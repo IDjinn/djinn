@@ -31,6 +31,12 @@ of them. A construct outside this list is forbidden in `djinnc/src` until the dj
 - `+ - * / %`, comparisons, `&& || !`
 - calls, method calls, static calls
 
+## Structs in codegen
+
+- fields (pointer, integer, float or struct-typed), `const` members, instance and `public static` methods, `this`
+- member access through pointers (`p.field`, `p.method()`), `Struct.method()` and `Struct.CONST`
+- by-value struct locals, struct parameters and returns are not exercised by djinnc itself
+
 ## Globals
 
 - `unsafe static mut void* name = null;` is used for the process arena (`Mem.arena()`). Typed struct pointers cannot be
