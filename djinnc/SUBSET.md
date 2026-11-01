@@ -31,6 +31,11 @@ of them. A construct outside this list is forbidden in `djinnc/src` until the dj
 - `+ - * / %`, comparisons, `&& || !`
 - calls, method calls, static calls
 
+## Globals
+
+- `static mut void* name = null;` is used for the process arena (`Mem.arena()`). Typed struct pointers cannot be
+  used as the global's type yet (stage0 reports the struct as not found), so the global is `void*` plus a cast.
+
 ## Forbidden
 
 generics, enums, `switch`, interfaces, `impl`, async/await, `try`/`throws`, `??`, `ensure`, string

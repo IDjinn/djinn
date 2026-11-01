@@ -1,0 +1,101 @@
+namespace djinnc;
+
+struct ArenaBlock {
+    ArenaBlock* prev;
+    u64 size;
+    u64 used;
+    u64 reserved;
+}
+
+struct ArenaMark {
+    ArenaBlock* block;
+    u64 used;
+}
+
+struct Arena {
+    ArenaBlock* head;
+    u64 block_size;
+    u64 total_reserved;
+    u64 total_allocated;
+
+    public static Arena* create(u64 block_size) {
+        Arena* arena = (Arena*)malloc(sizeof(Arena));
+        arena.head = (ArenaBlock*)0;
+        arena.block_size = block_size;
+        arena.total_reserved = 0;
+        arena.total_allocated = 0;
+        arena.add_block(block_size);
+        return arena;
+    }
+
+    public void* alloc(u64 size, u64 alignment) {
+        mut ArenaBlock* block = this.head;
+        mut u64 start = (block.used + alignment - 1) / alignment * alignment;
+        if (start + size > block.size) {
+            this.grow(size + alignment);
+            block = this.head;
+            start = (block.used + alignment - 1) / alignment * alignment;
+        }
+        block.used = start + size;
+        this.total_allocated = this.total_allocated + size;
+        i8* base = (i8*)block + 32;
+        return (void*)(base + start);
+    }
+
+    public void* zalloc(u64 size, u64 alignment) {
+        void* memory = this.alloc(size, alignment);
+        memset(memory, 0, size);
+        return memory;
+    }
+
+    public ArenaMark* mark() {
+        ArenaMark* mark = (ArenaMark*)this.alloc(sizeof(ArenaMark), 8);
+        mark.block = this.head;
+        ArenaBlock* block = this.head;
+        mark.used = block.used;
+        return mark;
+    }
+
+    public void reset_to(ArenaMark* mark) {
+        while (this.head != mark.block) {
+            ArenaBlock* dropped = this.head;
+            this.head = dropped.prev;
+            this.total_reserved = this.total_reserved - dropped.size;
+            free(dropped);
+        }
+        ArenaBlock* block = this.head;
+        block.used = mark.used;
+    }
+
+    public void destroy() {
+        while (this.head != null) {
+            ArenaBlock* dropped = this.head;
+            this.head = dropped.prev;
+            free(dropped);
+        }
+        this.total_reserved = 0;
+        this.total_allocated = 0;
+    }
+
+    void grow(u64 needed) {
+        mut u64 size = this.block_size;
+        if (size < 67108864) {
+            size = size * 2;
+            this.block_size = size;
+        }
+        if (size < needed) {
+            size = needed;
+        }
+        this.add_block(size);
+    }
+
+    void add_block(u64 size) {
+        ArenaBlock* block = (ArenaBlock*)malloc(size + 32);
+        block.prev = this.head;
+        block.size = size;
+        block.used = 0;
+        block.reserved = 0;
+        this.head = block;
+        this.total_reserved = this.total_reserved + size;
+    }
+}

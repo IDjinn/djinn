@@ -6,6 +6,13 @@ here="$(cd "$(dirname "$0")" && pwd)"
 out="$(mktemp -d)"
 failed=0
 
+if ! "$compiler" --selftest; then
+    echo "FAIL selftest"
+    failed=1
+else
+    echo "PASS selftest"
+fi
+
 for source in "$here"/samples/*.djinn; do
     name="$(basename "$source" .djinn)"
     expected="$(cat "$here/samples/$name.expected")"

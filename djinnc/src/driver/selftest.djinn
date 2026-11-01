@@ -1,0 +1,78 @@
+namespace djinnc;
+
+struct SelfTest {
+    public static i32 run() {
+        mut i32 failed = 0;
+        failed = failed + SelfTest.arena();
+        failed = failed + SelfTest.atoms();
+        if (failed == 0) {
+            printf("selftest: ok\n");
+        }
+        return failed;
+    }
+
+    static i32 check(bool condition, i8* name) {
+        if (condition) {
+            return 0;
+        }
+        printf("selftest: FAILED %s\n", name);
+        return 1;
+    }
+
+    static i32 arena() {
+        mut i32 failed = 0;
+        Arena* arena = Arena.create(1024);
+
+        i8* first = (i8*)arena.alloc(3, 1);
+        void* aligned = arena.alloc(8, 8);
+        failed = failed + SelfTest.check((i64)aligned % 8 == 0, "arena: 8-byte alignment");
+        void* wide = arena.alloc(16, 16);
+        failed = failed + SelfTest.check((i64)wide % 16 == 0, "arena: 16-byte alignment");
+
+        ArenaMark* mark = arena.mark();
+        u64 reserved_before = arena.total_reserved;
+        for (mut i32 i = 0; i < 100; i = i + 1) {
+            arena.alloc(500, 8);
+        }
+        failed = failed + SelfTest.check(arena.total_reserved > reserved_before, "arena: grows");
+        arena.reset_to(mark);
+        failed = failed + SelfTest.check(arena.total_reserved == reserved_before, "arena: reset frees blocks");
+
+        i8* big = (i8*)arena.zalloc(1048576, 8);
+        failed = failed + SelfTest.check(big[0] == 0 && big[1048575] == 0, "arena: oversized zalloc");
+        arena.destroy();
+        failed = failed + SelfTest.check(arena.total_reserved == 0 && arena.head == null, "arena: destroy releases blocks");
+        return failed;
+    }
+
+    static i32 atoms() {
+        mut i32 failed = 0;
+        Arena* arena = Arena.create(65536);
+        AtomTable* table = AtomTable.create(arena);
+
+        u32 foo = table.intern("foo", 3);
+        u32 bar = table.intern("bar", 3);
+        u32 again = table.intern("foo", 3);
+        failed = failed + SelfTest.check(foo == 0 && bar == 1, "atoms: sequential ids");
+        failed = failed + SelfTest.check(again == foo, "atoms: dedupe");
+        failed = failed + SelfTest.check(table.intern("fo", 2) != foo, "atoms: length matters");
+
+        ByteBuf* text = ByteBuf.create();
+        for (mut i32 i = 0; i < 5000; i = i + 1) {
+            text.length = 0;
+            text.append("name_");
+            text.append_int(i);
+            i8* copy = Str.duplicate(text.data, text.length);
+            table.intern(copy, (u32)text.length);
+        }
+        failed = failed + SelfTest.check(table.count == 5003, "atoms: count after growth");
+
+        text.length = 0;
+        text.append("name_4321");
+        u32 found = table.intern(text.data, (u32)text.length);
+        failed = failed + SelfTest.check(found < table.count && Str.same(table.text(found), "name_4321"), "atoms: lookup after rehash");
+        failed = failed + SelfTest.check(table.count == 5003, "atoms: no duplicate on re-intern");
+        arena.destroy();
+        return failed;
+    }
+}
