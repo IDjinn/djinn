@@ -36,6 +36,7 @@ struct NodeKind {
     const i32 INDEX = 51;
     const i32 FIELD_ACCESS = 52;
     const i32 SIZEOF = 53;
+    const i32 COUNT = 54;
 
     public static i8* name(i32 kind) {
         if (kind == NodeKind.PROGRAM) { return "Program"; }
@@ -78,8 +79,13 @@ struct NodeKind {
 unsafe static mut void* ast_base = null;
 unsafe static mut void* ast_types = null;
 unsafe static mut void* ast_lists = null;
+unsafe static mut void* ast_extra = null;
+unsafe static mut void* ast_layout = null;
+unsafe static mut void* ast_extra_sizes = null;
 unsafe static mut i32 ast_count = 0;
 unsafe static mut i32 ast_capacity = 0;
+unsafe static mut i32 ast_extra_count = 0;
+unsafe static mut i32 ast_extra_capacity = 0;
 
 struct Ast {
     public static void init(i32 capacity) {
@@ -89,6 +95,10 @@ struct Ast {
         ast_base = arena.zalloc((u64)capacity * sizeof(Node), 8);
         ast_types = (void*)PointerList.create();
         ast_lists = (void*)PointerList.create();
+        ast_extra_capacity = capacity + 64;
+        ast_extra_count = 1;
+        ast_extra = arena.zalloc((u64)ast_extra_capacity * 4, 4);
+        NodeLayout.build();
     }
 
     public static Node* at(i32 id) {
@@ -128,41 +138,229 @@ struct Ast {
     }
 }
 
+struct NodeField {
+    const i32 FIRST = 0;
+    const i32 SECOND = 1;
+    const i32 THIRD = 2;
+    const i32 FOURTH = 3;
+    const i32 TEXT = 4;
+    const i32 TYPE = 5;
+    const i32 LIST = 6;
+    const i32 VALUE_LOW = 7;
+    const i32 VALUE_HIGH = 8;
+    const i32 COUNT = 9;
+}
+
+struct Slot {
+    const i32 NONE = 0;
+    const i32 TOKEN = 1;
+    const i32 A = 2;
+    const i32 B = 3;
+    const i32 EXTRA = 4;
+}
+
+struct NodeLayout {
+    public static void build() {
+        Arena* arena = Memory.arena();
+        ast_layout = arena.zalloc((u64)NodeKind.COUNT * NodeField.COUNT, 1);
+        ast_extra_sizes = arena.zalloc((u64)NodeKind.COUNT, 1);
+
+        NodeLayout.list_only(NodeKind.PROGRAM);
+        NodeLayout.define(NodeKind.IMPORT, NodeField.TEXT, Slot.A);
+        NodeLayout.define(NodeKind.NAMESPACE_DECL, NodeField.LIST, Slot.A);
+        NodeLayout.define(NodeKind.NAMESPACE_DECL, NodeField.TEXT, Slot.B);
+        NodeLayout.define(NodeKind.FUNCTION, NodeField.FIRST, Slot.A);
+        NodeLayout.define(NodeKind.FUNCTION, NodeField.TEXT, Slot.EXTRA);
+        NodeLayout.define(NodeKind.FUNCTION, NodeField.TYPE, Slot.EXTRA + 1);
+        NodeLayout.define(NodeKind.FUNCTION, NodeField.LIST, Slot.EXTRA + 2);
+        NodeLayout.define(NodeKind.EXTERN_FUNCTION, NodeField.LIST, Slot.A);
+        NodeLayout.define(NodeKind.EXTERN_FUNCTION, NodeField.TEXT, Slot.EXTRA);
+        NodeLayout.define(NodeKind.EXTERN_FUNCTION, NodeField.TYPE, Slot.EXTRA + 1);
+        NodeLayout.define(NodeKind.PARAMETER, NodeField.TYPE, Slot.A);
+        NodeLayout.define(NodeKind.PARAMETER, NodeField.TEXT, Slot.B);
+        NodeLayout.define(NodeKind.STRUCT_DECL, NodeField.LIST, Slot.A);
+        NodeLayout.define(NodeKind.STRUCT_DECL, NodeField.TEXT, Slot.EXTRA);
+        NodeLayout.define(NodeKind.STRUCT_DECL, NodeField.TYPE, Slot.EXTRA + 1);
+        NodeLayout.declaration(NodeKind.FIELD_DECL);
+        NodeLayout.declaration(NodeKind.STATIC_VAR);
+        NodeLayout.declaration(NodeKind.VAR_DECL);
+        NodeLayout.list_only(NodeKind.BLOCK);
+        NodeLayout.define(NodeKind.EXPR_STMT, NodeField.FIRST, Slot.A);
+        NodeLayout.define(NodeKind.RETURN, NodeField.FIRST, Slot.A);
+        NodeLayout.define(NodeKind.IF, NodeField.FIRST, Slot.A);
+        NodeLayout.define(NodeKind.IF, NodeField.SECOND, Slot.EXTRA);
+        NodeLayout.define(NodeKind.IF, NodeField.THIRD, Slot.EXTRA + 1);
+        NodeLayout.pair(NodeKind.WHILE);
+        NodeLayout.pair(NodeKind.DO_WHILE);
+        NodeLayout.define(NodeKind.FOR, NodeField.FIRST, Slot.A);
+        NodeLayout.define(NodeKind.FOR, NodeField.SECOND, Slot.EXTRA);
+        NodeLayout.define(NodeKind.FOR, NodeField.THIRD, Slot.EXTRA + 1);
+        NodeLayout.define(NodeKind.FOR, NodeField.FOURTH, Slot.EXTRA + 2);
+        NodeLayout.define(NodeKind.INT_LITERAL, NodeField.TEXT, Slot.TOKEN);
+        NodeLayout.define(NodeKind.INT_LITERAL, NodeField.VALUE_LOW, Slot.A);
+        NodeLayout.define(NodeKind.INT_LITERAL, NodeField.VALUE_HIGH, Slot.B);
+        NodeLayout.define(NodeKind.FLOAT_LITERAL, NodeField.TEXT, Slot.TOKEN);
+        NodeLayout.define(NodeKind.STRING_LITERAL, NodeField.TEXT, Slot.TOKEN);
+        NodeLayout.define(NodeKind.STRING_LITERAL, NodeField.VALUE_LOW, Slot.A);
+        NodeLayout.define(NodeKind.BOOL_LITERAL, NodeField.VALUE_LOW, Slot.A);
+        NodeLayout.define(NodeKind.IDENTIFIER, NodeField.TEXT, Slot.A);
+        NodeLayout.define(NodeKind.UNARY, NodeField.FIRST, Slot.A);
+        NodeLayout.pair(NodeKind.BINARY);
+        NodeLayout.pair(NodeKind.ASSIGN);
+        NodeLayout.pair(NodeKind.INDEX);
+        NodeLayout.define(NodeKind.CALL, NodeField.FIRST, Slot.A);
+        NodeLayout.define(NodeKind.CALL, NodeField.LIST, Slot.B);
+        NodeLayout.define(NodeKind.CAST, NodeField.FIRST, Slot.A);
+        NodeLayout.define(NodeKind.CAST, NodeField.TYPE, Slot.B);
+        NodeLayout.define(NodeKind.FIELD_ACCESS, NodeField.FIRST, Slot.A);
+        NodeLayout.define(NodeKind.FIELD_ACCESS, NodeField.TEXT, Slot.B);
+        NodeLayout.define(NodeKind.SIZEOF, NodeField.TYPE, Slot.A);
+    }
+
+    static void list_only(i32 kind) {
+        NodeLayout.define(kind, NodeField.LIST, Slot.A);
+    }
+
+    static void pair(i32 kind) {
+        NodeLayout.define(kind, NodeField.FIRST, Slot.A);
+        NodeLayout.define(kind, NodeField.SECOND, Slot.B);
+    }
+
+    static void declaration(i32 kind) {
+        NodeLayout.define(kind, NodeField.FIRST, Slot.A);
+        NodeLayout.define(kind, NodeField.TEXT, Slot.EXTRA);
+        NodeLayout.define(kind, NodeField.TYPE, Slot.EXTRA + 1);
+    }
+
+    static void define(i32 kind, i32 field, i32 slot) {
+        u8* layout = (u8*)ast_layout;
+        u8* sizes = (u8*)ast_extra_sizes;
+        layout[kind * NodeField.COUNT + field] = (u8)slot;
+        if (slot >= Slot.EXTRA) {
+            i32 needed = slot - Slot.EXTRA + 1;
+            if (needed > (i32)sizes[kind]) {
+                sizes[kind] = (u8)needed;
+            }
+        }
+    }
+
+    public static i32 slot(i32 kind, i32 field) {
+        u8* layout = (u8*)ast_layout;
+        return (i32)layout[kind * NodeField.COUNT + field];
+    }
+
+    public static i32 extra_size(i32 kind) {
+        u8* sizes = (u8*)ast_extra_sizes;
+        return (i32)sizes[kind];
+    }
+}
+
+struct IdList {
+    u32* data;
+    i32 length;
+    i32 capacity;
+
+    public static IdList* create() {
+        Arena* arena = Memory.arena();
+        IdList* list = (IdList*)arena.zalloc(sizeof(IdList), 8);
+        list.capacity = 4;
+        list.data = (u32*)arena.alloc(16, 4);
+        return list;
+    }
+
+    public void push(u32 id) {
+        if (this.length == this.capacity) {
+            Arena* arena = Memory.arena();
+            i32 capacity = this.capacity * 2;
+            u32* grown = (u32*)arena.alloc((u64)capacity * 4, 4);
+            memcpy(grown, this.data, (u64)this.length * 4);
+            this.data = grown;
+            this.capacity = capacity;
+        }
+        this.data[this.length] = id;
+        this.length = this.length + 1;
+    }
+}
+
 struct Node {
-    i32 kind;
-    i32 op;
+    u16 kind;
+    u16 flags;
     i32 token;
-    i32 text_atom;
-    i32 base_atom;
-    i32 type_id;
-    i32 list_id;
-    i32 first_id;
-    i32 second_id;
-    i32 third_id;
-    i32 fourth_id;
-    i32 flag_value;
-    i32 variadic_value;
-    i32 value_low;
-    i32 value_high;
+    u32 a;
+    u32 b;
 
     public static Node* create(i32 kind, i32 token) {
         if (ast_count >= ast_capacity) {
-logger_error(Log.get(), "djinnc: ast node capacity exceeded (%d)", ast_capacity);
+            logger_error(Log.get(), "djinnc: ast node capacity exceeded (%d)", ast_capacity);
             exit(1);
         }
         Node* node = Ast.at(ast_count);
         ast_count = ast_count + 1;
-        node.kind = kind;
+        node.kind = (u16)kind;
         node.token = token;
+        i32 extra = NodeLayout.extra_size(kind);
+        if (extra > 0) {
+            Node.reserve_extra(extra);
+            node.b = (u32)ast_extra_count;
+            ast_extra_count = ast_extra_count + extra;
+        }
         return node;
+    }
+
+    static void reserve_extra(i32 count) {
+        if (ast_extra_count + count <= ast_extra_capacity) {
+            return;
+        }
+        Arena* arena = Memory.arena();
+        i32 capacity = ast_extra_capacity * 2;
+        u32* grown = (u32*)arena.zalloc((u64)capacity * 4, 4);
+        memcpy(grown, ast_extra, (u64)ast_extra_count * 4);
+        ast_extra = (void*)grown;
+        ast_extra_capacity = capacity;
     }
 
     public static Node* create_list(i32 kind, i32 token) {
         Node* node = Node.create(kind, token);
         PointerList* lists = (PointerList*)ast_lists;
-        lists.push(PointerList.create());
-        node.list_id = lists.length;
+        lists.push((void*)IdList.create());
+        node.set_field(NodeField.LIST, (u32)lists.length);
         return node;
+    }
+
+    u32 get_field(i32 field) {
+        i32 slot = NodeLayout.slot((i32)this.kind, field);
+        if (slot == Slot.NONE) {
+            return 0;
+        }
+        u32* words = (u32*)this;
+        if (slot == Slot.A) {
+            return words[2];
+        }
+        if (slot == Slot.B) {
+            return words[3];
+        }
+        if (slot == Slot.TOKEN) {
+            TokenList* tokens = TokenList.get();
+            return tokens.raw_atom(this.token);
+        }
+        u32* extra = (u32*)ast_extra;
+        return extra[(i32)words[3] + slot - Slot.EXTRA];
+    }
+
+    void set_field(i32 field, u32 value) {
+        i32 slot = NodeLayout.slot((i32)this.kind, field);
+        if (slot == Slot.NONE || slot == Slot.TOKEN) {
+            return;
+        }
+        u32* words = (u32*)this;
+        if (slot == Slot.A) {
+            words[2] = value;
+        } else if (slot == Slot.B) {
+            words[3] = value;
+        } else {
+            u32* extra = (u32*)ast_extra;
+            extra[(i32)words[3] + slot - Slot.EXTRA] = value;
+        }
     }
 
     public i32 line() {
@@ -181,43 +379,44 @@ logger_error(Log.get(), "djinnc: ast node capacity exceeded (%d)", ast_capacity)
     }
 
     public Node* first() {
-        return Ast.at(this.first_id);
+        return Ast.at((i32)this.get_field(NodeField.FIRST));
     }
 
     public Node* second() {
-        return Ast.at(this.second_id);
+        return Ast.at((i32)this.get_field(NodeField.SECOND));
     }
 
     public Node* third() {
-        return Ast.at(this.third_id);
+        return Ast.at((i32)this.get_field(NodeField.THIRD));
     }
 
     public Node* fourth() {
-        return Ast.at(this.fourth_id);
+        return Ast.at((i32)this.get_field(NodeField.FOURTH));
     }
 
     public void set_first(Node* node) {
-        this.first_id = Ast.id_of(node);
+        this.set_field(NodeField.FIRST, (u32)Ast.id_of(node));
     }
 
     public void set_second(Node* node) {
-        this.second_id = Ast.id_of(node);
+        this.set_field(NodeField.SECOND, (u32)Ast.id_of(node));
     }
 
     public void set_third(Node* node) {
-        this.third_id = Ast.id_of(node);
+        this.set_field(NodeField.THIRD, (u32)Ast.id_of(node));
     }
 
     public void set_fourth(Node* node) {
-        this.fourth_id = Ast.id_of(node);
+        this.set_field(NodeField.FOURTH, (u32)Ast.id_of(node));
     }
 
     public i8* text() {
-        if (this.text_atom == 0) {
+        u32 stored = this.get_field(NodeField.TEXT);
+        if (stored == 0) {
             return (i8*)0;
         }
         AtomTable* atoms = Ast.atoms();
-        return atoms.text((u32)this.text_atom - 1);
+        return atoms.text(stored - 1);
     }
 
     public void set_text(i8* text) {
@@ -226,60 +425,81 @@ logger_error(Log.get(), "djinnc: ast node capacity exceeded (%d)", ast_capacity)
 
     public void set_text_n(i8* text, i32 length) {
         AtomTable* atoms = Ast.atoms();
-        this.text_atom = (i32)atoms.intern_copy(text, (u32)length) + 1;
-        this.base_atom = (i32)Ast.intern_base_name(text, length);
+        this.set_field(NodeField.TEXT, atoms.intern_copy(text, (u32)length) + 1);
+    }
+
+    public void set_text_atom(u32 atom) {
+        this.set_field(NodeField.TEXT, atom + 1);
     }
 
     public u32 name() {
-        return (u32)this.base_atom;
+        u32 stored = this.get_field(NodeField.TEXT);
+        if (stored == 0) {
+            return 0;
+        }
+        AtomTable* atoms = Ast.atoms();
+        return atoms.base_of(stored - 1);
     }
 
     public TypeRef* type() {
-        if (this.type_id == 0) {
+        u32 stored = this.get_field(NodeField.TYPE);
+        if (stored == 0) {
             return (TypeRef*)0;
         }
         PointerList* types = (PointerList*)ast_types;
-        return (TypeRef*)types.get(this.type_id - 1);
+        return (TypeRef*)types.get((i32)stored - 1);
     }
 
     public void set_type(TypeRef* type) {
         PointerList* types = (PointerList*)ast_types;
         types.push((void*)type);
-        this.type_id = types.length;
+        this.set_field(NodeField.TYPE, (u32)types.length);
     }
 
     public bool flag() {
-        return this.flag_value != 0;
+        return ((u32)this.flags & 1) != 0;
     }
 
     public void set_flag(bool value) {
-        this.flag_value = 0;
+        u32 cleared = (u32)this.flags & 65534;
         if (value) {
-            this.flag_value = 1;
+            this.flags = (u16)(cleared | 1);
+        } else {
+            this.flags = (u16)cleared;
         }
     }
 
     public bool is_variadic() {
-        return this.variadic_value != 0;
+        return ((u32)this.flags & 2) != 0;
     }
 
     public void set_variadic(bool value) {
-        this.variadic_value = 0;
+        u32 cleared = (u32)this.flags & 65533;
         if (value) {
-            this.variadic_value = 1;
+            this.flags = (u16)(cleared | 2);
+        } else {
+            this.flags = (u16)cleared;
         }
     }
 
+    public i32 op() {
+        return (i32)((u32)this.flags >> 2);
+    }
+
+    public void set_op(i32 op) {
+        this.flags = (u16)(((u32)this.flags & 3) | ((u32)op << 2));
+    }
+
     public i64 int_value() {
-        u64 low = (u64)this.value_low & Limits.U32_MAX;
-        u64 high = (u64)this.value_high & Limits.U32_MAX;
+        u64 low = (u64)this.get_field(NodeField.VALUE_LOW);
+        u64 high = (u64)this.get_field(NodeField.VALUE_HIGH);
         return (i64)(low | (high << 32));
     }
 
     public void set_int_value(i64 value) {
         u64 bits = (u64)value;
-        this.value_low = (i32)(bits & Limits.U32_MAX);
-        this.value_high = (i32)(bits >> 32);
+        this.set_field(NodeField.VALUE_LOW, (u32)(bits & Limits.U32_MAX));
+        this.set_field(NodeField.VALUE_HIGH, (u32)(bits >> 32));
     }
 
     public f64 float_value() {
@@ -288,26 +508,26 @@ logger_error(Log.get(), "djinnc: ast node capacity exceeded (%d)", ast_capacity)
     }
 
     public void add(Node* child) {
-        PointerList* list = this.items();
-        list.push((void*)Ast.id_of(child));
+        IdList* list = this.items();
+        list.push((u32)Ast.id_of(child));
     }
 
     public bool has_items() {
-        return this.list_id != 0;
+        return this.get_field(NodeField.LIST) != 0;
     }
 
-    PointerList* items() {
+    IdList* items() {
         PointerList* lists = (PointerList*)ast_lists;
-        return (PointerList*)lists.get(this.list_id - 1);
+        return (IdList*)lists.get((i32)this.get_field(NodeField.LIST) - 1);
     }
 
     public Node* child(i32 index) {
-        PointerList* list = this.items();
-        return Ast.at((i32)list.get(index));
+        IdList* list = this.items();
+        return Ast.at((i32)list.data[index]);
     }
 
     public i32 count() {
-        PointerList* list = this.items();
+        IdList* list = this.items();
         return list.length;
     }
 }
