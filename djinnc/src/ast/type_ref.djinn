@@ -9,6 +9,9 @@ struct TypeKind {
     const i32 AUTO = 5;
 }
 
+unsafe static mut void* primitive_map = null;
+unsafe static mut void* primitive_list = null;
+
 struct TypeRef {
     i32 kind;
     i32 bits;
@@ -49,6 +52,35 @@ struct TypeRef {
         type.name = name;
         type.name_atom = Ast.intern_base_name(name, strlen(name));
         return type;
+    }
+
+    public static TypeRef* from_primitive_atom(u32 atom) {
+        if (primitive_map == null) {
+            primitive_map = (void*)U32Map.create(Memory.arena(), 256);
+            primitive_list = (void*)PointerList.create();
+        }
+        U32Map* map = (U32Map*)primitive_map;
+        PointerList* list = (PointerList*)primitive_list;
+        mut i64 found = map.find(atom);
+        if (found < 0) {
+            AtomTable* atoms = Atoms.get();
+            TypeRef* parsed = TypeRef.from_primitive_name(atoms.text(atom), (i32)atoms.length(atom));
+            if (parsed == null) {
+                map.put(atom, 0);
+                return (TypeRef*)0;
+            }
+            list.push((void*)parsed);
+            map.put(atom, (u32)list.length);
+            found = (i64)list.length;
+        }
+        if (found == 0) {
+            return (TypeRef*)0;
+        }
+        TypeRef* template = (TypeRef*)list.get((i32)found - 1);
+        TypeRef* copy = TypeRef.create(template.kind);
+        copy.bits = template.bits;
+        copy.is_signed = template.is_signed;
+        return copy;
     }
 
     public static TypeRef* from_primitive_name(i8* text, i32 length) {

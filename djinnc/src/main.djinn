@@ -13,10 +13,8 @@ i32 main() {
 
     i32 started_at = clock();
     PointerList* inputs = options.inputs;
-    PointerList* files = PointerList.create();
     PointerList* diagnostics_list = PointerList.create();
-    PointerList* type_names = PointerList.create();
-    mut i32 total_tokens = 0;
+    mut i64 total_bytes = 0;
     for (mut i32 i = 0; i < inputs.length; i = i + 1) {
         i8* path = (i8*)inputs.get(i);
         i8* source = Files.read_all(path);
@@ -24,33 +22,39 @@ i32 main() {
             logger_error(Log.get(), "djinnc: cannot read '%s'", path);
             return 1;
         }
-        Diagnostics* file_diagnostics = Diagnostics.create(path);
-        Lexer* lexer = Lexer.create(source, strlen(source), file_diagnostics);
-        TokenList* tokens = lexer.tokenize();
+        i32 length = strlen(source);
+        Sources.add(path, source, (u32)length);
+        diagnostics_list.push((void*)Diagnostics.create(path));
+        total_bytes = total_bytes + length;
+    }
+
+    TokenList* tokens = TokenList.create((i32)(total_bytes / 3) + 64);
+    for (mut i32 i = 0; i < inputs.length; i = i + 1) {
+        SourceFile* file = Sources.get(i);
+        Diagnostics* file_diagnostics = (Diagnostics*)diagnostics_list.get(i);
+        Lexer* lexer = Lexer.create(file, tokens, file_diagnostics);
+        lexer.tokenize();
         if (file_diagnostics.failed()) {
             return 1;
         }
-        if (options.emit_tokens) {
-            Dump.tokens(tokens);
-        }
-        Parser.collect_type_names(tokens, type_names);
-        total_tokens = total_tokens + tokens.length;
-        files.push((void*)tokens);
-        diagnostics_list.push((void*)file_diagnostics);
     }
     if (options.emit_tokens) {
+        Dump.tokens(tokens);
         return 0;
     }
 
-    Ast.init(total_tokens * 2 + 64);
+    U32Map* type_names = U32Map.create(Memory.arena(), 256);
+    for (mut i32 i = 0; i < inputs.length; i = i + 1) {
+        Parser.collect_type_names(tokens, Sources.get(i), type_names);
+    }
+
+    Ast.init(tokens.length * 2 + 64);
     Diagnostics* diagnostics = (Diagnostics*)diagnostics_list.get(0);
-    TokenList* first_tokens = (TokenList*)files.get(0);
-    Node* program = Node.create_list(NodeKind.PROGRAM, first_tokens.at(0));
-    for (mut i32 i = 0; i < files.length; i = i + 1) {
-        TokenList* tokens = (TokenList*)files.get(i);
+    Node* program = Node.create_list(NodeKind.PROGRAM, 0);
+    for (mut i32 i = 0; i < inputs.length; i = i + 1) {
+        SourceFile* file = Sources.get(i);
         Diagnostics* file_diagnostics = (Diagnostics*)diagnostics_list.get(i);
-        Ast.begin_file(file_diagnostics.file);
-        Parser* parser = Parser.create(tokens, file_diagnostics, type_names);
+        Parser* parser = Parser.create(tokens, file, file_diagnostics, type_names);
         Node* unit = parser.parse_program();
         if (file_diagnostics.failed()) {
             return 1;
@@ -61,8 +65,8 @@ i32 main() {
     }
     if (options.stats) {
         Arena* arena = Memory.arena();
-        printf("files: %d\n", files.length);
-        printf("tokens: %d (%d bytes)\n", total_tokens, total_tokens * (i32)sizeof(Token));
+        printf("files: %d\n", inputs.length);
+        printf("tokens: %d (%d bytes)\n", tokens.length, tokens.length * 9);
         printf("ast: %d nodes (%d bytes)\n", Ast.node_count(), Ast.node_count() * (i32)sizeof(Node));
         printf("arena: %d bytes allocated, %d bytes reserved\n", (i32)arena.total_allocated, (i32)arena.total_reserved);
         printf("ticks: lex+parse %d\n", clock() - started_at);
