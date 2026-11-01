@@ -1,0 +1,168 @@
+namespace djinnc;
+
+struct SemanticAnalyzer {
+    Diagnostics* diagnostics;
+    SymbolTable* symbols;
+
+    public static SemanticAnalyzer* create(Diagnostics* diagnostics, SymbolTable* symbols) {
+        SemanticAnalyzer* analyzer = (SemanticAnalyzer*)Memory.zalloc(sizeof(SemanticAnalyzer));
+        analyzer.diagnostics = diagnostics;
+        analyzer.symbols = symbols;
+        return analyzer;
+    }
+
+    public bool collect(Node* program) {
+        this.collect_structs(program);
+        this.collect_functions(program);
+        Diagnostics* diagnostics = this.diagnostics;
+        return !diagnostics.failed();
+    }
+
+    void error(Node* at, i8* message) {
+        Diagnostics* diagnostics = this.diagnostics;
+        diagnostics.error_in(Ast.file_name(at.file), at.line, at.column, message);
+    }
+
+    void collect_structs(Node* container) {
+        for (mut i32 i = 0; i < container.count(); i = i + 1) {
+            Node* declaration = container.child(i);
+            if (declaration.kind == NodeKind.NAMESPACE_DECL) {
+                this.collect_structs(declaration);
+            } else if (declaration.kind == NodeKind.STRUCT_DECL && declaration.type() == null) {
+                this.collect_struct(declaration);
+            }
+        }
+    }
+
+    void collect_struct(Node* declaration) {
+        Arena* arena = Memory.arena();
+        StructInfo* info = (StructInfo*)Memory.zalloc(sizeof(StructInfo));
+        info.name = declaration.text();
+        info.name_atom = declaration.name();
+        info.node = declaration;
+        info.fields = PointerList.create();
+        info.constants = PointerList.create();
+        info.field_map = U32Map.create(arena, 16);
+        info.constant_map = U32Map.create(arena, 8);
+        info.method_map = U32Map.create(arena, 16);
+        SymbolTable* symbols = this.symbols;
+        if (!symbols.add_struct(info)) {
+            this.error(declaration, "struct is already defined");
+            return;
+        }
+
+        PointerList* constants = info.constants;
+        PointerList* fields = info.fields;
+        U32Map* constant_map = info.constant_map;
+        U32Map* field_map = info.field_map;
+        for (mut i32 i = 0; i < declaration.count(); i = i + 1) {
+            Node* member = declaration.child(i);
+            if (member.kind != NodeKind.FIELD_DECL) {
+                continue;
+            }
+            if (member.first() != null) {
+                constant_map.put(member.name(), (u32)constants.length);
+                constants.push((void*)member);
+                continue;
+            }
+            if (field_map.contains(member.name())) {
+                this.error(member, "field is already defined");
+                continue;
+            }
+            FieldInfo* field = (FieldInfo*)Memory.zalloc(sizeof(FieldInfo));
+            field.name = member.text();
+            field.name_atom = member.name();
+            field.type = member.type();
+            field.index = fields.length;
+            field_map.put(field.name_atom, (u32)fields.length);
+            fields.push((void*)field);
+        }
+    }
+
+    void collect_functions(Node* container) {
+        for (mut i32 i = 0; i < container.count(); i = i + 1) {
+            Node* declaration = container.child(i);
+            if (declaration.kind == NodeKind.NAMESPACE_DECL) {
+                this.collect_functions(declaration);
+            } else if (declaration.kind == NodeKind.FUNCTION) {
+                this.collect_function(declaration, false, (StructInfo*)0);
+            } else if (declaration.kind == NodeKind.EXTERN_FUNCTION) {
+                this.collect_function(declaration, true, (StructInfo*)0);
+            } else if (declaration.kind == NodeKind.STRUCT_DECL && declaration.type() == null) {
+                this.collect_methods(declaration);
+            } else if (declaration.kind == NodeKind.STATIC_VAR) {
+                this.collect_global(declaration);
+            }
+        }
+    }
+
+    void collect_methods(Node* declaration) {
+        SymbolTable* symbols = this.symbols;
+        StructInfo* owner = symbols.find_struct(declaration.name());
+        if (owner == null) {
+            return;
+        }
+        for (mut i32 i = 0; i < declaration.count(); i = i + 1) {
+            Node* member = declaration.child(i);
+            if (member.kind == NodeKind.FUNCTION) {
+                this.collect_function(member, false, owner);
+            }
+        }
+    }
+
+    void collect_global(Node* declaration) {
+        TypeRef* ty = declaration.type();
+        if (ty.kind == TypeKind.AUTO || ty.kind == TypeKind.VOID) {
+            this.error(declaration, "static variable needs a concrete type");
+            return;
+        }
+        LocalVariable* variable = (LocalVariable*)Memory.zalloc(sizeof(LocalVariable));
+        variable.name = declaration.text();
+        variable.name_atom = declaration.name();
+        variable.type = ty;
+        variable.is_mutable = declaration.flag();
+        variable.node = declaration;
+        SymbolTable* symbols = this.symbols;
+        if (!symbols.add_global(variable)) {
+            this.error(declaration, "static variable is already defined");
+        }
+    }
+
+    void collect_function(Node* declaration, bool is_extern, StructInfo* owner) {
+        FunctionInfo* info = (FunctionInfo*)Memory.zalloc(sizeof(FunctionInfo));
+        info.name = SemanticAnalyzer.qualified_name(owner, declaration);
+        info.name_atom = declaration.name();
+        info.return_type = declaration.type();
+        info.param_types = PointerList.create();
+        info.is_variadic = declaration.is_variadic();
+        info.is_extern = is_extern;
+        info.node = declaration;
+        info.owner = owner;
+
+        PointerList* param_types = info.param_types;
+        if (owner != null && !declaration.flag()) {
+            info.is_instance = true;
+            param_types.push((void*)TypeRef.pointer_to(TypeRef.named(owner.name)));
+        }
+        for (mut i32 i = 0; i < declaration.count(); i = i + 1) {
+            Node* parameter = declaration.child(i);
+            param_types.push((void*)parameter.type());
+        }
+
+        SymbolTable* symbols = this.symbols;
+        if (!symbols.add_function(info) && !is_extern) {
+            this.error(declaration, "function is already defined");
+        }
+    }
+
+    static i8* qualified_name(StructInfo* owner, Node* declaration) {
+        if (owner == null) {
+            return declaration.text();
+        }
+        ByteBuffer* name = ByteBuffer.create();
+        name.append(owner.name);
+        name.append_char(46);
+        name.append(declaration.text());
+        return name.cstr();
+    }
+}

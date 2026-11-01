@@ -1,0 +1,159 @@
+namespace djinnc;
+
+struct LocalVariable {
+    i8* name;
+    u32 name_atom;
+    void* slot;
+    TypeRef* type;
+    bool is_mutable;
+    Node* node;
+}
+
+struct FieldInfo {
+    i8* name;
+    u32 name_atom;
+    TypeRef* type;
+    i32 index;
+}
+
+struct StructInfo {
+    i8* name;
+    u32 name_atom;
+    void* llvm;
+    PointerList* fields;
+    PointerList* constants;
+    U32Map* field_map;
+    U32Map* constant_map;
+    U32Map* method_map;
+    Node* node;
+}
+
+struct FunctionInfo {
+    i8* name;
+    u32 name_atom;
+    void* function;
+    void* function_type;
+    TypeRef* return_type;
+    PointerList* param_types;
+    bool is_variadic;
+    bool is_extern;
+    bool is_instance;
+    Node* node;
+    StructInfo* owner;
+}
+
+struct SymbolTable {
+    Arena* arena;
+    PointerList* structs;
+    PointerList* functions;
+    PointerList* globals;
+    U32Map* struct_map;
+    U32Map* function_map;
+    U32Map* global_map;
+
+    public static SymbolTable* create(Arena* arena) {
+        SymbolTable* table = (SymbolTable*)arena.zalloc(sizeof(SymbolTable), 8);
+        table.arena = arena;
+        table.structs = PointerList.create();
+        table.functions = PointerList.create();
+        table.globals = PointerList.create();
+        table.struct_map = U32Map.create(arena, 64);
+        table.function_map = U32Map.create(arena, 256);
+        table.global_map = U32Map.create(arena, 16);
+        return table;
+    }
+
+    public bool add_struct(StructInfo* info) {
+        U32Map* map = this.struct_map;
+        if (map.contains(info.name_atom)) {
+            return false;
+        }
+        PointerList* list = this.structs;
+        map.put(info.name_atom, (u32)list.length);
+        list.push((void*)info);
+        return true;
+    }
+
+    public StructInfo* find_struct(u32 name) {
+        U32Map* map = this.struct_map;
+        i64 index = map.find(name);
+        if (index < 0) {
+            return (StructInfo*)0;
+        }
+        PointerList* list = this.structs;
+        return (StructInfo*)list.get((i32)index);
+    }
+
+    public bool add_function(FunctionInfo* info) {
+        mut U32Map* map = this.function_map;
+        if (info.owner != null) {
+            StructInfo* owner = info.owner;
+            map = owner.method_map;
+        }
+        if (map.contains(info.name_atom)) {
+            return false;
+        }
+        PointerList* list = this.functions;
+        map.put(info.name_atom, (u32)list.length);
+        list.push((void*)info);
+        return true;
+    }
+
+    public FunctionInfo* find_function(u32 name) {
+        return this.lookup_function(this.function_map, name);
+    }
+
+    public FunctionInfo* find_method(StructInfo* owner, u32 name) {
+        return this.lookup_function(owner.method_map, name);
+    }
+
+    FunctionInfo* lookup_function(U32Map* map, u32 name) {
+        i64 index = map.find(name);
+        if (index < 0) {
+            return (FunctionInfo*)0;
+        }
+        PointerList* list = this.functions;
+        return (FunctionInfo*)list.get((i32)index);
+    }
+
+    public bool add_global(LocalVariable* variable) {
+        U32Map* map = this.global_map;
+        if (map.contains(variable.name_atom)) {
+            return false;
+        }
+        PointerList* list = this.globals;
+        map.put(variable.name_atom, (u32)list.length);
+        list.push((void*)variable);
+        return true;
+    }
+
+    public LocalVariable* find_global(u32 name) {
+        U32Map* map = this.global_map;
+        i64 index = map.find(name);
+        if (index < 0) {
+            return (LocalVariable*)0;
+        }
+        PointerList* list = this.globals;
+        return (LocalVariable*)list.get((i32)index);
+    }
+
+    public FieldInfo* find_field(StructInfo* info, u32 name) {
+        U32Map* map = info.field_map;
+        i64 index = map.find(name);
+        if (index < 0) {
+            return (FieldInfo*)0;
+        }
+        PointerList* list = info.fields;
+        return (FieldInfo*)list.get((i32)index);
+    }
+
+    public Node* find_constant(StructInfo* info, u32 name) {
+        U32Map* map = info.constant_map;
+        i64 index = map.find(name);
+        if (index < 0) {
+            return (Node*)0;
+        }
+        PointerList* list = info.constants;
+        return (Node*)list.get((i32)index);
+    }
+}

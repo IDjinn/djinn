@@ -12,51 +12,15 @@ struct Value {
     }
 }
 
-struct LocalVariable {
-    i8* name;
-    void* slot;
-    TypeRef* type;
-    bool is_mutable;
-}
-
-struct FieldInfo {
-    i8* name;
-    TypeRef* type;
-    i32 index;
-}
-
-struct StructInfo {
-    i8* name;
-    void* llvm;
-    PointerList* fields;
-    PointerList* constants;
-    Node* node;
-}
-
-struct FunctionInfo {
-    i8* name;
-    void* function;
-    void* function_type;
-    TypeRef* return_type;
-    PointerList* param_types;
-    bool is_variadic;
-    bool is_extern;
-    bool is_instance;
-}
-
 struct CodeGenerator {
     void* context;
     void* module;
     void* builder;
     void* alloca_builder;
     Diagnostics* diagnostics;
-    PointerList* functions;
-    PointerList* locals;
-    PointerList* globals;
-    PointerList* structs;
-    FunctionInfo* current;
-    void* break_target;
-    void* continue_target;
+    SymbolTable* symbols;
+    LocalScopes* scopes;
+    FunctionContext* function_context;
 
     public static CodeGenerator* create(Diagnostics* diagnostics, i8* module_name) {
         CodeGenerator* gen = (CodeGenerator*)Memory.zalloc(sizeof(CodeGenerator));
@@ -65,10 +29,9 @@ struct CodeGenerator {
         gen.builder = LLVMCreateBuilderInContext(gen.context);
         gen.alloca_builder = LLVMCreateBuilderInContext(gen.context);
         gen.diagnostics = diagnostics;
-        gen.functions = PointerList.create();
-        gen.locals = PointerList.create();
-        gen.globals = PointerList.create();
-        gen.structs = PointerList.create();
+        gen.symbols = SymbolTable.create(Memory.arena());
+        gen.scopes = LocalScopes.create();
+        gen.function_context = FunctionContext.create();
         i8* triple = LLVMGetDefaultTargetTriple();
         LLVMSetTarget(gen.module, triple);
         LLVMDisposeMessage(triple);
@@ -76,9 +39,13 @@ struct CodeGenerator {
     }
 
     public bool generate(Node* program) {
-        this.register_structs(program);
-        this.build_struct_bodies();
-        this.declare_all(program);
+        SemanticAnalyzer* analyzer = SemanticAnalyzer.create(this.diagnostics, this.symbols);
+        if (!analyzer.collect(program)) {
+            return false;
+        }
+        this.declare_structs();
+        this.declare_functions();
+        this.declare_globals();
         this.define_all(program);
         this.emit_entry_point();
         CoroWrappers.emit(this);
@@ -90,8 +57,7 @@ struct CodeGenerator {
         i8* message = (i8*)0;
         i32 invalid = LLVMVerifyModule(this.module, LlvmConst.VERIFY_RETURN_STATUS, &message);
         if (invalid != 0) {
-            logger_error(Log.get(), "djinnc: LLVM module verification failed:
-%s", message);
+            logger_error(Log.get(), "djinnc: LLVM module verification failed: %s", message);
             return false;
         }
         return true;
@@ -155,241 +121,27 @@ struct CodeGenerator {
         return LLVMIntTypeInContext(this.context, 32);
     }
 
-    FunctionInfo* find_function(i8* name) {
-        PointerList* list = this.functions;
-        for (mut i32 i = 0; i < list.length; i = i + 1) {
-            FunctionInfo* info = (FunctionInfo*)list.get(i);
-            if (Strings.same(info.name, name)) {
-                return info;
-            }
-        }
-        return (FunctionInfo*)0;
-    }
-
-    void declare_all(Node* container) {
-        for (mut i32 i = 0; i < container.count(); i = i + 1) {
-            Node* declaration = container.child(i);
-            if (declaration.kind == NodeKind.NAMESPACE_DECL) {
-                this.declare_all(declaration);
-            } else if (declaration.kind == NodeKind.FUNCTION) {
-                this.declare_function(declaration, false);
-            } else if (declaration.kind == NodeKind.EXTERN_FUNCTION) {
-                this.declare_function(declaration, true);
-            } else if (declaration.kind == NodeKind.STRUCT_DECL) {
-                this.declare_methods(declaration);
-            } else if (declaration.kind == NodeKind.STATIC_VAR) {
-                this.declare_static(declaration);
-            }
-        }
-    }
-
-    void declare_static(Node* declaration) {
-        TypeRef* ty = declaration.type();
-        if (ty.kind == TypeKind.AUTO || ty.kind == TypeKind.VOID) {
-            this.error(declaration, "static variable needs a concrete type");
-            return;
-        }
-        if (this.find_global(declaration.text()) != null) {
-            this.error(declaration, "static variable is already defined");
-            return;
-        }
-        void* global = LLVMAddGlobal(this.module, this.llvm_type(ty, declaration), declaration.text());
-        Value* initial = this.gen_expression(declaration.first(), ty);
-        LLVMSetInitializer(global, this.coerce(initial, ty));
-        if (!declaration.flag()) {
-            LLVMSetGlobalConstant(global, 1);
-        }
-        LocalVariable* entry = (LocalVariable*)Memory.zalloc(sizeof(LocalVariable));
-        entry.name = declaration.text();
-        entry.slot = global;
-        entry.type = ty;
-        entry.is_mutable = declaration.flag();
-        PointerList* list = this.globals;
-        list.push(entry);
-    }
-
-    LocalVariable* find_global(i8* name) {
-        PointerList* list = this.globals;
-        for (mut i32 i = 0; i < list.length; i = i + 1) {
-            LocalVariable* entry = (LocalVariable*)list.get(i);
-            if (Strings.same(entry.name, name)) {
-                return entry;
-            }
-        }
-        return (LocalVariable*)0;
-    }
-
-    void declare_function(Node* declaration, bool is_extern) {
-        this.declare_member(declaration, is_extern, (StructInfo*)0);
-    }
-
-    void declare_methods(Node* declaration) {
-        StructInfo* owner = this.find_struct(declaration.text());
-        if (owner == null) {
-            return;
-        }
-        for (mut i32 i = 0; i < declaration.count(); i = i + 1) {
-            Node* member = declaration.child(i);
-            if (member.kind == NodeKind.FUNCTION) {
-                this.declare_member(member, false, owner);
-            }
-        }
-    }
-
-    i8* member_name(StructInfo* owner, Node* declaration) {
-        if (owner == null) {
-            return declaration.text();
-        }
-        ByteBuffer* name = ByteBuffer.create();
-        name.append(owner.name);
-        name.append_char(46);
-        name.append(declaration.text());
-        return name.cstr();
-    }
-
-    void declare_member(Node* declaration, bool is_extern, StructInfo* owner) {
-        i8* qualified = this.member_name(owner, declaration);
-        if (this.find_function(qualified) != null) {
-            if (!is_extern) {
-                this.error(declaration, "function is already defined");
-            }
-            return;
-        }
-
-        FunctionInfo* info = (FunctionInfo*)Memory.zalloc(sizeof(FunctionInfo));
-        info.name = qualified;
-        info.return_type = declaration.type();
-        info.param_types = PointerList.create();
-        info.is_variadic = declaration.is_variadic();
-        info.is_extern = is_extern;
-
-        mut i32 offset = 0;
-        if (owner != null && !declaration.flag()) {
-            offset = 1;
-            info.is_instance = true;
-        }
-        i32 declared = declaration.count();
-        i32 count = declared + offset;
-        void** params = CodeGenerator.array_of(count);
-        PointerList* param_types = info.param_types;
-        if (offset == 1) {
-            param_types.push(this.this_type(owner));
-            params[0] = LLVMPointerTypeInContext(this.context, 0);
-        }
-        for (mut i32 i = 0; i < declared; i = i + 1) {
-            Node* parameter = declaration.child(i);
-            param_types.push(parameter.type());
-            params[i + offset] = this.llvm_type(parameter.type(), parameter);
-        }
-
-        void* return_type = this.llvm_type(declaration.type(), declaration);
-        mut i32 variadic = 0;
-        if (declaration.is_variadic()) {
-            variadic = 1;
-        }
-        info.function_type = LLVMFunctionType(return_type, params, (u32)count, variadic);
-
-        mut i8* symbol = qualified;
-        if (!is_extern && owner == null && Strings.same(symbol, "main")) {
-            symbol = "__djinn_sync_main";
-        }
-        info.function = LLVMAddFunction(this.module, symbol, info.function_type);
-
-        PointerList* list = this.functions;
-        list.push(info);
-    }
-
-    StructInfo* find_struct(i8* name) {
-        PointerList* list = this.structs;
-        for (mut i32 i = 0; i < list.length; i = i + 1) {
-            StructInfo* info = (StructInfo*)list.get(i);
-            if (Strings.same(info.name, name)) {
-                return info;
-            }
-        }
-        return (StructInfo*)0;
-    }
-
     StructInfo* struct_of(TypeRef* ty) {
         if (ty.kind != TypeKind.NAMED) {
             return (StructInfo*)0;
         }
-        return this.find_struct(CodeGenerator.base_name(ty.name));
+        SymbolTable* symbols = this.symbols;
+        return symbols.find_struct(ty.name_atom);
     }
 
     TypeRef* this_type(StructInfo* owner) {
         return TypeRef.pointer_to(TypeRef.named(owner.name));
     }
 
-    FieldInfo* find_field(StructInfo* info, i8* name) {
-        PointerList* list = info.fields;
-        for (mut i32 i = 0; i < list.length; i = i + 1) {
-            FieldInfo* field = (FieldInfo*)list.get(i);
-            if (Strings.same(field.name, name)) {
-                return field;
-            }
+    void declare_structs() {
+        SymbolTable* symbols = this.symbols;
+        PointerList* structs = symbols.structs;
+        for (mut i32 i = 0; i < structs.length; i = i + 1) {
+            StructInfo* info = (StructInfo*)structs.get(i);
+            info.llvm = LLVMStructCreateNamed(this.context, info.name);
         }
-        return (FieldInfo*)0;
-    }
-
-    Node* find_constant(StructInfo* info, i8* name) {
-        PointerList* list = info.constants;
-        for (mut i32 i = 0; i < list.length; i = i + 1) {
-            Node* constant = (Node*)list.get(i);
-            if (Strings.same(constant.text(), name)) {
-                return constant;
-            }
-        }
-        return (Node*)0;
-    }
-
-    void register_structs(Node* container) {
-        for (mut i32 i = 0; i < container.count(); i = i + 1) {
-            Node* declaration = container.child(i);
-            if (declaration.kind == NodeKind.NAMESPACE_DECL) {
-                this.register_structs(declaration);
-            } else if (declaration.kind == NodeKind.STRUCT_DECL && declaration.type() == null) {
-                this.register_struct(declaration);
-            }
-        }
-    }
-
-    void register_struct(Node* declaration) {
-        if (this.find_struct(declaration.text()) != null) {
-            this.error(declaration, "struct is already defined");
-            return;
-        }
-        StructInfo* info = (StructInfo*)Memory.zalloc(sizeof(StructInfo));
-        info.name = declaration.text();
-        info.node = declaration;
-        info.fields = PointerList.create();
-        info.constants = PointerList.create();
-        info.llvm = LLVMStructCreateNamed(this.context, info.name);
-        PointerList* constants = info.constants;
-        PointerList* fields = info.fields;
-        for (mut i32 i = 0; i < declaration.count(); i = i + 1) {
-            Node* member = declaration.child(i);
-            if (member.kind != NodeKind.FIELD_DECL) {
-                continue;
-            }
-            if (member.first() != null) {
-                constants.push((void*)member);
-            } else {
-                FieldInfo* field = (FieldInfo*)Memory.zalloc(sizeof(FieldInfo));
-                field.name = member.text();
-                field.type = member.type();
-                field.index = fields.length;
-                fields.push((void*)field);
-            }
-        }
-        PointerList* list = this.structs;
-        list.push((void*)info);
-    }
-
-    void build_struct_bodies() {
-        PointerList* list = this.structs;
-        for (mut i32 i = 0; i < list.length; i = i + 1) {
-            StructInfo* info = (StructInfo*)list.get(i);
+        for (mut i32 i = 0; i < structs.length; i = i + 1) {
+            StructInfo* info = (StructInfo*)structs.get(i);
             PointerList* fields = info.fields;
             void** types = CodeGenerator.array_of(fields.length);
             for (mut i32 f = 0; f < fields.length; f = f + 1) {
@@ -400,13 +152,60 @@ struct CodeGenerator {
         }
     }
 
+    void declare_functions() {
+        SymbolTable* symbols = this.symbols;
+        PointerList* functions = symbols.functions;
+        for (mut i32 i = 0; i < functions.length; i = i + 1) {
+            FunctionInfo* info = (FunctionInfo*)functions.get(i);
+            Node* declaration = info.node;
+            PointerList* param_types = info.param_types;
+            i32 count = param_types.length;
+            void** params = CodeGenerator.array_of(count);
+            for (mut i32 p = 0; p < count; p = p + 1) {
+                TypeRef* param_type = (TypeRef*)param_types.get(p);
+                params[p] = this.llvm_type(param_type, declaration);
+            }
+
+            void* return_type = this.llvm_type(info.return_type, declaration);
+            mut i32 variadic = 0;
+            if (info.is_variadic) {
+                variadic = 1;
+            }
+            info.function_type = LLVMFunctionType(return_type, params, (u32)count, variadic);
+
+            mut i8* symbol = info.name;
+            if (!info.is_extern && info.owner == null && Strings.same(symbol, "main")) {
+                symbol = "__djinn_sync_main";
+            }
+            info.function = LLVMAddFunction(this.module, symbol, info.function_type);
+        }
+    }
+
+    void declare_globals() {
+        SymbolTable* symbols = this.symbols;
+        PointerList* globals = symbols.globals;
+        for (mut i32 i = 0; i < globals.length; i = i + 1) {
+            LocalVariable* variable = (LocalVariable*)globals.get(i);
+            Node* declaration = variable.node;
+            TypeRef* ty = variable.type;
+            void* global = LLVMAddGlobal(this.module, this.llvm_type(ty, declaration), variable.name);
+            Value* initial = this.gen_expression(declaration.first(), ty);
+            LLVMSetInitializer(global, this.coerce(initial, ty));
+            if (!variable.is_mutable) {
+                LLVMSetGlobalConstant(global, 1);
+            }
+            variable.slot = global;
+        }
+    }
+
     void define_all(Node* container) {
         for (mut i32 i = 0; i < container.count(); i = i + 1) {
             Node* declaration = container.child(i);
             if (declaration.kind == NodeKind.NAMESPACE_DECL) {
                 this.define_all(declaration);
             } else if (declaration.kind == NodeKind.FUNCTION) {
-                this.define_function(declaration, (StructInfo*)0);
+                SymbolTable* symbols = this.symbols;
+                this.define_function(declaration, symbols.find_function(declaration.name()));
             } else if (declaration.kind == NodeKind.STRUCT_DECL) {
                 this.define_methods(declaration);
             }
@@ -414,21 +213,25 @@ struct CodeGenerator {
     }
 
     void define_methods(Node* declaration) {
-        StructInfo* owner = this.find_struct(declaration.text());
+        SymbolTable* symbols = this.symbols;
+        StructInfo* owner = symbols.find_struct(declaration.name());
         if (owner == null) {
             return;
         }
         for (mut i32 i = 0; i < declaration.count(); i = i + 1) {
             Node* member = declaration.child(i);
             if (member.kind == NodeKind.FUNCTION) {
-                this.define_function(member, owner);
+                this.define_function(member, symbols.find_method(owner, member.name()));
             }
         }
     }
 
-    void define_function(Node* declaration, StructInfo* owner) {
-        FunctionInfo* info = this.find_function(this.member_name(owner, declaration));
-        this.current = info;
+    void define_function(Node* declaration, FunctionInfo* info) {
+        if (info == null || (void*)info.node != (void*)declaration) {
+            return;
+        }
+        FunctionContext* function_context = this.function_context;
+        function_context.begin(info);
 
         void* entry = LLVMAppendBasicBlockInContext(this.context, info.function, "entry");
         void* body = LLVMAppendBasicBlockInContext(this.context, info.function, "body");
@@ -437,21 +240,21 @@ struct CodeGenerator {
         LLVMPositionBuilderBefore(this.alloca_builder, jump);
         LLVMPositionBuilderAtEnd(this.builder, body);
 
-        PointerList* list = this.locals;
-        list.truncate(0);
+        LocalScopes* scopes = this.scopes;
+        scopes.reset_to(0);
         mut i32 offset = 0;
         if (info.is_instance) {
             offset = 1;
-            TypeRef* this_pointer = this.this_type(owner);
+            TypeRef* this_pointer = this.this_type(info.owner);
             void* this_slot = this.create_slot(this_pointer, "this", declaration);
             LLVMBuildStore(this.builder, LLVMGetParam(info.function, 0), this_slot);
-            this.add_local("this", this_slot, this_pointer, false);
+            this.add_local("this", Ast.intern_base_name("this", 4), this_slot, this_pointer, false);
         }
         for (mut i32 i = 0; i < declaration.count(); i = i + 1) {
             Node* parameter = declaration.child(i);
             void* slot = this.create_slot(parameter.type(), parameter.text(), parameter);
             LLVMBuildStore(this.builder, LLVMGetParam(info.function, (u32)(i + offset)), slot);
-            this.add_local(parameter.text(), slot, parameter.type(), parameter.flag());
+            this.add_local(parameter.text(), parameter.name(), slot, parameter.type(), parameter.flag());
         }
 
         this.gen_statement(declaration.first());
@@ -469,27 +272,30 @@ struct CodeGenerator {
         return LLVMBuildAlloca(this.alloca_builder, this.llvm_type(ty, at), name);
     }
 
-    void add_local(i8* name, void* slot, TypeRef* ty, bool is_mutable) {
+    void add_local(i8* name, u32 name_atom, void* slot, TypeRef* ty, bool is_mutable) {
         LocalVariable* local = (LocalVariable*)Memory.zalloc(sizeof(LocalVariable));
         local.name = name;
+        local.name_atom = name_atom;
         local.slot = slot;
         local.type = ty;
         local.is_mutable = is_mutable;
-        PointerList* list = this.locals;
-        list.push(local);
+        LocalScopes* scopes = this.scopes;
+        scopes.define(name_atom, local);
     }
 
-    LocalVariable* find_local(i8* name) {
-        PointerList* list = this.locals;
-        mut i32 i = list.length - 1;
-        while (i >= 0) {
-            LocalVariable* local = (LocalVariable*)list.get(i);
-            if (Strings.same(local.name, name)) {
-                return local;
-            }
-            i = i - 1;
+    LocalVariable* find_local(u32 name) {
+        LocalScopes* scopes = this.scopes;
+        LocalVariable* local = scopes.find(name);
+        if (local != null) {
+            return local;
         }
-        return this.find_global(name);
+        SymbolTable* symbols = this.symbols;
+        return symbols.find_global(name);
+    }
+
+    FunctionInfo* current_function() {
+        FunctionContext* function_context = this.function_context;
+        return function_context.function;
     }
 
     bool is_terminated() {
@@ -498,7 +304,7 @@ struct CodeGenerator {
     }
 
     void* new_block(i8* name) {
-        return LLVMAppendBasicBlockInContext(this.context, this.current.function, name);
+        return LLVMAppendBasicBlockInContext(this.context, this.current_function().function, name);
     }
 
     void branch_if_open(void* target) {
@@ -513,7 +319,9 @@ struct CodeGenerator {
     }
 
     void emit_entry_point() {
-        FunctionInfo* user = this.find_function("main");
+        SymbolTable* symbols = this.symbols;
+        AtomTable* atoms = Ast.atoms();
+        FunctionInfo* user = symbols.find_function(atoms.intern_copy("main", 4));
         if (user == null) {
             Diagnostics* diagnostics = this.diagnostics;
             diagnostics.error(1, 1, "no 'main' function defined");
@@ -618,12 +426,12 @@ struct CodeGenerator {
         i32 kind = node.kind;
 
         if (kind == NodeKind.BLOCK) {
-            PointerList* list = this.locals;
-            i32 mark = list.length;
+            LocalScopes* scopes = this.scopes;
+            i32 mark = scopes.mark();
             for (mut i32 i = 0; i < node.count(); i = i + 1) {
                 this.gen_statement(node.child(i));
             }
-            list.truncate(mark);
+            scopes.reset_to(mark);
         } else if (kind == NodeKind.VAR_DECL) {
             this.gen_variable(node);
         } else if (kind == NodeKind.EXPR_STMT) {
@@ -639,18 +447,20 @@ struct CodeGenerator {
         } else if (kind == NodeKind.FOR) {
             this.gen_for(node);
         } else if (kind == NodeKind.BREAK) {
-            if (this.break_target == null) {
+            FunctionContext* function_context = this.function_context;
+            if (!function_context.in_loop()) {
                 this.error(node, "'break' outside of a loop");
                 return;
             }
-            LLVMBuildBr(this.builder, this.break_target);
+            LLVMBuildBr(this.builder, function_context.break_block());
             this.start_dead_block();
         } else if (kind == NodeKind.CONTINUE) {
-            if (this.continue_target == null) {
+            FunctionContext* function_context = this.function_context;
+            if (!function_context.in_loop()) {
                 this.error(node, "'continue' outside of a loop");
                 return;
             }
-            LLVMBuildBr(this.builder, this.continue_target);
+            LLVMBuildBr(this.builder, function_context.continue_block());
             this.start_dead_block();
         } else {
             this.error(node, "statement is not supported by code generation yet");
@@ -678,11 +488,11 @@ struct CodeGenerator {
         } else {
             LLVMBuildStore(this.builder, LLVMConstNull(this.llvm_type(declared, node)), slot);
         }
-        this.add_local(node.text(), slot, declared, node.flag());
+        this.add_local(node.text(), node.name(), slot, declared, node.flag());
     }
 
     void gen_return(Node* node) {
-        TypeRef* expected = this.current.return_type;
+        TypeRef* expected = this.current_function().return_type;
         if (node.first() == null) {
             LLVMBuildRetVoid(this.builder);
         } else if (expected.is_void()) {
@@ -747,8 +557,8 @@ struct CodeGenerator {
     }
 
     void gen_for(Node* node) {
-        PointerList* list = this.locals;
-        i32 mark = list.length;
+        LocalScopes* scopes = this.scopes;
+        i32 mark = scopes.mark();
         if (node.first() != null) {
             this.gen_statement(node.first());
         }
@@ -776,18 +586,15 @@ struct CodeGenerator {
         }
         LLVMBuildBr(this.builder, condition_block);
         LLVMPositionBuilderAtEnd(this.builder, end_block);
-        list.truncate(mark);
+        scopes.reset_to(mark);
     }
 
     void run_loop_body(Node* body, void* body_block, void* break_block, void* continue_block) {
-        void* saved_break = this.break_target;
-        void* saved_continue = this.continue_target;
-        this.break_target = break_block;
-        this.continue_target = continue_block;
+        FunctionContext* function_context = this.function_context;
+        function_context.enter_loop(break_block, continue_block);
         LLVMPositionBuilderAtEnd(this.builder, body_block);
         this.gen_statement(body);
-        this.break_target = saved_break;
-        this.continue_target = saved_continue;
+        function_context.leave_loop();
     }
 
     bool is_untyped_literal(Node* node) {
@@ -899,10 +706,11 @@ struct CodeGenerator {
         if (node.kind != NodeKind.IDENTIFIER) {
             return false;
         }
-        if (this.find_local(node.text()) != null) {
+        if (this.find_local(node.name()) != null) {
             return false;
         }
-        return this.find_struct(node.text()) != null;
+        SymbolTable* symbols = this.symbols;
+        return symbols.find_struct(node.name()) != null;
     }
 
     bool is_addressable(Node* node) {
@@ -943,7 +751,8 @@ struct CodeGenerator {
             this.error(node, "member access on a value that is not a struct");
             return this.fallback((void*)0);
         }
-        FieldInfo* field = this.find_field(info, node.text());
+        SymbolTable* symbols = this.symbols;
+        FieldInfo* field = symbols.find_field(info, node.name());
         if (field == null) {
             this.error(node, "struct has no such field");
             return this.fallback((void*)0);
@@ -955,8 +764,9 @@ struct CodeGenerator {
     Value* gen_member(Node* node) {
         Node* base = node.first();
         if (this.is_struct_name(base)) {
-            StructInfo* info = this.find_struct(base.text());
-            Node* constant = this.find_constant(info, node.text());
+            SymbolTable* symbols = this.symbols;
+            StructInfo* info = symbols.find_struct(base.name());
+            Node* constant = symbols.find_constant(info, node.name());
             if (constant == null) {
                 this.error(node, "struct has no such constant");
                 return this.fallback((void*)0);
@@ -970,7 +780,7 @@ struct CodeGenerator {
     }
 
     Value* gen_identifier(Node* node) {
-        LocalVariable* local = this.find_local(node.text());
+        LocalVariable* local = this.find_local(node.name());
         if (local == null) {
             this.error(node, "undefined variable");
             return this.fallback((void*)0);
@@ -988,7 +798,7 @@ struct CodeGenerator {
 
     Value* gen_address(Node* node) {
         if (node.kind == NodeKind.IDENTIFIER) {
-            LocalVariable* local = this.find_local(node.text());
+            LocalVariable* local = this.find_local(node.name());
             if (local == null) {
                 this.error(node, "undefined variable");
                 return this.fallback((void*)0);
@@ -1063,7 +873,7 @@ struct CodeGenerator {
     Value* gen_assign(Node* node) {
         Node* target = node.first();
         if (target.kind == NodeKind.IDENTIFIER) {
-            LocalVariable* local = this.find_local(target.text());
+            LocalVariable* local = this.find_local(target.name());
             if (local != null && !local.is_mutable) {
                 this.error(target, "cannot assign to an immutable variable");
             }
@@ -1267,17 +1077,18 @@ struct CodeGenerator {
 
     Value* gen_call(Node* node) {
         Node* callee = node.first();
+        SymbolTable* symbols = this.symbols;
         mut FunctionInfo* info = (FunctionInfo*)0;
         mut void* receiver = (void*)0;
         mut i32 offset = 0;
 
         if (callee.kind == NodeKind.IDENTIFIER) {
-            info = this.find_function(CodeGenerator.base_name(callee.text()));
+            info = symbols.find_function(callee.name());
         } else if (callee.kind == NodeKind.FIELD_ACCESS) {
             Node* base = callee.first();
             if (this.is_struct_name(base)) {
-                StructInfo* owner = this.find_struct(base.text());
-                info = this.find_function(this.method_name(owner.name, callee.text()));
+                StructInfo* owner = symbols.find_struct(base.name());
+                info = symbols.find_method(owner, callee.name());
                 if (info != null && info.is_instance) {
                     this.error(callee, "instance method called without an instance");
                     return this.fallback((void*)0);
@@ -1290,7 +1101,7 @@ struct CodeGenerator {
                     this.error(callee, "method call on a value that is not a struct");
                     return this.fallback((void*)0);
                 }
-                info = this.find_function(this.method_name(owner.name, callee.text()));
+                info = symbols.find_method(owner, callee.name());
                 if (info != null && !info.is_instance) {
                     this.error(callee, "static method called on an instance");
                     return this.fallback((void*)0);
@@ -1338,13 +1149,5 @@ struct CodeGenerator {
         }
         void* result = LLVMBuildCall2(this.builder, info.function_type, info.function, args, (u32)given, label);
         return Value.create(result, info.return_type);
-    }
-
-    i8* method_name(i8* owner, i8* member) {
-        ByteBuffer* name = ByteBuffer.create();
-        name.append(owner);
-        name.append_char(46);
-        name.append(member);
-        return name.cstr();
     }
 }
