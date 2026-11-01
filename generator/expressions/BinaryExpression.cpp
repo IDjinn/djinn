@@ -161,6 +161,27 @@ llvm::Value* Generator::generate_binary_expression(const BinaryExpression& expr)
         {
             return builder->CreateGEP(builder->getInt8Ty(), right, left, "ptr_arith");
         }
+        else if (leftType->isFloatingPointTy() && rightType->isFloatingPointTy())
+        {
+            const bool leftIsLiteral = dynamic_cast<const FloatLiteral*>(expr.left.get()) != nullptr;
+            const bool rightIsLiteral = dynamic_cast<const FloatLiteral*>(expr.right.get()) != nullptr;
+            if (rightIsLiteral && !leftIsLiteral)
+            {
+                right = builder->CreateFPCast(right, leftType, "fpcast");
+            }
+            else if (leftIsLiteral && !rightIsLiteral)
+            {
+                left = builder->CreateFPCast(left, rightType, "fpcast");
+            }
+            else if (leftType->getPrimitiveSizeInBits() < rightType->getPrimitiveSizeInBits())
+            {
+                left = builder->CreateFPExt(left, rightType, "fpext");
+            }
+            else
+            {
+                right = builder->CreateFPExt(right, leftType, "fpext");
+            }
+        }
         else
         {
             // Unhandled type mismatch — log before LLVM asserts
