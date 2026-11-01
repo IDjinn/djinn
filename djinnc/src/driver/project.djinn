@@ -1,0 +1,100 @@
+namespace djinnc;
+
+struct Project {
+    public static bool is_source_file(i8* path) {
+        i32 length = strlen(path);
+        return length > 6 && Strings.equals(path + length - 6, 6, ".djinn");
+    }
+
+    public static bool apply(Options* options, i8* directory) {
+        ByteBuffer* manifest_path = ByteBuffer.create();
+        manifest_path.append(directory);
+        manifest_path.append("/djinn.proj");
+        i8* manifest = Files.read_all(manifest_path.cstr());
+        if (manifest == null) {
+            logger_error(Log.get(), "djinnc: cannot read '%s'", manifest_path.cstr());
+            return false;
+        }
+        Project.read_manifest(options, manifest);
+
+        ByteBuffer* source_root = ByteBuffer.create();
+        source_root.append(directory);
+        source_root.append("/src");
+        i8* listing = __djinn_list_files(source_root.cstr(), ".djinn");
+        if (listing == null) {
+            logger_error(Log.get(), "djinnc: cannot list '%s'", source_root.cstr());
+            return false;
+        }
+        Project.add_listed_files(options, listing);
+        return options.inputs.length > 0;
+    }
+
+    static void add_listed_files(Options* options, i8* listing) {
+        i32 length = strlen(listing);
+        PointerList* inputs = options.inputs;
+        mut i32 start = 0;
+        for (mut i32 i = 0; i <= length; i = i + 1) {
+            if (i == length || listing[i] == 10) {
+                if (i > start) {
+                    inputs.push((void*)Strings.duplicate(listing + start, i - start));
+                }
+                start = i + 1;
+            }
+        }
+        options.input = (i8*)inputs.get(0);
+    }
+
+    static void read_manifest(Options* options, i8* manifest) {
+        i32 length = strlen(manifest);
+        mut i8* output_file = (i8*)0;
+        mut i8* output_directory = (i8*)0;
+        mut i32 start = 0;
+        for (mut i32 i = 0; i <= length; i = i + 1) {
+            if (i == length || manifest[i] == 10) {
+                i32 first = Project.skip_blanks(manifest, start, i);
+                if (Strings.starts_with(manifest, first, i, "file:")) {
+                    output_file = Project.read_value(manifest, first + 5, i);
+                } else if (Strings.starts_with(manifest, first, i, "directory:")) {
+                    output_directory = Project.read_value(manifest, first + 10, i);
+                } else if (first < i && (manifest[first] == 39 || manifest[first] == 34)) {
+                    ByteBuffer* link_args = options.link_args;
+                    link_args.append(" \"");
+                    link_args.append(Project.read_value(manifest, first, i));
+                    link_args.append("\"");
+                }
+                start = i + 1;
+            }
+        }
+
+        if (!options.output_set && output_file != null) {
+            ByteBuffer* output = ByteBuffer.create();
+            if (output_directory != null) {
+                output.append(output_directory);
+                output.append_char(47);
+            }
+            output.append(output_file);
+            options.output = output.cstr();
+        }
+    }
+
+    static i32 skip_blanks(i8* text, i32 from, i32 to) {
+        mut i32 position = from;
+        while (position < to && (text[position] == 32 || text[position] == 9)) {
+            position = position + 1;
+        }
+        return position;
+    }
+
+    static i8* read_value(i8* text, i32 from, i32 to) {
+        mut i32 start = Project.skip_blanks(text, from, to);
+        mut i32 end = to;
+        while (end > start && (text[end - 1] == 13 || text[end - 1] == 32 || text[end - 1] == 44)) {
+            end = end - 1;
+        }
+        if (end - start >= 2 && (text[start] == 39 || text[start] == 34) && text[end - 1] == text[start]) {
+            start = start + 1;
+            end = end - 1;
+        }
+        return Strings.duplicate(text + start, end - start);
+    }
+}
