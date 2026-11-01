@@ -422,7 +422,7 @@ TEST(ErrorHandling, ConstexprCallWithRuntimeArgumentsStaysRuntime)
             return value / divisor;
         }
 
-        static mut i32 runtime_divisor = 2;
+        unsafe static mut i32 runtime_divisor = 2;
 
         i32 main() {
             i32 result = try division(10, runtime_divisor) ?: -1;

@@ -1228,7 +1228,7 @@ std::unique_ptr<Program> Parser::parse(const std::string& program_name)
                 _macros[macroDecl->name.token_name] = macroDecl.get();
                 program->macros.push_back(std::move(macroDecl));
             }
-            else if (check(TokenType::STATIC))
+            else if (check(TokenType::STATIC) || check(TokenType::UNSAFE))
             {
                 program->staticVars.push_back(parse_static_var());
             }
@@ -3375,9 +3375,11 @@ std::unique_ptr<AttributeDeclaration> Parser::parse_attribute_declaration()
     return std::make_unique<AttributeDeclaration>(std::move(name), std::move(targetArgs), std::move(fields));
 }
 
-// static [mut] type name = expr;
+// [unsafe] static [mut] type name = expr;   ('static mut' requires 'unsafe')
 std::unique_ptr<StaticVarDeclaration> Parser::parse_static_var()
 {
+    const auto startLocation = SourceLocation(peek().position, peek().value.length());
+    const bool hasUnsafe = match(TokenType::UNSAFE);
     expect("Esperado 'static'", TokenType::STATIC);
 
     bool isMutable = false;
@@ -3385,6 +3387,15 @@ std::unique_ptr<StaticVarDeclaration> Parser::parse_static_var()
     {
         advance();
         isMutable = true;
+    }
+
+    if (isMutable && !hasUnsafe)
+    {
+        PARSER_ERROR(DiagnosticCode::UNEXPECTED_TOKEN, "'static mut' requires 'unsafe': write 'unsafe static mut'", startLocation);
+    }
+    if (hasUnsafe && !isMutable)
+    {
+        PARSER_ERROR(DiagnosticCode::UNEXPECTED_TOKEN, "'unsafe' is only valid on 'static mut'", startLocation);
     }
 
     auto type = parse_type();

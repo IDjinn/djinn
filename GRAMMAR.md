@@ -12,14 +12,14 @@ qualified_name       = IDENTIFIER { "::" IDENTIFIER } ;
 ### Static Variables
 
 ```ebnf
-static_var           = "static" [ "mut" ] type IDENTIFIER "=" expression ";" ;
+static_var           = [ "unsafe" ] "static" [ "mut" ] type IDENTIFIER "=" expression ";" ;
 
-(* Global variables require "static" keyword. Immutable by default, use "mut" for mutable.
+(* Global variables require "static" keyword. Immutable by default; "mut" makes it mutable and requires the "unsafe" prefix.
    Accessible via namespace system. Initialized with compile-time evaluable expressions.
 
    Examples:
    static i32 MAX_SIZE = 1024;
-   static mut i32 counter = 0;
+   unsafe static mut i32 counter = 0;
 *)
 ```
 

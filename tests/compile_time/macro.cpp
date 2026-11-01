@@ -68,7 +68,7 @@ TEST(Macro, LocalAvoidsDoubleEvaluation)
             }
         }
 
-        static mut i32 counter = 0;
+        unsafe static mut i32 counter = 0;
 
         i32 next() {
             counter = counter + 1;
@@ -94,7 +94,7 @@ TEST(Macro, WithoutLocalCausesDoubleEvaluation)
             }
         }
 
-        static mut i32 counter = 0;
+        unsafe static mut i32 counter = 0;
 
         i32 next() {
             counter = counter + 1;
@@ -412,7 +412,7 @@ TEST(Macro, RuleLevelLocal)
             local (expression a, expression b) => { a * a + b * b }
         }
 
-        static mut i32 counter = 0;
+        unsafe static mut i32 counter = 0;
 
         i32 next() {
             counter = counter + 1;
@@ -438,7 +438,7 @@ TEST(Macro, LogWithLiteralTokenLevels)
             (off, expression msg)   => void
         }
 
-        static mut i32 log_count = 0;
+        unsafe static mut i32 log_count = 0;
 
         void do_log(i32 x) {
             log_count = log_count + x;
@@ -505,7 +505,7 @@ TEST(Macro, LiteralTokenWithIdentifierAndExpression)
         }
 
         static i32 x = 10;
-        static mut i32 y = 20;
+        unsafe static mut i32 y = 20;
 
         i32 main() {
             i32 a = dispatch(get, x);
@@ -551,7 +551,7 @@ TEST(Macro, LogPatternLikeRust)
             (off, expression msg)   => void
         }
 
-        static mut i32 call_count = 0;
+        unsafe static mut i32 call_count = 0;
 
         void trace(i32 val) {
             call_count = call_count + val;

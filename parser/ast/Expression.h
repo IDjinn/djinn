@@ -93,6 +93,7 @@ constexpr std::string tokenTypeToString(const TokenType type)
     case TokenType::PUBLIC: return "public";
     case TokenType::PRIVATE: return "private";
     case TokenType::STATIC: return "static";
+    case TokenType::UNSAFE: return "unsafe";
     case TokenType::THIS: return "this";
     case TokenType::NEW: return "new";
     case TokenType::IMPL: return "impl";

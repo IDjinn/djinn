@@ -37,6 +37,7 @@ struct CodeGen {
     Diagnostics* diagnostics;
     PtrVec* functions;
     PtrVec* locals;
+    PtrVec* globals;
     FuncInfo* current;
     void* break_target;
     void* continue_target;
@@ -50,6 +51,7 @@ struct CodeGen {
         gen.diagnostics = diagnostics;
         gen.functions = PtrVec.create();
         gen.locals = PtrVec.create();
+        gen.globals = PtrVec.create();
         i8* triple = LLVMGetDefaultTargetTriple();
         LLVMSetTarget(gen.module, triple);
         LLVMDisposeMessage(triple);
@@ -145,10 +147,48 @@ struct CodeGen {
                 this.declare_function(declaration, false);
             } else if (declaration.kind == NodeKind.EXTERN_FUNCTION) {
                 this.declare_function(declaration, true);
+            } else if (declaration.kind == NodeKind.STATIC_VAR) {
+                this.declare_static(declaration);
             } else if (declaration.kind == NodeKind.STRUCT_DECL) {
                 this.error(declaration, "structs are not supported by code generation yet");
             }
         }
+    }
+
+    void declare_static(Node* declaration) {
+        TypeRef* ty = declaration.type();
+        if (ty.kind == TypeKind.AUTO || ty.kind == TypeKind.VOID) {
+            this.error(declaration, "static variable needs a concrete type");
+            return;
+        }
+        if (this.find_global(declaration.text()) != null) {
+            this.error(declaration, "static variable is already defined");
+            return;
+        }
+        void* global = LLVMAddGlobal(this.module, this.llvm_type(ty, declaration), declaration.text());
+        Value* initial = this.gen_expression(declaration.first(), ty);
+        LLVMSetInitializer(global, this.coerce(initial, ty));
+        if (!declaration.flag()) {
+            LLVMSetGlobalConstant(global, 1);
+        }
+        Local* entry = (Local*)Mem.zalloc(sizeof(Local));
+        entry.name = declaration.text();
+        entry.slot = global;
+        entry.type = ty;
+        entry.is_mutable = declaration.flag();
+        PtrVec* list = this.globals;
+        list.push(entry);
+    }
+
+    Local* find_global(i8* name) {
+        PtrVec* list = this.globals;
+        for (mut i32 i = 0; i < list.length; i = i + 1) {
+            Local* entry = (Local*)list.get(i);
+            if (Str.same(entry.name, name)) {
+                return entry;
+            }
+        }
+        return (Local*)0;
     }
 
     void declare_function(Node* declaration, bool is_extern) {
@@ -258,7 +298,7 @@ struct CodeGen {
             }
             i = i - 1;
         }
-        return (Local*)0;
+        return this.find_global(name);
     }
 
     bool is_terminated() {

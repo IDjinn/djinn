@@ -258,6 +258,10 @@ struct Parser {
             return this.parse_struct();
         }
 
+        if (token.kind == TokenKind.UNSAFE || token.kind == TokenKind.STATIC) {
+            return this.parse_static_var();
+        }
+
         if (token.kind == TokenKind.ENUM || token.kind == TokenKind.INTERFACE || token.kind == TokenKind.IMPL
             || token.kind == TokenKind.MACRO) {
             this.fail("this declaration is not supported yet");
@@ -397,6 +401,31 @@ struct Parser {
 
         function.set_first(this.parse_block());
         return function;
+    }
+
+    Node* parse_static_var() {
+        Token* start = this.current();
+        bool has_unsafe = this.match(TokenKind.UNSAFE);
+        Node* node = Node.create(NodeKind.STATIC_VAR, start);
+        Token* after_static = this.peek_token(1);
+        if (!has_unsafe && after_static.kind == TokenKind.MUT) {
+            this.fail("'static mut' requires 'unsafe'");
+            return node;
+        }
+        this.expect(TokenKind.STATIC, "expected 'static'");
+        bool is_mutable = this.match(TokenKind.MUT);
+        if (has_unsafe && !is_mutable) {
+            this.fail("'unsafe' is only valid on 'static mut'");
+            return node;
+        }
+        node.set_flag(is_mutable);
+        node.set_type(this.parse_type());
+        Token* name = this.expect(TokenKind.IDENTIFIER, "expected static variable name");
+        node.set_text(name.copy_text());
+        this.expect(TokenKind.EQUAL, "expected '=' in static variable declaration");
+        node.set_first(this.parse_expression());
+        this.expect(TokenKind.SEMICOLON, "expected ';' after static variable");
+        return node;
     }
 
     Node* parse_struct() {

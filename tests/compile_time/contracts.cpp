@@ -217,7 +217,7 @@ TEST(Contracts, RuntimeArgumentsSkipCompileTimeAnalysis)
     // Same require, but the argument is a runtime value: the check must stay
     // at runtime and no warning may be emitted
     const auto source = R"(
-        static mut i32 runtime_input = 500;
+        unsafe static mut i32 runtime_input = 500;
 
         i32 checked(i32 value)
             require(value < 100)

@@ -19,7 +19,7 @@ TEST(StaticVar, SimpleImmutable)
 TEST(StaticVar, Mutable)
 {
     const auto source = R"(
-        static mut i32 counter = 0;
+        unsafe static mut i32 counter = 0;
 
         void increment() {
             counter = counter + 1;
@@ -56,7 +56,7 @@ TEST(StaticVar, MultipleGlobals)
 TEST(StaticVar, MutableWithFunctions)
 {
     const auto source = R"(
-        static mut i32 state = 0;
+        unsafe static mut i32 state = 0;
 
         void set_state(i32 val) {
             state = val;
@@ -98,7 +98,7 @@ TEST(StaticVar, UsedInExpressions)
 TEST(StaticVar, MutableAccumulator)
 {
     const auto source = R"(
-        static mut i32 total = 0;
+        unsafe static mut i32 total = 0;
 
         void add(i32 x) {
             total = total + x;
@@ -114,4 +114,32 @@ TEST(StaticVar, MutableAccumulator)
 
     const auto result = DjinnCompiler::run(source, {.generateBinary = true});
     EXPECT_EQ(result.returnCode, 42);
+}
+
+TEST(StaticVar, MutableRequiresUnsafe)
+{
+    const auto source = R"(
+        static mut i32 counter = 0;
+
+        i32 main() {
+            return counter;
+        }
+    )";
+
+    const auto result = DjinnCompiler::run(source, {.generateBinary = false});
+    EXPECT_GT(result.diagnostics.size(), 0);
+}
+
+TEST(StaticVar, UnsafeRequiresMutable)
+{
+    const auto source = R"(
+        unsafe static i32 counter = 0;
+
+        i32 main() {
+            return counter;
+        }
+    )";
+
+    const auto result = DjinnCompiler::run(source, {.generateBinary = false});
+    EXPECT_GT(result.diagnostics.size(), 0);
 }

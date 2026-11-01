@@ -32,4 +32,17 @@ for source in "$here"/samples/*.djinn; do
     fi
 done
 
+for source in "$here"/errors/*.djinn; do
+    name="$(basename "$source" .djinn)"
+    if "$compiler" "$source" --no-link -o "$out/$name" >"$out/$name.log" 2>&1; then
+        echo "FAIL $name (expected a compile error)"
+        failed=1
+    elif ! grep -q "error:" "$out/$name.log"; then
+        echo "FAIL $name (no diagnostic)"
+        failed=1
+    else
+        echo "PASS $name"
+    fi
+done
+
 exit $failed

@@ -30,6 +30,7 @@ static std::unordered_map<std::string, TokenType> keywords = {
     {"public", TokenType::PUBLIC},
     {"private", TokenType::PRIVATE},
     {"static", TokenType::STATIC},
+    {"unsafe", TokenType::UNSAFE},
     {"this", TokenType::THIS},
     {"enum", TokenType::ENUM},
     {"new", TokenType::NEW},

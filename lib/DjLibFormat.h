@@ -52,6 +52,7 @@ namespace djlib
         case TokenType::PUBLIC: return "PUBLIC";
         case TokenType::PRIVATE: return "PRIVATE";
         case TokenType::STATIC: return "STATIC";
+        case TokenType::UNSAFE: return "UNSAFE";
         case TokenType::THIS: return "THIS";
         case TokenType::INT: return "INT";
         case TokenType::UINT: return "UINT";
@@ -147,7 +148,7 @@ namespace djlib
             {"CASE", TokenType::CASE}, {"DEFAULT", TokenType::DEFAULT},
             {"BREAK", TokenType::BREAK}, {"CONTINUE", TokenType::CONTINUE},
             {"INTERFACE", TokenType::INTERFACE}, {"PUBLIC", TokenType::PUBLIC},
-            {"PRIVATE", TokenType::PRIVATE}, {"STATIC", TokenType::STATIC},
+            {"PRIVATE", TokenType::PRIVATE}, {"STATIC", TokenType::STATIC}, {"UNSAFE", TokenType::UNSAFE},
             {"THIS", TokenType::THIS}, {"INT", TokenType::INT},
             {"UINT", TokenType::UINT}, {"VOID", TokenType::VOID},
             {"FLOAT", TokenType::FLOAT}, {"STRING", TokenType::STRING},
