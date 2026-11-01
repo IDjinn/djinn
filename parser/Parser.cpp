@@ -1541,8 +1541,7 @@ std::unique_ptr<Statement> Parser::parse_statement()
         auto rhs = parse_expression();
         expect("Esperado ';'", TokenType::SEMICOLON);
 
-        static size_t destructureCounter = 0;
-        std::string tempName = "__destructure_" + std::to_string(destructureCounter++);
+        std::string tempName = "__destructure_" + std::to_string(_destructureCounter++);
         SourceLocation tempLoc = rhs->location;
         SourceIdentifier tempIdent(tempName, tempLoc);
         Type autoType = Type::auto_type();
@@ -1704,10 +1703,9 @@ std::unique_ptr<Statement> Parser::parse_for_statement()
         }
         else
         {
-            static int anonRangeCounter = 0;
             auto loc = SourceLocation(peek().position, peek().value.length());
             stmt->variableType = Type(TypeKind::INTEGER, 32, true);
-            stmt->variableName = SourceIdentifier("__anon_i_" + std::to_string(anonRangeCounter++), loc);
+            stmt->variableName = SourceIdentifier("__anon_i_" + std::to_string(_anonRangeCounter++), loc);
         }
 
         // Parse range bounds: [start..end], [start..end), start..end, start..=end

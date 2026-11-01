@@ -95,16 +95,16 @@ namespace djinn
     {
         // The operand may be a throwing call whose outcome the arms handle:
         // bind it under the try guard so the call counts as checked
-        const bool prevInsideTry = _binder.insideTryExpression_;
-        const bool prevSawThrowing = _binder.tryOperandSawThrowingCall_;
-        _binder.insideTryExpression_ = true;
-        _binder.tryOperandSawThrowingCall_ = false;
+        const bool prevInsideTry = _binder.ctx_.insideTry;
+        const bool prevSawThrowing = _binder.ctx_.sawThrowingCall;
+        _binder.ctx_.insideTry = true;
+        _binder.ctx_.sawThrowingCall = false;
 
         auto operandSym = _binder.bindExpression(*expr.value);
 
-        _binder.insideTryExpression_ = prevInsideTry;
-        const bool sawThrowing = _binder.tryOperandSawThrowingCall_;
-        _binder.tryOperandSawThrowingCall_ = prevSawThrowing;
+        _binder.ctx_.insideTry = prevInsideTry;
+        const bool sawThrowing = _binder.ctx_.sawThrowingCall;
+        _binder.ctx_.sawThrowingCall = prevSawThrowing;
 
         // Error-outcome switches yield the operand's success type; enum
         // switches stay untyped (arm bindings only exist at codegen scope)
@@ -255,16 +255,16 @@ namespace djinn
 
     void BinderExpressionVisitor::visit(const TryExpression& expr)
     {
-        const bool prevInsideTry = _binder.insideTryExpression_;
-        const bool prevSawThrowing = _binder.tryOperandSawThrowingCall_;
-        _binder.insideTryExpression_ = true;
-        _binder.tryOperandSawThrowingCall_ = false;
+        const bool prevInsideTry = _binder.ctx_.insideTry;
+        const bool prevSawThrowing = _binder.ctx_.sawThrowingCall;
+        _binder.ctx_.insideTry = true;
+        _binder.ctx_.sawThrowingCall = false;
 
         auto operandSym = _binder.bindExpression(*expr.expr);
 
-        _binder.insideTryExpression_ = prevInsideTry;
-        const bool sawThrowing = _binder.tryOperandSawThrowingCall_;
-        _binder.tryOperandSawThrowingCall_ = prevSawThrowing;
+        _binder.ctx_.insideTry = prevInsideTry;
+        const bool sawThrowing = _binder.ctx_.sawThrowingCall;
+        _binder.ctx_.sawThrowingCall = prevSawThrowing;
 
         if (!sawThrowing)
         {
@@ -275,7 +275,7 @@ namespace djinn
             ));
         }
 
-        if (!expr.fallback && !_binder.currentFunctionThrows_)
+        if (!expr.fallback && !_binder.ctx_.throws)
         {
             _binder._diagnostics.emitAndPrint(Diagnostic(
                 Severity::Error, DiagnosticCode::TRY_WITHOUT_FALLBACK,

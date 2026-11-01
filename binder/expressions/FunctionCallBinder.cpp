@@ -26,9 +26,9 @@ std::shared_ptr<Symbol> Binder::bindIdentifier(const Identifier& id)
     }
 
     // Check if identifier is a const field of the current struct
-    if (!currentStructName_.empty())
+    if (!ctx_.structName.empty())
     {
-        if (const auto structSym = _current_scope->lookupStruct(currentStructName_); structSym)
+        if (const auto structSym = _current_scope->lookupStruct(ctx_.structName); structSym)
         {
             if (const auto field = structSym->findField(id.identifier.token_name); field && field->isConstant)
             {

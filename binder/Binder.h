@@ -111,12 +111,38 @@ private:
     std::shared_ptr<ScopedSymbolTable> _current_scope;
     std::shared_ptr<ScopedSymbolTable> _global_scope;
 
-    std::string currentFunction_;
-    std::string currentStructName_;
-    bool currentFunctionThrows_ = false;
-    bool currentFunctionThrowsAny_ = false;
-    std::vector<Type> currentFunctionThrowsTypes_;
-    bool insideTryExpression_ = false;
+    struct BindContext
+    {
+        std::string function;
+        std::string structName;
+        bool throws = false;
+        bool throwsAny = false;
+        std::vector<Type> throwsTypes;
+        bool insideTry = false;
+        bool sawThrowingCall = false;
+    };
+
+    BindContext ctx_;
+
+    class FunctionBindScope
+    {
+    public:
+        FunctionBindScope(Binder& binder, BindContext next)
+            : binder_(binder), saved_(std::move(next))
+        {
+            std::swap(binder_.ctx_, saved_);
+        }
+
+        ~FunctionBindScope() { std::swap(binder_.ctx_, saved_); }
+
+        FunctionBindScope(const FunctionBindScope&) = delete;
+        FunctionBindScope& operator=(const FunctionBindScope&) = delete;
+
+    private:
+        Binder& binder_;
+        BindContext saved_;
+    };
+
     mutable int32_t nextErrorTag_ = djinn::errors::FirstUserErrorTag;
     bool _bindingStdLib = false;
     std::unordered_map<std::string, int32_t> _attributeTargets;
@@ -244,7 +270,6 @@ private:
     bool is_error_derived_from(const std::string& structName, const std::string& baseName) const;
 
     // Error handling checks: enforce `try` on calls to throwing functions
-    bool tryOperandSawThrowingCall_ = false;
     void check_throwing_call(const std::string& calleeName, bool calleeThrows, const SourceLocation& loc);
 
     // Compile-time enforcement: a call whose outcome is provable (constexpr

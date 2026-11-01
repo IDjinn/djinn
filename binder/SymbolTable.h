@@ -11,6 +11,7 @@
 #include <vector>
 #include <ranges>
 #include <set>
+#include <unordered_set>
 
 #include "Symbol.h"
 
@@ -38,7 +39,7 @@ public:
         if (_symbols.contains(name))
             return false;
 
-        _symbols[name] = std::move(symbol);
+        insertSymbol(name, std::move(symbol));
         return true;
     }
 
@@ -47,7 +48,7 @@ public:
         if (_symbols.contains(alias))
             return false;
 
-        _symbols[alias] = std::move(symbol);
+        insertSymbol(alias, std::move(symbol));
         return true;
     }
 
@@ -57,7 +58,7 @@ public:
         if (_symbols.contains(name))
             return nullptr;
 
-        _symbols[name] = std::make_shared<Symbol>(SymbolKind::Variable, name, type, loc, isMutable);
+        insertSymbol(name, std::make_shared<Symbol>(SymbolKind::Variable, name, type, loc, isMutable));
         return _symbols[name];
     }
 
@@ -86,7 +87,7 @@ public:
         const std::string key = "interface:" + ifaceSym->name;
         if (_symbols.contains(key))
             return false;
-        _symbols[key] = std::move(ifaceSym);
+        insertSymbol(key, std::move(ifaceSym));
         return true;
     }
 
@@ -95,7 +96,7 @@ public:
         const std::string key = "interface:" + alias;
         if (_symbols.contains(key))
             return false;
-        _symbols[key] = std::move(ifaceSym);
+        insertSymbol(key, std::move(ifaceSym));
         return true;
     }
 
@@ -157,8 +158,9 @@ public:
         }
         // Fallback: try to find a struct whose qualified name ends with ::name
         const std::string suffix = "::" + name;
-        for (const auto& [symName, symbol] : _symbols)
+        for (const auto& symName : _order)
         {
+            const auto& symbol = _symbols.at(symName);
             if (symbol->isStruct() && symName.ends_with(suffix))
             {
                 return std::dynamic_pointer_cast<StructSymbol>(symbol);
@@ -204,8 +206,9 @@ public:
         }
 
         const std::string suffix = "::" + name;
-        for (const auto& [symName, symbol] : _symbols)
+        for (const auto& symName : _order)
         {
+            const auto& symbol = _symbols.at(symName);
             if (symbol->isEnum() && symName.ends_with(suffix))
             {
                 return std::dynamic_pointer_cast<EnumSymbol>(symbol);
@@ -259,7 +262,7 @@ public:
     [[nodiscard]] std::vector<std::shared_ptr<Symbol>> getUnusedSymbols() const
     {
         std::vector<std::shared_ptr<Symbol>> unused;
-        for (const auto& symbol : _symbols | std::views::values)
+        for (const auto& symbol : orderedSymbols())
         {
             if (!symbol->isUsed && (symbol->isVariable() || symbol->isParameter()))
             {
@@ -272,7 +275,7 @@ public:
     std::vector<std::shared_ptr<Symbol>> get_all_interfaces() const
     {
         std::vector<std::shared_ptr<Symbol>> all_interfaces;
-        for (const auto& symbol : _symbols | std::views::values)
+        for (const auto& symbol : orderedSymbols())
         {
             if (symbol->isInterface()) all_interfaces.push_back(symbol);
         }
@@ -283,7 +286,7 @@ public:
     std::vector<std::shared_ptr<Symbol>> get_all_functions() const
     {
         std::vector<std::shared_ptr<Symbol>> all_functions;
-        for (const auto& symbol : _symbols | std::views::values)
+        for (const auto& symbol : orderedSymbols())
         {
             if (symbol->kind == SymbolKind::Function) all_functions.push_back(symbol);
         }
@@ -292,32 +295,35 @@ public:
 
     std::vector<std::shared_ptr<Symbol>> get_all_extern_functions() const
     {
-        std::set<std::shared_ptr<Symbol>> unique_extern;
-        for (const auto& symbol : _symbols | std::views::values)
+        std::vector<std::shared_ptr<Symbol>> unique_extern;
+        std::unordered_set<const Symbol*> seen;
+        for (const auto& symbol : orderedSymbols())
         {
-            if (symbol->kind == SymbolKind::ExternFunction) unique_extern.insert(symbol);
+            if (symbol->kind == SymbolKind::ExternFunction && seen.insert(symbol.get()).second)
+                unique_extern.push_back(symbol);
         }
-        return {unique_extern.begin(), unique_extern.end()};
+        return unique_extern;
     }
 
     std::vector<std::shared_ptr<Symbol>> get_all_structs() const
     {
-        std::set<std::shared_ptr<Symbol>> unique_structs;
-        for (const auto& symbol : _symbols | std::views::values)
+        std::vector<std::shared_ptr<Symbol>> unique_structs;
+        std::unordered_set<const Symbol*> seen;
+        for (const auto& symbol : orderedSymbols())
         {
             // Error types are builtin: no LLVM struct is emitted for them
             // (error values are generated inline by throw/construction sites)
             if (symbol->isStruct() && std::dynamic_pointer_cast<StructSymbol>(symbol)->isErrorType)
                 continue;
-            if (symbol->isStruct()) unique_structs.insert(symbol);
+            if (symbol->isStruct() && seen.insert(symbol.get()).second) unique_structs.push_back(symbol);
         }
-        return {unique_structs.begin(), unique_structs.end()};
+        return unique_structs;
     }
 
     std::vector<std::shared_ptr<Symbol>> get_all_enums() const
     {
         std::vector<std::shared_ptr<Symbol>> all_enums;
-        for (const auto& symbol : _symbols | std::views::values)
+        for (const auto& symbol : orderedSymbols())
         {
             if (symbol->isEnum()) all_enums.push_back(symbol);
         }
@@ -328,7 +334,7 @@ public:
     std::vector<std::shared_ptr<Symbol>> get_all_variables() const
     {
         std::vector<std::shared_ptr<Symbol>> all_variables;
-        for (const auto& symbol : _symbols | std::views::values)
+        for (const auto& symbol : orderedSymbols())
         {
             if (symbol->isVariable()) all_variables.push_back(symbol);
         }
@@ -343,7 +349,7 @@ public:
 
     std::shared_ptr<MethodSymbol> lookupMethod(const std::string& name)
     {
-        for (const auto& symbol : _symbols | std::views::values)
+        for (const auto& symbol : orderedSymbols())
         {
             if (symbol->isMethod()) return std::shared_ptr<MethodSymbol>(dynamic_cast<MethodSymbol*>(symbol.get()));
             if (symbol->isStruct())
@@ -369,8 +375,27 @@ public:
 #endif
 
 private:
+    void insertSymbol(const std::string& key, std::shared_ptr<Symbol> symbol)
+    {
+        _order.push_back(key);
+        _symbols.emplace(key, std::move(symbol));
+    }
+
+    // Symbols in definition order, so every consumer sees a stable sequence
+    [[nodiscard]] std::vector<std::shared_ptr<Symbol>> orderedSymbols() const
+    {
+        std::vector<std::shared_ptr<Symbol>> result;
+        result.reserve(_order.size());
+        for (const auto& key : _order)
+        {
+            result.push_back(_symbols.at(key));
+        }
+        return result;
+    }
+
     std::shared_ptr<SymbolTable> _parent;
     std::unordered_map<std::string, std::shared_ptr<Symbol>> _symbols;
+    std::vector<std::string> _order;
     int _depth = 0;
 #ifdef _MSC_VER
 #pragma warning(pop)

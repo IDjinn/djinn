@@ -14,7 +14,7 @@ void Generator::generate_statement(const Statement& stmt)
 
 void Generator::generate_return_statement(const ReturnStatement& stmt)
 {
-    if (inSwitchArmBlock_)
+    if (fn_.armYield.active)
     {
         GENERATOR_ERROR(DiagnosticCode::UNEXPECTED_TOKEN,
                         "'return' is not allowed inside a switch arm block; use 'yield' or 'throw'",
@@ -22,16 +22,16 @@ void Generator::generate_return_statement(const ReturnStatement& stmt)
     }
 
     // In async functions: store return value in promise and branch to final suspend
-    if (inAsyncFunction)
+    if (fn_.coroutine.active)
     {
-        if (stmt.value && asyncPromisePtr && asyncReturnType && !asyncReturnType->isVoidTy())
+        if (stmt.value && fn_.coroutine.promise && fn_.coroutine.returnType && !fn_.coroutine.returnType->isVoidTy())
         {
             llvm::Value* val = nullptr;
 
             // Handle brace initializers for struct returns (e.g. return { .fd = x, .connected = true })
             if (auto* braceInit = dynamic_cast<const BraceInitializer*>(stmt.value.get()))
             {
-                if (auto* structType = llvm::dyn_cast<llvm::StructType>(asyncReturnType))
+                if (auto* structType = llvm::dyn_cast<llvm::StructType>(fn_.coroutine.returnType))
                 {
                     const auto structName = structType->getName().str();
                     val = generate_brace_init_for_struct(*braceInit, structType, structName);
@@ -41,26 +41,26 @@ void Generator::generate_return_statement(const ReturnStatement& stmt)
             if (!val)
             {
                 val = generate_expression(*stmt.value);
-                if (asyncReturnType->isPointerTy())
+                if (fn_.coroutine.returnType->isPointerTy())
                 {
                     val = coerce_str_to_ptr(val);
                 }
-                val = cast_value(val, asyncReturnType);
+                val = cast_value(val, fn_.coroutine.returnType);
             }
 
             // Load from alloca if needed
             if (auto* alloca = llvm::dyn_cast<llvm::AllocaInst>(val))
             {
-                if (alloca->getAllocatedType() == asyncReturnType)
+                if (alloca->getAllocatedType() == fn_.coroutine.returnType)
                 {
-                    val = builder->CreateLoad(asyncReturnType, alloca, "ret_load");
+                    val = builder->CreateLoad(fn_.coroutine.returnType, alloca, "ret_load");
                 }
             }
 
-            builder->CreateStore(val, asyncPromisePtr);
+            builder->CreateStore(val, fn_.coroutine.promise);
         }
         emit_all_scope_cleanup();
-        builder->CreateBr(asyncFinalSuspendBB);
+        builder->CreateBr(fn_.coroutine.finalSuspend);
         return;
     }
 
@@ -68,7 +68,7 @@ void Generator::generate_return_statement(const ReturnStatement& stmt)
     {
         if (auto* braceInit = dynamic_cast<const BraceInitializer*>(stmt.value.get()))
         {
-            const auto returnType = currentFunction->getReturnType();
+            const auto returnType = fn_.function->getReturnType();
             if (auto* structType = llvm::dyn_cast<llvm::StructType>(returnType))
             {
                 const auto structName = structType->getName().str();
@@ -97,7 +97,7 @@ void Generator::generate_return_statement(const ReturnStatement& stmt)
         }
 
         auto val = generate_expression(*stmt.value);
-        llvm::Type* returnType = currentFunction->getReturnType();
+        llvm::Type* returnType = fn_.function->getReturnType();
         if (returnType->isPointerTy())
         {
             val = coerce_str_to_ptr(val);
@@ -113,18 +113,18 @@ void Generator::generate_return_statement(const ReturnStatement& stmt)
         val = cast_value(val, returnType, sourceSigned);
 
         // ensure(...) contracts: check postconditions before actually returning
-        if (!currentContracts_.empty())
+        if (!fn_.contracts.empty())
         {
             bool hasEnsure = false;
-            for (const auto& contract : currentContracts_)
+            for (const auto& contract : fn_.contracts)
             {
                 if (contract && contract->isEnsure() && contract->condition) hasEnsure = true;
             }
             if (hasEnsure)
             {
-                if (contractReturnAlloca)
+                if (fn_.contractReturn)
                 {
-                    builder->CreateStore(val, contractReturnAlloca);
+                    builder->CreateStore(val, fn_.contractReturn);
                 }
                 emit_contract_ensures();
             }
@@ -136,7 +136,7 @@ void Generator::generate_return_statement(const ReturnStatement& stmt)
     else
     {
         // Void functions may still have side-condition ensure clauses
-        if (!currentContracts_.empty())
+        if (!fn_.contracts.empty())
         {
             emit_contract_ensures();
         }
@@ -149,7 +149,7 @@ void Generator::generate_yield_statement(const YieldStatement& stmt)
 {
     if (!stmt.value)
     {
-        if (!inAsyncFunction)
+        if (!fn_.coroutine.active)
         {
             throw CompileError(DiagnosticCode::UNEXPECTED_TOKEN, "yield só é permitido em funções async");
         }
@@ -163,18 +163,18 @@ void Generator::generate_yield_statement(const YieldStatement& stmt)
                                                       }, "coro.yield");
 
         // Switch: 0 = resumed, 1 = destroyed, default = suspend (return to caller)
-        auto* resumeBB = llvm::BasicBlock::Create(*context, "yield.resume", currentFunction);
-        auto* switchInst = builder->CreateSwitch(suspResult, asyncSuspendBB, 2);
+        auto* resumeBB = llvm::BasicBlock::Create(*context, "yield.resume", fn_.function);
+        auto* switchInst = builder->CreateSwitch(suspResult, fn_.coroutine.suspend, 2);
         switchInst->addCase(builder->getInt8(0), resumeBB);
-        switchInst->addCase(builder->getInt8(1), asyncCleanupBB);
+        switchInst->addCase(builder->getInt8(1), fn_.coroutine.cleanup);
 
         // Continue execution after yield
         builder->SetInsertPoint(resumeBB);
         return;
     }
 
-    if (!inSwitchArmBlock_ || !armYieldBlock_ ||
-        armYieldBlock_->getParent() != builder->GetInsertBlock()->getParent())
+    if (!fn_.armYield.active || !fn_.armYield.block ||
+        fn_.armYield.block->getParent() != builder->GetInsertBlock()->getParent())
     {
         GENERATOR_ERROR(DiagnosticCode::UNEXPECTED_TOKEN,
                         "'yield <value>' is only allowed inside a switch arm block", stmt.location);
@@ -186,18 +186,18 @@ void Generator::generate_yield_statement(const YieldStatement& stmt)
         value = builder->CreateLoad(alloca->getAllocatedType(), alloca, "yield_load");
     }
 
-    if (!armYieldSlot_)
+    if (!fn_.armYield.slot)
     {
-        armYieldSlot_ = builder->CreateAlloca(value->getType(), nullptr, "yield_slot");
+        fn_.armYield.slot = builder->CreateAlloca(value->getType(), nullptr, "yield_slot");
     }
-    else if (armYieldSlot_->getAllocatedType() != value->getType())
+    else if (fn_.armYield.slot->getAllocatedType() != value->getType())
     {
         GENERATOR_ERROR(DiagnosticCode::TYPE_MISMATCH, "'yield' values must share one type", stmt.location);
     }
 
-    builder->CreateStore(value, armYieldSlot_);
-    builder->CreateBr(armYieldBlock_);
-    armDidYield_ = true;
+    builder->CreateStore(value, fn_.armYield.slot);
+    builder->CreateBr(fn_.armYield.block);
+    fn_.armYield.didYield = true;
 }
 
 void Generator::generate_spawn_statement(const SpawnStatement& stmt)
@@ -219,19 +219,21 @@ void Generator::generate_spawn_statement(const SpawnStatement& stmt)
 
 void Generator::generate_break_statement()
 {
-    if (!breakTargets.empty())
+    if (!fn_.loops.empty())
     {
         emit_scope_cleanup();
-        builder->CreateBr(breakTargets.back());
+        builder->CreateBr(fn_.loops.back().breakBlock);
     }
 }
 
 void Generator::generate_continue_statement()
 {
-    if (!continueTargets.empty())
+    for (auto it = fn_.loops.rbegin(); it != fn_.loops.rend(); ++it)
     {
+        if (!it->continueBlock) continue;
         emit_scope_cleanup();
-        builder->CreateBr(continueTargets.back());
+        builder->CreateBr(it->continueBlock);
+        return;
     }
 }
 
@@ -284,7 +286,7 @@ void Generator::generate_if_statement(const IfStatement& stmt)
 
         if (builder->GetInsertBlock()->getTerminator())
         {
-            auto* deadBB = llvm::BasicBlock::Create(*context, "ct.dead", currentFunction);
+            auto* deadBB = llvm::BasicBlock::Create(*context, "ct.dead", fn_.function);
             builder->SetInsertPoint(deadBB);
         }
         return;
@@ -301,11 +303,11 @@ void Generator::generate_if_statement(const IfStatement& stmt)
         );
     }
 
-    llvm::BasicBlock* thenBB = llvm::BasicBlock::Create(*context, "then", currentFunction);
+    llvm::BasicBlock* thenBB = llvm::BasicBlock::Create(*context, "then", fn_.function);
     llvm::BasicBlock* elseBB = stmt.elseBranch
-                                   ? llvm::BasicBlock::Create(*context, "else", currentFunction)
+                                   ? llvm::BasicBlock::Create(*context, "else", fn_.function)
                                    : nullptr;
-    llvm::BasicBlock* mergeBB = llvm::BasicBlock::Create(*context, "ifcont", currentFunction);
+    llvm::BasicBlock* mergeBB = llvm::BasicBlock::Create(*context, "ifcont", fn_.function);
 
     if (elseBB)
     {
@@ -351,13 +353,12 @@ void Generator::generate_for_statement(const ForStatement& stmt)
         generate_expression(*stmt.initializer);
     }
 
-    llvm::BasicBlock* condBB = llvm::BasicBlock::Create(*context, "for.cond", currentFunction);
-    llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "for.body", currentFunction);
-    llvm::BasicBlock* incBB = llvm::BasicBlock::Create(*context, "for.inc", currentFunction);
-    llvm::BasicBlock* endBB = llvm::BasicBlock::Create(*context, "for.end", currentFunction);
+    llvm::BasicBlock* condBB = llvm::BasicBlock::Create(*context, "for.cond", fn_.function);
+    llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "for.body", fn_.function);
+    llvm::BasicBlock* incBB = llvm::BasicBlock::Create(*context, "for.inc", fn_.function);
+    llvm::BasicBlock* endBB = llvm::BasicBlock::Create(*context, "for.end", fn_.function);
 
-    breakTargets.push_back(endBB);
-    continueTargets.push_back(incBB);
+    LoopGuard loopGuard(fn_.loops, endBB, incBB);
 
     builder->CreateBr(condBB);
 
@@ -399,8 +400,6 @@ void Generator::generate_for_statement(const ForStatement& stmt)
 
     builder->SetInsertPoint(endBB);
 
-    breakTargets.pop_back();
-    continueTargets.pop_back();
 
     pop_scope();
 }
@@ -428,13 +427,12 @@ void Generator::generate_range_for_statement(const RangeForStatement& stmt)
     llvm::Value* endVal = generate_expression(*stmt.end);
     endVal = cast_value(endVal, varType);
 
-    llvm::BasicBlock* condBB = llvm::BasicBlock::Create(*context, "rangefor.cond", currentFunction);
-    llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "rangefor.body", currentFunction);
-    llvm::BasicBlock* incBB = llvm::BasicBlock::Create(*context, "rangefor.inc", currentFunction);
-    llvm::BasicBlock* endBB = llvm::BasicBlock::Create(*context, "rangefor.end", currentFunction);
+    llvm::BasicBlock* condBB = llvm::BasicBlock::Create(*context, "rangefor.cond", fn_.function);
+    llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "rangefor.body", fn_.function);
+    llvm::BasicBlock* incBB = llvm::BasicBlock::Create(*context, "rangefor.inc", fn_.function);
+    llvm::BasicBlock* endBB = llvm::BasicBlock::Create(*context, "rangefor.end", fn_.function);
 
-    breakTargets.push_back(endBB);
-    continueTargets.push_back(incBB);
+    LoopGuard loopGuard(fn_.loops, endBB, incBB);
 
     builder->CreateBr(condBB);
 
@@ -473,20 +471,17 @@ void Generator::generate_range_for_statement(const RangeForStatement& stmt)
 
     builder->SetInsertPoint(endBB);
 
-    breakTargets.pop_back();
-    continueTargets.pop_back();
 
     pop_scope();
 }
 
 void Generator::generate_while_statement(const WhileStatement& stmt)
 {
-    llvm::BasicBlock* condBB = llvm::BasicBlock::Create(*context, "while.cond", currentFunction);
-    llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "while.body", currentFunction);
-    llvm::BasicBlock* endBB = llvm::BasicBlock::Create(*context, "while.end", currentFunction);
+    llvm::BasicBlock* condBB = llvm::BasicBlock::Create(*context, "while.cond", fn_.function);
+    llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "while.body", fn_.function);
+    llvm::BasicBlock* endBB = llvm::BasicBlock::Create(*context, "while.end", fn_.function);
 
-    breakTargets.push_back(endBB);
-    continueTargets.push_back(condBB);
+    LoopGuard loopGuard(fn_.loops, endBB, condBB);
 
     builder->CreateBr(condBB);
     builder->SetInsertPoint(condBB);
@@ -513,18 +508,15 @@ void Generator::generate_while_statement(const WhileStatement& stmt)
 
     builder->SetInsertPoint(endBB);
 
-    breakTargets.pop_back();
-    continueTargets.pop_back();
 }
 
 void Generator::generate_do_while_statement(const DoWhileStatement& stmt)
 {
-    llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "dowhile.body", currentFunction);
-    llvm::BasicBlock* condBB = llvm::BasicBlock::Create(*context, "dowhile.cond", currentFunction);
-    llvm::BasicBlock* endBB = llvm::BasicBlock::Create(*context, "dowhile.end", currentFunction);
+    llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "dowhile.body", fn_.function);
+    llvm::BasicBlock* condBB = llvm::BasicBlock::Create(*context, "dowhile.cond", fn_.function);
+    llvm::BasicBlock* endBB = llvm::BasicBlock::Create(*context, "dowhile.end", fn_.function);
 
-    breakTargets.push_back(endBB);
-    continueTargets.push_back(condBB);
+    LoopGuard loopGuard(fn_.loops, endBB, condBB);
 
     builder->CreateBr(bodyBB);
     builder->SetInsertPoint(bodyBB);
@@ -550,17 +542,15 @@ void Generator::generate_do_while_statement(const DoWhileStatement& stmt)
     builder->CreateCondBr(condValue, bodyBB, endBB);
     builder->SetInsertPoint(endBB);
 
-    breakTargets.pop_back();
-    continueTargets.pop_back();
 }
 
 void Generator::generate_switch_statement(const SwitchStatement& stmt)
 {
     llvm::Value* switchValue = generate_expression(*stmt.value);
 
-    llvm::BasicBlock* endBB = llvm::BasicBlock::Create(*context, "switch.end", currentFunction);
+    llvm::BasicBlock* endBB = llvm::BasicBlock::Create(*context, "switch.end", fn_.function);
     llvm::BasicBlock* defaultBB = endBB;
-    breakTargets.push_back(endBB);
+    LoopGuard loopGuard(fn_.loops, endBB);
 
     size_t numCases = 0;
     for (const auto& caseStmt : stmt.cases)
@@ -571,7 +561,7 @@ void Generator::generate_switch_statement(const SwitchStatement& stmt)
         }
         else
         {
-            defaultBB = llvm::BasicBlock::Create(*context, "switch.default", currentFunction);
+            defaultBB = llvm::BasicBlock::Create(*context, "switch.default", fn_.function);
         }
     }
 
@@ -583,7 +573,7 @@ void Generator::generate_switch_statement(const SwitchStatement& stmt)
 
         if (caseStmt->expression)
         {
-            caseBB = llvm::BasicBlock::Create(*context, "switch.case", currentFunction);
+            caseBB = llvm::BasicBlock::Create(*context, "switch.case", fn_.function);
             llvm::Value* caseValue = generate_expression(*caseStmt->expression);
 
             // Cast case value to match switch value type
@@ -618,7 +608,6 @@ void Generator::generate_switch_statement(const SwitchStatement& stmt)
     }
 
     builder->SetInsertPoint(endBB);
-    breakTargets.pop_back();
 }
 
 llvm::Value* Generator::generate_brace_init_for_struct(const BraceInitializer& braceInit, llvm::StructType* structType,

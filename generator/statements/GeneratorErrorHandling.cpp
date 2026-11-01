@@ -226,7 +226,7 @@ void Generator::generate_throw_statement(const ThrowStatement& stmt)
 
     emit_all_scope_cleanup();
 
-    llvm::Type* returnType = currentFunction ? currentFunction->getReturnType() : builder->getInt32Ty();
+    llvm::Type* returnType = fn_.function ? fn_.function->getReturnType() : builder->getInt32Ty();
     if (returnType->isVoidTy())
     {
         builder->CreateRetVoid();
@@ -256,7 +256,7 @@ void Generator::emit_error_propagation_check(const SourceLocation& loc)
     builder->SetInsertPoint(errBB);
     store_error_origin(loc);
     emit_all_scope_cleanup();
-    llvm::Type* returnType = currentFunction ? currentFunction->getReturnType() : builder->getInt32Ty();
+    llvm::Type* returnType = fn_.function ? fn_.function->getReturnType() : builder->getInt32Ty();
     if (returnType->isVoidTy())
     {
         builder->CreateRetVoid();
@@ -336,7 +336,7 @@ void Generator::emit_div_by_zero_check(const TrapOperand& dividend, const TrapOp
 
     builder->SetInsertPoint(errBB);
 
-    if (currentFunctionThrows)
+    if (fn_.throws)
     {
         emit_error_throw_with_tag(djinn::errors::builtin_error_tag("DivisionByZero"), loc);
     }
@@ -353,8 +353,8 @@ void Generator::emit_div_by_zero_check(const TrapOperand& dividend, const TrapOp
 // pseudo-variable for ensure clauses and emits require checks at entry.
 void Generator::setup_contracts(const std::vector<const ContractClause*>& contracts, llvm::Function* llvmFunc)
 {
-    currentContracts_ = contracts;
-    contractReturnAlloca = nullptr;
+    fn_.contracts = contracts;
+    fn_.contractReturn = nullptr;
 
     bool hasEnsure = false;
     for (const auto& contract : contracts)
@@ -368,8 +368,8 @@ void Generator::setup_contracts(const std::vector<const ContractClause*>& contra
 
     if (hasEnsure && llvmFunc && !llvmFunc->getReturnType()->isVoidTy())
     {
-        contractReturnAlloca = builder->CreateAlloca(llvmFunc->getReturnType(), nullptr, "__return");
-        currentScope->define_variable("return", contractReturnAlloca, "");
+        fn_.contractReturn = builder->CreateAlloca(llvmFunc->getReturnType(), nullptr, "__return");
+        currentScope->define_variable("return", fn_.contractReturn, "");
     }
 
     emit_contract_requirements();
@@ -407,7 +407,7 @@ void Generator::emit_non_zero_param_check(const std::string& paramName, const Ty
 // the non-zero entry check already covers it.
 void Generator::emit_contract_requirements()
 {
-    for (const auto& contract : currentContracts_)
+    for (const auto& contract : fn_.contracts)
     {
         if (!contract || !contract->isRequire() || !contract->condition) continue;
 
@@ -443,7 +443,7 @@ void Generator::emit_contract_requirements()
 // has already been stored in the `return` pseudo-variable).
 void Generator::emit_contract_ensures()
 {
-    for (const auto& contract : currentContracts_)
+    for (const auto& contract : fn_.contracts)
     {
         if (!contract || !contract->isEnsure() || !contract->condition) continue;
 
@@ -497,7 +497,7 @@ void Generator::emit_error_throw_with_tag(const int32_t tag, const SourceLocatio
 
     emit_all_scope_cleanup();
 
-    llvm::Type* returnType = currentFunction ? currentFunction->getReturnType() : builder->getInt32Ty();
+    llvm::Type* returnType = fn_.function ? fn_.function->getReturnType() : builder->getInt32Ty();
     if (returnType->isVoidTy())
         builder->CreateRetVoid();
     else
@@ -555,10 +555,11 @@ llvm::Value* Generator::generate_try_expression(const TryExpression& expr)
 
     builder->CreateStore(llvm::ConstantInt::get(builder->getInt1Ty(), 0), errorFlagGlobal, true);
 
-    const bool prevInsideTry = insideTryOperand_;
-    insideTryOperand_ = true;
-    auto* callResult = generate_expression(*expr.expr);
-    insideTryOperand_ = prevInsideTry;
+    llvm::Value* callResult = nullptr;
+    {
+        const ValueGuard<bool> tryGuard(fn_.insideTryOperand, true);
+        callResult = generate_expression(*expr.expr);
+    }
 
     if (auto* alloca = llvm::dyn_cast<llvm::AllocaInst>(callResult))
     {
@@ -569,7 +570,7 @@ llvm::Value* Generator::generate_try_expression(const TryExpression& expr)
 
     if (!expr.fallback)
     {
-        if (currentFunctionThrows)
+        if (fn_.throws)
         {
             // No fallback: propagate the error to this function's callers,
             // with the origin rising to this unhandled try call site
@@ -582,7 +583,7 @@ llvm::Value* Generator::generate_try_expression(const TryExpression& expr)
             builder->SetInsertPoint(errBB);
             store_error_origin(expr.location);
             emit_all_scope_cleanup();
-            llvm::Type* returnType = currentFunction ? currentFunction->getReturnType() : builder->getInt32Ty();
+            llvm::Type* returnType = fn_.function ? fn_.function->getReturnType() : builder->getInt32Ty();
             if (returnType->isVoidTy())
                 builder->CreateRetVoid();
             else

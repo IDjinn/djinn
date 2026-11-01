@@ -33,12 +33,12 @@ llvm::Value* Generator::generate_coro_intrinsic(
 {
     if (method == "handle")
     {
-        if (!inAsyncFunction || !asyncCoroHandle)
+        if (!fn_.coroutine.active || !fn_.coroutine.handle)
         {
             throw CompileError(DiagnosticCode::UNEXPECTED_TOKEN,
                                "coro::handle() can only be called inside an async function");
         }
-        return asyncCoroHandle;
+        return fn_.coroutine.handle;
     }
 
     if (method == "done")
@@ -82,7 +82,7 @@ llvm::Value* Generator::generate_coro_intrinsic(
 
     if (method == "suspend")
     {
-        if (!inAsyncFunction || !asyncCoroHandle)
+        if (!fn_.coroutine.active || !fn_.coroutine.handle)
         {
             throw CompileError(DiagnosticCode::UNEXPECTED_TOKEN,
                                "coro::suspend() can only be called inside an async function");
@@ -97,7 +97,7 @@ llvm::Value* Generator::generate_coro_intrinsic(
             markWaitingFn = llvm::Function::Create(ft, llvm::Function::ExternalLinkage,
                                                    "__djinn_mark_waiting", *module);
         }
-        builder->CreateCall(markWaitingFn, {asyncCoroHandle});
+        builder->CreateCall(markWaitingFn, {fn_.coroutine.handle});
 
         // Emit coro.suspend(false) + switch (same pattern as yield)
         auto* coroSuspendFn = llvm::Intrinsic::getOrInsertDeclaration(
@@ -107,10 +107,10 @@ llvm::Value* Generator::generate_coro_intrinsic(
                                                           builder->getFalse()
                                                       }, "coro.suspend");
 
-        auto* resumeBB = llvm::BasicBlock::Create(*context, "suspend.resume", currentFunction);
-        auto* switchInst = builder->CreateSwitch(suspResult, asyncSuspendBB, 2);
+        auto* resumeBB = llvm::BasicBlock::Create(*context, "suspend.resume", fn_.function);
+        auto* switchInst = builder->CreateSwitch(suspResult, fn_.coroutine.suspend, 2);
         switchInst->addCase(builder->getInt8(0), resumeBB);
-        switchInst->addCase(builder->getInt8(1), asyncCleanupBB);
+        switchInst->addCase(builder->getInt8(1), fn_.coroutine.cleanup);
 
         builder->SetInsertPoint(resumeBB);
         return nullptr; // void

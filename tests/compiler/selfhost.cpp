@@ -11,6 +11,7 @@ TEST(SelfHost, Stage1CompilesWithStage0 )
     CompilerOptions options;
     options.generateBinary = false;
     options.noCache = true;
+    options.includeStd = false;
     options.nativeLibraries = {"-lLLVM-C"};
 
     const auto result = DjinnCompiler::compileFromDirectory(projectDir, options);

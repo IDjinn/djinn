@@ -310,8 +310,6 @@ void Generator::generate_property(const StructSymbol& struc, const PropertySymbo
     // Generate getter
     if (prop.hasGetter && (prop.getterBody || prop.getterExpr))
     {
-        push_scope();
-
         const auto getterName = struc.name + "__get_" + prop.name;
         llvm::Type* returnType = generate_type(prop.type);
 
@@ -324,7 +322,7 @@ void Generator::generate_property(const StructSymbol& struc, const PropertySymbo
 
         functions[getterName] = llvmFunc;
         def->methodFunctions["get_" + prop.name] = llvmFunc;
-        currentFunction = llvmFunc;
+        FunctionScope scope(*this, llvmFunc, struc.name);
 
         auto* entry = llvm::BasicBlock::Create(*context, "entry", llvmFunc);
         builder->SetInsertPoint(entry);
@@ -354,15 +352,11 @@ void Generator::generate_property(const StructSymbol& struc, const PropertySymbo
         {
             builder->CreateRet(llvm::Constant::getNullValue(returnType));
         }
-
-        pop_scope();
     }
 
     // Generate setter
     if (prop.hasSetter && (prop.setterBody || prop.setterExpr))
     {
-        push_scope();
-
         const auto setterName = struc.name + "__set_" + prop.name;
         llvm::Type* valueType = generate_type(prop.type);
 
@@ -376,7 +370,7 @@ void Generator::generate_property(const StructSymbol& struc, const PropertySymbo
 
         functions[setterName] = llvmFunc;
         def->methodFunctions["set_" + prop.name] = llvmFunc;
-        currentFunction = llvmFunc;
+        FunctionScope scope(*this, llvmFunc, struc.name);
 
         auto* entry = llvm::BasicBlock::Create(*context, "entry", llvmFunc);
         builder->SetInsertPoint(entry);
@@ -411,8 +405,6 @@ void Generator::generate_property(const StructSymbol& struc, const PropertySymbo
         {
             builder->CreateRetVoid();
         }
-
-        pop_scope();
     }
 }
 
@@ -451,15 +443,9 @@ void Generator::forward_declare_method(const StructSymbol& struc, const MethodSy
 
 void Generator::generate_method(const StructSymbol& struc, const MethodSymbol& method)
 {
-    push_scope();
-    const std::string savedStructName = currentStructName;
-    currentStructName = struc.name;
-
     StructDef* def = currentScope->lookup_struct(struc.name);
     if (!def || !def->llvmType)
     {
-        currentStructName = savedStructName;
-        pop_scope();
         throw std::runtime_error("Struct not found for method: " + struc.name);
     }
 
@@ -498,10 +484,8 @@ void Generator::generate_method(const StructSymbol& struc, const MethodSymbol& m
         def->methodFunctions[method.name] = llvmFunc;
     }
 
-    currentFunction = llvmFunc;
-    currentFunctionThrows = method.isThrowing();
-    currentContracts_.clear();
-    contractReturnAlloca = nullptr;
+    FunctionScope scope(*this, llvmFunc, struc.name);
+    fn_.throws = method.isThrowing();
 
     const bool isStatic = method.isStatic;
     llvm::Type* returnType = generate_type(method.returnType);
@@ -509,8 +493,6 @@ void Generator::generate_method(const StructSymbol& struc, const MethodSymbol& m
     if (method.isAsync)
     {
         generate_async_method_body(struc, method, llvmFunc, def);
-        currentStructName = savedStructName;
-        pop_scope();
         return;
     }
 
@@ -577,8 +559,8 @@ void Generator::generate_method(const StructSymbol& struc, const MethodSymbol& m
         }
     }
 
-    currentContracts_.clear();
-    contractReturnAlloca = nullptr;
+    fn_.contracts.clear();
+    fn_.contractReturn = nullptr;
 
     if (!builder->GetInsertBlock()->getTerminator())
     {
@@ -594,9 +576,6 @@ void Generator::generate_method(const StructSymbol& struc, const MethodSymbol& m
         }
     }
 
-    currentStructName = savedStructName;
-    currentFunctionThrows = false;
-    pop_scope();
 }
 
 void Generator::generate_async_method_body(const StructSymbol& struc, const MethodSymbol& method,
@@ -668,24 +647,7 @@ void Generator::generate_async_method_body(const StructSymbol& struc, const Meth
     auto* coroBeginFn = llvm::Intrinsic::getOrInsertDeclaration(module.get(), llvm::Intrinsic::coro_begin);
     llvm::Value* coroHandle = builder->CreateCall(coroBeginFn, {coroId, phiMem}, "coro.hdl");
 
-    // Save/set async state
-    bool prevInAsync = inAsyncFunction;
-    llvm::Value* prevCoroId = asyncCoroId;
-    llvm::Value* prevCoroHandle = asyncCoroHandle;
-    llvm::Value* prevPromisePtr = asyncPromisePtr;
-    llvm::BasicBlock* prevFinalSuspendBB = asyncFinalSuspendBB;
-    llvm::BasicBlock* prevCleanupBB = asyncCleanupBB;
-    llvm::BasicBlock* prevSuspendBB = asyncSuspendBB;
-    llvm::Type* prevAsyncReturnType = asyncReturnType;
-
-    inAsyncFunction = true;
-    asyncCoroId = coroId;
-    asyncCoroHandle = coroHandle;
-    asyncPromisePtr = promisePtr;
-    asyncFinalSuspendBB = finalSuspendBB;
-    asyncCleanupBB = cleanupBB;
-    asyncSuspendBB = suspendBB;
-    asyncReturnType = origReturnType;
+    fn_.coroutine = {true, coroId, coroHandle, promisePtr, finalSuspendBB, cleanupBB, suspendBB, origReturnType};
 
     // --- initial suspend: method returns handle immediately, body runs on first resume ---
     {
@@ -795,14 +757,4 @@ void Generator::generate_async_method_body(const StructSymbol& struc, const Meth
                             llvm::ConstantTokenNone::get(*context)
                         });
     builder->CreateRet(coroHandle);
-
-    // Restore async state
-    inAsyncFunction = prevInAsync;
-    asyncCoroId = prevCoroId;
-    asyncCoroHandle = prevCoroHandle;
-    asyncPromisePtr = prevPromisePtr;
-    asyncFinalSuspendBB = prevFinalSuspendBB;
-    asyncCleanupBB = prevCleanupBB;
-    asyncSuspendBB = prevSuspendBB;
-    asyncReturnType = prevAsyncReturnType;
 }

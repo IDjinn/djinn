@@ -224,11 +224,28 @@ struct CleanupEntry
     llvm::AllocaInst* alloca;
 };
 
+// Picks the lexicographically smallest qualified name ending with `suffix`, so
+// the result does not depend on unordered_map iteration order.
+template <typename Map>
+auto* find_by_suffix(Map& map, const std::string& suffix)
+{
+    decltype(map.begin()->second.get()) best = nullptr;
+    const std::string* bestName = nullptr;
+    for (auto& [symName, def] : map)
+    {
+        if (!symName.ends_with(suffix)) continue;
+        if (bestName && symName >= *bestName) continue;
+        best = def.get();
+        bestName = &symName;
+    }
+    return best;
+}
+
 struct GeneratorScope
 {
     std::shared_ptr<GeneratorScope> parent = nullptr;
 
-    std::unordered_map<std::string, StructDef> structs;
+    std::unordered_map<std::string, std::unique_ptr<StructDef>> structs;
     std::unordered_map<std::string, std::string> structAliases;
 
     std::vector<CleanupEntry> cleanupList;
@@ -260,7 +277,7 @@ struct GeneratorScope
     std::unordered_map<std::string, llvm::Function*> localFunctions;
     std::unordered_map<std::string, GenericFunctionDef> genericFunctions;
 
-    std::unordered_map<std::string, EnumDef> enums;
+    std::unordered_map<std::string, std::unique_ptr<EnumDef>> enums;
 
     explicit GeneratorScope(std::shared_ptr<GeneratorScope> parent = nullptr)
         : parent(std::move(parent))
@@ -269,31 +286,33 @@ struct GeneratorScope
 
     void define_struct(const std::string& name, StructDef def)
     {
-        structs[name] = std::move(def);
+        if (auto it = structs.find(name); it != structs.end())
+        {
+            *it->second = std::move(def);
+            return;
+        }
+        structs.emplace(name, std::make_unique<StructDef>(std::move(def)));
     }
 
     [[nodiscard]] StructDef* lookup_struct(const std::string& name)
     {
         if (const auto it = structs.find(name); it != structs.end())
         {
-            return &it->second;
+            return it->second.get();
         }
         // Try alias
         if (const std::string resolved = resolve_alias(name); resolved != name)
         {
             if (const auto it = structs.find(resolved); it != structs.end())
             {
-                return &it->second;
+                return it->second.get();
             }
         }
         // Fallback: try to find a struct whose qualified name ends with ::name
         const std::string suffix = "::" + name;
-        for (auto& [symName, def] : structs)
+        if (auto* found = find_by_suffix(structs, suffix))
         {
-            if (symName.ends_with(suffix))
-            {
-                return &def;
-            }
+            return found;
         }
         if (parent)
         {
@@ -306,23 +325,20 @@ struct GeneratorScope
     {
         if (const auto it = structs.find(name); it != structs.end())
         {
-            return &it->second;
+            return it->second.get();
         }
         if (const std::string resolved = resolve_alias(name); resolved != name)
         {
             if (const auto it = structs.find(resolved); it != structs.end())
             {
-                return &it->second;
+                return it->second.get();
             }
         }
         // Fallback: try to find a struct whose qualified name ends with ::name
         const std::string suffix = "::" + name;
-        for (const auto& [symName, def] : structs)
+        if (auto* found = find_by_suffix(structs, suffix))
         {
-            if (symName.ends_with(suffix))
-            {
-                return &def;
-            }
+            return found;
         }
         if (parent)
         {
@@ -349,30 +365,32 @@ struct GeneratorScope
 
     void define_enum(const std::string& name, EnumDef def)
     {
-        enums[name] = std::move(def);
+        if (auto it = enums.find(name); it != enums.end())
+        {
+            *it->second = std::move(def);
+            return;
+        }
+        enums.emplace(name, std::make_unique<EnumDef>(std::move(def)));
     }
 
     [[nodiscard]] EnumDef* lookup_enum(const std::string& name)
     {
         if (const auto it = enums.find(name); it != enums.end())
         {
-            return &it->second;
+            return it->second.get();
         }
         if (const std::string resolved = resolve_alias(name); resolved != name)
         {
             if (const auto it = enums.find(resolved); it != enums.end())
             {
-                return &it->second;
+                return it->second.get();
             }
         }
         // Fallback: try to find an enum whose qualified name ends with ::name
         const std::string suffix = "::" + name;
-        for (auto& [symName, def] : enums)
+        if (auto* found = find_by_suffix(enums, suffix))
         {
-            if (symName.ends_with(suffix))
-            {
-                return &def;
-            }
+            return found;
         }
         if (parent)
         {
@@ -385,23 +403,20 @@ struct GeneratorScope
     {
         if (const auto it = enums.find(name); it != enums.end())
         {
-            return &it->second;
+            return it->second.get();
         }
         if (const std::string resolved = resolve_alias(name); resolved != name)
         {
             if (const auto it = enums.find(resolved); it != enums.end())
             {
-                return &it->second;
+                return it->second.get();
             }
         }
         // Fallback: try to find an enum whose qualified name ends with ::name
         const std::string suffix = "::" + name;
-        for (const auto& [symName, def] : enums)
+        if (auto* found = find_by_suffix(enums, suffix))
         {
-            if (symName.ends_with(suffix))
-            {
-                return &def;
-            }
+            return found;
         }
         if (parent)
         {

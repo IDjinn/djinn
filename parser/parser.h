@@ -45,6 +45,8 @@ private:
     DiagnosticEngine& _diagnostics;
     std::unordered_map<std::string, MacroDeclaration*> _macros;
     size_t _macroExpansionCounter = 0;
+    size_t _destructureCounter = 0;
+    size_t _anonRangeCounter = 0;
 
     void pushScope();
 

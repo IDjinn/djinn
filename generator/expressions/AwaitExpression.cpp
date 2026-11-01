@@ -16,7 +16,7 @@ llvm::Value* Generator::generate_await_in_async(llvm::Value* childHandle, llvm::
         awaitFn = llvm::Function::Create(ft, llvm::Function::ExternalLinkage,
                                          "__djinn_await", *module);
     }
-    builder->CreateCall(awaitFn, {childHandle, asyncCoroHandle});
+    builder->CreateCall(awaitFn, {childHandle, fn_.coroutine.handle});
 
     // 2. coro.suspend(false) + switch — suspend parent until child completes
     auto* coroSuspendFn = llvm::Intrinsic::getOrInsertDeclaration(
@@ -26,10 +26,10 @@ llvm::Value* Generator::generate_await_in_async(llvm::Value* childHandle, llvm::
                                                       builder->getFalse()
                                                   }, "await.susp");
 
-    auto* awaitReadyBB = llvm::BasicBlock::Create(*context, "await.ready", currentFunction);
-    auto* switchInst = builder->CreateSwitch(suspResult, asyncSuspendBB, 2);
+    auto* awaitReadyBB = llvm::BasicBlock::Create(*context, "await.ready", fn_.function);
+    auto* switchInst = builder->CreateSwitch(suspResult, fn_.coroutine.suspend, 2);
     switchInst->addCase(builder->getInt8(0), awaitReadyBB);
-    switchInst->addCase(builder->getInt8(1), asyncCleanupBB);
+    switchInst->addCase(builder->getInt8(1), fn_.coroutine.cleanup);
 
     // 3. await.ready: extract result from child promise
     builder->SetInsertPoint(awaitReadyBB);
@@ -78,9 +78,9 @@ llvm::Value* Generator::generate_await_loop(llvm::Value* handle, llvm::Type* res
     else
     {
         // Fallback: simple busy-loop for programs with no async runtime
-        auto* awaitLoopBB = llvm::BasicBlock::Create(*context, "await.loop", currentFunction);
-        auto* awaitResumeBB = llvm::BasicBlock::Create(*context, "await.resume", currentFunction);
-        auto* awaitReadyBB = llvm::BasicBlock::Create(*context, "await.ready", currentFunction);
+        auto* awaitLoopBB = llvm::BasicBlock::Create(*context, "await.loop", fn_.function);
+        auto* awaitResumeBB = llvm::BasicBlock::Create(*context, "await.resume", fn_.function);
+        auto* awaitReadyBB = llvm::BasicBlock::Create(*context, "await.ready", fn_.function);
 
         builder->CreateBr(awaitLoopBB);
 
@@ -187,7 +187,7 @@ llvm::Value* Generator::generate_await_expression(const AwaitExpression& expr)
 
     // In async context: use proper suspend/resume via event loop
     // In sync context: fallback to busy-loop
-    if (inAsyncFunction)
+    if (fn_.coroutine.active)
     {
         return generate_await_in_async(handle, resultType);
     }

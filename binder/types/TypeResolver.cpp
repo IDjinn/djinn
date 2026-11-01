@@ -46,9 +46,9 @@ bool Binder::isTypeDefined(const Type& type) const
 
     case TypeKind::STRUCT:
         {
-            if (!currentStructName_.empty())
+            if (!ctx_.structName.empty())
             {
-                if (const auto owner = _global_scope->lookupStruct(currentStructName_))
+                if (const auto owner = _global_scope->lookupStruct(ctx_.structName))
                 {
                     for (const auto& param : owner->genericParams)
                     {

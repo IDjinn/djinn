@@ -33,8 +33,6 @@ std::string Generator::get_primitive_type_name(llvm::Type* type)
 
 void Generator::generate_primitive_impl_method(const StructSymbol& struc, const MethodSymbol& method)
 {
-    push_scope();
-
     const std::string mangledName = struc.name + "__" + method.name;
 
     llvm::Type* returnType = generate_type(method.returnType);
@@ -67,10 +65,7 @@ void Generator::generate_primitive_impl_method(const StructSymbol& struc, const 
         def->methodFunctions[method.name] = llvmFunc;
     }
 
-    currentFunction = llvmFunc;
-    currentFunctionThrows = false;
-    currentContracts_.clear();
-    contractReturnAlloca = nullptr;
+    FunctionScope scope(*this, llvmFunc, struc.name);
 
     auto* entry = llvm::BasicBlock::Create(*context, "entry", llvmFunc);
     builder->SetInsertPoint(entry);
@@ -145,6 +140,4 @@ void Generator::generate_primitive_impl_method(const StructSymbol& struc, const 
             builder->CreateRet(llvm::Constant::getNullValue(returnType));
         }
     }
-
-    pop_scope();
 }

@@ -14,6 +14,7 @@
 #include <filesystem>
 #include "../parser/AST.h"
 #include "GeneratorScope.h"
+#include "FunctionContext.h"
 #include "../binder/Symbol.h"
 #include "../binder/SymbolTable.h"
 #include "../diagnostics/Diagnostic.h"
@@ -44,6 +45,14 @@ struct TrapOperand
     llvm::Value* value = nullptr;
     llvm::Value* slot = nullptr;
     std::string name;
+};
+
+// Struct a pointer-typed field points to, reported by field access so callers
+// can keep dispatching methods through opaque pointers.
+struct PointeeHint
+{
+    llvm::StructType* type = nullptr;
+    std::string structName;
 };
 
 // Level of runtime error instrumentation baked into the generated module.
@@ -253,7 +262,9 @@ private:
 
     llvm::Value* generate_variable_declaration(const VariableDeclaration& expr);
 
-    llvm::Value* generate_field_access(const FieldAccess& expr);
+    llvm::Value* generate_field_access(const FieldAccess& expr, PointeeHint* pointee = nullptr);
+
+    PointeeHint resolve_field_pointee(const std::string& ownerStruct, unsigned fieldIdx, llvm::Type* fieldType);
 
     llvm::Value* generate_field_assignment(const FieldAssignment& expr);
 
@@ -282,13 +293,27 @@ private:
 
     llvm::Value* cast_value(llvm::Value* value, llvm::Type* targetType, bool isSigned = true) const;
 
-    const GenericContext* _currentGenericCtx = nullptr;
+    FunctionContext fn_;
+    std::shared_ptr<GeneratorScope> globalScope_;
 
-    llvm::Function* currentFunction = nullptr;
-    std::string currentStructName; // set during struct method generation
+    // Swaps in a fresh FunctionContext, a function-local scope chain rooted at the
+    // global scope and the builder insert point, restoring all three on destruction.
+    class FunctionScope
+    {
+    public:
+        FunctionScope(Generator& generator, llvm::Function* function, std::string structName = {},
+                      const GenericContext* generics = nullptr);
+        ~FunctionScope();
 
-    std::vector<llvm::BasicBlock*> breakTargets;
-    std::vector<llvm::BasicBlock*> continueTargets;
+        FunctionScope(const FunctionScope&) = delete;
+        FunctionScope& operator=(const FunctionScope&) = delete;
+
+    private:
+        Generator& generator_;
+        FunctionContext saved_;
+        std::shared_ptr<GeneratorScope> savedScope_;
+        llvm::IRBuilderBase::InsertPointGuard insertGuard_;
+    };
 
     // Generation verification (generates default main if missing)
     void verify_all_symbols_generated();
@@ -302,28 +327,10 @@ private:
 
     void generate_yield_statement(const YieldStatement& stmt);
 
-    // Switch arm block yield context ("yield expr;" inside "-> { ... }"):
-    // values are stored to the slot and each yield branches to the block,
-    // which becomes the arm's contribution to the switch merge
-    bool inSwitchArmBlock_ = false;
-    llvm::BasicBlock* armYieldBlock_ = nullptr;
-    llvm::AllocaInst* armYieldSlot_ = nullptr;
-    bool armDidYield_ = false;
-
     // RAII cleanup
     llvm::Function* find_destroy_method(llvm::AllocaInst* alloca);
     void emit_scope_cleanup();
     void emit_all_scope_cleanup();
-
-    // Async/coroutine state
-    bool inAsyncFunction = false;
-    llvm::Value* asyncCoroId = nullptr;
-    llvm::Value* asyncCoroHandle = nullptr;
-    llvm::Value* asyncPromisePtr = nullptr;
-    llvm::BasicBlock* asyncFinalSuspendBB = nullptr;
-    llvm::BasicBlock* asyncCleanupBB = nullptr;
-    llvm::BasicBlock* asyncSuspendBB = nullptr;
-    llvm::Type* asyncReturnType = nullptr; // original return type before coroutine transform
 
     void generate_async_function_body(const FunctionSymbol& func);
     void generate_async_method_body(const StructSymbol& struc, const MethodSymbol& method,
@@ -347,8 +354,6 @@ private:
     llvm::Value* generate_try_expression(const TryExpression& expr);
 
     // Error handling globals (errno-style for throws functions)
-    bool currentFunctionThrows = false;
-    bool insideTryOperand_ = false;
     llvm::GlobalVariable* errorFlagGlobal = nullptr;
     llvm::GlobalVariable* errorTagGlobal = nullptr;
     llvm::GlobalVariable* errorPayloadGlobal = nullptr;
@@ -393,8 +398,6 @@ private:
     std::unordered_map<std::string, llvm::Constant*> stringGlobalCache;
 
     // Contracts (require/ensure)
-    std::vector<const ContractClause*> currentContracts_;
-    llvm::AllocaInst* contractReturnAlloca = nullptr;
     void setup_contracts(const std::vector<const ContractClause*>& contracts, llvm::Function* llvmFunc);
     void emit_contract_requirements();
     void emit_contract_ensures();
@@ -409,10 +412,6 @@ private:
     llvm::Value* generate_intrinsic_method(const FunctionCall& call, const StructDef* def,
                                            const std::string& methodName);
     llvm::Value* generate_coro_intrinsic(const FunctionCall& call, const std::string& method);
-
-    // Temporary state for propagating pointee type info from field access to variable init
-    llvm::Type* _lastFieldAccessPointeeType = nullptr;
-    std::string _lastFieldAccessStructName;
 
     size_t generatedFunctions = 0;
     size_t generatedExternFunctions = 0;
