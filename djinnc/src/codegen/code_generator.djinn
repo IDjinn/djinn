@@ -2,9 +2,9 @@ namespace djinnc;
 
 struct Value {
     void* ref;
-    TypeRef* type;
+    u32 type;
 
-    public static Value* create(void* ref, TypeRef* type) {
+    public static Value* create(void* ref, u32 type) {
         Value* value = (Value*)Memory.zalloc(sizeof(Value));
         value.ref = ref;
         value.type = type;
@@ -19,9 +19,7 @@ struct CodeGenerator {
     void* alloca_builder;
     Diagnostics* diagnostics;
     SymbolTable* symbols;
-    LocalScopes* scopes;
     FunctionContext* function_context;
-    u32 scope;
 
     public static CodeGenerator* create(Diagnostics* diagnostics, i8* module_name) {
         CodeGenerator* gen = (CodeGenerator*)Memory.zalloc(sizeof(CodeGenerator));
@@ -31,7 +29,6 @@ struct CodeGenerator {
         gen.alloca_builder = LLVMCreateBuilderInContext(gen.context);
         gen.diagnostics = diagnostics;
         gen.symbols = SymbolTable.create(Memory.arena());
-        gen.scopes = LocalScopes.create();
         gen.function_context = FunctionContext.create();
         i8* triple = LLVMGetDefaultTargetTriple();
         LLVMSetTarget(gen.module, triple);
@@ -42,6 +39,10 @@ struct CodeGenerator {
     public bool generate(Node* program) {
         SemanticAnalyzer* analyzer = SemanticAnalyzer.create(this.diagnostics, this.symbols);
         if (!analyzer.collect(program)) {
+            return false;
+        }
+        TypeChecker* checker = TypeChecker.create(this.diagnostics, this.symbols);
+        if (!checker.run()) {
             return false;
         }
         this.declare_structs();
@@ -94,44 +95,42 @@ struct CodeGenerator {
         return qualified + last;
     }
 
-    void* llvm_type(TypeRef* ty, Node* at) {
-        if (ty.kind == TypeKind.VOID) {
+    void* llvm_type(u32 type) {
+        i32 kind = Types.kind(type);
+        if (kind == TypeKind.VOID) {
             return LLVMVoidTypeInContext(this.context);
         }
-        if (ty.kind == TypeKind.INTEGER) {
-            return LLVMIntTypeInContext(this.context, (u32)ty.bits);
+        if (kind == TypeKind.INTEGER) {
+            return LLVMIntTypeInContext(this.context, Types.bits(type));
         }
-        if (ty.kind == TypeKind.FLOAT) {
-            if (ty.bits == 32) {
+        if (kind == TypeKind.FLOAT) {
+            if (Types.bits(type) == 32) {
                 return LLVMFloatTypeInContext(this.context);
             }
             return LLVMDoubleTypeInContext(this.context);
         }
-        if (ty.kind == TypeKind.POINTER) {
+        if (kind == TypeKind.POINTER) {
             return LLVMPointerTypeInContext(this.context, 0);
         }
-        if (ty.kind == TypeKind.NAMED) {
-            StructInfo* info = this.struct_of(ty);
-            if (info != null) {
-                return info.llvm;
-            }
-            this.error(at, "unknown type");
-            return LLVMIntTypeInContext(this.context, 32);
+        if (kind == TypeKind.NAMED) {
+            StructInfo* info = this.struct_of(type);
+            return info.llvm;
         }
-        this.error(at, "this type is not supported by code generation yet");
-        return LLVMIntTypeInContext(this.context, 32);
+        logger_error(Log.get(), "djinnc: type %d has no code generation", type);
+        exit(1);
+        return (void*)0;
     }
 
-    StructInfo* struct_of(TypeRef* ty) {
-        if (ty.kind != TypeKind.NAMED) {
-            return (StructInfo*)0;
-        }
+    StructInfo* struct_of(u32 type) {
         SymbolTable* symbols = this.symbols;
-        return symbols.find_struct(ty.full_atom, ty.name_atom, this.scope);
+        return symbols.struct_at(Types.struct_index(type));
     }
 
-    TypeRef* this_type(StructInfo* owner) {
-        return TypeRef.pointer_to(TypeRef.named_atoms(owner.name, owner.name_atom, owner.name_atom));
+    StructInfo* struct_behind(u32 type) {
+        if (Types.is_pointer(type)) {
+            return this.struct_of(Types.element(type));
+        }
+        return this.struct_of(type);
     }
 
     void declare_structs() {
@@ -143,12 +142,11 @@ struct CodeGenerator {
         }
         for (mut i32 i = 0; i < structs.length; i = i + 1) {
             StructInfo* info = (StructInfo*)structs.get(i);
-            this.scope = info.namespace_id;
             PointerList* fields = info.fields;
             void** types = CodeGenerator.array_of(fields.length);
             for (mut i32 f = 0; f < fields.length; f = f + 1) {
                 FieldInfo* field = (FieldInfo*)fields.get(f);
-                types[f] = this.llvm_type(field.type, info.node);
+                types[f] = this.llvm_type(field.type);
             }
             LLVMStructSetBody(info.llvm, types, (u32)fields.length, 0);
         }
@@ -159,17 +157,14 @@ struct CodeGenerator {
         PointerList* functions = symbols.functions;
         for (mut i32 i = 0; i < functions.length; i = i + 1) {
             FunctionInfo* info = (FunctionInfo*)functions.get(i);
-            this.scope = info.namespace_id;
-            Node* declaration = info.node;
-            PointerList* param_types = info.param_types;
+            IdList* param_types = info.param_types;
             i32 count = param_types.length;
             void** params = CodeGenerator.array_of(count);
             for (mut i32 p = 0; p < count; p = p + 1) {
-                TypeRef* param_type = (TypeRef*)param_types.get(p);
-                params[p] = this.llvm_type(param_type, declaration);
+                params[p] = this.llvm_type(param_types.get(p));
             }
 
-            void* return_type = this.llvm_type(info.return_type, declaration);
+            void* return_type = this.llvm_type(info.return_type);
             mut i32 variadic = 0;
             if (info.is_variadic) {
                 variadic = 1;
@@ -189,12 +184,11 @@ struct CodeGenerator {
         PointerList* globals = symbols.globals;
         for (mut i32 i = 0; i < globals.length; i = i + 1) {
             LocalVariable* variable = (LocalVariable*)globals.get(i);
-            this.scope = variable.namespace_id;
             Node* declaration = variable.node;
-            TypeRef* ty = variable.type;
-            void* global = LLVMAddGlobal(this.module, this.llvm_type(ty, declaration), variable.name);
-            Value* initial = this.gen_expression(declaration.first(), ty);
-            LLVMSetInitializer(global, this.coerce(initial, ty));
+            u32 type = variable.type;
+            void* global = LLVMAddGlobal(this.module, this.llvm_type(type), variable.name);
+            Value* initial = this.gen_expression(declaration.first());
+            LLVMSetInitializer(global, this.coerce(initial, type));
             if (!variable.is_mutable) {
                 LLVMSetGlobalConstant(global, 1);
             }
@@ -214,12 +208,8 @@ struct CodeGenerator {
     }
 
     void define_function(Node* declaration, FunctionInfo* info) {
-        if (info == null || (void*)info.node != (void*)declaration) {
-            return;
-        }
         FunctionContext* function_context = this.function_context;
         function_context.begin(info);
-        this.scope = info.namespace_id;
 
         void* entry = LLVMAppendBasicBlockInContext(this.context, info.function, "entry");
         void* body = LLVMAppendBasicBlockInContext(this.context, info.function, "body");
@@ -228,27 +218,24 @@ struct CodeGenerator {
         LLVMPositionBuilderBefore(this.alloca_builder, jump);
         LLVMPositionBuilderAtEnd(this.builder, body);
 
-        LocalScopes* scopes = this.scopes;
-        scopes.reset_to(0);
         mut i32 offset = 0;
         if (info.is_instance) {
             offset = 1;
-            TypeRef* this_pointer = this.this_type(info.owner);
-            void* this_slot = this.create_slot(this_pointer, "this", declaration);
-            LLVMBuildStore(this.builder, LLVMGetParam(info.function, 0), this_slot);
-            this.add_local("this", Atoms.THIS_ATOM, this_slot, this_pointer, false);
+            LocalVariable* receiver = info.this_variable;
+            receiver.slot = this.create_slot(receiver.type, "this");
+            LLVMBuildStore(this.builder, LLVMGetParam(info.function, 0), receiver.slot);
         }
         for (mut i32 i = 0; i < declaration.count(); i = i + 1) {
             Node* parameter = declaration.child(i);
-            void* slot = this.create_slot(parameter.type(), parameter.text(), parameter);
-            LLVMBuildStore(this.builder, LLVMGetParam(info.function, (u32)(i + offset)), slot);
-            this.add_local(parameter.text(), parameter.name(), slot, parameter.type(), parameter.flag());
+            LocalVariable* variable = (LocalVariable*)parameter.symbol();
+            variable.slot = this.create_slot(variable.type, variable.name);
+            LLVMBuildStore(this.builder, LLVMGetParam(info.function, (u32)(i + offset)), variable.slot);
         }
 
         this.gen_statement(declaration.first());
 
         if (!this.is_terminated()) {
-            if (info.return_type.is_void()) {
+            if (Types.is_void(info.return_type)) {
                 LLVMBuildRetVoid(this.builder);
             } else {
                 LLVMBuildUnreachable(this.builder);
@@ -256,29 +243,8 @@ struct CodeGenerator {
         }
     }
 
-    void* create_slot(TypeRef* ty, i8* name, Node* at) {
-        return LLVMBuildAlloca(this.alloca_builder, this.llvm_type(ty, at), name);
-    }
-
-    void add_local(i8* name, u32 name_atom, void* slot, TypeRef* ty, bool is_mutable) {
-        LocalVariable* local = (LocalVariable*)Memory.zalloc(sizeof(LocalVariable));
-        local.name = name;
-        local.name_atom = name_atom;
-        local.slot = slot;
-        local.type = ty;
-        local.is_mutable = is_mutable;
-        LocalScopes* scopes = this.scopes;
-        scopes.define(name_atom, local);
-    }
-
-    LocalVariable* find_local(u32 name) {
-        LocalScopes* scopes = this.scopes;
-        LocalVariable* local = scopes.find(name);
-        if (local != null) {
-            return local;
-        }
-        SymbolTable* symbols = this.symbols;
-        return symbols.find_global(name, name, this.scope);
+    void* create_slot(u32 type, i8* name) {
+        return LLVMBuildAlloca(this.alloca_builder, this.llvm_type(type), name);
     }
 
     FunctionInfo* current_function() {
@@ -342,76 +308,76 @@ struct CodeGenerator {
         LLVMBuildCall2(this.builder, init_type, init_fn, init_args, 1, "");
 
         mut void* exit_code = LLVMConstInt(i32_type, 0, 0);
-        if (user.return_type.is_void()) {
+        if (Types.is_void(user.return_type)) {
             LLVMBuildCall2(this.builder, user.function_type, user.function, CodeGenerator.array_of(0), 0, "");
         } else {
             void* returned = LLVMBuildCall2(this.builder, user.function_type, user.function, CodeGenerator.array_of(0), 0, "exit");
             Value* wrapped = Value.create(returned, user.return_type);
-            exit_code = this.coerce(wrapped, TypeRef.integer(32, true));
+            exit_code = this.coerce(wrapped, Types.i32_type());
         }
 
         LLVMBuildCall2(this.builder, shutdown_type, shutdown_fn, CodeGenerator.array_of(0), 0, "");
         LLVMBuildRet(this.builder, exit_code);
     }
 
-    void* coerce(Value* source, TypeRef* target) {
-        TypeRef* from = source.type;
+    void* coerce(Value* source, u32 target) {
+        u32 from = source.type;
         void* ref = source.ref;
-        if (target == null) {
+        if (target == 0 || from == target) {
             return ref;
         }
-        void* destination = this.llvm_type(target, (Node*)0);
+        void* destination = this.llvm_type(target);
 
-        if (from.kind == TypeKind.INTEGER && target.kind == TypeKind.INTEGER) {
-            if (from.bits == target.bits) {
+        if (Types.is_integer(from) && Types.is_integer(target)) {
+            if (Types.bits(from) == Types.bits(target)) {
                 return ref;
             }
-            if (from.bits > target.bits) {
+            if (Types.bits(from) > Types.bits(target)) {
                 return LLVMBuildCast(this.builder, LlvmConst.OP_TRUNC, ref, destination, "trunc");
             }
-            if (from.is_signed && from.bits > 1) {
+            if (Types.is_signed(from) && Types.bits(from) > 1) {
                 return LLVMBuildCast(this.builder, LlvmConst.OP_SEXT, ref, destination, "sext");
             }
             return LLVMBuildCast(this.builder, LlvmConst.OP_ZEXT, ref, destination, "zext");
         }
-        if (from.kind == TypeKind.INTEGER && target.kind == TypeKind.FLOAT) {
-            if (from.is_signed) {
+        if (Types.is_integer(from) && Types.is_float(target)) {
+            if (Types.is_signed(from)) {
                 return LLVMBuildCast(this.builder, LlvmConst.OP_SITOFP, ref, destination, "sitofp");
             }
             return LLVMBuildCast(this.builder, LlvmConst.OP_UITOFP, ref, destination, "uitofp");
         }
-        if (from.kind == TypeKind.FLOAT && target.kind == TypeKind.INTEGER) {
-            if (target.is_signed) {
+        if (Types.is_float(from) && Types.is_integer(target)) {
+            if (Types.is_signed(target)) {
                 return LLVMBuildCast(this.builder, LlvmConst.OP_FPTOSI, ref, destination, "fptosi");
             }
             return LLVMBuildCast(this.builder, LlvmConst.OP_FPTOUI, ref, destination, "fptoui");
         }
-        if (from.kind == TypeKind.FLOAT && target.kind == TypeKind.FLOAT) {
-            if (from.bits == target.bits) {
+        if (Types.is_float(from) && Types.is_float(target)) {
+            if (Types.bits(from) == Types.bits(target)) {
                 return ref;
             }
-            if (from.bits < target.bits) {
+            if (Types.bits(from) < Types.bits(target)) {
                 return LLVMBuildCast(this.builder, LlvmConst.OP_FPEXT, ref, destination, "fpext");
             }
             return LLVMBuildCast(this.builder, LlvmConst.OP_FPTRUNC, ref, destination, "fptrunc");
         }
-        if (from.kind == TypeKind.INTEGER && target.kind == TypeKind.POINTER) {
+        if (Types.is_integer(from) && Types.is_pointer(target)) {
             return LLVMBuildCast(this.builder, LlvmConst.OP_INTTOPTR, ref, destination, "inttoptr");
         }
-        if (from.kind == TypeKind.POINTER && target.kind == TypeKind.INTEGER) {
+        if (Types.is_pointer(from) && Types.is_integer(target)) {
             return LLVMBuildCast(this.builder, LlvmConst.OP_PTRTOINT, ref, destination, "ptrtoint");
         }
         return ref;
     }
 
     void* to_condition(Value* source) {
-        TypeRef* ty = source.type;
+        u32 type = source.type;
         void* ref = source.ref;
-        if (ty.kind == TypeKind.INTEGER && ty.bits == 1) {
+        if (Types.is_integer(type) && Types.bits(type) == 1) {
             return ref;
         }
         void* zero = LLVMConstNull(LLVMTypeOf(ref));
-        if (ty.kind == TypeKind.FLOAT) {
+        if (Types.is_float(type)) {
             return LLVMBuildFCmp(this.builder, LlvmConst.REAL_UNE, ref, zero, "tobool");
         }
         return LLVMBuildICmp(this.builder, LlvmConst.INT_NE, ref, zero, "tobool");
@@ -421,16 +387,13 @@ struct CodeGenerator {
         i32 kind = node.kind;
 
         if (kind == NodeKind.BLOCK) {
-            LocalScopes* scopes = this.scopes;
-            i32 mark = scopes.mark();
             for (mut i32 i = 0; i < node.count(); i = i + 1) {
                 this.gen_statement(node.child(i));
             }
-            scopes.reset_to(mark);
         } else if (kind == NodeKind.VAR_DECL) {
             this.gen_variable(node);
         } else if (kind == NodeKind.EXPR_STMT) {
-            this.gen_expression(node.first(), (TypeRef*)0);
+            this.gen_expression(node.first());
         } else if (kind == NodeKind.RETURN) {
             this.gen_return(node);
         } else if (kind == NodeKind.IF) {
@@ -443,18 +406,10 @@ struct CodeGenerator {
             this.gen_for(node);
         } else if (kind == NodeKind.BREAK) {
             FunctionContext* function_context = this.function_context;
-            if (!function_context.in_loop()) {
-                this.error(node, "'break' outside of a loop");
-                return;
-            }
             LLVMBuildBr(this.builder, function_context.break_block());
             this.start_dead_block();
         } else if (kind == NodeKind.CONTINUE) {
             FunctionContext* function_context = this.function_context;
-            if (!function_context.in_loop()) {
-                this.error(node, "'continue' outside of a loop");
-                return;
-            }
             LLVMBuildBr(this.builder, function_context.continue_block());
             this.start_dead_block();
         } else {
@@ -463,44 +418,30 @@ struct CodeGenerator {
     }
 
     void gen_variable(Node* node) {
-        mut TypeRef* declared = node.type();
-        mut Value* initial = (Value*)0;
-
+        LocalVariable* variable = (LocalVariable*)node.symbol();
+        u32 declared = variable.type;
+        variable.slot = this.create_slot(declared, variable.name);
         if (node.first() != null) {
-            initial = this.gen_expression(node.first(), declared);
-        }
-        if (declared.kind == TypeKind.AUTO) {
-            if (initial == null) {
-                this.error(node, "'auto' variable needs an initializer");
-                return;
-            }
-            declared = initial.type;
-        }
-
-        void* slot = this.create_slot(declared, node.text(), node);
-        if (initial != null) {
-            LLVMBuildStore(this.builder, this.coerce(initial, declared), slot);
+            Value* initial = this.gen_expression(node.first());
+            LLVMBuildStore(this.builder, this.coerce(initial, declared), variable.slot);
         } else {
-            LLVMBuildStore(this.builder, LLVMConstNull(this.llvm_type(declared, node)), slot);
+            LLVMBuildStore(this.builder, LLVMConstNull(this.llvm_type(declared)), variable.slot);
         }
-        this.add_local(node.text(), node.name(), slot, declared, node.flag());
     }
 
     void gen_return(Node* node) {
-        TypeRef* expected = this.current_function().return_type;
         if (node.first() == null) {
             LLVMBuildRetVoid(this.builder);
-        } else if (expected.is_void()) {
-            this.error(node, "void function cannot return a value");
         } else {
-            Value* returned = this.gen_expression(node.first(), expected);
+            u32 expected = this.current_function().return_type;
+            Value* returned = this.gen_expression(node.first());
             LLVMBuildRet(this.builder, this.coerce(returned, expected));
         }
         this.start_dead_block();
     }
 
     void gen_if(Node* node) {
-        void* condition = this.to_condition(this.gen_expression(node.first(), (TypeRef*)0));
+        void* condition = this.to_condition(this.gen_expression(node.first()));
         void* then_block = this.new_block("if.then");
         void* end_block = this.new_block("if.end");
         mut void* else_block = end_block;
@@ -528,7 +469,7 @@ struct CodeGenerator {
 
         this.branch_if_open(condition_block);
         LLVMPositionBuilderAtEnd(this.builder, condition_block);
-        void* condition = this.to_condition(this.gen_expression(node.first(), (TypeRef*)0));
+        void* condition = this.to_condition(this.gen_expression(node.first()));
         LLVMBuildCondBr(this.builder, condition, body_block, end_block);
 
         this.run_loop_body(node.second(), body_block, end_block, condition_block);
@@ -546,14 +487,12 @@ struct CodeGenerator {
         this.branch_if_open(condition_block);
 
         LLVMPositionBuilderAtEnd(this.builder, condition_block);
-        void* condition = this.to_condition(this.gen_expression(node.first(), (TypeRef*)0));
+        void* condition = this.to_condition(this.gen_expression(node.first()));
         LLVMBuildCondBr(this.builder, condition, body_block, end_block);
         LLVMPositionBuilderAtEnd(this.builder, end_block);
     }
 
     void gen_for(Node* node) {
-        LocalScopes* scopes = this.scopes;
-        i32 mark = scopes.mark();
         if (node.first() != null) {
             this.gen_statement(node.first());
         }
@@ -566,7 +505,7 @@ struct CodeGenerator {
         this.branch_if_open(condition_block);
         LLVMPositionBuilderAtEnd(this.builder, condition_block);
         if (node.second() != null) {
-            void* condition = this.to_condition(this.gen_expression(node.second(), (TypeRef*)0));
+            void* condition = this.to_condition(this.gen_expression(node.second()));
             LLVMBuildCondBr(this.builder, condition, body_block, end_block);
         } else {
             LLVMBuildBr(this.builder, body_block);
@@ -577,11 +516,10 @@ struct CodeGenerator {
 
         LLVMPositionBuilderAtEnd(this.builder, step_block);
         if (node.third() != null) {
-            this.gen_expression(node.third(), (TypeRef*)0);
+            this.gen_expression(node.third());
         }
         LLVMBuildBr(this.builder, condition_block);
         LLVMPositionBuilderAtEnd(this.builder, end_block);
-        scopes.reset_to(mark);
     }
 
     void run_loop_body(Node* body, void* body_block, void* break_block, void* continue_block) {
@@ -592,51 +530,41 @@ struct CodeGenerator {
         function_context.leave_loop();
     }
 
-    bool is_untyped_literal(Node* node) {
-        if (node.kind == NodeKind.INT_LITERAL) {
-            return true;
-        }
-        return node.kind == NodeKind.UNARY && node.op() == TokenKind.MINUS && node.first().kind == NodeKind.INT_LITERAL;
+    Value* fallback() {
+        return Value.create(LLVMConstInt(LLVMIntTypeInContext(this.context, 32), 0, 0), Types.i32_type());
     }
 
-    Value* fallback(void* hint) {
-        return Value.create(LLVMConstInt(LLVMIntTypeInContext(this.context, 32), 0, 0), TypeRef.integer(32, true));
-    }
-
-    Value* gen_expression(Node* node, TypeRef* expected) {
+    Value* gen_expression(Node* node) {
         i32 kind = node.kind;
+        u32 type = node.value_type();
 
         if (kind == NodeKind.INT_LITERAL) {
-            return this.gen_integer_literal(node, expected);
+            if (Types.is_float(type)) {
+                return Value.create(LLVMConstReal(this.llvm_type(type), (f64)node.int_value()), type);
+            }
+            return Value.create(LLVMConstInt(this.llvm_type(type), (u64)node.int_value(), 0), type);
         }
         if (kind == NodeKind.FLOAT_LITERAL) {
-            mut TypeRef* ty = TypeRef.floating(64);
-            if (expected != null && expected.kind == TypeKind.FLOAT) {
-                ty = expected;
-            }
-            return Value.create(LLVMConstReal(this.llvm_type(ty, node), node.float_value()), ty);
+            return Value.create(LLVMConstReal(this.llvm_type(type), node.float_value()), type);
         }
         if (kind == NodeKind.STRING_LITERAL) {
             void* text = LLVMBuildGlobalStringPtr(this.builder, node.text(), "str");
-            return Value.create(text, TypeRef.pointer_to(TypeRef.integer(8, true)));
+            return Value.create(text, type);
         }
         if (kind == NodeKind.BOOL_LITERAL) {
-            TypeRef* flag = TypeRef.integer(1, false);
-            return Value.create(LLVMConstInt(this.llvm_type(flag, node), (u64)node.int_value(), 0), flag);
+            return Value.create(LLVMConstInt(this.llvm_type(type), (u64)node.int_value(), 0), type);
         }
         if (kind == NodeKind.NULL_LITERAL) {
-            TypeRef* any = TypeRef.pointer_to(TypeRef.create(TypeKind.VOID));
-            any.nullable = true;
-            return Value.create(LLVMConstNull(this.llvm_type(any, node)), any);
+            return Value.create(LLVMConstNull(this.llvm_type(type)), type);
         }
         if (kind == NodeKind.IDENTIFIER) {
             return this.gen_identifier(node);
         }
         if (kind == NodeKind.UNARY) {
-            return this.gen_unary(node, expected);
+            return this.gen_unary(node);
         }
         if (kind == NodeKind.BINARY) {
-            return this.gen_binary(node, expected);
+            return this.gen_binary(node);
         }
         if (kind == NodeKind.ASSIGN) {
             return this.gen_assign(node);
@@ -645,12 +573,11 @@ struct CodeGenerator {
             return this.gen_call(node);
         }
         if (kind == NodeKind.CAST) {
-            Value* operand = this.gen_expression(node.first(), node.type());
-            return Value.create(this.coerce(operand, node.type()), node.type());
+            Value* operand = this.gen_expression(node.first());
+            return Value.create(this.coerce(operand, type), type);
         }
         if (kind == NodeKind.INDEX) {
-            Value* address = this.gen_address(node);
-            return this.load_through(address, node);
+            return this.load_through(this.gen_address(node), type);
         }
         if (kind == NodeKind.SIZEOF) {
             return this.gen_sizeof(node);
@@ -660,52 +587,27 @@ struct CodeGenerator {
         }
 
         this.error(node, "expression is not supported by code generation yet");
-        return this.fallback((void*)0);
-    }
-
-    Value* gen_integer_literal(Node* node, TypeRef* expected) {
-        if (expected != null && expected.kind == TypeKind.FLOAT) {
-            return Value.create(LLVMConstReal(this.llvm_type(expected, node), (f64)node.int_value()), expected);
-        }
-        mut TypeRef* ty = TypeRef.integer(32, true);
-        if (expected != null && expected.kind == TypeKind.INTEGER) {
-            ty = expected;
-        } else if (node.int_value() > 2147483647) {
-            ty = TypeRef.integer(64, true);
-        }
-        return Value.create(LLVMConstInt(this.llvm_type(ty, node), (u64)node.int_value(), 0), ty);
+        return this.fallback();
     }
 
     Value* gen_sizeof(Node* node) {
-        TypeRef* ty = node.type();
-        mut i64 bytes = 8;
-        if (ty.kind == TypeKind.INTEGER) {
-            bytes = (i64)((ty.bits + 7) / 8);
-        } else if (ty.kind == TypeKind.FLOAT) {
-            bytes = (i64)(ty.bits / 8);
-        } else if (ty.kind == TypeKind.NAMED) {
-            StructInfo* info = this.struct_of(ty);
-            if (info == null) {
-                this.error(node, "sizeof of an unknown type");
-                return this.fallback((void*)0);
-            }
-            return Value.create(LLVMSizeOf(info.llvm), TypeRef.integer(64, true));
-        } else if (ty.kind != TypeKind.POINTER) {
-            this.error(node, "sizeof of this type is not supported yet");
+        u32 measured = (u32)(u64)node.symbol();
+        u32 result = Types.i64_type();
+        if (Types.is_struct(measured)) {
+            StructInfo* info = this.struct_of(measured);
+            return Value.create(LLVMSizeOf(info.llvm), result);
         }
-        TypeRef* result = TypeRef.integer(64, true);
-        return Value.create(LLVMConstInt(this.llvm_type(result, node), (u64)bytes, 0), result);
+        mut i64 bytes = 8;
+        if (Types.is_integer(measured)) {
+            bytes = (i64)((Types.bits(measured) + 7) / 8);
+        } else if (Types.is_float(measured)) {
+            bytes = (i64)(Types.bits(measured) / 8);
+        }
+        return Value.create(LLVMConstInt(this.llvm_type(result), (u64)bytes, 0), result);
     }
 
     bool is_struct_name(Node* node) {
-        if (node.kind != NodeKind.IDENTIFIER) {
-            return false;
-        }
-        if (this.find_local(node.name()) != null) {
-            return false;
-        }
-        SymbolTable* symbols = this.symbols;
-        return symbols.find_struct(node.text_atom(), node.name(), this.scope) != null;
+        return node.kind == NodeKind.IDENTIFIER && node.symbol_kind() == SymbolKind.STRUCT_NAME;
     }
 
     bool is_addressable(Node* node) {
@@ -719,174 +621,112 @@ struct CodeGenerator {
         return kind == NodeKind.UNARY && node.op() == TokenKind.STAR;
     }
 
-    Value* struct_pointer(Node* base) {
+    void* struct_pointer(Node* base) {
         if (this.is_addressable(base)) {
-            Value* address = this.gen_address(base);
-            TypeRef* address_type = address.type;
-            TypeRef* element = address_type.element;
-            if (element.kind == TypeKind.POINTER) {
-                return this.load_through(address, base);
+            void* address = this.gen_address(base);
+            u32 base_type = base.value_type();
+            if (Types.is_pointer(base_type)) {
+                return LLVMBuildLoad2(this.builder, this.llvm_type(base_type), address, "load");
             }
             return address;
         }
-        Value* value = this.gen_expression(base, (TypeRef*)0);
-        TypeRef* value_type = value.type;
-        if (value_type.kind != TypeKind.POINTER) {
-            this.error(base, "member access needs a struct or a pointer to one");
-            return this.fallback((void*)0);
-        }
-        return value;
+        Value* value = this.gen_expression(base);
+        return value.ref;
     }
 
-    Value* field_address(Node* node) {
-        Value* base = this.struct_pointer(node.first());
-        TypeRef* base_type = base.type;
-        StructInfo* info = this.struct_of(base_type.element);
-        if (info == null) {
-            this.error(node, "member access on a value that is not a struct");
-            return this.fallback((void*)0);
-        }
-        SymbolTable* symbols = this.symbols;
-        FieldInfo* field = symbols.find_field(info, node.name());
-        if (field == null) {
-            this.error(node, "struct has no such field");
-            return this.fallback((void*)0);
-        }
-        void* address = LLVMBuildStructGEP2(this.builder, info.llvm, base.ref, (u32)field.index, node.text());
-        return Value.create(address, TypeRef.pointer_to(field.type));
+    void* field_address(Node* node) {
+        Node* base = node.first();
+        void* pointer = this.struct_pointer(base);
+        StructInfo* info = this.struct_behind(base.value_type());
+        FieldInfo* field = (FieldInfo*)node.symbol();
+        return LLVMBuildStructGEP2(this.builder, info.llvm, pointer, (u32)field.index, node.text());
     }
 
     Value* gen_member(Node* node) {
         Node* base = node.first();
         if (this.is_struct_name(base)) {
-            SymbolTable* symbols = this.symbols;
-            StructInfo* info = symbols.find_struct(base.text_atom(), base.name(), this.scope);
-            Node* constant = symbols.find_constant(info, node.name());
-            if (constant == null) {
-                this.error(node, "struct has no such constant");
-                return this.fallback((void*)0);
-            }
-            TypeRef* declared = constant.type();
-            Value* value = this.gen_expression(constant.first(), declared);
+            Node* constant = (Node*)node.symbol();
+            u32 declared = constant.value_type();
+            Value* value = this.gen_expression(constant.first());
             return Value.create(this.coerce(value, declared), declared);
         }
-        Value* address = this.field_address(node);
-        return this.load_through(address, node);
+        return this.load_through(this.field_address(node), node.value_type());
     }
 
     Value* gen_identifier(Node* node) {
-        LocalVariable* local = this.find_local(node.name());
-        if (local == null) {
-            this.error(node, "undefined variable");
-            return this.fallback((void*)0);
-        }
-        void* loaded = LLVMBuildLoad2(this.builder, this.llvm_type(local.type, node), local.slot, node.text());
-        return Value.create(loaded, local.type);
+        LocalVariable* variable = (LocalVariable*)node.symbol();
+        void* loaded = LLVMBuildLoad2(this.builder, this.llvm_type(variable.type), variable.slot, node.text());
+        return Value.create(loaded, variable.type);
     }
 
-    Value* load_through(Value* address, Node* at) {
-        TypeRef* pointer = address.type;
-        TypeRef* element = pointer.element;
-        void* loaded = LLVMBuildLoad2(this.builder, this.llvm_type(element, at), address.ref, "load");
-        return Value.create(loaded, element);
+    Value* load_through(void* address, u32 type) {
+        void* loaded = LLVMBuildLoad2(this.builder, this.llvm_type(type), address, "load");
+        return Value.create(loaded, type);
     }
 
-    Value* gen_address(Node* node) {
-        if (node.kind == NodeKind.IDENTIFIER) {
-            LocalVariable* local = this.find_local(node.name());
-            if (local == null) {
-                this.error(node, "undefined variable");
-                return this.fallback((void*)0);
-            }
-            return Value.create(local.slot, TypeRef.pointer_to(local.type));
+    void* gen_address(Node* node) {
+        i32 kind = node.kind;
+
+        if (kind == NodeKind.IDENTIFIER) {
+            LocalVariable* variable = (LocalVariable*)node.symbol();
+            return variable.slot;
         }
 
-        if (node.kind == NodeKind.FIELD_ACCESS) {
+        if (kind == NodeKind.FIELD_ACCESS) {
             return this.field_address(node);
         }
 
-        if (node.kind == NodeKind.INDEX) {
-            Value* base = this.gen_expression(node.first(), (TypeRef*)0);
-            TypeRef* base_type = base.type;
-            if (base_type.kind != TypeKind.POINTER || base_type.element.kind == TypeKind.VOID) {
-                this.error(node, "only pointers to sized types can be indexed");
-                return this.fallback((void*)0);
-            }
-            Value* index = this.gen_expression(node.second(), TypeRef.integer(64, true));
+        if (kind == NodeKind.INDEX) {
+            Value* base = this.gen_expression(node.first());
+            Value* index = this.gen_expression(node.second());
             void** indices = CodeGenerator.array_of(1);
-            indices[0] = this.coerce(index, TypeRef.integer(64, true));
-            void* element_type = this.llvm_type(base_type.element, node);
-            void* address = LLVMBuildGEP2(this.builder, element_type, base.ref, indices, 1, "index");
-            return Value.create(address, base_type);
+            indices[0] = this.coerce(index, Types.i64_type());
+            void* element_type = this.llvm_type(node.value_type());
+            return LLVMBuildGEP2(this.builder, element_type, base.ref, indices, 1, "index");
         }
 
-        if (node.kind == NodeKind.UNARY && node.op() == TokenKind.STAR) {
-            Value* pointer = this.gen_expression(node.first(), (TypeRef*)0);
-            TypeRef* pointer_type = pointer.type;
-            if (pointer_type.kind != TypeKind.POINTER || pointer_type.element.kind == TypeKind.VOID) {
-                this.error(node, "cannot dereference this value");
-                return this.fallback((void*)0);
-            }
-            return pointer;
-        }
-
-        this.error(node, "expression is not addressable");
-        return this.fallback((void*)0);
+        Value* pointer = this.gen_expression(node.first());
+        return pointer.ref;
     }
 
-    Value* gen_unary(Node* node, TypeRef* expected) {
+    Value* gen_unary(Node* node) {
         i32 op = node.op();
 
         if (op == TokenKind.AMPERSAND) {
-            return this.gen_address(node.first());
+            return Value.create(this.gen_address(node.first()), node.value_type());
         }
         if (op == TokenKind.STAR) {
-            Value* address = this.gen_address(node);
-            return this.load_through(address, node);
+            return this.load_through(this.gen_address(node), node.value_type());
         }
 
-        Value* operand = this.gen_expression(node.first(), expected);
-        TypeRef* ty = operand.type;
+        Value* operand = this.gen_expression(node.first());
+        u32 type = operand.type;
         if (op == TokenKind.MINUS) {
-            if (ty.kind == TypeKind.FLOAT) {
-                return Value.create(LLVMBuildFNeg(this.builder, operand.ref, "neg"), ty);
+            if (Types.is_float(type)) {
+                return Value.create(LLVMBuildFNeg(this.builder, operand.ref, "neg"), type);
             }
-            return Value.create(LLVMBuildNeg(this.builder, operand.ref, "neg"), ty);
+            return Value.create(LLVMBuildNeg(this.builder, operand.ref, "neg"), type);
         }
         if (op == TokenKind.TILDE) {
-            return Value.create(LLVMBuildNot(this.builder, operand.ref, "not"), ty);
+            return Value.create(LLVMBuildNot(this.builder, operand.ref, "not"), type);
         }
-        if (op == TokenKind.BANG) {
-            void* condition = this.to_condition(operand);
-            return Value.create(LLVMBuildNot(this.builder, condition, "lnot"), TypeRef.integer(1, false));
-        }
-
-        this.error(node, "unary operator is not supported by code generation yet");
-        return this.fallback((void*)0);
+        void* condition = this.to_condition(operand);
+        return Value.create(LLVMBuildNot(this.builder, condition, "lnot"), Types.bool_type());
     }
 
     Value* gen_assign(Node* node) {
-        Node* target = node.first();
-        if (target.kind == NodeKind.IDENTIFIER) {
-            LocalVariable* local = this.find_local(target.name());
-            if (local != null && !local.is_mutable) {
-                this.error(target, "cannot assign to an immutable variable");
-            }
-        }
-
-        Value* address = this.gen_address(target);
-        TypeRef* pointer = address.type;
-        TypeRef* element = pointer.element;
-        Value* value = this.gen_expression(node.second(), element);
+        void* address = this.gen_address(node.first());
+        u32 element = node.value_type();
+        Value* value = this.gen_expression(node.second());
         void* stored = this.coerce(value, element);
-        LLVMBuildStore(this.builder, stored, address.ref);
+        LLVMBuildStore(this.builder, stored, address);
         return Value.create(stored, element);
     }
 
     Value* gen_logical(Node* node) {
         bool is_and = node.op() == TokenKind.AND_AND;
-        TypeRef* flag = TypeRef.integer(1, false);
-        void* left = this.to_condition(this.gen_expression(node.first(), (TypeRef*)0));
+        u32 flag = Types.bool_type();
+        void* left = this.to_condition(this.gen_expression(node.first()));
         void* left_block = LLVMGetInsertBlock(this.builder);
         void* right_block = this.new_block("logic.rhs");
         void* end_block = this.new_block("logic.end");
@@ -898,19 +738,19 @@ struct CodeGenerator {
         }
 
         LLVMPositionBuilderAtEnd(this.builder, right_block);
-        void* right = this.to_condition(this.gen_expression(node.second(), (TypeRef*)0));
+        void* right = this.to_condition(this.gen_expression(node.second()));
         void* right_end = LLVMGetInsertBlock(this.builder);
         LLVMBuildBr(this.builder, end_block);
 
         LLVMPositionBuilderAtEnd(this.builder, end_block);
-        void* merged = LLVMBuildPhi(this.builder, this.llvm_type(flag, node), "logic");
+        void* merged = LLVMBuildPhi(this.builder, this.llvm_type(flag), "logic");
         void** values = CodeGenerator.array_of(2);
         void** blocks = CodeGenerator.array_of(2);
         mut u64 shortcut = 1;
         if (is_and) {
             shortcut = 0;
         }
-        values[0] = LLVMConstInt(this.llvm_type(flag, node), shortcut, 0);
+        values[0] = LLVMConstInt(this.llvm_type(flag), shortcut, 0);
         blocks[0] = left_block;
         values[1] = right;
         blocks[1] = right_end;
@@ -918,62 +758,32 @@ struct CodeGenerator {
         return Value.create(merged, flag);
     }
 
-    static bool is_comparison(i32 op) {
-        return op == TokenKind.EQUAL_EQUAL || op == TokenKind.BANG_EQUAL || op == TokenKind.LESS
-            || op == TokenKind.LESS_EQUAL || op == TokenKind.GREATER || op == TokenKind.GREATER_EQUAL;
-    }
-
-    Value* gen_binary(Node* node, TypeRef* expected) {
+    Value* gen_binary(Node* node) {
         i32 op = node.op();
         if (op == TokenKind.AND_AND || op == TokenKind.OR_OR) {
             return this.gen_logical(node);
         }
 
-        mut TypeRef* hint = expected;
-        if (CodeGenerator.is_comparison(op)) {
-            hint = (TypeRef*)0;
-        }
+        Value* left = this.gen_expression(node.first());
+        Value* right = this.gen_expression(node.second());
 
-        mut Value* left = (Value*)0;
-        mut Value* right = (Value*)0;
-        if (this.is_untyped_literal(node.first()) && !this.is_untyped_literal(node.second())) {
-            right = this.gen_expression(node.second(), hint);
-            left = this.gen_expression(node.first(), right.type);
-        } else {
-            left = this.gen_expression(node.first(), hint);
-            right = this.gen_expression(node.second(), left.type);
-        }
-
-        TypeRef* left_type = left.type;
-        TypeRef* right_type = right.type;
-
-        if (left_type.kind == TypeKind.POINTER && right_type.kind == TypeKind.INTEGER
+        if (Types.is_pointer(left.type) && Types.is_integer(right.type)
             && (op == TokenKind.PLUS || op == TokenKind.MINUS)) {
             return this.gen_pointer_offset(node, left, right);
         }
 
-        mut TypeRef* common = left_type;
-        if (right_type.kind == TypeKind.FLOAT && left_type.kind == TypeKind.INTEGER) {
-            common = right_type;
-        } else if (left_type.kind == TypeKind.INTEGER && right_type.kind == TypeKind.INTEGER
-            && right_type.bits > left_type.bits) {
-            common = right_type;
-        } else if (left_type.kind == TypeKind.FLOAT && right_type.kind == TypeKind.FLOAT
-            && right_type.bits > left_type.bits) {
-            common = right_type;
-        }
-
+        u32 common = Types.common(left.type, right.type);
         void* lhs = this.coerce(left, common);
         void* rhs = this.coerce(right, common);
 
-        if (CodeGenerator.is_comparison(op)) {
+        if (TypeChecker.is_comparison(op)) {
             return this.gen_comparison(node, common, lhs, rhs);
         }
         return this.gen_arithmetic(node, common, lhs, rhs);
     }
 
     Value* gen_pointer_offset(Node* node, Value* pointer, Value* offset) {
-        mut void* amount = this.coerce(offset, TypeRef.integer(64, true));
+        mut void* amount = this.coerce(offset, Types.i64_type());
         if (node.op() == TokenKind.MINUS) {
             amount = LLVMBuildNeg(this.builder, amount, "negoffset");
         }
@@ -984,11 +794,11 @@ struct CodeGenerator {
         return Value.create(moved, pointer.type);
     }
 
-    Value* gen_comparison(Node* node, TypeRef* common, void* lhs, void* rhs) {
+    Value* gen_comparison(Node* node, u32 common, void* lhs, void* rhs) {
         i32 op = node.op();
-        TypeRef* flag = TypeRef.integer(1, false);
+        u32 flag = Types.bool_type();
 
-        if (common.kind == TypeKind.FLOAT) {
+        if (Types.is_float(common)) {
             mut i32 real = LlvmConst.REAL_OEQ;
             if (op == TokenKind.BANG_EQUAL) { real = LlvmConst.REAL_UNE; }
             if (op == TokenKind.LESS) { real = LlvmConst.REAL_OLT; }
@@ -998,7 +808,7 @@ struct CodeGenerator {
             return Value.create(LLVMBuildFCmp(this.builder, real, lhs, rhs, "fcmp"), flag);
         }
 
-        bool is_signed = common.kind == TypeKind.INTEGER && common.is_signed;
+        bool is_signed = Types.is_integer(common) && Types.is_signed(common);
         mut i32 predicate = LlvmConst.INT_EQ;
         if (op == TokenKind.BANG_EQUAL) { predicate = LlvmConst.INT_NE; }
         if (op == TokenKind.LESS) { predicate = LlvmConst.INT_ULT; }
@@ -1014,23 +824,16 @@ struct CodeGenerator {
         return Value.create(LLVMBuildICmp(this.builder, predicate, lhs, rhs, "icmp"), flag);
     }
 
-    Value* gen_arithmetic(Node* node, TypeRef* common, void* lhs, void* rhs) {
+    Value* gen_arithmetic(Node* node, u32 common, void* lhs, void* rhs) {
         i32 op = node.op();
         void* builder = this.builder;
 
-        if (common.kind == TypeKind.FLOAT) {
+        if (Types.is_float(common)) {
             if (op == TokenKind.PLUS) { return Value.create(LLVMBuildFAdd(builder, lhs, rhs, "fadd"), common); }
             if (op == TokenKind.MINUS) { return Value.create(LLVMBuildFSub(builder, lhs, rhs, "fsub"), common); }
             if (op == TokenKind.STAR) { return Value.create(LLVMBuildFMul(builder, lhs, rhs, "fmul"), common); }
             if (op == TokenKind.SLASH) { return Value.create(LLVMBuildFDiv(builder, lhs, rhs, "fdiv"), common); }
-            if (op == TokenKind.PERCENT) { return Value.create(LLVMBuildFRem(builder, lhs, rhs, "frem"), common); }
-            this.error(node, "operator is not valid for floating point operands");
-            return Value.create(lhs, common);
-        }
-
-        if (common.kind != TypeKind.INTEGER) {
-            this.error(node, "operator is not valid for these operands");
-            return Value.create(lhs, common);
+            return Value.create(LLVMBuildFRem(builder, lhs, rhs, "frem"), common);
         }
 
         if (op == TokenKind.PLUS) { return Value.create(LLVMBuildAdd(builder, lhs, rhs, "add"), common); }
@@ -1040,16 +843,17 @@ struct CodeGenerator {
         if (op == TokenKind.PIPE) { return Value.create(LLVMBuildOr(builder, lhs, rhs, "or"), common); }
         if (op == TokenKind.CARET) { return Value.create(LLVMBuildXor(builder, lhs, rhs, "xor"), common); }
         if (op == TokenKind.LESS_LESS) { return Value.create(LLVMBuildShl(builder, lhs, rhs, "shl"), common); }
+        bool is_signed = Types.is_signed(common);
         if (op == TokenKind.SLASH) {
-            if (common.is_signed) { return Value.create(LLVMBuildSDiv(builder, lhs, rhs, "sdiv"), common); }
+            if (is_signed) { return Value.create(LLVMBuildSDiv(builder, lhs, rhs, "sdiv"), common); }
             return Value.create(LLVMBuildUDiv(builder, lhs, rhs, "udiv"), common);
         }
         if (op == TokenKind.PERCENT) {
-            if (common.is_signed) { return Value.create(LLVMBuildSRem(builder, lhs, rhs, "srem"), common); }
+            if (is_signed) { return Value.create(LLVMBuildSRem(builder, lhs, rhs, "srem"), common); }
             return Value.create(LLVMBuildURem(builder, lhs, rhs, "urem"), common);
         }
         if (op == TokenKind.GREATER_GREATER) {
-            if (common.is_signed) { return Value.create(LLVMBuildAShr(builder, lhs, rhs, "ashr"), common); }
+            if (is_signed) { return Value.create(LLVMBuildAShr(builder, lhs, rhs, "ashr"), common); }
             return Value.create(LLVMBuildLShr(builder, lhs, rhs, "lshr"), common);
         }
 
@@ -1058,13 +862,13 @@ struct CodeGenerator {
     }
 
     Value* promote_variadic(Value* argument) {
-        TypeRef* ty = argument.type;
-        if (ty.kind == TypeKind.INTEGER && ty.bits < 32) {
-            TypeRef* wide = TypeRef.integer(32, ty.is_signed);
+        u32 type = argument.type;
+        if (Types.is_integer(type) && Types.bits(type) < 32) {
+            u32 wide = Types.integer(32, Types.is_signed(type));
             return Value.create(this.coerce(argument, wide), wide);
         }
-        if (ty.kind == TypeKind.FLOAT && ty.bits < 64) {
-            TypeRef* wide = TypeRef.floating(64);
+        if (Types.is_float(type) && Types.bits(type) < 64) {
+            u32 wide = Types.floating(64);
             return Value.create(this.coerce(argument, wide), wide);
         }
         return argument;
@@ -1072,55 +876,18 @@ struct CodeGenerator {
 
     Value* gen_call(Node* node) {
         Node* callee = node.first();
-        SymbolTable* symbols = this.symbols;
-        mut FunctionInfo* info = (FunctionInfo*)0;
+        FunctionInfo* info = (FunctionInfo*)callee.symbol();
         mut void* receiver = (void*)0;
         mut i32 offset = 0;
 
-        if (callee.kind == NodeKind.IDENTIFIER) {
-            info = symbols.find_function(callee.text_atom(), callee.name(), this.scope);
-        } else if (callee.kind == NodeKind.FIELD_ACCESS) {
-            Node* base = callee.first();
-            if (this.is_struct_name(base)) {
-                StructInfo* owner = symbols.find_struct(base.text_atom(), base.name(), this.scope);
-                info = symbols.find_method(owner, callee.name());
-                if (info != null && info.is_instance) {
-                    this.error(callee, "instance method called without an instance");
-                    return this.fallback((void*)0);
-                }
-            } else {
-                Value* instance = this.struct_pointer(base);
-                TypeRef* instance_type = instance.type;
-                StructInfo* owner = this.struct_of(instance_type.element);
-                if (owner == null) {
-                    this.error(callee, "method call on a value that is not a struct");
-                    return this.fallback((void*)0);
-                }
-                info = symbols.find_method(owner, callee.name());
-                if (info != null && !info.is_instance) {
-                    this.error(callee, "static method called on an instance");
-                    return this.fallback((void*)0);
-                }
-                receiver = instance.ref;
-                offset = 1;
-            }
-        } else {
-            this.error(node, "only calls to named functions are supported by code generation yet");
-            return this.fallback((void*)0);
+        if (callee.symbol_kind() == SymbolKind.INSTANCE_METHOD) {
+            receiver = this.struct_pointer(callee.first());
+            offset = 1;
         }
 
-        if (info == null) {
-            this.error(callee, "call to an undeclared function");
-            return this.fallback((void*)0);
-        }
-
-        PointerList* param_types = info.param_types;
+        IdList* param_types = info.param_types;
         i32 fixed = param_types.length;
         i32 given = node.count() + offset;
-        if (given < fixed || (given > fixed && !info.is_variadic)) {
-            this.error(node, "wrong number of arguments");
-            return this.fallback((void*)0);
-        }
 
         void** args = CodeGenerator.array_of(given);
         if (offset == 1) {
@@ -1129,17 +896,16 @@ struct CodeGenerator {
         for (mut i32 i = offset; i < given; i = i + 1) {
             Node* argument_node = node.child(i - offset);
             if (i < fixed) {
-                TypeRef* wanted = (TypeRef*)param_types.get(i);
-                Value* argument = this.gen_expression(argument_node, wanted);
-                args[i] = this.coerce(argument, wanted);
+                Value* argument = this.gen_expression(argument_node);
+                args[i] = this.coerce(argument, param_types.get(i));
             } else {
-                Value* extra = this.promote_variadic(this.gen_expression(argument_node, (TypeRef*)0));
+                Value* extra = this.promote_variadic(this.gen_expression(argument_node));
                 args[i] = extra.ref;
             }
         }
 
         mut i8* label = "call";
-        if (info.return_type.is_void()) {
+        if (Types.is_void(info.return_type)) {
             label = "";
         }
         void* result = LLVMBuildCall2(this.builder, info.function_type, info.function, args, (u32)given, label);

@@ -5,7 +5,7 @@ struct LocalVariable {
     u32 name_atom;
     u32 namespace_id;
     void* slot;
-    TypeRef* type;
+    u32 type;
     bool is_mutable;
     Node* node;
 }
@@ -13,7 +13,7 @@ struct LocalVariable {
 struct FieldInfo {
     i8* name;
     u32 name_atom;
-    TypeRef* type;
+    u32 type;
     i32 index;
 }
 
@@ -21,6 +21,8 @@ struct StructInfo {
     i8* name;
     u32 name_atom;
     u32 namespace_id;
+    u32 index;
+    u32 type_id;
     void* llvm;
     PointerList* fields;
     PointerList* constants;
@@ -36,8 +38,9 @@ struct FunctionInfo {
     u32 namespace_id;
     void* function;
     void* function_type;
-    TypeRef* return_type;
-    PointerList* param_types;
+    u32 return_type;
+    IdList* param_types;
+    LocalVariable* this_variable;
     bool is_variadic;
     bool is_extern;
     bool is_instance;
@@ -176,6 +179,39 @@ struct SymbolTable {
             namespace_id = info.parent;
         }
         return 0 - 1;
+    }
+
+    public u32 resolve_type(TypeRef* ref, u32 scope) {
+        i32 kind = ref.kind;
+        if (kind == TypeKind.VOID) {
+            return Types.void_type();
+        }
+        if (kind == TypeKind.AUTO) {
+            return Types.auto_type();
+        }
+        if (kind == TypeKind.INTEGER) {
+            return Types.integer((u32)ref.bits, ref.is_signed);
+        }
+        if (kind == TypeKind.FLOAT) {
+            return Types.floating((u32)ref.bits);
+        }
+        if (kind == TypeKind.POINTER) {
+            u32 element = this.resolve_type(ref.element, scope);
+            if (element == 0) {
+                return 0;
+            }
+            return Types.pointer_to(element);
+        }
+        StructInfo* info = this.find_struct(ref.full_atom, ref.name_atom, scope);
+        if (info == null) {
+            return 0;
+        }
+        return info.type_id;
+    }
+
+    public StructInfo* struct_at(u32 index) {
+        PointerList* list = this.structs;
+        return (StructInfo*)list.get((i32)index);
     }
 
     public bool add_struct(StructInfo* info) {
