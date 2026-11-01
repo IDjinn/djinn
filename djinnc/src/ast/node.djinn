@@ -73,25 +73,75 @@ struct NodeKind {
     }
 }
 
+static mut void* ast_base = null;
+static mut void* ast_atoms = null;
+static mut void* ast_types = null;
+static mut void* ast_lists = null;
+static mut i32 ast_count = 0;
+static mut i32 ast_capacity = 0;
+
+struct Ast {
+    public static void init(i32 capacity) {
+        Arena* arena = Mem.arena();
+        ast_capacity = capacity;
+        ast_count = 1;
+        ast_base = arena.zalloc((u64)capacity * sizeof(Node), 8);
+        ast_atoms = (void*)AtomTable.create(arena);
+        ast_types = (void*)PtrVec.create();
+        ast_lists = (void*)PtrVec.create();
+    }
+
+    public static Node* at(i32 id) {
+        if (id == 0) {
+            return (Node*)0;
+        }
+        i8* base = (i8*)ast_base;
+        return (Node*)(base + (i64)id * sizeof(Node));
+    }
+
+    public static i32 id_of(Node* node) {
+        if (node == null) {
+            return 0;
+        }
+        i8* base = (i8*)ast_base;
+        i8* address = (i8*)node;
+        return (i32)(((i64)address - (i64)base) / (i64)sizeof(Node));
+    }
+
+    public static AtomTable* atoms() {
+        return (AtomTable*)ast_atoms;
+    }
+
+    public static i32 node_count() {
+        return ast_count - 1;
+    }
+}
+
 struct Node {
     i32 kind;
+    i32 op;
     i32 line;
     i32 column;
-    i32 op;
-    i8* text;
-    i64 int_value;
-    f64 float_value;
-    bool flag;
-    bool is_variadic;
-    TypeRef* type;
-    Node* first;
-    Node* second;
-    Node* third;
-    Node* fourth;
-    PtrVec* items;
+    i32 text_atom;
+    i32 type_id;
+    i32 list_id;
+    i32 first_id;
+    i32 second_id;
+    i32 third_id;
+    i32 fourth_id;
+    i32 flag_value;
+    i32 variadic_value;
+    i32 value_low;
+    i32 value_high;
 
     public static Node* create(i32 kind, Token* at) {
-        Node* node = (Node*)Mem.zalloc(sizeof(Node));
+        if (ast_count >= ast_capacity) {
+            printf("djinnc: ast node capacity exceeded (%d)
+", ast_capacity);
+            exit(1);
+        }
+        Node* node = Ast.at(ast_count);
+        ast_count = ast_count + 1;
         node.kind = kind;
         node.line = at.line;
         node.column = at.column;
@@ -100,22 +150,135 @@ struct Node {
 
     public static Node* create_list(i32 kind, Token* at) {
         Node* node = Node.create(kind, at);
-        node.items = PtrVec.create();
+        PtrVec* lists = (PtrVec*)ast_lists;
+        lists.push(PtrVec.create());
+        node.list_id = lists.length;
         return node;
     }
 
+    public Node* first() {
+        return Ast.at(this.first_id);
+    }
+
+    public Node* second() {
+        return Ast.at(this.second_id);
+    }
+
+    public Node* third() {
+        return Ast.at(this.third_id);
+    }
+
+    public Node* fourth() {
+        return Ast.at(this.fourth_id);
+    }
+
+    public void set_first(Node* node) {
+        this.first_id = Ast.id_of(node);
+    }
+
+    public void set_second(Node* node) {
+        this.second_id = Ast.id_of(node);
+    }
+
+    public void set_third(Node* node) {
+        this.third_id = Ast.id_of(node);
+    }
+
+    public void set_fourth(Node* node) {
+        this.fourth_id = Ast.id_of(node);
+    }
+
+    public i8* text() {
+        if (this.text_atom == 0) {
+            return (i8*)0;
+        }
+        AtomTable* atoms = Ast.atoms();
+        return atoms.text((u32)this.text_atom - 1);
+    }
+
+    public void set_text(i8* text) {
+        this.set_text_n(text, strlen(text));
+    }
+
+    public void set_text_n(i8* text, i32 length) {
+        AtomTable* atoms = Ast.atoms();
+        this.text_atom = (i32)atoms.intern_copy(text, (u32)length) + 1;
+    }
+
+    public TypeRef* type() {
+        if (this.type_id == 0) {
+            return (TypeRef*)0;
+        }
+        PtrVec* types = (PtrVec*)ast_types;
+        return (TypeRef*)types.get(this.type_id - 1);
+    }
+
+    public void set_type(TypeRef* type) {
+        PtrVec* types = (PtrVec*)ast_types;
+        types.push((void*)type);
+        this.type_id = types.length;
+    }
+
+    public bool flag() {
+        return this.flag_value != 0;
+    }
+
+    public void set_flag(bool value) {
+        this.flag_value = 0;
+        if (value) {
+            this.flag_value = 1;
+        }
+    }
+
+    public bool is_variadic() {
+        return this.variadic_value != 0;
+    }
+
+    public void set_variadic(bool value) {
+        this.variadic_value = 0;
+        if (value) {
+            this.variadic_value = 1;
+        }
+    }
+
+    public i64 int_value() {
+        u64 low = (u64)this.value_low & 4294967295;
+        u64 high = (u64)this.value_high & 4294967295;
+        return (i64)(low | (high << 32));
+    }
+
+    public void set_int_value(i64 value) {
+        u64 bits = (u64)value;
+        this.value_low = (i32)(bits & 4294967295);
+        this.value_high = (i32)(bits >> 32);
+    }
+
+    public f64 float_value() {
+        i8* literal = this.text();
+        return Str.parse_float(literal, strlen(literal));
+    }
+
     public void add(Node* child) {
-        PtrVec* list = this.items;
-        list.push(child);
+        PtrVec* list = this.items();
+        list.push((void*)Ast.id_of(child));
+    }
+
+    public bool has_items() {
+        return this.list_id != 0;
+    }
+
+    PtrVec* items() {
+        PtrVec* lists = (PtrVec*)ast_lists;
+        return (PtrVec*)lists.get(this.list_id - 1);
     }
 
     public Node* child(i32 index) {
-        PtrVec* list = this.items;
-        return (Node*)list.get(index);
+        PtrVec* list = this.items();
+        return Ast.at((i32)list.get(index));
     }
 
     public i32 count() {
-        PtrVec* list = this.items;
+        PtrVec* list = this.items();
         return list.length;
     }
 }
