@@ -3,6 +3,7 @@ namespace djinnc;
 struct LocalVariable {
     i8* name;
     u32 name_atom;
+    u32 namespace_id;
     void* slot;
     TypeRef* type;
     bool is_mutable;
@@ -19,6 +20,7 @@ struct FieldInfo {
 struct StructInfo {
     i8* name;
     u32 name_atom;
+    u32 namespace_id;
     void* llvm;
     PointerList* fields;
     PointerList* constants;
@@ -31,6 +33,7 @@ struct StructInfo {
 struct FunctionInfo {
     i8* name;
     u32 name_atom;
+    u32 namespace_id;
     void* function;
     void* function_type;
     TypeRef* return_type;
@@ -42,14 +45,22 @@ struct FunctionInfo {
     StructInfo* owner;
 }
 
+struct NamespaceInfo {
+    u32 id;
+    u32 parent;
+    u32 qualified_atom;
+}
+
 struct SymbolTable {
     Arena* arena;
     PointerList* structs;
     PointerList* functions;
     PointerList* globals;
+    PointerList* namespaces;
     U32Map* struct_map;
     U32Map* function_map;
     U32Map* global_map;
+    U32Map* namespace_map;
 
     public static SymbolTable* create(Arena* arena) {
         SymbolTable* table = (SymbolTable*)arena.zalloc(sizeof(SymbolTable), 8);
@@ -57,26 +68,130 @@ struct SymbolTable {
         table.structs = PointerList.create();
         table.functions = PointerList.create();
         table.globals = PointerList.create();
+        table.namespaces = PointerList.create();
         table.struct_map = U32Map.create(arena, 64);
         table.function_map = U32Map.create(arena, 256);
         table.global_map = U32Map.create(arena, 16);
+        table.namespace_map = U32Map.create(arena, 16);
+        NamespaceInfo* root = (NamespaceInfo*)arena.zalloc(sizeof(NamespaceInfo), 8);
+        PointerList* namespaces = table.namespaces;
+        namespaces.push((void*)root);
         return table;
+    }
+
+    static u32 key(u32 namespace_id, u32 atom) {
+        if (atom >= 1048576 || namespace_id >= 4096) {
+            logger_error(Log.get(), "djinnc: symbol table key space exhausted");
+            exit(1);
+        }
+        return (namespace_id << 20) | atom;
+    }
+
+    NamespaceInfo* namespace_at(u32 id) {
+        PointerList* namespaces = this.namespaces;
+        return (NamespaceInfo*)namespaces.get((i32)id);
+    }
+
+    u32 join_atom(u32 parent, u32 name_atom) {
+        if (parent == 0) {
+            return name_atom;
+        }
+        AtomTable* atoms = Atoms.get();
+        NamespaceInfo* owner = this.namespace_at(parent);
+        ByteBuffer* joined = ByteBuffer.create();
+        joined.append_slice(atoms.text(owner.qualified_atom), (i32)atoms.length(owner.qualified_atom));
+        joined.append("::");
+        joined.append_slice(atoms.text(name_atom), (i32)atoms.length(name_atom));
+        return atoms.intern_copy(joined.data, (u32)joined.length);
+    }
+
+    public u32 enter_namespace(u32 parent, u32 name_atom) {
+        u32 qualified = this.join_atom(parent, name_atom);
+        U32Map* map = this.namespace_map;
+        i64 found = map.find(qualified);
+        if (found >= 0) {
+            return (u32)found;
+        }
+        PointerList* namespaces = this.namespaces;
+        Arena* arena = this.arena;
+        NamespaceInfo* info = (NamespaceInfo*)arena.zalloc(sizeof(NamespaceInfo), 8);
+        info.id = (u32)namespaces.length;
+        info.parent = parent;
+        info.qualified_atom = qualified;
+        namespaces.push((void*)info);
+        map.put(qualified, info.id);
+        return info.id;
+    }
+
+    public i8* namespace_prefix(u32 namespace_id) {
+        if (namespace_id == 0) {
+            return (i8*)0;
+        }
+        NamespaceInfo* info = this.namespace_at(namespace_id);
+        AtomTable* atoms = Atoms.get();
+        return atoms.text(info.qualified_atom);
+    }
+
+    i64 find_child_namespace(u32 scope, u32 prefix_atom) {
+        U32Map* map = this.namespace_map;
+        return map.find(this.join_atom(scope, prefix_atom));
+    }
+
+    i64 lookup(U32Map* map, u32 full, u32 base, u32 scope) {
+        if (full == base) {
+            mut u32 namespace_id = scope;
+            while (true) {
+                i64 index = map.find(SymbolTable.key(namespace_id, base));
+                if (index >= 0) {
+                    return index;
+                }
+                if (namespace_id == 0) {
+                    return 0 - 1;
+                }
+                NamespaceInfo* info = this.namespace_at(namespace_id);
+                namespace_id = info.parent;
+            }
+        }
+
+        AtomTable* atoms = Atoms.get();
+        i32 length = (i32)atoms.length(full);
+        i8* text = atoms.text(full);
+        mut i32 last = 0;
+        for (mut i32 i = 0; i + 1 < length; i = i + 1) {
+            if (text[i] == 58 && text[i + 1] == 58) {
+                last = i + 2;
+            }
+        }
+        u32 prefix = atoms.intern_copy(text, (u32)(last - 2));
+        mut u32 namespace_id = scope;
+        while (true) {
+            i64 target = this.find_child_namespace(namespace_id, prefix);
+            if (target >= 0) {
+                return map.find(SymbolTable.key((u32)target, base));
+            }
+            if (namespace_id == 0) {
+                return 0 - 1;
+            }
+            NamespaceInfo* info = this.namespace_at(namespace_id);
+            namespace_id = info.parent;
+        }
+        return 0 - 1;
     }
 
     public bool add_struct(StructInfo* info) {
         U32Map* map = this.struct_map;
-        if (map.contains(info.name_atom)) {
+        u32 key = SymbolTable.key(info.namespace_id, info.name_atom);
+        if (map.contains(key)) {
             return false;
         }
         PointerList* list = this.structs;
-        map.put(info.name_atom, (u32)list.length);
+        map.put(key, (u32)list.length);
         list.push((void*)info);
         return true;
     }
 
-    public StructInfo* find_struct(u32 name) {
-        U32Map* map = this.struct_map;
-        i64 index = map.find(name);
+    public StructInfo* find_struct(u32 full, u32 base, u32 scope) {
+        i64 index = this.lookup(this.struct_map, full, base, scope);
         if (index < 0) {
             return (StructInfo*)0;
         }
@@ -86,28 +201,32 @@ struct SymbolTable {
 
     public bool add_function(FunctionInfo* info) {
         mut U32Map* map = this.function_map;
+        mut u32 key = SymbolTable.key(info.namespace_id, info.name_atom);
         if (info.owner != null) {
             StructInfo* owner = info.owner;
             map = owner.method_map;
+            key = info.name_atom;
         }
-        if (map.contains(info.name_atom)) {
+        if (map.contains(key)) {
             return false;
         }
         PointerList* list = this.functions;
-        map.put(info.name_atom, (u32)list.length);
+        map.put(key, (u32)list.length);
         list.push((void*)info);
         return true;
     }
 
-    public FunctionInfo* find_function(u32 name) {
-        return this.lookup_function(this.function_map, name);
+    public FunctionInfo* find_function(u32 full, u32 base, u32 scope) {
+        i64 index = this.lookup(this.function_map, full, base, scope);
+        if (index < 0) {
+            return (FunctionInfo*)0;
+        }
+        PointerList* list = this.functions;
+        return (FunctionInfo*)list.get((i32)index);
     }
 
     public FunctionInfo* find_method(StructInfo* owner, u32 name) {
-        return this.lookup_function(owner.method_map, name);
-    }
-
-    FunctionInfo* lookup_function(U32Map* map, u32 name) {
+        U32Map* map = owner.method_map;
         i64 index = map.find(name);
         if (index < 0) {
             return (FunctionInfo*)0;
@@ -118,18 +237,18 @@ struct SymbolTable {
 
     public bool add_global(LocalVariable* variable) {
         U32Map* map = this.global_map;
-        if (map.contains(variable.name_atom)) {
+        u32 key = SymbolTable.key(variable.namespace_id, variable.name_atom);
+        if (map.contains(key)) {
             return false;
         }
         PointerList* list = this.globals;
-        map.put(variable.name_atom, (u32)list.length);
+        map.put(key, (u32)list.length);
         list.push((void*)variable);
         return true;
     }
 
-    public LocalVariable* find_global(u32 name) {
-        U32Map* map = this.global_map;
-        i64 index = map.find(name);
+    public LocalVariable* find_global(u32 full, u32 base, u32 scope) {
+        i64 index = this.lookup(this.global_map, full, base, scope);
         if (index < 0) {
             return (LocalVariable*)0;
         }
