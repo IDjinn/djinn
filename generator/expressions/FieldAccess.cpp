@@ -5,7 +5,32 @@
 #include "../Generator.h"
 #include "../../utils/Logger.h"
 
-llvm::Value* Generator::generate_field_access(const FieldAccess& expr)
+PointeeHint Generator::resolve_field_pointee(const std::string& ownerStruct, const unsigned fieldIdx,
+                                             llvm::Type* fieldType)
+{
+    PointeeHint hint;
+    if (!fieldType->isPointerTy()) return hint;
+
+    const StructDef* srcDef = currentScope->lookup_struct(ownerStruct);
+    if (!srcDef || fieldIdx >= srcDef->fields.size()) return hint;
+
+    const Type& djinnFieldType = srcDef->fields[fieldIdx].second;
+    if (djinnFieldType.kind != TypeKind::POINTER || !djinnFieldType.elementType ||
+        djinnFieldType.elementType->kind != TypeKind::STRUCT)
+    {
+        return hint;
+    }
+
+    std::string resolved = currentScope->resolve_alias(djinnFieldType.elementType->structName);
+    if (llvm::StructType* pointeeSt = currentScope->get_llvm_struct(resolved))
+    {
+        hint.type = pointeeSt;
+        hint.structName = std::move(resolved);
+    }
+    return hint;
+}
+
+llvm::Value* Generator::generate_field_access(const FieldAccess& expr, PointeeHint* pointee)
 {
     if (auto* ident = dynamic_cast<const Identifier*>(expr.object.get()))
     {
@@ -151,29 +176,9 @@ llvm::Value* Generator::generate_field_access(const FieldAccess& expr)
         llvm::Type* fieldType = structType->getElementType(fieldIdx);
         llvm::Value* result = builder->CreateLoad(fieldType, fieldPtr, expr.fieldName.token_name);
 
-        // Track pointee type for pointer fields (e.g., TypeInfo* type in object struct)
-        _lastFieldAccessPointeeType = nullptr;
-        _lastFieldAccessStructName.clear();
-        if (fieldType->isPointerTy())
+        if (pointee)
         {
-            if (const StructDef* srcDef = currentScope->lookup_struct(fieldIndicesName))
-            {
-                if (fieldIdx < srcDef->fields.size())
-                {
-                    const Type& djinnFieldType = srcDef->fields[fieldIdx].second;
-                    if (djinnFieldType.kind == TypeKind::POINTER && djinnFieldType.elementType &&
-                        djinnFieldType.elementType->kind == TypeKind::STRUCT)
-                    {
-                        std::string resolved = currentScope->resolve_alias(djinnFieldType.elementType->structName);
-                        llvm::StructType* pointeeSt = currentScope->get_llvm_struct(resolved);
-                        if (pointeeSt)
-                        {
-                            _lastFieldAccessPointeeType = pointeeSt;
-                            _lastFieldAccessStructName = resolved;
-                        }
-                    }
-                }
-            }
+            *pointee = resolve_field_pointee(fieldIndicesName, fieldIdx, fieldType);
         }
 
         return result;
@@ -183,23 +188,17 @@ llvm::Value* Generator::generate_field_access(const FieldAccess& expr)
     // Generate the inner expression and resolve the struct type from it
     if (auto* innerField = dynamic_cast<const FieldAccess*>(expr.object.get()))
     {
-        llvm::Value* innerVal = generate_field_access(*innerField);
+        PointeeHint innerPointee;
+        llvm::Value* innerVal = generate_field_access(*innerField, &innerPointee);
 
-        // After generating the inner field access, check if it returned a pointer-to-struct
         llvm::StructType* innerStructType = nullptr;
         std::string innerStructName;
         llvm::Value* basePtr = innerVal;
 
-        if (_lastFieldAccessPointeeType)
+        if (innerPointee.type)
         {
-            // The inner access returned a pointer to a known struct (e.g., TypeInfo*)
-            innerStructType = llvm::dyn_cast<llvm::StructType>(_lastFieldAccessPointeeType);
-            innerStructName = _lastFieldAccessStructName;
-        }
-        else if (innerVal->getType()->isPointerTy())
-        {
-            // Try to resolve from the loaded value if it's a struct pointer
-            // This case shouldn't normally happen since _lastFieldAccess* should be set
+            innerStructType = innerPointee.type;
+            innerStructName = innerPointee.structName;
         }
 
         if (!innerStructType)
@@ -257,29 +256,9 @@ llvm::Value* Generator::generate_field_access(const FieldAccess& expr)
         llvm::Type* fieldType = innerStructType->getElementType(fieldIdx);
         llvm::Value* result = builder->CreateLoad(fieldType, fieldPtr, expr.fieldName.token_name);
 
-        // Track pointee type for further chaining
-        _lastFieldAccessPointeeType = nullptr;
-        _lastFieldAccessStructName.clear();
-        if (fieldType->isPointerTy())
+        if (pointee)
         {
-            if (const StructDef* srcDef = currentScope->lookup_struct(innerStructName))
-            {
-                if (fieldIdx < srcDef->fields.size())
-                {
-                    const Type& djinnFieldType = srcDef->fields[fieldIdx].second;
-                    if (djinnFieldType.kind == TypeKind::POINTER && djinnFieldType.elementType &&
-                        djinnFieldType.elementType->kind == TypeKind::STRUCT)
-                    {
-                        std::string resolved = currentScope->resolve_alias(djinnFieldType.elementType->structName);
-                        llvm::StructType* pointeeSt = currentScope->get_llvm_struct(resolved);
-                        if (pointeeSt)
-                        {
-                            _lastFieldAccessPointeeType = pointeeSt;
-                            _lastFieldAccessStructName = resolved;
-                        }
-                    }
-                }
-            }
+            *pointee = resolve_field_pointee(innerStructName, fieldIdx, fieldType);
         }
 
         return result;

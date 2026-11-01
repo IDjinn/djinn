@@ -11,7 +11,7 @@ namespace djinn::binder
     bool IntrinsicCallHandler::canHandle(const FunctionCall& call,
                                          std::shared_ptr<ScopedSymbolTable> /*scope*/) const
     {
-        return is_intrinsic(call.name.token_name);
+        return !call.isMethodCall() && is_intrinsic(call.name.token_name);
     }
 
     std::shared_ptr<Symbol> IntrinsicCallHandler::handle(

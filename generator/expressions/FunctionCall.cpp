@@ -43,11 +43,11 @@ llvm::Value* Generator::generate_intrinsic_call(const FunctionCall& call)
             }
 
             // Check if the argument is a generic type parameter (e.g., sizeof(T))
-            if (_currentGenericCtx)
+            if (fn_.generics)
             {
                 if (const auto* ident = dynamic_cast<const Identifier*>(call.arguments[0].get()))
                 {
-                    if (const Type* resolved = _currentGenericCtx->resolve(ident->name()))
+                    if (const Type* resolved = fn_.generics->resolve(ident->name()))
                     {
                         llvm::Type* llvmType = generate_type(*resolved);
                         const auto& dataLayout = module->getDataLayout();
@@ -117,7 +117,7 @@ llvm::Value* Generator::generate_intrinsic_call(const FunctionCall& call)
 
             builder->CreateCall(trapFunc);
             builder->CreateUnreachable();
-            auto* deadBlock = llvm::BasicBlock::Create(*context, "after_trap", currentFunction);
+            auto* deadBlock = llvm::BasicBlock::Create(*context, "after_trap", fn_.function);
             builder->SetInsertPoint(deadBlock);
             return nullptr;
         }
@@ -132,7 +132,7 @@ llvm::Value* Generator::generate_intrinsic_call(const FunctionCall& call)
 
             builder->CreateCall(trapFunc);
             builder->CreateUnreachable();
-            auto* deadBlock = llvm::BasicBlock::Create(*context, "after_debugtrap", currentFunction);
+            auto* deadBlock = llvm::BasicBlock::Create(*context, "after_debugtrap", fn_.function);
             builder->SetInsertPoint(deadBlock);
             return nullptr;
         }
@@ -147,7 +147,7 @@ llvm::Value* Generator::generate_intrinsic_call(const FunctionCall& call)
     //
     //         builder->CreateCall(abortFunc);
     //         auto* unreachable = builder->CreateUnreachable();
-    //         auto* deadBlock = llvm::BasicBlock::Create(*context, "after_abort", currentFunction);
+    //         auto* deadBlock = llvm::BasicBlock::Create(*context, "after_abort", fn_.function);
     //         builder->SetInsertPoint(deadBlock);
     //         return unreachable;
     //     }
@@ -155,7 +155,7 @@ llvm::Value* Generator::generate_intrinsic_call(const FunctionCall& call)
     case Intrinsic::Unreachable:
         {
             auto* unreachable = builder->CreateUnreachable();
-            auto* deadBlock = llvm::BasicBlock::Create(*context, "after_unreachable", currentFunction);
+            auto* deadBlock = llvm::BasicBlock::Create(*context, "after_unreachable", fn_.function);
             builder->SetInsertPoint(deadBlock);
             return unreachable;
         }
@@ -290,11 +290,11 @@ llvm::Value* Generator::generate_intrinsic_call(const FunctionCall& call)
             std::string typeName = call.typeofResolvedName;
 
             // Fallback for generic type parameters (e.g., typeof(T) inside generic context)
-            if (typeName.empty() && _currentGenericCtx)
+            if (typeName.empty() && fn_.generics)
             {
                 if (const auto* ident = dynamic_cast<const Identifier*>(call.arguments[0].get()))
                 {
-                    if (const Type* resolved = _currentGenericCtx->resolve(ident->name()))
+                    if (const Type* resolved = fn_.generics->resolve(ident->name()))
                     {
                         typeName = resolved->toHumanString();
                     }
@@ -339,14 +339,14 @@ llvm::Value* Generator::generate_intrinsic_call(const FunctionCall& call)
 
 llvm::Value* Generator::generate_function_call(const FunctionCall& expr)
 {
-    if (is_intrinsic(expr.name.token_name))
-    {
-        return generate_intrinsic_call(expr);
-    }
-
     if (expr.isMethodCall())
     {
         return generate_method_call_internal(expr);
+    }
+
+    if (is_intrinsic(expr.name.token_name))
+    {
+        return generate_intrinsic_call(expr);
     }
 
     if (const size_t colonPos = expr.name.token_name.find("::"); colonPos != std::string::npos)
@@ -586,7 +586,7 @@ llvm::Value* Generator::generate_function_call(const FunctionCall& expr)
 
     // Unchecked call to a throwing function inside another throwing function:
     // re-throw when the callee failed (error propagation)
-    if (currentFunctionThrows && !insideTryOperand_ && funcSym && funcSym->isThrowing())
+    if (fn_.throws && !fn_.insideTryOperand && funcSym && funcSym->isThrowing())
     {
         emit_error_propagation_check(expr.name.location);
     }
@@ -793,22 +793,26 @@ llvm::Value* Generator::generate_method_call_internal(const FunctionCall& call)
         {
             // For complex receivers (e.g., this.type.hash()), generate the expression
             // and infer the type from the resulting LLVM value
-            llvm::Value* receiverVal = generate_expression(*call.receiver);
+            PointeeHint receiverPointee;
+            llvm::Value* receiverVal = nullptr;
+            if (const auto* receiverField = dynamic_cast<const FieldAccess*>(call.receiver.get()))
+            {
+                receiverVal = generate_field_access(*receiverField, &receiverPointee);
+            }
+            else
+            {
+                receiverVal = generate_expression(*call.receiver);
+            }
             if (receiverVal)
             {
                 llvm::Type* recvType = receiverVal->getType();
-                // If it's a pointer, check tracked pointee type from field access
                 if (recvType->isPointerTy())
                 {
-                    // Use _lastFieldAccessPointeeType set by generate_field_access
-                    if (_lastFieldAccessPointeeType)
+                    if (receiverPointee.type)
                     {
-                        if (auto* structTy = llvm::dyn_cast<llvm::StructType>(_lastFieldAccessPointeeType))
-                        {
-                            structName = _lastFieldAccessStructName.empty()
-                                             ? structTy->getName().str()
-                                             : _lastFieldAccessStructName;
-                        }
+                        structName = receiverPointee.structName.empty()
+                                         ? receiverPointee.type->getName().str()
+                                         : receiverPointee.structName;
                     }
                     // Fallback: check if it's a loaded struct type
                     else if (auto* loadInst = llvm::dyn_cast<llvm::LoadInst>(receiverVal))
@@ -1167,7 +1171,7 @@ llvm::Value* Generator::generate_method_call_internal(const FunctionCall& call)
 
     // Unchecked call to a throwing method inside another throwing function:
     // re-throw when the callee failed (error propagation)
-    if (currentFunctionThrows && !insideTryOperand_)
+    if (fn_.throws && !fn_.insideTryOperand)
     {
         const auto structSym = symbols->lookupStruct(structName);
         const auto methodSym = structSym ? structSym->getMethod(call.name.token_name) : nullptr;

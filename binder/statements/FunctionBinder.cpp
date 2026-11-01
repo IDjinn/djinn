@@ -53,12 +53,14 @@ void Binder::bindFunction(const FunctionDeclaration& func, const std::string& pr
     const std::string qualifiedName = (func.name.token_name == "main" || prefix.empty())
                                           ? func.name.token_name
                                           : prefix + "::" + func.name.token_name;
-    currentFunction_ = qualifiedName;
-
     const auto funcSym = _global_scope->lookupFunction(qualifiedName);
-    currentFunctionThrows_ = funcSym ? funcSym->isThrowing() : false;
-    currentFunctionThrowsAny_ = funcSym ? funcSym->throwsAny : false;
-    currentFunctionThrowsTypes_ = funcSym ? funcSym->throwsTypes : std::vector<Type>();
+
+    BindContext next;
+    next.function = qualifiedName;
+    next.throws = funcSym ? funcSym->isThrowing() : false;
+    next.throwsAny = funcSym ? funcSym->throwsAny : false;
+    next.throwsTypes = funcSym ? funcSym->throwsTypes : std::vector<Type>();
+    FunctionBindScope bindScope(*this, std::move(next));
 
     pushScope();
 
@@ -109,19 +111,17 @@ void Binder::bindFunction(const FunctionDeclaration& func, const std::string& pr
     }
 
     popScope();
-    currentFunction_.clear();
-    currentFunctionThrows_ = false;
-    currentFunctionThrowsAny_ = false;
-    currentFunctionThrowsTypes_.clear();
 }
 
 void Binder::bindMethod(StructMethodDeclaration& method, const StructDeclaration& struc)
 {
-    currentFunction_ = struc.name.token_name + "::" + method.name.token_name;
-    currentStructName_ = struc.name.token_name;
-    currentFunctionThrows_ = method.isThrowing();
-    currentFunctionThrowsAny_ = method.throwsAny;
-    currentFunctionThrowsTypes_ = method.throwsTypes;
+    BindContext next;
+    next.function = struc.name.token_name + "::" + method.name.token_name;
+    next.structName = struc.name.token_name;
+    next.throws = method.isThrowing();
+    next.throwsAny = method.throwsAny;
+    next.throwsTypes = method.throwsTypes;
+    FunctionBindScope bindScope(*this, std::move(next));
 
     pushScope();
 
@@ -248,11 +248,6 @@ void Binder::bindMethod(StructMethodDeclaration& method, const StructDeclaration
     }
 
     popScope();
-    currentFunction_.clear();
-    currentStructName_.clear();
-    currentFunctionThrows_ = false;
-    currentFunctionThrowsAny_ = false;
-    currentFunctionThrowsTypes_.clear();
 }
 
 void Binder::bind_contract_conditions(const std::vector<const ContractClause*>& contracts,

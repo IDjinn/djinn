@@ -24,6 +24,23 @@
 #include "../utils/Logger.h"
 #include "RuntimeDiagnostics.h"
 
+namespace
+{
+    // unordered_map iteration order is unspecified; emission order must not depend on it
+    template <typename Map>
+    std::vector<const typename Map::value_type*> sorted_entries(const Map& map)
+    {
+        std::vector<const typename Map::value_type*> entries;
+        entries.reserve(map.size());
+        for (const auto& entry : map)
+        {
+            entries.push_back(&entry);
+        }
+        std::ranges::sort(entries, [](const auto* a, const auto* b) { return a->first < b->first; });
+        return entries;
+    }
+}
+
 Generator::Generator(DiagnosticEngine& diagnostics, const std::shared_ptr<ScopedSymbolTable>& symbols)
     : _diagnostics(diagnostics),
       symbols(symbols),
@@ -32,6 +49,26 @@ Generator::Generator(DiagnosticEngine& diagnostics, const std::shared_ptr<Scoped
       builder(std::make_unique<llvm::IRBuilder<>>(*context)),
       currentScope(std::make_shared<GeneratorScope>())
 {
+    globalScope_ = currentScope;
+}
+
+Generator::FunctionScope::FunctionScope(Generator& generator, llvm::Function* function, std::string structName,
+                                        const GenericContext* generics)
+    : generator_(generator),
+      savedScope_(generator.currentScope),
+      insertGuard_(*generator.builder)
+{
+    saved_.function = function;
+    saved_.structName = std::move(structName);
+    saved_.generics = generics;
+    std::swap(generator_.fn_, saved_);
+    generator_.currentScope = std::make_shared<GeneratorScope>(generator_.globalScope_);
+}
+
+Generator::FunctionScope::~FunctionScope()
+{
+    std::swap(generator_.fn_, saved_);
+    generator_.currentScope = std::move(savedScope_);
 }
 
 void Generator::push_scope()
@@ -126,8 +163,9 @@ void Generator::generate()
     register_intrinsic_constants();
 
     // PASS 0b: Evaluate constexpr declarations and register in the compile-time evaluator
-    for (const auto& [name, entry] : symbols->constExprConstants)
+    for (const auto* constEntry : sorted_entries(symbols->constExprConstants))
     {
+        const auto& [name, entry] = *constEntry;
         if (!entry.value)
             continue; // intrinsic — already defined in PASS 0a
 
@@ -150,8 +188,9 @@ void Generator::generate()
     }
 
     // PASS 0c: Generate global static variables
-    for (const auto& [name, entry] : symbols->staticVars)
+    for (const auto* staticEntry : sorted_entries(symbols->staticVars))
     {
+        const auto& [name, entry] = *staticEntry;
         if (name.find("::") != std::string::npos && name != name.substr(name.rfind("::") + 2))
             continue;
 
@@ -312,9 +351,9 @@ void Generator::generate()
             apply_implicit_attributes(realMainFn);
             functions["main"] = realMainFn;
 
+            FunctionScope mainScope(*this, realMainFn);
             auto* entryBB = llvm::BasicBlock::Create(*context, "entry", realMainFn);
             builder->SetInsertPoint(entryBB);
-            currentFunction = realMainFn;
 
             // Init runtime with 4 worker threads (default)
             auto* initFn = module->getFunction("__djinn_runtime_init");
@@ -380,9 +419,9 @@ void Generator::generate()
             apply_implicit_attributes(realMainFn);
             functions["main"] = realMainFn;
 
+            FunctionScope mainScope(*this, realMainFn);
             auto* entryBB = llvm::BasicBlock::Create(*context, "entry", realMainFn);
             builder->SetInsertPoint(entryBB);
-            currentFunction = realMainFn;
 
             auto* initFn = module->getFunction("__djinn_runtime_init");
             builder->CreateCall(initFn, {builder->getInt32(4)});

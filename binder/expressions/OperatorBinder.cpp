@@ -273,7 +273,7 @@ std::shared_ptr<Symbol> Binder::bindBinaryExpression(const BinaryExpression& exp
 
         overflowMode = leftMode != OverflowMode::None ? leftMode : rightMode;
 
-        if (overflowMode == OverflowMode::Checked && !currentFunctionThrows_)
+        if (overflowMode == OverflowMode::Checked && !ctx_.throws)
         {
             BINDER_ERROR(
                 DiagnosticCode::TYPE_MISMATCH,
@@ -334,7 +334,7 @@ std::shared_ptr<Symbol> Binder::bindUnaryExpression(const UnaryExpression& expr)
         const_cast<UnaryExpression&>(expr).overflowMode = mode;
         const_cast<UnaryExpression&>(expr).overflowSigned = operand->type.sign;
 
-        if (mode == OverflowMode::Checked && !currentFunctionThrows_)
+        if (mode == OverflowMode::Checked && !ctx_.throws)
         {
             BINDER_ERROR(
                 DiagnosticCode::TYPE_MISMATCH,
@@ -395,7 +395,7 @@ std::shared_ptr<Symbol> Binder::bindPostfixExpression(const PostfixExpression& e
         const_cast<PostfixExpression&>(expr).overflowMode = mode;
         const_cast<PostfixExpression&>(expr).overflowSigned = operand->type.sign;
 
-        if (mode == OverflowMode::Checked && !currentFunctionThrows_)
+        if (mode == OverflowMode::Checked && !ctx_.throws)
         {
             BINDER_ERROR(
                 DiagnosticCode::TYPE_MISMATCH,

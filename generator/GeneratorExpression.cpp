@@ -41,6 +41,7 @@ namespace
             if (error_derived_from(symbols, *structSym, armType))
                 tags.push_back(structSym->errorTag);
         }
+        std::sort(tags.begin() + 1, tags.end());
         return tags;
     }
 }
@@ -77,10 +78,11 @@ llvm::Value* Generator::generate_switch_expression(const SwitchExpression& expr)
     // clear the flag and suppress auto-propagation while it evaluates
     builder->CreateStore(llvm::ConstantInt::get(builder->getInt1Ty(), 0), errorFlagGlobal, true);
 
-    const bool prevInsideTry = insideTryOperand_;
-    insideTryOperand_ = true;
-    llvm::Value* matchValue = generate_expression(*expr.value);
-    insideTryOperand_ = prevInsideTry;
+    llvm::Value* matchValue = nullptr;
+    {
+        const ValueGuard<bool> tryGuard(fn_.insideTryOperand, true);
+        matchValue = generate_expression(*expr.value);
+    }
 
     if (!matchValue)
     {
@@ -118,23 +120,14 @@ llvm::Value* Generator::generate_switch_expression(const SwitchExpression& expr)
         {
             auto* yieldBB = llvm::BasicBlock::Create(*context, "switch.arm.yield",
                                                      builder->GetInsertBlock()->getParent());
-            const auto prevYieldBlock = armYieldBlock_;
-            const auto prevYieldSlot = armYieldSlot_;
-            const auto prevDidYield = armDidYield_;
-            const auto prevInArm = inSwitchArmBlock_;
-            armYieldBlock_ = yieldBB;
-            armYieldSlot_ = nullptr;
-            armDidYield_ = false;
-            inSwitchArmBlock_ = true;
+            const SwitchArmYield prevArm = fn_.armYield;
+            fn_.armYield = {true, yieldBB, nullptr, false};
 
             generate_block(*arm.block);
 
-            auto* yieldSlot = armYieldSlot_;
-            const bool didYield = armDidYield_;
-            armYieldBlock_ = prevYieldBlock;
-            armYieldSlot_ = prevYieldSlot;
-            armDidYield_ = prevDidYield;
-            inSwitchArmBlock_ = prevInArm;
+            auto* yieldSlot = fn_.armYield.slot;
+            const bool didYield = fn_.armYield.didYield;
+            fn_.armYield = prevArm;
 
             // Fall-through is only valid where no value is needed: the final
             // block must be terminated, or already dead (e.g. both paths of
@@ -380,11 +373,11 @@ llvm::Value* Generator::generate_switch_expression(const SwitchExpression& expr)
     // No error arm matched: propagate in throwing functions, abort uncaught otherwise
     if (!caughtAll)
     {
-        if (currentFunctionThrows)
+        if (fn_.throws)
         {
             store_error_origin(expr.location);
             emit_all_scope_cleanup();
-            llvm::Type* returnType = currentFunction ? currentFunction->getReturnType() : builder->getInt32Ty();
+            llvm::Type* returnType = fn_.function ? fn_.function->getReturnType() : builder->getInt32Ty();
             if (returnType->isVoidTy())
             {
                 builder->CreateRetVoid();

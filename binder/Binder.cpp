@@ -357,15 +357,15 @@ void Binder::check_throwing_call(const std::string& calleeName, const bool calle
     if (enforcement_ == ErrorEnforcement::Off) return;
     if (!calleeThrows) return;
 
-    if (insideTryExpression_)
+    if (ctx_.insideTry)
     {
-        tryOperandSawThrowingCall_ = true;
+        ctx_.sawThrowingCall = true;
         return;
     }
 
     // Unchecked call inside another throwing function: error propagates.
     // Strict mode rejects it — propagate explicitly with a bare `try`.
-    if (currentFunctionThrows_&& enforcement_ != ErrorEnforcement::Strict) return;
+    if (ctx_.throws&& enforcement_ != ErrorEnforcement::Strict) return;
 
     const bool strict = enforcement_ == ErrorEnforcement::Strict;
     _diagnostics.emitAndPrint(Diagnostic(
@@ -412,7 +412,7 @@ bool Binder::check_compile_time_call(const FunctionSymbol& funcSym, const Functi
     if (_bindingStdLib) return false;
     // A call inside `try` is handled (fallback or propagation), so provable
     // failures have nothing to report
-    if (insideTryExpression_) return false;
+    if (ctx_.insideTry) return false;
     if (enforcement_ != ErrorEnforcement::CompileTime && enforcement_ != ErrorEnforcement::Strict) return false;
     if (!funcSym.hasBody()) return false;
     if (call.arguments.size() != funcSym.paramNames.size()) return false;

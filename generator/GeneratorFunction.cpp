@@ -34,21 +34,15 @@ void Generator::forward_declare_function(const FunctionSymbol& func)
 
 void Generator::generate_function_body(const FunctionSymbol& func)
 {
-    currentFunctionThrows = func.isThrowing();
-    currentContracts_.clear();
-    contractReturnAlloca = nullptr;
+    llvm::Function* llvmFunc = functions[func.name];
+    FunctionScope scope(*this, llvmFunc);
+    fn_.throws = func.isThrowing();
 
     if (func.isAsync)
     {
         generate_async_function_body(func);
-        currentFunctionThrows = false;
         return;
     }
-
-    push_scope();
-
-    llvm::Function* llvmFunc = functions[func.name];
-    currentFunction = llvmFunc;
 
     const auto entry = llvm::BasicBlock::Create(*context, "entry", llvmFunc);
     builder->SetInsertPoint(entry);
@@ -88,13 +82,11 @@ void Generator::generate_function_body(const FunctionSymbol& func)
         }
     }
 
-    currentContracts_.clear();
-    contractReturnAlloca = nullptr;
+    fn_.contracts.clear();
+    fn_.contractReturn = nullptr;
 
     if (builder->GetInsertBlock()->getTerminator())
     {
-        pop_scope();
-        currentFunctionThrows = false;
         return;
     }
 
@@ -104,14 +96,10 @@ void Generator::generate_function_body(const FunctionSymbol& func)
     if (returnType->isVoidTy())
     {
         builder->CreateRetVoid();
-        pop_scope();
-        currentFunctionThrows = false;
         return;
     }
 
     builder->CreateRet(llvm::Constant::getNullValue(returnType));
-    pop_scope();
-    currentFunctionThrows = false;
 }
 
 void Generator::ensure_malloc_free_declared()
@@ -154,10 +142,7 @@ void Generator::generate_async_function_body(const FunctionSymbol& func)
     hasAsyncFunctions = true;
     ensure_malloc_free_declared();
 
-    push_scope();
-
-    llvm::Function* llvmFunc = functions[func.name];
-    currentFunction = llvmFunc;
+    llvm::Function* llvmFunc = fn_.function;
 
     // Mark as presplitcoroutine so CoroSplitPass knows to process this function
     llvmFunc->addFnAttr(llvm::Attribute::PresplitCoroutine);
@@ -236,24 +221,7 @@ void Generator::generate_async_function_body(const FunctionSymbol& func)
     auto* coroBeginFn = llvm::Intrinsic::getOrInsertDeclaration(module.get(), llvm::Intrinsic::coro_begin);
     llvm::Value* coroHandle = builder->CreateCall(coroBeginFn, {coroId, phiMem}, "coro.hdl");
 
-    // Save async state
-    bool prevInAsync = inAsyncFunction;
-    llvm::Value* prevCoroId = asyncCoroId;
-    llvm::Value* prevCoroHandle = asyncCoroHandle;
-    llvm::Value* prevPromisePtr = asyncPromisePtr;
-    llvm::BasicBlock* prevFinalSuspendBB = asyncFinalSuspendBB;
-    llvm::BasicBlock* prevCleanupBB = asyncCleanupBB;
-    llvm::BasicBlock* prevSuspendBB = asyncSuspendBB;
-    llvm::Type* prevAsyncReturnType = asyncReturnType;
-
-    inAsyncFunction = true;
-    asyncCoroId = coroId;
-    asyncCoroHandle = coroHandle;
-    asyncPromisePtr = promisePtr;
-    asyncFinalSuspendBB = finalSuspendBB;
-    asyncCleanupBB = cleanupBB;
-    asyncSuspendBB = suspendBB;
-    asyncReturnType = origReturnType;
+    fn_.coroutine = {true, coroId, coroHandle, promisePtr, finalSuspendBB, cleanupBB, suspendBB, origReturnType};
 
     // --- initial suspend: function returns handle immediately, body runs on first resume ---
     {
@@ -355,18 +323,6 @@ void Generator::generate_async_function_body(const FunctionSymbol& func)
                             llvm::ConstantTokenNone::get(*context)
                         });
     builder->CreateRet(coroHandle);
-
-    // Restore async state
-    inAsyncFunction = prevInAsync;
-    asyncCoroId = prevCoroId;
-    asyncCoroHandle = prevCoroHandle;
-    asyncPromisePtr = prevPromisePtr;
-    asyncFinalSuspendBB = prevFinalSuspendBB;
-    asyncCleanupBB = prevCleanupBB;
-    asyncSuspendBB = prevSuspendBB;
-    asyncReturnType = prevAsyncReturnType;
-
-    pop_scope();
 }
 
 void Generator::generate_extern_function(const ExternFunctionSymbol& func)

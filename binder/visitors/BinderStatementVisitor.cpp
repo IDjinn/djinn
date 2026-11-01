@@ -88,7 +88,7 @@ namespace djinn
 
     void BinderStatementVisitor::visit(const ThrowStatement& stmt)
     {
-        if (!_binder.currentFunctionThrows_)
+        if (!_binder.ctx_.throws)
         {
             _binder._diagnostics.emitAndPrint(Diagnostic(
                 Severity::Error, DiagnosticCode::THROW_OUTSIDE_THROWS,
@@ -133,10 +133,10 @@ namespace djinn
             return;
         }
 
-        if (!_binder.currentFunctionThrowsAny_ && !_binder.currentFunctionThrowsTypes_.empty())
+        if (!_binder.ctx_.throwsAny && !_binder.ctx_.throwsTypes.empty())
         {
             bool covered = false;
-            for (const auto& t : _binder.currentFunctionThrowsTypes_)
+            for (const auto& t : _binder.ctx_.throwsTypes)
             {
                 if (t.kind == TypeKind::STRUCT && _binder.is_error_derived_from(thrownTypeName, t.structName))
                 {

@@ -33,9 +33,9 @@ llvm::Value* Generator::generate_identifier(const Identifier& expr) const
     }
 
     // Check const fields of the current struct (for use inside static methods)
-    if (!currentStructName.empty())
+    if (!fn_.structName.empty())
     {
-        if (const StructDef* structDef = currentScope->lookup_struct(currentStructName))
+        if (const StructDef* structDef = currentScope->lookup_struct(fn_.structName))
         {
             if (llvm::Constant* constVal = structDef->getConstField(expr.identifier.token_name))
             {

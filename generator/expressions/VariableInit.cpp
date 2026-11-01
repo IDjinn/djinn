@@ -143,7 +143,17 @@ llvm::Value* Generator::generate_variable_init(const VariableInit& expr)
         return alloca;
     }
 
-    llvm::Value* initVal = generate_expression(*expr.value);
+    PointeeHint valuePointee;
+    llvm::Value* initVal = nullptr;
+    if (const auto* fieldAccess = dynamic_cast<const FieldAccess*>(expr.value.get());
+        fieldAccess && expr.type.kind == TypeKind::AUTO)
+    {
+        initVal = generate_field_access(*fieldAccess, &valuePointee);
+    }
+    else
+    {
+        initVal = generate_expression(*expr.value);
+    }
     if (!initVal)
     {
         throw CompileError(DiagnosticCode::INVALID_OPERATION,
@@ -390,13 +400,10 @@ llvm::Value* Generator::generate_variable_init(const VariableInit& expr)
         }
         else if (type->isPointerTy())
         {
-            // Use pointee type info propagated from field access
-            if (_lastFieldAccessPointeeType && !_lastFieldAccessStructName.empty())
+            if (valuePointee.type && !valuePointee.structName.empty())
             {
-                pointeeType = _lastFieldAccessPointeeType;
-                structTypeName = _lastFieldAccessStructName;
-                _lastFieldAccessPointeeType = nullptr;
-                _lastFieldAccessStructName.clear();
+                pointeeType = valuePointee.type;
+                structTypeName = valuePointee.structName;
             }
         }
     }
