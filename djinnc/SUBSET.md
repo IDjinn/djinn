@@ -10,7 +10,7 @@ of them. A construct outside this list is forbidden in `djinnc/src` until the dj
 - `namespace djinnc;` in every file
 - free functions, `extern "C" { ... }` blocks (including variadic `...`)
 - `struct` with fields, `public` / private methods, `public static` methods
-- `static` factory methods returning `T*` (heap allocated with `Mem.zalloc`)
+- `static` factory methods returning `T*` (heap allocated with `Memory.zalloc`)
 
 ## Types
 
@@ -39,7 +39,7 @@ of them. A construct outside this list is forbidden in `djinnc/src` until the dj
 
 ## Globals
 
-- `unsafe static mut void* name = null;` is used for the process arena (`Mem.arena()`). Typed struct pointers cannot be
+- `unsafe static mut void* name = null;` is used for the process arena (`Memory.arena()`). Typed struct pointers cannot be
   used as the global's type yet (stage0 reports the struct as not found), so the global is `void*` plus a cast.
 
 ## Forbidden

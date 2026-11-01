@@ -5,14 +5,14 @@ struct Value {
     TypeRef* type;
 
     public static Value* create(void* ref, TypeRef* type) {
-        Value* value = (Value*)Mem.zalloc(sizeof(Value));
+        Value* value = (Value*)Memory.zalloc(sizeof(Value));
         value.ref = ref;
         value.type = type;
         return value;
     }
 }
 
-struct Local {
+struct LocalVariable {
     i8* name;
     void* slot;
     TypeRef* type;
@@ -28,47 +28,47 @@ struct FieldInfo {
 struct StructInfo {
     i8* name;
     void* llvm;
-    PtrVec* fields;
-    PtrVec* constants;
+    PointerList* fields;
+    PointerList* constants;
     Node* node;
 }
 
-struct FuncInfo {
+struct FunctionInfo {
     i8* name;
     void* function;
     void* function_type;
     TypeRef* return_type;
-    PtrVec* param_types;
+    PointerList* param_types;
     bool is_variadic;
     bool is_extern;
     bool is_instance;
 }
 
-struct CodeGen {
+struct CodeGenerator {
     void* context;
     void* module;
     void* builder;
     void* alloca_builder;
     Diagnostics* diagnostics;
-    PtrVec* functions;
-    PtrVec* locals;
-    PtrVec* globals;
-    PtrVec* structs;
-    FuncInfo* current;
+    PointerList* functions;
+    PointerList* locals;
+    PointerList* globals;
+    PointerList* structs;
+    FunctionInfo* current;
     void* break_target;
     void* continue_target;
 
-    public static CodeGen* create(Diagnostics* diagnostics, i8* module_name) {
-        CodeGen* gen = (CodeGen*)Mem.zalloc(sizeof(CodeGen));
+    public static CodeGenerator* create(Diagnostics* diagnostics, i8* module_name) {
+        CodeGenerator* gen = (CodeGenerator*)Memory.zalloc(sizeof(CodeGenerator));
         gen.context = LLVMContextCreate();
         gen.module = LLVMModuleCreateWithNameInContext(module_name, gen.context);
         gen.builder = LLVMCreateBuilderInContext(gen.context);
         gen.alloca_builder = LLVMCreateBuilderInContext(gen.context);
         gen.diagnostics = diagnostics;
-        gen.functions = PtrVec.create();
-        gen.locals = PtrVec.create();
-        gen.globals = PtrVec.create();
-        gen.structs = PtrVec.create();
+        gen.functions = PointerList.create();
+        gen.locals = PointerList.create();
+        gen.globals = PointerList.create();
+        gen.structs = PointerList.create();
         i8* triple = LLVMGetDefaultTargetTriple();
         LLVMSetTarget(gen.module, triple);
         LLVMDisposeMessage(triple);
@@ -113,7 +113,7 @@ struct CodeGen {
     }
 
     static void** array_of(i32 count) {
-        return (void**)Mem.zalloc(((i64)count + 1) * 8);
+        return (void**)Memory.zalloc(((i64)count + 1) * 8);
     }
 
     static i8* base_name(i8* qualified) {
@@ -155,15 +155,15 @@ struct CodeGen {
         return LLVMIntTypeInContext(this.context, 32);
     }
 
-    FuncInfo* find_function(i8* name) {
-        PtrVec* list = this.functions;
+    FunctionInfo* find_function(i8* name) {
+        PointerList* list = this.functions;
         for (mut i32 i = 0; i < list.length; i = i + 1) {
-            FuncInfo* info = (FuncInfo*)list.get(i);
-            if (Str.same(info.name, name)) {
+            FunctionInfo* info = (FunctionInfo*)list.get(i);
+            if (Strings.same(info.name, name)) {
                 return info;
             }
         }
-        return (FuncInfo*)0;
+        return (FunctionInfo*)0;
     }
 
     void declare_all(Node* container) {
@@ -199,24 +199,24 @@ struct CodeGen {
         if (!declaration.flag()) {
             LLVMSetGlobalConstant(global, 1);
         }
-        Local* entry = (Local*)Mem.zalloc(sizeof(Local));
+        LocalVariable* entry = (LocalVariable*)Memory.zalloc(sizeof(LocalVariable));
         entry.name = declaration.text();
         entry.slot = global;
         entry.type = ty;
         entry.is_mutable = declaration.flag();
-        PtrVec* list = this.globals;
+        PointerList* list = this.globals;
         list.push(entry);
     }
 
-    Local* find_global(i8* name) {
-        PtrVec* list = this.globals;
+    LocalVariable* find_global(i8* name) {
+        PointerList* list = this.globals;
         for (mut i32 i = 0; i < list.length; i = i + 1) {
-            Local* entry = (Local*)list.get(i);
-            if (Str.same(entry.name, name)) {
+            LocalVariable* entry = (LocalVariable*)list.get(i);
+            if (Strings.same(entry.name, name)) {
                 return entry;
             }
         }
-        return (Local*)0;
+        return (LocalVariable*)0;
     }
 
     void declare_function(Node* declaration, bool is_extern) {
@@ -240,7 +240,7 @@ struct CodeGen {
         if (owner == null) {
             return declaration.text();
         }
-        ByteBuf* name = ByteBuf.create();
+        ByteBuffer* name = ByteBuffer.create();
         name.append(owner.name);
         name.append_char(46);
         name.append(declaration.text());
@@ -256,10 +256,10 @@ struct CodeGen {
             return;
         }
 
-        FuncInfo* info = (FuncInfo*)Mem.zalloc(sizeof(FuncInfo));
+        FunctionInfo* info = (FunctionInfo*)Memory.zalloc(sizeof(FunctionInfo));
         info.name = qualified;
         info.return_type = declaration.type();
-        info.param_types = PtrVec.create();
+        info.param_types = PointerList.create();
         info.is_variadic = declaration.is_variadic();
         info.is_extern = is_extern;
 
@@ -270,8 +270,8 @@ struct CodeGen {
         }
         i32 declared = declaration.count();
         i32 count = declared + offset;
-        void** params = CodeGen.array_of(count);
-        PtrVec* param_types = info.param_types;
+        void** params = CodeGenerator.array_of(count);
+        PointerList* param_types = info.param_types;
         if (offset == 1) {
             param_types.push(this.this_type(owner));
             params[0] = LLVMPointerTypeInContext(this.context, 0);
@@ -290,20 +290,20 @@ struct CodeGen {
         info.function_type = LLVMFunctionType(return_type, params, (u32)count, variadic);
 
         mut i8* symbol = qualified;
-        if (!is_extern && owner == null && Str.same(symbol, "main")) {
+        if (!is_extern && owner == null && Strings.same(symbol, "main")) {
             symbol = "__djinn_sync_main";
         }
         info.function = LLVMAddFunction(this.module, symbol, info.function_type);
 
-        PtrVec* list = this.functions;
+        PointerList* list = this.functions;
         list.push(info);
     }
 
     StructInfo* find_struct(i8* name) {
-        PtrVec* list = this.structs;
+        PointerList* list = this.structs;
         for (mut i32 i = 0; i < list.length; i = i + 1) {
             StructInfo* info = (StructInfo*)list.get(i);
-            if (Str.same(info.name, name)) {
+            if (Strings.same(info.name, name)) {
                 return info;
             }
         }
@@ -314,7 +314,7 @@ struct CodeGen {
         if (ty.kind != TypeKind.NAMED) {
             return (StructInfo*)0;
         }
-        return this.find_struct(CodeGen.base_name(ty.name));
+        return this.find_struct(CodeGenerator.base_name(ty.name));
     }
 
     TypeRef* this_type(StructInfo* owner) {
@@ -322,10 +322,10 @@ struct CodeGen {
     }
 
     FieldInfo* find_field(StructInfo* info, i8* name) {
-        PtrVec* list = info.fields;
+        PointerList* list = info.fields;
         for (mut i32 i = 0; i < list.length; i = i + 1) {
             FieldInfo* field = (FieldInfo*)list.get(i);
-            if (Str.same(field.name, name)) {
+            if (Strings.same(field.name, name)) {
                 return field;
             }
         }
@@ -333,10 +333,10 @@ struct CodeGen {
     }
 
     Node* find_constant(StructInfo* info, i8* name) {
-        PtrVec* list = info.constants;
+        PointerList* list = info.constants;
         for (mut i32 i = 0; i < list.length; i = i + 1) {
             Node* constant = (Node*)list.get(i);
-            if (Str.same(constant.text(), name)) {
+            if (Strings.same(constant.text(), name)) {
                 return constant;
             }
         }
@@ -359,14 +359,14 @@ struct CodeGen {
             this.error(declaration, "struct is already defined");
             return;
         }
-        StructInfo* info = (StructInfo*)Mem.zalloc(sizeof(StructInfo));
+        StructInfo* info = (StructInfo*)Memory.zalloc(sizeof(StructInfo));
         info.name = declaration.text();
         info.node = declaration;
-        info.fields = PtrVec.create();
-        info.constants = PtrVec.create();
+        info.fields = PointerList.create();
+        info.constants = PointerList.create();
         info.llvm = LLVMStructCreateNamed(this.context, info.name);
-        PtrVec* constants = info.constants;
-        PtrVec* fields = info.fields;
+        PointerList* constants = info.constants;
+        PointerList* fields = info.fields;
         for (mut i32 i = 0; i < declaration.count(); i = i + 1) {
             Node* member = declaration.child(i);
             if (member.kind != NodeKind.FIELD_DECL) {
@@ -375,23 +375,23 @@ struct CodeGen {
             if (member.first() != null) {
                 constants.push((void*)member);
             } else {
-                FieldInfo* field = (FieldInfo*)Mem.zalloc(sizeof(FieldInfo));
+                FieldInfo* field = (FieldInfo*)Memory.zalloc(sizeof(FieldInfo));
                 field.name = member.text();
                 field.type = member.type();
                 field.index = fields.length;
                 fields.push((void*)field);
             }
         }
-        PtrVec* list = this.structs;
+        PointerList* list = this.structs;
         list.push((void*)info);
     }
 
     void build_struct_bodies() {
-        PtrVec* list = this.structs;
+        PointerList* list = this.structs;
         for (mut i32 i = 0; i < list.length; i = i + 1) {
             StructInfo* info = (StructInfo*)list.get(i);
-            PtrVec* fields = info.fields;
-            void** types = CodeGen.array_of(fields.length);
+            PointerList* fields = info.fields;
+            void** types = CodeGenerator.array_of(fields.length);
             for (mut i32 f = 0; f < fields.length; f = f + 1) {
                 FieldInfo* field = (FieldInfo*)fields.get(f);
                 types[f] = this.llvm_type(field.type, info.node);
@@ -427,7 +427,7 @@ struct CodeGen {
     }
 
     void define_function(Node* declaration, StructInfo* owner) {
-        FuncInfo* info = this.find_function(this.member_name(owner, declaration));
+        FunctionInfo* info = this.find_function(this.member_name(owner, declaration));
         this.current = info;
 
         void* entry = LLVMAppendBasicBlockInContext(this.context, info.function, "entry");
@@ -437,7 +437,7 @@ struct CodeGen {
         LLVMPositionBuilderBefore(this.alloca_builder, jump);
         LLVMPositionBuilderAtEnd(this.builder, body);
 
-        PtrVec* list = this.locals;
+        PointerList* list = this.locals;
         list.truncate(0);
         mut i32 offset = 0;
         if (info.is_instance) {
@@ -470,21 +470,21 @@ struct CodeGen {
     }
 
     void add_local(i8* name, void* slot, TypeRef* ty, bool is_mutable) {
-        Local* local = (Local*)Mem.zalloc(sizeof(Local));
+        LocalVariable* local = (LocalVariable*)Memory.zalloc(sizeof(LocalVariable));
         local.name = name;
         local.slot = slot;
         local.type = ty;
         local.is_mutable = is_mutable;
-        PtrVec* list = this.locals;
+        PointerList* list = this.locals;
         list.push(local);
     }
 
-    Local* find_local(i8* name) {
-        PtrVec* list = this.locals;
+    LocalVariable* find_local(i8* name) {
+        PointerList* list = this.locals;
         mut i32 i = list.length - 1;
         while (i >= 0) {
-            Local* local = (Local*)list.get(i);
-            if (Str.same(local.name, name)) {
+            LocalVariable* local = (LocalVariable*)list.get(i);
+            if (Strings.same(local.name, name)) {
                 return local;
             }
             i = i - 1;
@@ -513,7 +513,7 @@ struct CodeGen {
     }
 
     void emit_entry_point() {
-        FuncInfo* user = this.find_function("main");
+        FunctionInfo* user = this.find_function("main");
         if (user == null) {
             Diagnostics* diagnostics = this.diagnostics;
             diagnostics.error(1, 1, "no 'main' function defined");
@@ -522,32 +522,32 @@ struct CodeGen {
 
         void* i32_type = LLVMIntTypeInContext(this.context, 32);
         void* void_type = LLVMVoidTypeInContext(this.context);
-        void** init_params = CodeGen.array_of(1);
+        void** init_params = CodeGenerator.array_of(1);
         init_params[0] = i32_type;
         void* init_type = LLVMFunctionType(void_type, init_params, 1, 0);
         void* init_fn = LLVMAddFunction(this.module, "__djinn_runtime_init", init_type);
-        void* shutdown_type = LLVMFunctionType(void_type, CodeGen.array_of(0), 0, 0);
+        void* shutdown_type = LLVMFunctionType(void_type, CodeGenerator.array_of(0), 0, 0);
         void* shutdown_fn = LLVMAddFunction(this.module, "__djinn_runtime_shutdown", shutdown_type);
 
-        void* main_type = LLVMFunctionType(i32_type, CodeGen.array_of(0), 0, 0);
+        void* main_type = LLVMFunctionType(i32_type, CodeGenerator.array_of(0), 0, 0);
         void* main_fn = LLVMAddFunction(this.module, "main", main_type);
         void* entry = LLVMAppendBasicBlockInContext(this.context, main_fn, "entry");
         LLVMPositionBuilderAtEnd(this.builder, entry);
 
-        void** init_args = CodeGen.array_of(1);
+        void** init_args = CodeGenerator.array_of(1);
         init_args[0] = LLVMConstInt(i32_type, 4, 0);
         LLVMBuildCall2(this.builder, init_type, init_fn, init_args, 1, "");
 
         mut void* exit_code = LLVMConstInt(i32_type, 0, 0);
         if (user.return_type.is_void()) {
-            LLVMBuildCall2(this.builder, user.function_type, user.function, CodeGen.array_of(0), 0, "");
+            LLVMBuildCall2(this.builder, user.function_type, user.function, CodeGenerator.array_of(0), 0, "");
         } else {
-            void* returned = LLVMBuildCall2(this.builder, user.function_type, user.function, CodeGen.array_of(0), 0, "exit");
+            void* returned = LLVMBuildCall2(this.builder, user.function_type, user.function, CodeGenerator.array_of(0), 0, "exit");
             Value* wrapped = Value.create(returned, user.return_type);
             exit_code = this.coerce(wrapped, TypeRef.integer(32, true));
         }
 
-        LLVMBuildCall2(this.builder, shutdown_type, shutdown_fn, CodeGen.array_of(0), 0, "");
+        LLVMBuildCall2(this.builder, shutdown_type, shutdown_fn, CodeGenerator.array_of(0), 0, "");
         LLVMBuildRet(this.builder, exit_code);
     }
 
@@ -618,7 +618,7 @@ struct CodeGen {
         i32 kind = node.kind;
 
         if (kind == NodeKind.BLOCK) {
-            PtrVec* list = this.locals;
+            PointerList* list = this.locals;
             i32 mark = list.length;
             for (mut i32 i = 0; i < node.count(); i = i + 1) {
                 this.gen_statement(node.child(i));
@@ -747,7 +747,7 @@ struct CodeGen {
     }
 
     void gen_for(Node* node) {
-        PtrVec* list = this.locals;
+        PointerList* list = this.locals;
         i32 mark = list.length;
         if (node.first() != null) {
             this.gen_statement(node.first());
@@ -970,7 +970,7 @@ struct CodeGen {
     }
 
     Value* gen_identifier(Node* node) {
-        Local* local = this.find_local(node.text());
+        LocalVariable* local = this.find_local(node.text());
         if (local == null) {
             this.error(node, "undefined variable");
             return this.fallback((void*)0);
@@ -988,7 +988,7 @@ struct CodeGen {
 
     Value* gen_address(Node* node) {
         if (node.kind == NodeKind.IDENTIFIER) {
-            Local* local = this.find_local(node.text());
+            LocalVariable* local = this.find_local(node.text());
             if (local == null) {
                 this.error(node, "undefined variable");
                 return this.fallback((void*)0);
@@ -1008,7 +1008,7 @@ struct CodeGen {
                 return this.fallback((void*)0);
             }
             Value* index = this.gen_expression(node.second(), TypeRef.integer(64, true));
-            void** indices = CodeGen.array_of(1);
+            void** indices = CodeGenerator.array_of(1);
             indices[0] = this.coerce(index, TypeRef.integer(64, true));
             void* element_type = this.llvm_type(base_type.element, node);
             void* address = LLVMBuildGEP2(this.builder, element_type, base.ref, indices, 1, "index");
@@ -1063,7 +1063,7 @@ struct CodeGen {
     Value* gen_assign(Node* node) {
         Node* target = node.first();
         if (target.kind == NodeKind.IDENTIFIER) {
-            Local* local = this.find_local(target.text());
+            LocalVariable* local = this.find_local(target.text());
             if (local != null && !local.is_mutable) {
                 this.error(target, "cannot assign to an immutable variable");
             }
@@ -1099,8 +1099,8 @@ struct CodeGen {
 
         LLVMPositionBuilderAtEnd(this.builder, end_block);
         void* merged = LLVMBuildPhi(this.builder, this.llvm_type(flag, node), "logic");
-        void** values = CodeGen.array_of(2);
-        void** blocks = CodeGen.array_of(2);
+        void** values = CodeGenerator.array_of(2);
+        void** blocks = CodeGenerator.array_of(2);
         mut u64 shortcut = 1;
         if (is_and) {
             shortcut = 0;
@@ -1125,7 +1125,7 @@ struct CodeGen {
         }
 
         mut TypeRef* hint = expected;
-        if (CodeGen.is_comparison(op)) {
+        if (CodeGenerator.is_comparison(op)) {
             hint = (TypeRef*)0;
         }
 
@@ -1161,7 +1161,7 @@ struct CodeGen {
         void* lhs = this.coerce(left, common);
         void* rhs = this.coerce(right, common);
 
-        if (CodeGen.is_comparison(op)) {
+        if (CodeGenerator.is_comparison(op)) {
             return this.gen_comparison(node, common, lhs, rhs);
         }
         return this.gen_arithmetic(node, common, lhs, rhs);
@@ -1172,7 +1172,7 @@ struct CodeGen {
         if (node.op == TokenKind.MINUS) {
             amount = LLVMBuildNeg(this.builder, amount, "negoffset");
         }
-        void** indices = CodeGen.array_of(1);
+        void** indices = CodeGenerator.array_of(1);
         indices[0] = amount;
         void* byte_type = LLVMIntTypeInContext(this.context, 8);
         void* moved = LLVMBuildGEP2(this.builder, byte_type, pointer.ref, indices, 1, "ptradd");
@@ -1267,12 +1267,12 @@ struct CodeGen {
 
     Value* gen_call(Node* node) {
         Node* callee = node.first();
-        mut FuncInfo* info = (FuncInfo*)0;
+        mut FunctionInfo* info = (FunctionInfo*)0;
         mut void* receiver = (void*)0;
         mut i32 offset = 0;
 
         if (callee.kind == NodeKind.IDENTIFIER) {
-            info = this.find_function(CodeGen.base_name(callee.text()));
+            info = this.find_function(CodeGenerator.base_name(callee.text()));
         } else if (callee.kind == NodeKind.FIELD_ACCESS) {
             Node* base = callee.first();
             if (this.is_struct_name(base)) {
@@ -1308,7 +1308,7 @@ struct CodeGen {
             return this.fallback((void*)0);
         }
 
-        PtrVec* param_types = info.param_types;
+        PointerList* param_types = info.param_types;
         i32 fixed = param_types.length;
         i32 given = node.count() + offset;
         if (given < fixed || (given > fixed && !info.is_variadic)) {
@@ -1316,7 +1316,7 @@ struct CodeGen {
             return this.fallback((void*)0);
         }
 
-        void** args = CodeGen.array_of(given);
+        void** args = CodeGenerator.array_of(given);
         if (offset == 1) {
             args[0] = receiver;
         }
@@ -1341,7 +1341,7 @@ struct CodeGen {
     }
 
     i8* method_name(i8* owner, i8* member) {
-        ByteBuf* name = ByteBuf.create();
+        ByteBuffer* name = ByteBuffer.create();
         name.append(owner);
         name.append_char(46);
         name.append(member);
