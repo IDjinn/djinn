@@ -126,7 +126,9 @@ llvm::Value* Generator::generate_binary_expression(const BinaryExpression& expr)
                 }
                 else
                 {
-                    right = builder->CreateSExt(right, leftType, "sext");
+                    right = expr.rightSigned
+                                ? builder->CreateSExt(right, leftType, "sext")
+                                : builder->CreateZExt(right, leftType, "zext");
                 }
             }
             else
@@ -138,7 +140,9 @@ llvm::Value* Generator::generate_binary_expression(const BinaryExpression& expr)
                 }
                 else
                 {
-                    left = builder->CreateSExt(left, rightType, "sext");
+                    left = expr.leftSigned
+                               ? builder->CreateSExt(left, rightType, "sext")
+                               : builder->CreateZExt(left, rightType, "zext");
                 }
             }
         }
@@ -168,6 +172,7 @@ llvm::Value* Generator::generate_binary_expression(const BinaryExpression& expr)
     }
 
     const bool isFloat = left->getType()->isFloatingPointTy();
+    const bool compareSigned = expr.leftSigned && expr.rightSigned;
     const bool isStruct = left->getType()->isStructTy();
 
     // For struct types, look up operator overloads
@@ -341,19 +346,23 @@ llvm::Value* Generator::generate_binary_expression(const BinaryExpression& expr)
     case TokenType::LESS:
         return isFloat
                    ? builder->CreateFCmpOLT(left, right, "lttmp")
-                   : builder->CreateICmpSLT(left, right, "lttmp");
+                   : (compareSigned ? builder->CreateICmpSLT(left, right, "lttmp")
+                                  : builder->CreateICmpULT(left, right, "lttmp"));
     case TokenType::LESS_EQUAL:
         return isFloat
                    ? builder->CreateFCmpOLE(left, right, "letmp")
-                   : builder->CreateICmpSLE(left, right, "letmp");
+                   : (compareSigned ? builder->CreateICmpSLE(left, right, "letmp")
+                                  : builder->CreateICmpULE(left, right, "letmp"));
     case TokenType::GREATER:
         return isFloat
                    ? builder->CreateFCmpOGT(left, right, "gttmp")
-                   : builder->CreateICmpSGT(left, right, "gttmp");
+                   : (compareSigned ? builder->CreateICmpSGT(left, right, "gttmp")
+                                  : builder->CreateICmpUGT(left, right, "gttmp"));
     case TokenType::GREATER_EQUAL:
         return isFloat
                    ? builder->CreateFCmpOGE(left, right, "getmp")
-                   : builder->CreateICmpSGE(left, right, "getmp");
+                   : (compareSigned ? builder->CreateICmpSGE(left, right, "getmp")
+                                  : builder->CreateICmpUGE(left, right, "getmp"));
 
     case TokenType::AND_AND:
         return builder->CreateAnd(left, right, "andtmp");

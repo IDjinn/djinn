@@ -68,6 +68,13 @@ std::shared_ptr<Symbol> Binder::bindBinaryExpression(const BinaryExpression& exp
     const bool leftIsLiteral = isIntLiteral(*expr.left);
     const bool rightIsLiteral = isIntLiteral(*expr.right);
 
+    if (leftResolved.kind == TypeKind::INTEGER && rightResolved.kind == TypeKind::INTEGER)
+    {
+        auto& mutableExpr = const_cast<BinaryExpression&>(expr);
+        mutableExpr.leftSigned = leftIsLiteral && !rightIsLiteral ? rightResolved.sign : leftResolved.sign;
+        mutableExpr.rightSigned = rightIsLiteral && !leftIsLiteral ? leftResolved.sign : rightResolved.sign;
+    }
+
     // Check if a STRUCT type is a generic param (not registered as struct/enum)
     auto isGenericParam = [this](const Type& type) -> bool // TODO: VALID FUNCTION FOR TYPE GENERIC CHECK
     {

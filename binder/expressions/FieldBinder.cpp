@@ -68,7 +68,9 @@ std::shared_ptr<Symbol> Binder::bindFieldAccess(const FieldAccess& access)
             );
         }
 
-        return std::make_shared<Symbol>(field.value());
+        auto fieldSymbol = std::make_shared<Symbol>(field.value());
+        isTypeDefined(fieldSymbol->type);
+        return fieldSymbol;
     }
 
     return object_symbol;
