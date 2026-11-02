@@ -66,7 +66,13 @@ Enum-like values are `i32` constants held in `static` structs until `==` on enum
 ## Constructors
 
 - `Point(i32 x, i32 y) { ... }` inside a struct body or `impl`; one constructor per type, arguments are positional (ordered).
-- `Point p = Point(1, 2);` builds a value, `Point* heap = new Point(1, 2);` allocates zeroed memory (`calloc`) and returns a pointer. Generic types work the same way: `Box<i32>(7)`, `new Box<i32>(9)`.
+- `Point p = Point(1, 2);` builds a value, `Point* heap = new Point(1, 2);` allocates zeroed memory through the runtime allocator (`__djinn_malloc`, which traces the allocation) and returns a pointer. Generic types work the same way: `Box<i32>(7)`, `new Box<i32>(9)`.
 - A struct without a constructor can only be built with `Name()` (zero-initialized) or a `{ .field = value }` initializer.
 
 - Operator overloading: `operator +(T left, T right) -> T { ... }` inside `impl T { }` or the struct body defines a static operator method; binary expressions on struct values call it. `!=` is derived from `==`.
+
+## Overloading
+
+- Functions, methods, constructors and operators can share a name when their parameter types differ; a redefinition with the same parameter types is still an error.
+- The call picks the candidate whose parameter types match best (exact type beats numeric conversion); no match or a tie is a compile error. Overloads after the first get a `$n` suffix in the symbol name.
+

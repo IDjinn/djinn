@@ -569,11 +569,21 @@ struct TypeChecker {
             this.error(node, "struct does not define this operator");
             return Types.i32_type();
         }
-        IdList* params = method.param_types;
-        if (params.length != 2 || params.get(0) != left || params.get(1) != right) {
+        mut FunctionInfo* exact = (FunctionInfo*)0;
+        mut FunctionInfo* walk = method;
+        while (walk != null) {
+            IdList* candidate_params = walk.param_types;
+            if (candidate_params.length == 2 && candidate_params.get(0) == left && candidate_params.get(1) == right) {
+                exact = walk;
+                break;
+            }
+            walk = walk.overload;
+        }
+        if (exact == null) {
             this.error(node, "operator operands do not match its parameters");
             return method.return_type;
         }
+        method = exact;
         node.set_symbol(kind, (void*)method);
         return method.return_type;
     }
@@ -849,9 +859,78 @@ struct TypeChecker {
         return instance;
     }
 
+    FunctionInfo* pick_overload(FunctionInfo* head, Node* call, i32 offset) {
+        IdList* types = IdList.create();
+        for (mut i32 i = 0; i < call.count(); i = i + 1) {
+            Node* argument = call.child(i);
+            if (argument.kind == NodeKind.STRUCT_INIT) {
+                types.push(0);
+            } else {
+                types.push(this.check_expression(argument, 0));
+            }
+        }
+        mut FunctionInfo* best = (FunctionInfo*)0;
+        mut i32 best_score = 0 - 1;
+        mut bool ambiguous = false;
+        mut FunctionInfo* candidate = head;
+        while (candidate != null) {
+            IdList* params = candidate.param_types;
+            i32 fixed = params.length - offset;
+            bool arity_ok = call.count() == fixed || (candidate.is_variadic && call.count() >= fixed);
+            if (!candidate.is_template && arity_ok) {
+                mut i32 score = 0;
+                mut bool fits = true;
+                for (mut i32 i = 0; i < call.count() && i < fixed; i = i + 1) {
+                    u32 expected = params.get(i + offset);
+                    u32 actual = types.get(i);
+                    if (actual == 0) {
+                        if (Types.is_struct(expected)) {
+                            score = score + 1;
+                        } else {
+                            fits = false;
+                        }
+                    } else if (actual == expected) {
+                        score = score + 4;
+                    } else if ((Types.is_integer(actual) || Types.is_float(actual)) && (Types.is_integer(expected) || Types.is_float(expected))) {
+                        score = score + 1;
+                    } else if (Types.is_pointer(actual) && Types.is_pointer(expected)) {
+                        score = score + 1;
+                    } else {
+                        fits = false;
+                    }
+                }
+                if (fits) {
+                    if (score > best_score) {
+                        best = candidate;
+                        best_score = score;
+                        ambiguous = false;
+                    } else if (score == best_score) {
+                        ambiguous = true;
+                    }
+                }
+            }
+            candidate = candidate.overload;
+        }
+        if (best == null) {
+            this.error(call, "no overload matches these arguments");
+            return (FunctionInfo*)0;
+        }
+        if (ambiguous) {
+            this.error(call, "call is ambiguous between overloads");
+            return (FunctionInfo*)0;
+        }
+        return best;
+    }
+
     FunctionInfo* check_constructor_arguments(Node* node, StructInfo* owner) {
         SymbolTable* symbols = this.symbols;
-        FunctionInfo* constructor = symbols.find_method(owner, Ast.intern_base_name(".ctor", 5));
+        mut FunctionInfo* constructor = symbols.find_method(owner, Ast.intern_base_name(".ctor", 5));
+        if (constructor != null && constructor.overload != null) {
+            constructor = this.pick_overload(constructor, node, 1);
+            if (constructor == null) {
+                return constructor;
+            }
+        }
         if (constructor == null) {
             if (node.count() > 0) {
                 this.error(node, "struct has no constructor");
@@ -940,6 +1019,12 @@ struct TypeChecker {
                     return Types.i32_type();
                 }
             }
+            if (info != null && info.overload != null) {
+                info = this.pick_overload(info, node, 0);
+                if (info == null) {
+                    return Types.i32_type();
+                }
+            }
             callee.set_symbol(SymbolKind.FUNCTION, (void*)info);
         } else if (callee.kind == NodeKind.FIELD_ACCESS) {
             Node* base = callee.first();
@@ -957,6 +1042,12 @@ struct TypeChecker {
                     this.error(callee, "instance method called without an instance");
                     return Types.i32_type();
                 }
+                if (info != null && info.overload != null) {
+                    info = this.pick_overload(info, node, 0);
+                    if (info == null) {
+                        return Types.i32_type();
+                    }
+                }
                 callee.set_symbol(SymbolKind.STATIC_METHOD, (void*)info);
             } else {
                 StructInfo* owner = this.struct_of_base(base);
@@ -973,6 +1064,12 @@ struct TypeChecker {
                 if (info != null && !info.is_instance) {
                     this.error(callee, "static method called on an instance");
                     return Types.i32_type();
+                }
+                if (info != null && info.overload != null) {
+                    info = this.pick_overload(info, node, 1);
+                    if (info == null) {
+                        return Types.i32_type();
+                    }
                 }
                 callee.set_symbol(SymbolKind.INSTANCE_METHOD, (void*)info);
                 offset = 1;

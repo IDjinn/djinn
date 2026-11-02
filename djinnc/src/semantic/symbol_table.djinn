@@ -65,6 +65,8 @@ struct FunctionInfo {
     GenericParams* generics;
     bool is_template;
     U32Map* bindings;
+    FunctionInfo* overload;
+    i32 overload_index;
 }
 
 struct NamespaceInfo {
@@ -354,6 +356,23 @@ struct SymbolTable {
         return (StructInfo*)list.get((i32)index);
     }
 
+    static bool same_signature(FunctionInfo* left, FunctionInfo* right) {
+        if (left.is_template || right.is_template) {
+            return left.is_template && right.is_template;
+        }
+        IdList* a = left.param_types;
+        IdList* b = right.param_types;
+        if (a.length != b.length) {
+            return false;
+        }
+        for (mut i32 i = 0; i < a.length; i = i + 1) {
+            if (a.get(i) != b.get(i)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     public bool add_function(FunctionInfo* info) {
         mut U32Map* map = this.function_map;
         mut u32 key = SymbolTable.key(info.namespace_id, info.name_atom);
@@ -362,11 +381,34 @@ struct SymbolTable {
             map = owner.method_map;
             key = info.name_atom;
         }
-        if (map.contains(key)) {
-            return false;
-        }
         PointerList* list = this.functions;
-        map.put(key, (u32)list.length);
+        i64 found = map.find(key);
+        if (found < 0) {
+            map.put(key, (u32)list.length);
+            list.push((void*)info);
+            return true;
+        }
+        mut FunctionInfo* tail = (FunctionInfo*)list.get((i32)found);
+        mut i32 ordinal = 1;
+        while (true) {
+            if (SymbolTable.same_signature(tail, info)) {
+                return false;
+            }
+            if (tail.overload == null) {
+                break;
+            }
+            tail = tail.overload;
+            ordinal = ordinal + 1;
+        }
+        tail.overload = info;
+        info.overload_index = ordinal;
+        if (!info.is_extern) {
+            ByteBuffer* mangled = ByteBuffer.create();
+            mangled.append(info.name);
+            mangled.append_char(36);
+            mangled.append_int((i64)ordinal);
+            info.name = mangled.cstr();
+        }
         list.push((void*)info);
         return true;
     }
