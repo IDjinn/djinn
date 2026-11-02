@@ -354,6 +354,12 @@ std::shared_ptr<Symbol> Binder::bindUnaryExpression(const UnaryExpression& expr)
 
     Type resultType = operand ? operand->type : Type::voided();
 
+    if (operand && expr.op == TokenType::AMPERSAND)
+        resultType = Type::pointer(operand->type);
+    else if (operand && expr.op == TokenType::STAR && operand->type.kind == TypeKind::POINTER &&
+        operand->type.elementType)
+        resultType = *operand->type.elementType;
+
     // Only negation preserves non-zero-ness (~x is zero when x == -1)
     if (expr.op != TokenType::MINUS && resultType.kind == TypeKind::INTEGER)
     {

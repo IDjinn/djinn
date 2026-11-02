@@ -163,7 +163,13 @@ std::string Generator::get_djinn_type_name(const Expression& expr, llvm::Value* 
     if (const auto* varDecl = dynamic_cast<const VariableDeclaration*>(&expr))
         return varDecl->type.toHumanString();
 
-    return get_type_name_for_value(value);
+    std::string llvmName = get_type_name_for_value(value);
+    if (llvmName == "unknown")
+    {
+        if (const Type* bound = type_of(expr))
+            return bound->toHumanString();
+    }
+    return llvmName;
 }
 
 llvm::Value* Generator::box_value(llvm::Value* value, const std::string& typeName)
