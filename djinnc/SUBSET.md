@@ -38,7 +38,7 @@ of them. A construct outside this list is forbidden in `djinnc/src` until the dj
 
 - fields (pointer, integer, float or struct-typed), `const` members, instance and `public static` methods, `this`
 - member access through pointers (`p.field`, `p.method()`), `Struct.method()` and `Struct.CONST`
-- by-value struct locals, struct parameters and returns are not exercised by djinnc itself
+- by-value struct locals, parameters, returns and copies, plus struct initializers `{ .x = 1, .y = 2 }` (the target struct comes from the context: declaration, return, argument, assignment or an outer field)
 
 ## Globals
 

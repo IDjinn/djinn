@@ -354,6 +354,9 @@ struct TypeChecker {
         if (kind == NodeKind.SWITCH_EXPR) {
             return this.check_switch_expression(node, expected);
         }
+        if (kind == NodeKind.STRUCT_INIT) {
+            return this.check_struct_init(node, expected);
+        }
         if (kind == NodeKind.INTRINSIC) {
             u32 measured = this.resolve_type(node.type(), node);
             if (Types.is_void(measured) || measured == Types.auto_type()) {
@@ -594,6 +597,27 @@ struct TypeChecker {
         }
         this.check_expression(node.second(), type);
         return type;
+    }
+
+    u32 check_struct_init(Node* node, u32 expected) {
+        SymbolTable* symbols = this.symbols;
+        if (expected == 0 || !Types.is_struct(expected) || symbols.enum_of_type(expected) != null) {
+            this.error(node, "a struct initializer needs a struct type from its context");
+            return Types.i32_type();
+        }
+        StructInfo* info = symbols.struct_at(Types.struct_index(expected));
+        for (mut i32 i = 0; i < node.count(); i = i + 1) {
+            Node* init = node.child(i);
+            FieldInfo* field = symbols.find_field(info, init.name());
+            if (field == null) {
+                this.error(init, "struct has no such field");
+                this.check_expression(init.first(), 0);
+            } else {
+                init.set_symbol(SymbolKind.FIELD, (void*)field);
+                this.check_expression(init.first(), field.type);
+            }
+        }
+        return expected;
     }
 
     u32 check_switch_expression(Node* node, u32 expected) {
