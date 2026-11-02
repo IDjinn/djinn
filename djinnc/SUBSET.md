@@ -25,6 +25,7 @@ of them. A construct outside this list is forbidden in `djinnc/src` until the dj
 - `if / else if / else`, `while`, `do-while`, `for`, `break`, `continue`, `return`
 - `switch (integer) { case <const>: ... default: ... }` as a statement: no fallthrough, `break` leaves the switch, `continue` targets the enclosing loop
 - `enum Name { A(), B = 5, C }` and tagged enums `enum Msg { Empty(), Number(i32), Pair(i32, i32) }`: `Msg::Pair(1, 2)` builds a value, payload-less enums are `i32` tags with `==`, `!=` and `case Name::A():`. `switch value { Empty -> 1, Number n -> n, Pair a b -> a * b }` is an expression and must cover every variant. Payload types are scalars; generic enums are not supported yet.
+- `interface Name { Type field; Ret method(params); }`, `struct X : interface Name` (or `struct X : Name`), `impl X { methods }` and `impl Name for X { methods }`: conformance (fields and method signatures) is checked at compile time; there is no interface-typed value or dynamic dispatch, no generic interface, and `impl` takes a single interface and a single struct.
 - assignment to locals, fields and indexed pointers
 
 ## Expressions
@@ -46,7 +47,7 @@ of them. A construct outside this list is forbidden in `djinnc/src` until the dj
 
 ## Forbidden
 
-generics, interfaces, `impl`, async/await, `try`/`throws`, `ensure`, string
+generics, async/await, `try`/`throws`, `ensure`, string
 interpolation, closures, `auto`, destructuring.
 
 Enum-like values are `i32` constants held in `static` structs until `==` on enums exists in both compilers.
