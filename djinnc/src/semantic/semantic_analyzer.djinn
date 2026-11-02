@@ -3,6 +3,7 @@ namespace djinnc;
 struct SemanticAnalyzer {
     Diagnostics* diagnostics;
     SymbolTable* symbols;
+    u32 scope;
 
     public static SemanticAnalyzer* create(Diagnostics* diagnostics, SymbolTable* symbols) {
         SemanticAnalyzer* analyzer = (SemanticAnalyzer*)Memory.zalloc(sizeof(SemanticAnalyzer));
@@ -13,6 +14,7 @@ struct SemanticAnalyzer {
 
     public bool collect(Node* program) {
         this.collect_structs(program);
+        this.resolve_structs();
         this.collect_functions(program);
         Diagnostics* diagnostics = this.diagnostics;
         return !diagnostics.failed();
@@ -20,14 +22,38 @@ struct SemanticAnalyzer {
 
     void error(Node* at, i8* message) {
         Diagnostics* diagnostics = this.diagnostics;
-        diagnostics.error_in(Ast.file_name(at.file), at.line, at.column, message);
+        diagnostics.error_in(at.file_name(), at.line(), at.column(), message);
+    }
+
+    u32 enter(Node* namespace_node) {
+        u32 saved = this.scope;
+        if (!namespace_node.flag()) {
+            SymbolTable* symbols = this.symbols;
+            this.scope = symbols.enter_namespace(saved, namespace_node.text_atom());
+        }
+        return saved;
+    }
+
+    i8* declared_name(Node* declaration, u32 namespace_id) {
+        SymbolTable* symbols = this.symbols;
+        i8* prefix = symbols.namespace_prefix(namespace_id);
+        if (prefix == null) {
+            return declaration.text();
+        }
+        ByteBuffer* name = ByteBuffer.create();
+        name.append(prefix);
+        name.append("::");
+        name.append(declaration.text());
+        return name.cstr();
     }
 
     void collect_structs(Node* container) {
         for (mut i32 i = 0; i < container.count(); i = i + 1) {
             Node* declaration = container.child(i);
             if (declaration.kind == NodeKind.NAMESPACE_DECL) {
+                u32 saved = this.enter(declaration);
                 this.collect_structs(declaration);
+                this.scope = saved;
             } else if (declaration.kind == NodeKind.STRUCT_DECL && declaration.type() == null) {
                 this.collect_struct(declaration);
             }
@@ -37,7 +63,8 @@ struct SemanticAnalyzer {
     void collect_struct(Node* declaration) {
         Arena* arena = Memory.arena();
         StructInfo* info = (StructInfo*)Memory.zalloc(sizeof(StructInfo));
-        info.name = declaration.text();
+        info.namespace_id = this.scope;
+        info.name = this.declared_name(declaration, this.scope);
         info.name_atom = declaration.name();
         info.node = declaration;
         info.fields = PointerList.create();
@@ -50,6 +77,9 @@ struct SemanticAnalyzer {
             this.error(declaration, "struct is already defined");
             return;
         }
+        PointerList* registered = symbols.structs;
+        info.index = (u32)(registered.length - 1);
+        info.type_id = Types.structure(info.index);
 
         PointerList* constants = info.constants;
         PointerList* fields = info.fields;
@@ -72,18 +102,55 @@ struct SemanticAnalyzer {
             FieldInfo* field = (FieldInfo*)Memory.zalloc(sizeof(FieldInfo));
             field.name = member.text();
             field.name_atom = member.name();
-            field.type = member.type();
             field.index = fields.length;
             field_map.put(field.name_atom, (u32)fields.length);
             fields.push((void*)field);
         }
     }
 
+    u32 resolve(TypeRef* ref, Node* at) {
+        SymbolTable* symbols = this.symbols;
+        u32 resolved = symbols.resolve_type(ref, this.scope);
+        if (resolved == 0) {
+            this.error(at, "unknown type");
+            return Types.i32_type();
+        }
+        return resolved;
+    }
+
+    void resolve_structs() {
+        SymbolTable* symbols = this.symbols;
+        PointerList* structs = symbols.structs;
+        for (mut i32 i = 0; i < structs.length; i = i + 1) {
+            StructInfo* info = (StructInfo*)structs.get(i);
+            this.scope = info.namespace_id;
+            Node* declaration = info.node;
+            for (mut i32 m = 0; m < declaration.count(); m = m + 1) {
+                Node* member = declaration.child(m);
+                if (member.kind != NodeKind.FIELD_DECL) {
+                    continue;
+                }
+                u32 resolved = this.resolve(member.type(), member);
+                if (member.first() != null) {
+                    member.set_value_type(resolved);
+                    continue;
+                }
+                FieldInfo* field = symbols.find_field(info, member.name());
+                if (field != null && field.type == 0) {
+                    field.type = resolved;
+                }
+            }
+        }
+        this.scope = 0;
+    }
+
     void collect_functions(Node* container) {
         for (mut i32 i = 0; i < container.count(); i = i + 1) {
             Node* declaration = container.child(i);
             if (declaration.kind == NodeKind.NAMESPACE_DECL) {
+                u32 saved = this.enter(declaration);
                 this.collect_functions(declaration);
+                this.scope = saved;
             } else if (declaration.kind == NodeKind.FUNCTION) {
                 this.collect_function(declaration, false, (StructInfo*)0);
             } else if (declaration.kind == NodeKind.EXTERN_FUNCTION) {
@@ -98,7 +165,7 @@ struct SemanticAnalyzer {
 
     void collect_methods(Node* declaration) {
         SymbolTable* symbols = this.symbols;
-        StructInfo* owner = symbols.find_struct(declaration.name());
+        StructInfo* owner = symbols.find_struct(declaration.name(), declaration.name(), this.scope);
         if (owner == null) {
             return;
         }
@@ -117,9 +184,10 @@ struct SemanticAnalyzer {
             return;
         }
         LocalVariable* variable = (LocalVariable*)Memory.zalloc(sizeof(LocalVariable));
-        variable.name = declaration.text();
+        variable.namespace_id = this.scope;
+        variable.name = this.declared_name(declaration, this.scope);
         variable.name_atom = declaration.name();
-        variable.type = ty;
+        variable.type = this.resolve(ty, declaration);
         variable.is_mutable = declaration.flag();
         variable.node = declaration;
         SymbolTable* symbols = this.symbols;
@@ -130,23 +198,28 @@ struct SemanticAnalyzer {
 
     void collect_function(Node* declaration, bool is_extern, StructInfo* owner) {
         FunctionInfo* info = (FunctionInfo*)Memory.zalloc(sizeof(FunctionInfo));
-        info.name = SemanticAnalyzer.qualified_name(owner, declaration);
+        mut u32 function_scope = this.scope;
+        if (is_extern) {
+            function_scope = 0;
+        }
+        info.namespace_id = function_scope;
+        info.name = this.function_name(owner, declaration, is_extern, function_scope);
         info.name_atom = declaration.name();
-        info.return_type = declaration.type();
-        info.param_types = PointerList.create();
+        info.return_type = this.resolve(declaration.type(), declaration);
+        info.param_types = IdList.create();
         info.is_variadic = declaration.is_variadic();
         info.is_extern = is_extern;
         info.node = declaration;
         info.owner = owner;
 
-        PointerList* param_types = info.param_types;
+        IdList* param_types = info.param_types;
         if (owner != null && !declaration.flag()) {
             info.is_instance = true;
-            param_types.push((void*)TypeRef.pointer_to(TypeRef.named(owner.name)));
+            param_types.push(Types.pointer_to(owner.type_id));
         }
         for (mut i32 i = 0; i < declaration.count(); i = i + 1) {
             Node* parameter = declaration.child(i);
-            param_types.push((void*)parameter.type());
+            param_types.push(this.resolve(parameter.type(), parameter));
         }
 
         SymbolTable* symbols = this.symbols;
@@ -155,14 +228,17 @@ struct SemanticAnalyzer {
         }
     }
 
-    static i8* qualified_name(StructInfo* owner, Node* declaration) {
-        if (owner == null) {
+    i8* function_name(StructInfo* owner, Node* declaration, bool is_extern, u32 namespace_id) {
+        if (owner != null) {
+            ByteBuffer* name = ByteBuffer.create();
+            name.append(owner.name);
+            name.append_char(46);
+            name.append(declaration.text());
+            return name.cstr();
+        }
+        if (is_extern) {
             return declaration.text();
         }
-        ByteBuffer* name = ByteBuffer.create();
-        name.append(owner.name);
-        name.append_char(46);
-        name.append(declaration.text());
-        return name.cstr();
+        return this.declared_name(declaration, namespace_id);
     }
 }

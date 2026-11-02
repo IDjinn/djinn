@@ -7,7 +7,11 @@ struct TypeKind {
     const i32 POINTER = 3;
     const i32 NAMED = 4;
     const i32 AUTO = 5;
+    const i32 NONE = 6;
 }
+
+unsafe static mut void* primitive_map = null;
+unsafe static mut void* primitive_list = null;
 
 struct TypeRef {
     i32 kind;
@@ -17,6 +21,7 @@ struct TypeRef {
     TypeRef* element;
     i8* name;
     u32 name_atom;
+    u32 full_atom;
 
     public static TypeRef* create(i32 kind) {
         TypeRef* type = (TypeRef*)Memory.zalloc(sizeof(TypeRef));
@@ -47,8 +52,47 @@ struct TypeRef {
     public static TypeRef* named(i8* name) {
         TypeRef* type = TypeRef.create(TypeKind.NAMED);
         type.name = name;
-        type.name_atom = Ast.intern_base_name(name, strlen(name));
+        AtomTable* atoms = Atoms.get();
+        type.full_atom = atoms.intern_copy(name, (u32)strlen(name));
+        type.name_atom = atoms.base_of(type.full_atom);
         return type;
+    }
+
+    public static TypeRef* named_atoms(i8* name, u32 full_atom, u32 base_atom) {
+        TypeRef* type = TypeRef.create(TypeKind.NAMED);
+        type.name = name;
+        type.full_atom = full_atom;
+        type.name_atom = base_atom;
+        return type;
+    }
+
+    public static TypeRef* from_primitive_atom(u32 atom) {
+        if (primitive_map == null) {
+            primitive_map = (void*)U32Map.create(Memory.arena(), 256);
+            primitive_list = (void*)PointerList.create();
+        }
+        U32Map* map = (U32Map*)primitive_map;
+        PointerList* list = (PointerList*)primitive_list;
+        mut i64 found = map.find(atom);
+        if (found < 0) {
+            AtomTable* atoms = Atoms.get();
+            TypeRef* parsed = TypeRef.from_primitive_name(atoms.text(atom), (i32)atoms.length(atom));
+            if (parsed == null) {
+                map.put(atom, 0);
+                return (TypeRef*)0;
+            }
+            list.push((void*)parsed);
+            map.put(atom, (u32)list.length);
+            found = (i64)list.length;
+        }
+        if (found == 0) {
+            return (TypeRef*)0;
+        }
+        TypeRef* template = (TypeRef*)list.get((i32)found - 1);
+        TypeRef* copy = TypeRef.create(template.kind);
+        copy.bits = template.bits;
+        copy.is_signed = template.is_signed;
+        return copy;
     }
 
     public static TypeRef* from_primitive_name(i8* text, i32 length) {

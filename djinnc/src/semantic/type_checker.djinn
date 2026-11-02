@@ -1,0 +1,604 @@
+namespace djinnc;
+
+struct TypeChecker {
+    Diagnostics* diagnostics;
+    SymbolTable* symbols;
+    LocalScopes* scopes;
+    FunctionInfo* function;
+    u32 scope;
+    i32 loop_depth;
+
+    public static TypeChecker* create(Diagnostics* diagnostics, SymbolTable* symbols) {
+        TypeChecker* checker = (TypeChecker*)Memory.zalloc(sizeof(TypeChecker));
+        checker.diagnostics = diagnostics;
+        checker.symbols = symbols;
+        checker.scopes = LocalScopes.create();
+        return checker;
+    }
+
+    void error(Node* at, i8* message) {
+        Diagnostics* diagnostics = this.diagnostics;
+        diagnostics.error_in(at.file_name(), at.line(), at.column(), message);
+    }
+
+    public u32 resolve_type(TypeRef* ref, Node* at) {
+        SymbolTable* symbols = this.symbols;
+        u32 resolved = symbols.resolve_type(ref, this.scope);
+        if (resolved == 0) {
+            this.error(at, "unknown type");
+            return Types.i32_type();
+        }
+        return resolved;
+    }
+
+    public bool run() {
+        SymbolTable* symbols = this.symbols;
+        PointerList* structs = symbols.structs;
+        for (mut i32 i = 0; i < structs.length; i = i + 1) {
+            StructInfo* info = (StructInfo*)structs.get(i);
+            PointerList* constants = info.constants;
+            for (mut i32 c = 0; c < constants.length; c = c + 1) {
+                this.check_constant((Node*)constants.get(c), info.namespace_id);
+            }
+        }
+        PointerList* globals = symbols.globals;
+        for (mut i32 i = 0; i < globals.length; i = i + 1) {
+            this.check_global((LocalVariable*)globals.get(i));
+        }
+        PointerList* functions = symbols.functions;
+        for (mut i32 i = 0; i < functions.length; i = i + 1) {
+            FunctionInfo* info = (FunctionInfo*)functions.get(i);
+            if (!info.is_extern) {
+                this.check_function(info);
+            }
+        }
+        Diagnostics* diagnostics = this.diagnostics;
+        return !diagnostics.failed();
+    }
+
+    void check_constant(Node* member, u32 namespace_id) {
+        this.scope = namespace_id;
+        this.function = (FunctionInfo*)0;
+        LocalScopes* scopes = this.scopes;
+        scopes.reset_to(0);
+        this.check_expression(member.first(), member.value_type());
+    }
+
+    void check_global(LocalVariable* variable) {
+        this.scope = variable.namespace_id;
+        this.function = (FunctionInfo*)0;
+        LocalScopes* scopes = this.scopes;
+        scopes.reset_to(0);
+        Node* declaration = variable.node;
+        declaration.set_value_type(variable.type);
+        this.check_expression(declaration.first(), variable.type);
+    }
+
+    void check_function(FunctionInfo* info) {
+        this.scope = info.namespace_id;
+        this.function = info;
+        this.loop_depth = 0;
+        LocalScopes* scopes = this.scopes;
+        scopes.reset_to(0);
+
+        Node* declaration = info.node;
+        IdList* params = info.param_types;
+        mut i32 offset = 0;
+        if (info.is_instance) {
+            offset = 1;
+            LocalVariable* receiver = (LocalVariable*)Memory.zalloc(sizeof(LocalVariable));
+            receiver.name = "this";
+            receiver.name_atom = Atoms.THIS_ATOM;
+            receiver.type = params.get(0);
+            info.this_variable = receiver;
+            scopes.define(Atoms.THIS_ATOM, receiver);
+        }
+        for (mut i32 i = 0; i < declaration.count(); i = i + 1) {
+            Node* parameter = declaration.child(i);
+            LocalVariable* variable = (LocalVariable*)Memory.zalloc(sizeof(LocalVariable));
+            variable.name = parameter.text();
+            variable.name_atom = parameter.name();
+            variable.type = params.get(i + offset);
+            variable.is_mutable = parameter.flag();
+            variable.node = parameter;
+            parameter.set_symbol(SymbolKind.LOCAL, (void*)variable);
+            parameter.set_value_type(variable.type);
+            scopes.define(variable.name_atom, variable);
+        }
+
+        this.check_statement(declaration.first());
+    }
+
+    void check_statement(Node* node) {
+        i32 kind = node.kind;
+        LocalScopes* scopes = this.scopes;
+
+        if (kind == NodeKind.BLOCK) {
+            i32 mark = scopes.mark();
+            for (mut i32 i = 0; i < node.count(); i = i + 1) {
+                this.check_statement(node.child(i));
+            }
+            scopes.reset_to(mark);
+        } else if (kind == NodeKind.VAR_DECL) {
+            this.check_variable(node);
+        } else if (kind == NodeKind.EXPR_STMT) {
+            this.check_expression(node.first(), 0);
+        } else if (kind == NodeKind.RETURN) {
+            this.check_return(node);
+        } else if (kind == NodeKind.IF) {
+            this.check_condition(node.first());
+            this.check_statement(node.second());
+            if (node.third() != null) {
+                this.check_statement(node.third());
+            }
+        } else if (kind == NodeKind.WHILE) {
+            this.check_condition(node.first());
+            this.check_loop_body(node.second());
+        } else if (kind == NodeKind.DO_WHILE) {
+            this.check_loop_body(node.second());
+            this.check_condition(node.first());
+        } else if (kind == NodeKind.FOR) {
+            i32 mark = scopes.mark();
+            if (node.first() != null) {
+                this.check_statement(node.first());
+            }
+            if (node.second() != null) {
+                this.check_condition(node.second());
+            }
+            if (node.third() != null) {
+                this.check_expression(node.third(), 0);
+            }
+            this.check_loop_body(node.fourth());
+            scopes.reset_to(mark);
+        } else if (kind == NodeKind.BREAK) {
+            if (this.loop_depth == 0) {
+                this.error(node, "'break' outside of a loop");
+            }
+        } else if (kind == NodeKind.CONTINUE) {
+            if (this.loop_depth == 0) {
+                this.error(node, "'continue' outside of a loop");
+            }
+        } else {
+            this.error(node, "statement is not supported yet");
+        }
+    }
+
+    void check_loop_body(Node* body) {
+        this.loop_depth = this.loop_depth + 1;
+        this.check_statement(body);
+        this.loop_depth = this.loop_depth - 1;
+    }
+
+    void check_condition(Node* node) {
+        u32 type = this.check_expression(node, 0);
+        bool usable = Types.is_integer(type) || Types.is_float(type) || Types.is_pointer(type);
+        if (!usable) {
+            this.error(node, "condition must be a number or a pointer");
+        }
+    }
+
+    void check_variable(Node* node) {
+        mut u32 declared = this.resolve_type(node.type(), node);
+        mut u32 initial = 0;
+        if (node.first() != null) {
+            mut u32 hint = declared;
+            if (declared == Types.auto_type()) {
+                hint = 0;
+            }
+            initial = this.check_expression(node.first(), hint);
+        }
+        if (declared == Types.auto_type()) {
+            if (initial == 0) {
+                this.error(node, "'auto' variable needs an initializer");
+                declared = Types.i32_type();
+            } else {
+                declared = initial;
+            }
+        }
+        if (Types.is_void(declared)) {
+            this.error(node, "variable cannot have type void");
+            declared = Types.i32_type();
+        }
+
+        LocalVariable* variable = (LocalVariable*)Memory.zalloc(sizeof(LocalVariable));
+        variable.name = node.text();
+        variable.name_atom = node.name();
+        variable.type = declared;
+        variable.is_mutable = node.flag();
+        variable.node = node;
+        node.set_symbol(SymbolKind.LOCAL, (void*)variable);
+        node.set_value_type(declared);
+        LocalScopes* scopes = this.scopes;
+        scopes.define(variable.name_atom, variable);
+    }
+
+    void check_return(Node* node) {
+        FunctionInfo* info = this.function;
+        u32 expected = info.return_type;
+        if (node.first() == null) {
+            if (!Types.is_void(expected)) {
+                this.error(node, "missing return value");
+            }
+            return;
+        }
+        if (Types.is_void(expected)) {
+            this.error(node, "void function cannot return a value");
+            this.check_expression(node.first(), 0);
+            return;
+        }
+        this.check_expression(node.first(), expected);
+    }
+
+    LocalVariable* find_variable(u32 name) {
+        LocalScopes* scopes = this.scopes;
+        LocalVariable* local = scopes.find(name);
+        if (local != null) {
+            return local;
+        }
+        SymbolTable* symbols = this.symbols;
+        return symbols.find_global(name, name, this.scope);
+    }
+
+    bool is_struct_name(Node* node) {
+        if (node.kind != NodeKind.IDENTIFIER) {
+            return false;
+        }
+        if (this.find_variable(node.name()) != null) {
+            return false;
+        }
+        SymbolTable* symbols = this.symbols;
+        return symbols.find_struct(node.text_atom(), node.name(), this.scope) != null;
+    }
+
+    bool is_addressable(Node* node) {
+        i32 kind = node.kind;
+        if (kind == NodeKind.IDENTIFIER || kind == NodeKind.INDEX) {
+            return true;
+        }
+        if (kind == NodeKind.FIELD_ACCESS) {
+            return !this.is_struct_name(node.first());
+        }
+        return kind == NodeKind.UNARY && node.op() == TokenKind.STAR;
+    }
+
+    public u32 check_expression(Node* node, u32 expected) {
+        u32 type = this.compute_expression(node, expected);
+        node.set_value_type(type);
+        return type;
+    }
+
+    u32 compute_expression(Node* node, u32 expected) {
+        i32 kind = node.kind;
+
+        if (kind == NodeKind.INT_LITERAL) {
+            if (expected != 0 && (Types.is_float(expected) || Types.is_integer(expected))) {
+                return expected;
+            }
+            if (node.int_value() > 2147483647) {
+                return Types.i64_type();
+            }
+            return Types.i32_type();
+        }
+        if (kind == NodeKind.FLOAT_LITERAL) {
+            if (expected != 0 && Types.is_float(expected)) {
+                return expected;
+            }
+            return Types.floating(64);
+        }
+        if (kind == NodeKind.STRING_LITERAL) {
+            return Types.byte_pointer();
+        }
+        if (kind == NodeKind.BOOL_LITERAL) {
+            return Types.bool_type();
+        }
+        if (kind == NodeKind.NULL_LITERAL) {
+            return Types.pointer_to(Types.void_type());
+        }
+        if (kind == NodeKind.IDENTIFIER || kind == NodeKind.INDEX) {
+            return this.check_lvalue(node);
+        }
+        if (kind == NodeKind.FIELD_ACCESS) {
+            return this.check_member(node);
+        }
+        if (kind == NodeKind.UNARY) {
+            return this.check_unary(node, expected);
+        }
+        if (kind == NodeKind.BINARY) {
+            return this.check_binary(node, expected);
+        }
+        if (kind == NodeKind.ASSIGN) {
+            return this.check_assign(node);
+        }
+        if (kind == NodeKind.CALL) {
+            return this.check_call(node);
+        }
+        if (kind == NodeKind.CAST) {
+            u32 target = this.resolve_type(node.type(), node);
+            this.check_expression(node.first(), target);
+            return target;
+        }
+        if (kind == NodeKind.SIZEOF) {
+            u32 measured = this.resolve_type(node.type(), node);
+            if (Types.is_void(measured) || measured == Types.auto_type()) {
+                this.error(node, "sizeof of this type is not supported yet");
+            }
+            node.set_symbol(SymbolKind.TYPE, (void*)(u64)measured);
+            return Types.i64_type();
+        }
+
+        this.error(node, "expression is not supported yet");
+        return Types.i32_type();
+    }
+
+    u32 check_lvalue(Node* node) {
+        u32 type = this.compute_lvalue(node);
+        node.set_value_type(type);
+        return type;
+    }
+
+    u32 compute_lvalue(Node* node) {
+        i32 kind = node.kind;
+
+        if (kind == NodeKind.IDENTIFIER) {
+            LocalVariable* variable = this.find_variable(node.name());
+            if (variable == null) {
+                this.error(node, "undefined variable");
+                return Types.i32_type();
+            }
+            LocalScopes* scopes = this.scopes;
+            if (scopes.find(node.name()) != null) {
+                node.set_symbol(SymbolKind.LOCAL, (void*)variable);
+            } else {
+                node.set_symbol(SymbolKind.GLOBAL, (void*)variable);
+            }
+            return variable.type;
+        }
+
+        if (kind == NodeKind.FIELD_ACCESS) {
+            return this.check_field(node);
+        }
+
+        if (kind == NodeKind.INDEX) {
+            u32 base = this.check_expression(node.first(), 0);
+            this.check_expression(node.second(), Types.i64_type());
+            if (!Types.is_sized_pointer(base)) {
+                this.error(node, "only pointers to sized types can be indexed");
+                return Types.i32_type();
+            }
+            return Types.element(base);
+        }
+
+        if (kind == NodeKind.UNARY && node.op() == TokenKind.STAR) {
+            u32 pointer = this.check_expression(node.first(), 0);
+            if (!Types.is_sized_pointer(pointer)) {
+                this.error(node, "cannot dereference this value");
+                return Types.i32_type();
+            }
+            return Types.element(pointer);
+        }
+
+        this.error(node, "expression is not addressable");
+        return Types.i32_type();
+    }
+
+    StructInfo* struct_of_base(Node* base) {
+        mut u32 type = 0;
+        if (this.is_addressable(base)) {
+            type = this.check_lvalue(base);
+        } else {
+            type = this.check_expression(base, 0);
+            if (!Types.is_pointer(type)) {
+                this.error(base, "member access needs a struct or a pointer to one");
+                return (StructInfo*)0;
+            }
+        }
+        mut u32 target = type;
+        if (Types.is_pointer(type)) {
+            target = Types.element(type);
+        }
+        if (!Types.is_struct(target)) {
+            this.error(base, "member access on a value that is not a struct");
+            return (StructInfo*)0;
+        }
+        SymbolTable* symbols = this.symbols;
+        return symbols.struct_at(Types.struct_index(target));
+    }
+
+    u32 check_field(Node* node) {
+        Node* base = node.first();
+        if (this.is_struct_name(base)) {
+            this.error(node, "a struct constant cannot be used as a variable");
+            return Types.i32_type();
+        }
+        StructInfo* info = this.struct_of_base(base);
+        if (info == null) {
+            return Types.i32_type();
+        }
+        SymbolTable* symbols = this.symbols;
+        FieldInfo* field = symbols.find_field(info, node.name());
+        if (field == null) {
+            this.error(node, "struct has no such field");
+            return Types.i32_type();
+        }
+        node.set_symbol(SymbolKind.FIELD, (void*)field);
+        return field.type;
+    }
+
+    u32 check_member(Node* node) {
+        Node* base = node.first();
+        if (this.is_struct_name(base)) {
+            SymbolTable* symbols = this.symbols;
+            StructInfo* info = symbols.find_struct(base.text_atom(), base.name(), this.scope);
+            base.set_symbol(SymbolKind.STRUCT_NAME, (void*)info);
+            Node* constant = symbols.find_constant(info, node.name());
+            if (constant == null) {
+                this.error(node, "struct has no such constant");
+                return Types.i32_type();
+            }
+            node.set_symbol(SymbolKind.CONSTANT, (void*)constant);
+            return constant.value_type();
+        }
+        return this.check_field(node);
+    }
+
+    u32 check_unary(Node* node, u32 expected) {
+        i32 op = node.op();
+
+        if (op == TokenKind.AMPERSAND) {
+            return Types.pointer_to(this.check_lvalue(node.first()));
+        }
+        if (op == TokenKind.STAR) {
+            return this.check_lvalue(node);
+        }
+
+        u32 operand = this.check_expression(node.first(), expected);
+        if (op == TokenKind.MINUS) {
+            if (!Types.is_integer(operand) && !Types.is_float(operand)) {
+                this.error(node, "operator is not valid for this operand");
+            }
+            return operand;
+        }
+        if (op == TokenKind.TILDE) {
+            if (!Types.is_integer(operand)) {
+                this.error(node, "operator is not valid for this operand");
+            }
+            return operand;
+        }
+        if (op == TokenKind.BANG) {
+            return Types.bool_type();
+        }
+
+        this.error(node, "unary operator is not supported yet");
+        return Types.i32_type();
+    }
+
+    bool is_untyped_literal(Node* node) {
+        if (node.kind == NodeKind.INT_LITERAL) {
+            return true;
+        }
+        return node.kind == NodeKind.UNARY && node.op() == TokenKind.MINUS && node.first().kind == NodeKind.INT_LITERAL;
+    }
+
+    static bool is_comparison(i32 op) {
+        return op == TokenKind.EQUAL_EQUAL || op == TokenKind.BANG_EQUAL || op == TokenKind.LESS
+            || op == TokenKind.LESS_EQUAL || op == TokenKind.GREATER || op == TokenKind.GREATER_EQUAL;
+    }
+
+    u32 check_binary(Node* node, u32 expected) {
+        i32 op = node.op();
+        if (op == TokenKind.AND_AND || op == TokenKind.OR_OR) {
+            this.check_condition(node.first());
+            this.check_condition(node.second());
+            return Types.bool_type();
+        }
+
+        mut u32 hint = expected;
+        if (TypeChecker.is_comparison(op)) {
+            hint = 0;
+        }
+
+        mut u32 left = 0;
+        mut u32 right = 0;
+        if (this.is_untyped_literal(node.first()) && !this.is_untyped_literal(node.second())) {
+            right = this.check_expression(node.second(), hint);
+            left = this.check_expression(node.first(), right);
+        } else {
+            left = this.check_expression(node.first(), hint);
+            right = this.check_expression(node.second(), left);
+        }
+
+        if (Types.is_pointer(left) && Types.is_integer(right) && (op == TokenKind.PLUS || op == TokenKind.MINUS)) {
+            return left;
+        }
+
+        u32 common = Types.common(left, right);
+        if (TypeChecker.is_comparison(op)) {
+            return Types.bool_type();
+        }
+        if (Types.is_float(common)) {
+            bool valid = op == TokenKind.PLUS || op == TokenKind.MINUS || op == TokenKind.STAR
+                || op == TokenKind.SLASH || op == TokenKind.PERCENT;
+            if (!valid) {
+                this.error(node, "operator is not valid for floating point operands");
+            }
+        } else if (!Types.is_integer(common)) {
+            this.error(node, "operator is not valid for these operands");
+        }
+        return common;
+    }
+
+    u32 check_assign(Node* node) {
+        Node* target = node.first();
+        u32 type = this.check_lvalue(target);
+        if (target.kind == NodeKind.IDENTIFIER && target.symbol() != null) {
+            LocalVariable* variable = (LocalVariable*)target.symbol();
+            if (!variable.is_mutable) {
+                this.error(target, "cannot assign to an immutable variable");
+            }
+        }
+        this.check_expression(node.second(), type);
+        return type;
+    }
+
+    u32 check_call(Node* node) {
+        Node* callee = node.first();
+        SymbolTable* symbols = this.symbols;
+        mut FunctionInfo* info = (FunctionInfo*)0;
+        mut i32 offset = 0;
+
+        if (callee.kind == NodeKind.IDENTIFIER) {
+            info = symbols.find_function(callee.text_atom(), callee.name(), this.scope);
+            callee.set_symbol(SymbolKind.FUNCTION, (void*)info);
+        } else if (callee.kind == NodeKind.FIELD_ACCESS) {
+            Node* base = callee.first();
+            if (this.is_struct_name(base)) {
+                StructInfo* owner = symbols.find_struct(base.text_atom(), base.name(), this.scope);
+                base.set_symbol(SymbolKind.STRUCT_NAME, (void*)owner);
+                info = symbols.find_method(owner, callee.name());
+                if (info != null && info.is_instance) {
+                    this.error(callee, "instance method called without an instance");
+                    return Types.i32_type();
+                }
+                callee.set_symbol(SymbolKind.STATIC_METHOD, (void*)info);
+            } else {
+                StructInfo* owner = this.struct_of_base(base);
+                if (owner == null) {
+                    return Types.i32_type();
+                }
+                info = symbols.find_method(owner, callee.name());
+                if (info != null && !info.is_instance) {
+                    this.error(callee, "static method called on an instance");
+                    return Types.i32_type();
+                }
+                callee.set_symbol(SymbolKind.INSTANCE_METHOD, (void*)info);
+                offset = 1;
+            }
+        } else {
+            this.error(node, "only calls to named functions are supported yet");
+            return Types.i32_type();
+        }
+
+        if (info == null) {
+            this.error(callee, "call to an undeclared function");
+            return Types.i32_type();
+        }
+
+        IdList* param_types = info.param_types;
+        i32 fixed = param_types.length;
+        i32 given = node.count() + offset;
+        if (given < fixed || (given > fixed && !info.is_variadic)) {
+            this.error(node, "wrong number of arguments");
+            return info.return_type;
+        }
+
+        for (mut i32 i = offset; i < given; i = i + 1) {
+            Node* argument = node.child(i - offset);
+            if (i < fixed) {
+                this.check_expression(argument, param_types.get(i));
+            } else {
+                this.check_expression(argument, 0);
+            }
+        }
+        return info.return_type;
+    }
+}

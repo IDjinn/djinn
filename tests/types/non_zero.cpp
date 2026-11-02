@@ -20,7 +20,15 @@ namespace
     // assertions must be scoped to the function body)
     std::string functionIr(const std::string& ir, const std::string& funcName)
     {
-        const auto begin = ir.find("define @" + funcName + "(");
+        const std::string marker = "@" + funcName + "(";
+        size_t begin = ir.find(marker);
+        while (begin != std::string::npos)
+        {
+            const auto lineStart = ir.rfind('\n', begin);
+            const auto line = ir.substr(lineStart == std::string::npos ? 0 : lineStart + 1, 6);
+            if (line == "define") break;
+            begin = ir.find(marker, begin + 1);
+        }
         if (begin == std::string::npos) return "";
         const auto end = ir.find('}', begin);
         return ir.substr(begin, end == std::string::npos ? std::string::npos : end - begin);

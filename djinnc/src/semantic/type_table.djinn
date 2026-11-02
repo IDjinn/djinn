@@ -1,0 +1,253 @@
+namespace djinnc;
+
+unsafe static mut void* process_types = null;
+
+struct TypeTable {
+    u8* kinds;
+    u32* operands;
+    u8* signs;
+    u32* pointers;
+    u32 count;
+    u32 capacity;
+    U32Map* scalars;
+
+    public static TypeTable* get() {
+        if (process_types == null) {
+            Arena* arena = Memory.arena();
+            TypeTable* table = (TypeTable*)arena.zalloc(sizeof(TypeTable), 8);
+            table.capacity = 128;
+            table.kinds = (u8*)arena.zalloc(128, 1);
+            table.operands = (u32*)arena.zalloc(128 * 4, 4);
+            table.signs = (u8*)arena.zalloc(128, 1);
+            table.pointers = (u32*)arena.zalloc(128 * 4, 4);
+            table.scalars = U32Map.create(arena, 64);
+            process_types = (void*)table;
+            table.add(TypeKind.NONE, 0, false);
+            table.add(TypeKind.VOID, 0, false);
+            table.add(TypeKind.AUTO, 0, false);
+        }
+        return (TypeTable*)process_types;
+    }
+
+    u32 add(i32 kind, u32 operand, bool is_signed) {
+        if (this.count == this.capacity) {
+            this.grow();
+        }
+        u32 id = this.count;
+        this.count = this.count + 1;
+        this.kinds[id] = (u8)kind;
+        this.operands[id] = operand;
+        if (is_signed) {
+            this.signs[id] = 1;
+        }
+        return id;
+    }
+
+    void grow() {
+        Arena* arena = Memory.arena();
+        u32 capacity = this.capacity * 2;
+        u8* kinds = (u8*)arena.zalloc((u64)capacity, 1);
+        u32* operands = (u32*)arena.zalloc((u64)capacity * 4, 4);
+        u8* signs = (u8*)arena.zalloc((u64)capacity, 1);
+        u32* pointers = (u32*)arena.zalloc((u64)capacity * 4, 4);
+        memcpy(kinds, this.kinds, (u64)this.count);
+        memcpy(operands, this.operands, (u64)this.count * 4);
+        memcpy(signs, this.signs, (u64)this.count);
+        memcpy(pointers, this.pointers, (u64)this.count * 4);
+        this.kinds = kinds;
+        this.operands = operands;
+        this.signs = signs;
+        this.pointers = pointers;
+        this.capacity = capacity;
+    }
+
+    u32 intern_scalar(u32 key, i32 kind, u32 operand, bool is_signed) {
+        U32Map* scalars = this.scalars;
+        i64 found = scalars.find(key);
+        if (found >= 0) {
+            return (u32)found;
+        }
+        u32 id = this.add(kind, operand, is_signed);
+        scalars.put(key, id);
+        return id;
+    }
+
+    public u32 integer(u32 bits, bool is_signed) {
+        mut u32 key = bits * 2;
+        if (is_signed) {
+            key = key + 1;
+        }
+        return this.intern_scalar(key, TypeKind.INTEGER, bits, is_signed);
+    }
+
+    public u32 floating(u32 bits) {
+        return this.intern_scalar(1048576 + bits, TypeKind.FLOAT, bits, true);
+    }
+
+    public u32 structure(u32 struct_index) {
+        return this.intern_scalar(2097152 + struct_index, TypeKind.NAMED, struct_index, false);
+    }
+
+    public u32 pointer_to(u32 element) {
+        if (this.pointers[element] != 0) {
+            return this.pointers[element];
+        }
+        u32 id = this.add(TypeKind.POINTER, element, false);
+        this.pointers[element] = id;
+        return id;
+    }
+
+    public i32 kind(u32 id) {
+        return (i32)this.kinds[id];
+    }
+
+    public u32 operand(u32 id) {
+        return this.operands[id];
+    }
+
+    public bool is_signed(u32 id) {
+        return this.signs[id] != 0;
+    }
+}
+
+struct Types {
+    public static u32 none() {
+        return 0;
+    }
+
+    public static u32 void_type() {
+        return 1;
+    }
+
+    public static u32 auto_type() {
+        return 2;
+    }
+
+    public static u32 integer(u32 bits, bool is_signed) {
+        TypeTable* table = TypeTable.get();
+        return table.integer(bits, is_signed);
+    }
+
+    public static u32 floating(u32 bits) {
+        TypeTable* table = TypeTable.get();
+        return table.floating(bits);
+    }
+
+    public static u32 bool_type() {
+        return Types.integer(1, false);
+    }
+
+    public static u32 i32_type() {
+        return Types.integer(32, true);
+    }
+
+    public static u32 i64_type() {
+        return Types.integer(64, true);
+    }
+
+    public static u32 byte_pointer() {
+        return Types.pointer_to(Types.integer(8, true));
+    }
+
+    public static u32 pointer_to(u32 element) {
+        TypeTable* table = TypeTable.get();
+        return table.pointer_to(element);
+    }
+
+    public static u32 structure(u32 struct_index) {
+        TypeTable* table = TypeTable.get();
+        return table.structure(struct_index);
+    }
+
+    public static i32 kind(u32 id) {
+        TypeTable* table = TypeTable.get();
+        return table.kind(id);
+    }
+
+    public static bool is_void(u32 id) {
+        return Types.kind(id) == TypeKind.VOID;
+    }
+
+    public static bool is_integer(u32 id) {
+        return Types.kind(id) == TypeKind.INTEGER;
+    }
+
+    public static bool is_float(u32 id) {
+        return Types.kind(id) == TypeKind.FLOAT;
+    }
+
+    public static bool is_pointer(u32 id) {
+        return Types.kind(id) == TypeKind.POINTER;
+    }
+
+    public static bool is_struct(u32 id) {
+        return Types.kind(id) == TypeKind.NAMED;
+    }
+
+    public static u32 bits(u32 id) {
+        TypeTable* table = TypeTable.get();
+        return table.operand(id);
+    }
+
+    public static bool is_signed(u32 id) {
+        TypeTable* table = TypeTable.get();
+        return table.is_signed(id);
+    }
+
+    public static u32 element(u32 id) {
+        TypeTable* table = TypeTable.get();
+        return table.operand(id);
+    }
+
+    public static u32 struct_index(u32 id) {
+        TypeTable* table = TypeTable.get();
+        return table.operand(id);
+    }
+
+    public static bool is_sized_pointer(u32 id) {
+        return Types.is_pointer(id) && !Types.is_void(Types.element(id));
+    }
+
+    public static u32 common(u32 left, u32 right) {
+        if (Types.is_float(right) && Types.is_integer(left)) {
+            return right;
+        }
+        if (Types.is_integer(left) && Types.is_integer(right) && Types.bits(right) > Types.bits(left)) {
+            return right;
+        }
+        if (Types.is_float(left) && Types.is_float(right) && Types.bits(right) > Types.bits(left)) {
+            return right;
+        }
+        return left;
+    }
+
+    public static void describe(u32 id, ByteBuffer* out) {
+        i32 kind = Types.kind(id);
+        if (kind == TypeKind.VOID) {
+            out.append("void");
+        } else if (kind == TypeKind.AUTO) {
+            out.append("auto");
+        } else if (kind == TypeKind.INTEGER) {
+            if (Types.bits(id) == 1) {
+                out.append("bool");
+            } else {
+                if (Types.is_signed(id)) {
+                    out.append_char(105);
+                } else {
+                    out.append_char(117);
+                }
+                out.append_int((i64)Types.bits(id));
+            }
+        } else if (kind == TypeKind.FLOAT) {
+            out.append_char(102);
+            out.append_int((i64)Types.bits(id));
+        } else if (kind == TypeKind.POINTER) {
+            Types.describe(Types.element(id), out);
+            out.append_char(42);
+        } else if (kind == TypeKind.NAMED) {
+            out.append("struct");
+        } else {
+            out.append("?");
+        }
+    }
+}

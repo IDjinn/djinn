@@ -604,6 +604,8 @@ struct BinaryExpression : Expression
     std::unique_ptr<Expression> right;
     OverflowMode overflowMode = OverflowMode::None; // set by the binder for integer arithmetic
     bool overflowSigned = true; // set by the binder: signedness used by mode-aware codegen
+    bool leftSigned = true; // set by the binder: widening and comparison signedness per operand
+    bool rightSigned = true;
 
     BinaryExpression(
         std::unique_ptr<Expression> left,

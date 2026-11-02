@@ -1,40 +1,105 @@
 namespace djinnc;
 
+unsafe static mut void* all_tokens = null;
+
 struct TokenList {
-    Token* data;
+    u8* kinds;
+    u32* starts;
+    u32* atoms;
     i32 length;
     i32 capacity;
 
     public static TokenList* create(i32 capacity) {
-        TokenList* list = (TokenList*)Memory.zalloc(sizeof(TokenList));
+        Arena* arena = Memory.arena();
+        TokenList* list = (TokenList*)arena.zalloc(sizeof(TokenList), 8);
         list.capacity = capacity;
-        list.data = (Token*)Memory.zalloc((i64)capacity * sizeof(Token));
+        list.kinds = (u8*)arena.alloc((u64)capacity, 1);
+        list.starts = (u32*)arena.alloc((u64)capacity * 4, 4);
+        list.atoms = (u32*)arena.alloc((u64)capacity * 4, 4);
+        all_tokens = (void*)list;
         return list;
     }
 
-    public void push(i32 kind, i8* text, i32 count, i32 line, i32 column) {
+    public static TokenList* get() {
+        return (TokenList*)all_tokens;
+    }
+
+    public void push(i32 kind, u32 start, u32 atom) {
         if (this.length == this.capacity) {
             this.grow();
         }
-        Token* token = this.at(this.length);
-        token.kind = kind;
-        token.text = text;
-        token.length = count;
-        token.line = line;
-        token.column = column;
+        this.kinds[this.length] = (u8)kind;
+        this.starts[this.length] = start;
+        this.atoms[this.length] = atom;
         this.length = this.length + 1;
     }
 
-    public Token* at(i32 index) {
-        i8* base = (i8*)this.data;
-        return (Token*)(base + (i64)index * sizeof(Token));
+    public i32 kind(i32 index) {
+        return (i32)this.kinds[index];
+    }
+
+    public u32 start(i32 index) {
+        return this.starts[index];
+    }
+
+    public u32 atom(i32 index) {
+        return this.atoms[index] - 1;
+    }
+
+    public u32 raw_atom(i32 index) {
+        return this.atoms[index];
+    }
+
+    public bool has_atom(i32 index) {
+        return this.atoms[index] != 0;
+    }
+
+    public i8* text(i32 index) {
+        if (this.atoms[index] == 0) {
+            i32 kind = this.kind(index);
+            if (kind == TokenKind.END_OF_FILE) {
+                return "";
+            }
+            return TokenKind.text(kind);
+        }
+        AtomTable* table = Atoms.get();
+        return table.text(this.atoms[index] - 1);
+    }
+
+    public i32 text_length(i32 index) {
+        if (this.atoms[index] == 0) {
+            return strlen(this.text(index));
+        }
+        AtomTable* table = Atoms.get();
+        return (i32)table.length(this.atoms[index] - 1);
+    }
+
+    public i8* copy_text(i32 index) {
+        return Strings.duplicate(this.text(index), this.text_length(index));
+    }
+
+    public i32 line(i32 index) {
+        SourceFile* file = Sources.of_token(index);
+        return (i32)file.line_of(this.starts[index]);
+    }
+
+    public i32 column(i32 index) {
+        SourceFile* file = Sources.of_token(index);
+        return (i32)file.column_of(this.starts[index]);
     }
 
     void grow() {
-        i32 newCapacity = this.capacity * 2;
-        Token* newData = (Token*)Memory.zalloc((i64)newCapacity * sizeof(Token));
-        memcpy(newData, this.data, (u64)this.length * sizeof(Token));
-        this.data = newData;
-        this.capacity = newCapacity;
+        Arena* arena = Memory.arena();
+        i32 capacity = this.capacity * 2;
+        u8* kinds = (u8*)arena.alloc((u64)capacity, 1);
+        u32* starts = (u32*)arena.alloc((u64)capacity * 4, 4);
+        u32* atoms = (u32*)arena.alloc((u64)capacity * 4, 4);
+        memcpy(kinds, this.kinds, (u64)this.length);
+        memcpy(starts, this.starts, (u64)this.length * 4);
+        memcpy(atoms, this.atoms, (u64)this.length * 4);
+        this.kinds = kinds;
+        this.starts = starts;
+        this.atoms = atoms;
+        this.capacity = capacity;
     }
 }
