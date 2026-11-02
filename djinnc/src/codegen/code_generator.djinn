@@ -146,6 +146,16 @@ struct CodeGenerator {
         }
         for (mut i32 i = 0; i < structs.length; i = i + 1) {
             StructInfo* info = (StructInfo*)structs.get(i);
+            if (info.has_payload) {
+                i32 slots = info.slot_count + 1;
+                void** layout = CodeGenerator.array_of(slots);
+                layout[0] = LLVMIntTypeInContext(this.context, 32);
+                for (mut i32 s = 1; s < slots; s = s + 1) {
+                    layout[s] = LLVMIntTypeInContext(this.context, 64);
+                }
+                LLVMStructSetBody(info.llvm, layout, (u32)slots, 0);
+                continue;
+            }
             PointerList* fields = info.fields;
             void** types = CodeGenerator.array_of(fields.length);
             for (mut i32 f = 0; f < fields.length; f = f + 1) {
@@ -632,7 +642,10 @@ struct CodeGenerator {
         if (kind == NodeKind.INDEX) {
             return this.load_through(this.gen_address(node), type);
         }
-        if (kind == NodeKind.SIZEOF) {
+        if (kind == NodeKind.SWITCH_EXPR) {
+            return this.gen_switch_expression(node);
+        }
+        if (kind == NodeKind.INTRINSIC) {
             return this.gen_sizeof(node);
         }
         if (kind == NodeKind.FIELD_ACCESS) {
@@ -956,11 +969,82 @@ struct CodeGenerator {
         return argument;
     }
 
+    Value* gen_enum_construct(Node* node, Node* variant, u32 enum_type) {
+        void* llvm = this.llvm_type(enum_type);
+        void* slot = this.create_slot(enum_type, "enum.value");
+        void* tag_address = LLVMBuildStructGEP2(this.builder, llvm, slot, 0, "enum.tag");
+        Node* tag_value = variant.first();
+        void* tag = LLVMConstInt(LLVMIntTypeInContext(this.context, 32), (u64)tag_value.int_value(), 0);
+        LLVMBuildStore(this.builder, tag, tag_address);
+        for (mut i32 i = 0; i < node.count(); i = i + 1) {
+            Node* payload = variant.child(i);
+            Value* argument = this.gen_expression(node.child(i));
+            void* address = LLVMBuildStructGEP2(this.builder, llvm, slot, (u32)(i + 1), "enum.payload");
+            LLVMBuildStore(this.builder, this.coerce(argument, payload.value_type()), address);
+        }
+        return Value.create(LLVMBuildLoad2(this.builder, llvm, slot, "enum.loaded"), enum_type);
+    }
+
+    Value* gen_switch_expression(Node* node) {
+        SymbolTable* symbols = this.symbols;
+        Node* subject_node = node.first();
+        Value* subject = this.gen_expression(subject_node);
+        u32 subject_type = subject.type;
+        StructInfo* owner = symbols.enum_of_type(subject_type);
+        u32 result_type = node.value_type();
+
+        mut void* tag = subject.ref;
+        mut void* spill = (void*)0;
+        void* enum_llvm = this.llvm_type(subject_type);
+        if (Types.is_struct(subject_type)) {
+            spill = this.create_slot(subject_type, "match.subject");
+            LLVMBuildStore(this.builder, subject.ref, spill);
+            void* tag_address = LLVMBuildStructGEP2(this.builder, enum_llvm, spill, 0, "match.tag.ptr");
+            tag = LLVMBuildLoad2(this.builder, LLVMIntTypeInContext(this.context, 32), tag_address, "match.tag");
+        }
+
+        void* result_slot = this.create_slot(result_type, "match.result");
+        void* end_block = this.new_block("match.end");
+        PointerList* blocks = PointerList.create();
+        for (mut i32 i = 0; i < node.count(); i = i + 1) {
+            blocks.push(this.new_block("match.arm"));
+        }
+        void* dispatch = LLVMBuildSwitch(this.builder, tag, blocks.get(node.count() - 1), (u32)node.count());
+        for (mut i32 i = 0; i < node.count(); i = i + 1) {
+            Node* case_arm = node.child(i);
+            Node* variant = (Node*)case_arm.symbol();
+            Node* tag_value = variant.first();
+            void* label = LLVMConstInt(LLVMIntTypeInContext(this.context, 32), (u64)tag_value.int_value(), 0);
+            LLVMAddCase(dispatch, label, blocks.get(i));
+        }
+
+        for (mut i32 i = 0; i < node.count(); i = i + 1) {
+            Node* arm = node.child(i);
+            LLVMPositionBuilderAtEnd(this.builder, blocks.get(i));
+            for (mut i32 b = 0; b < arm.count(); b = b + 1) {
+                Node* binding = arm.child(b);
+                LocalVariable* variable = (LocalVariable*)binding.symbol();
+                variable.slot = this.create_slot(variable.type, variable.name);
+                void* address = LLVMBuildStructGEP2(this.builder, enum_llvm, spill, (u32)(b + 1), "match.payload");
+                void* loaded = LLVMBuildLoad2(this.builder, this.llvm_type(variable.type), address, "match.bound");
+                LLVMBuildStore(this.builder, loaded, variable.slot);
+            }
+            Value* produced = this.gen_expression(arm.first());
+            LLVMBuildStore(this.builder, this.coerce(produced, result_type), result_slot);
+            this.branch_if_open(end_block);
+        }
+        LLVMPositionBuilderAtEnd(this.builder, end_block);
+        return Value.create(LLVMBuildLoad2(this.builder, this.llvm_type(result_type), result_slot, "match.value"), result_type);
+    }
+
     Value* gen_call(Node* node) {
         Node* callee = node.first();
         if (callee.symbol_kind() == SymbolKind.CONSTANT) {
             Node* variant = (Node*)callee.symbol();
             u32 declared = variant.value_type();
+            if (Types.is_struct(declared)) {
+                return this.gen_enum_construct(node, variant, declared);
+            }
             Value* tag = this.gen_expression(variant.first());
             return Value.create(this.coerce(tag, declared), declared);
         }

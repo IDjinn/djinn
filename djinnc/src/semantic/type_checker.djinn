@@ -351,7 +351,10 @@ struct TypeChecker {
             this.check_expression(node.first(), target);
             return target;
         }
-        if (kind == NodeKind.SIZEOF) {
+        if (kind == NodeKind.SWITCH_EXPR) {
+            return this.check_switch_expression(node, expected);
+        }
+        if (kind == NodeKind.INTRINSIC) {
             u32 measured = this.resolve_type(node.type(), node);
             if (Types.is_void(measured) || measured == Types.auto_type()) {
                 this.error(node, "sizeof of this type is not supported yet");
@@ -469,6 +472,9 @@ struct TypeChecker {
                 this.error(node, "struct has no such constant");
                 return Types.i32_type();
             }
+            if (info.has_payload) {
+                this.error(node, "a payload enum is built with Enum::Variant(...)");
+            }
             node.set_symbol(SymbolKind.CONSTANT, (void*)constant);
             return constant.value_type();
         }
@@ -584,6 +590,65 @@ struct TypeChecker {
         return type;
     }
 
+    u32 check_switch_expression(Node* node, u32 expected) {
+        SymbolTable* symbols = this.symbols;
+        u32 subject_type = this.check_expression(node.first(), 0);
+        StructInfo* owner = symbols.enum_of_type(subject_type);
+        if (owner == null) {
+            this.error(node.first(), "switch expression needs an enum value");
+            return Types.i32_type();
+        }
+
+        PointerList* constants = owner.constants;
+        mut i32 covered = 0;
+        mut u32 result = expected;
+        LocalScopes* scopes = this.scopes;
+        for (mut i32 i = 0; i < node.count(); i = i + 1) {
+            Node* arm = node.child(i);
+            Node* variant = symbols.find_constant(owner, arm.name());
+            if (variant == null) {
+                this.error(arm, "enum has no such variant");
+                continue;
+            }
+            if (arm.symbol() != null) {
+                this.error(arm, "variant is matched more than once");
+            } else {
+                covered = covered + 1;
+            }
+            arm.set_symbol(SymbolKind.CONSTANT, (void*)variant);
+            if (arm.count() != variant.count()) {
+                this.error(arm, "wrong number of bindings for the variant payload");
+                continue;
+            }
+
+            i32 mark = scopes.mark();
+            for (mut i32 b = 0; b < arm.count(); b = b + 1) {
+                Node* binding = arm.child(b);
+                Node* payload = variant.child(b);
+                LocalVariable* variable = (LocalVariable*)Memory.zalloc(sizeof(LocalVariable));
+                variable.name = binding.text();
+                variable.name_atom = binding.name();
+                variable.type = payload.value_type();
+                variable.node = binding;
+                binding.set_symbol(SymbolKind.LOCAL, (void*)variable);
+                binding.set_value_type(variable.type);
+                scopes.define(variable.name_atom, variable);
+            }
+            u32 arm_type = this.check_expression(arm.first(), result);
+            if (result == 0) {
+                result = arm_type;
+            }
+            scopes.reset_to(mark);
+        }
+        if (covered < constants.length) {
+            this.error(node, "switch expression does not cover every variant");
+        }
+        if (result == 0) {
+            return Types.i32_type();
+        }
+        return result;
+    }
+
     Node* find_enum_variant(Node* callee) {
         i8* text = callee.text();
         i32 length = (i32)strlen(text);
@@ -616,8 +681,12 @@ struct TypeChecker {
         if (callee.kind == NodeKind.IDENTIFIER) {
             Node* variant = this.find_enum_variant(callee);
             if (variant != null) {
-                if (node.count() != 0) {
-                    this.error(node, "enum variants with payloads are not supported yet");
+                if (node.count() != variant.count()) {
+                    this.error(node, "wrong number of enum variant arguments");
+                }
+                for (mut i32 a = 0; a < node.count() && a < variant.count(); a = a + 1) {
+                    Node* payload = variant.child(a);
+                    this.check_expression(node.child(a), payload.value_type());
                 }
                 callee.set_symbol(SymbolKind.CONSTANT, (void*)variant);
                 return variant.value_type();
