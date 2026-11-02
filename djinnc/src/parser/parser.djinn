@@ -5,6 +5,8 @@ struct Parser {
     i32 pos;
     i32 end;
     bool failed;
+    bool scan_half;
+    bool half_greater;
     Diagnostics* diagnostics;
     U32Map* type_names;
 
@@ -24,6 +26,16 @@ struct Parser {
             bool declaresType = kind == TokenKind.STRUCT || kind == TokenKind.ENUM || kind == TokenKind.INTERFACE;
             if (declaresType && list.kind(i + 1) == TokenKind.IDENTIFIER) {
                 names.put(list.atom(i + 1), 1);
+                if (list.kind(i + 2) == TokenKind.LESS) {
+                    mut i32 cursor = i + 3;
+                    while (cursor < file.token_end && list.kind(cursor) == TokenKind.IDENTIFIER) {
+                        names.put(list.atom(cursor), 1);
+                        cursor = cursor + 1;
+                        if (list.kind(cursor) == TokenKind.COMMA) {
+                            cursor = cursor + 1;
+                        }
+                    }
+                }
             }
         }
     }
@@ -172,6 +184,15 @@ struct Parser {
                 break;
             }
         }
+        if (this.kind_of(this.peek_token(offset)) == TokenKind.LESS) {
+            offset = this.scan_type_arguments(offset);
+            if (offset < 0) {
+                return offset;
+            }
+            if (this.scan_half) {
+                return 0 - 1;
+            }
+        }
         while (this.kind_of(this.peek_token(offset)) == TokenKind.STAR) {
             offset = offset + 1;
         }
@@ -179,6 +200,33 @@ struct Parser {
             offset = offset + 1;
         }
         return offset;
+    }
+
+    i32 scan_type_arguments(i32 start) {
+        mut i32 offset = start + 1;
+        while (true) {
+            i32 end = this.scan_type_end(offset);
+            if (end < 0) {
+                return end;
+            }
+            offset = end;
+            if (this.scan_half) {
+                this.scan_half = false;
+                return offset;
+            }
+            i32 kind = this.kind_of(this.peek_token(offset));
+            if (kind == TokenKind.COMMA) {
+                offset = offset + 1;
+            } else if (kind == TokenKind.GREATER) {
+                return offset + 1;
+            } else if (kind == TokenKind.GREATER_GREATER) {
+                this.scan_half = true;
+                return offset + 1;
+            } else {
+                return 0 - 1;
+            }
+        }
+        return 0 - 1;
     }
 
     bool is_declaration_start() {
@@ -223,6 +271,65 @@ struct Parser {
         }
     }
 
+    PointerList* parse_type_arguments() {
+        this.expect(TokenKind.LESS, "expected '<'");
+        PointerList* args = PointerList.create();
+        while (!this.failed) {
+            args.push((void*)this.parse_type());
+            if (this.half_greater) {
+                this.half_greater = false;
+                return args;
+            }
+            if (this.match(TokenKind.COMMA)) {
+                continue;
+            }
+            if (this.match(TokenKind.GREATER)) {
+                return args;
+            }
+            if (this.match(TokenKind.GREATER_GREATER)) {
+                this.half_greater = true;
+                return args;
+            }
+            this.fail("expected '>' after type arguments");
+        }
+        return args;
+    }
+
+    GenericParams* parse_generic_params() {
+        GenericParams* params = GenericParams.create();
+        IdList* names = params.names;
+        this.expect(TokenKind.LESS, "expected '<'");
+        while (!this.failed) {
+            i32 token = this.expect(TokenKind.IDENTIFIER, "expected a type parameter name");
+            names.push(this.atom_of(token));
+            if (this.match(TokenKind.COMMA)) {
+                continue;
+            }
+            this.expect(TokenKind.GREATER, "expected '>' after type parameters");
+            break;
+        }
+        return params;
+    }
+
+    void parse_where_clauses(GenericParams* params) {
+        while (this.match(TokenKind.WHERE)) {
+            i32 token = this.expect(TokenKind.IDENTIFIER, "expected a type parameter after 'where'");
+            i32 owner = params.index_of(this.atom_of(token));
+            if (owner < 0) {
+                this.fail("'where' names an unknown type parameter");
+                return;
+            }
+            this.expect(TokenKind.COLON, "expected ':' after the constrained type parameter");
+            params.add_bound(owner, this.parse_type());
+            while (this.match(TokenKind.COMMA)) {
+                params.add_bound(owner, this.parse_type());
+            }
+            if (this.check(TokenKind.SEMICOLON) && this.kind_of(this.peek_token(1)) == TokenKind.WHERE) {
+                this.advance();
+            }
+        }
+    }
+
     TypeRef* parse_type() {
         i32 token = this.current();
         mut TypeRef* base = (TypeRef*)0;
@@ -252,7 +359,7 @@ struct Parser {
         }
 
         if (this.check(TokenKind.LESS) && base.kind == TypeKind.NAMED) {
-            this.fail("generic types are not supported yet");
+            base.args = this.parse_type_arguments();
         }
 
         if (this.match(TokenKind.QUESTION)) {
@@ -480,9 +587,9 @@ struct Parser {
         node.set_text(this.copy_of(name));
 
         if (this.check(TokenKind.LESS)) {
-            this.fail("generic enums are not supported yet");
-            return node;
+            node.set_generics(this.parse_generic_params());
         }
+        this.parse_bases_and_constraints(node);
 
         this.expect(TokenKind.LBRACE, "expected '{' to open enum body");
         mut i64 next_value = 0;
@@ -597,6 +704,40 @@ struct Parser {
         return node;
     }
 
+    void parse_bases_and_constraints(Node* node) {
+        mut bool has_base = false;
+        while (!this.failed) {
+            if (this.check(TokenKind.COLON)) {
+                this.advance();
+                this.match(TokenKind.INTERFACE);
+                TypeRef* first = this.parse_type();
+                if (has_base) {
+                    Node* extra = Node.create(NodeKind.PARAMETER, this.current());
+                    extra.set_type(first);
+                    node.add(extra);
+                } else {
+                    node.set_type(first);
+                    has_base = true;
+                }
+                while (this.match(TokenKind.COMMA)) {
+                    this.match(TokenKind.INTERFACE);
+                    Node* base = Node.create(NodeKind.PARAMETER, this.current());
+                    base.set_type(this.parse_type());
+                    node.add(base);
+                }
+            } else if (this.check(TokenKind.WHERE)) {
+                GenericParams* params = node.generics();
+                if (params == null) {
+                    this.fail("'where' needs a generic declaration");
+                    return;
+                }
+                this.parse_where_clauses(params);
+            } else {
+                return;
+            }
+        }
+    }
+
     Node* parse_struct() {
         i32 start = this.advance();
         Node* node = Node.create_list(NodeKind.STRUCT_DECL, start);
@@ -604,20 +745,9 @@ struct Parser {
         node.set_text(this.copy_of(name));
 
         if (this.check(TokenKind.LESS)) {
-            this.fail("generic structs are not supported yet");
-            return node;
+            node.set_generics(this.parse_generic_params());
         }
-
-        if (this.match(TokenKind.COLON)) {
-            this.match(TokenKind.INTERFACE);
-            node.set_type(this.parse_type());
-            while (this.match(TokenKind.COMMA)) {
-                this.match(TokenKind.INTERFACE);
-                Node* base = Node.create(NodeKind.PARAMETER, this.current());
-                base.set_type(this.parse_type());
-                node.add(base);
-            }
-        }
+        this.parse_bases_and_constraints(node);
 
         if (this.match(TokenKind.SEMICOLON)) {
             return node;
