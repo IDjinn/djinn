@@ -13,9 +13,11 @@ struct SemanticAnalyzer {
     }
 
     public bool collect(Node* program) {
+        this.collect_interfaces(program);
         this.collect_structs(program);
         this.resolve_structs();
         this.collect_functions(program);
+        this.verify_conformance(program);
         Diagnostics* diagnostics = this.diagnostics;
         return !diagnostics.failed();
     }
@@ -47,6 +49,39 @@ struct SemanticAnalyzer {
         return name.cstr();
     }
 
+    bool is_nominal(Node* declaration) {
+        TypeRef* base = declaration.type();
+        if (base == null) {
+            return true;
+        }
+        if (base.kind != TypeKind.NAMED) {
+            return false;
+        }
+        SymbolTable* symbols = this.symbols;
+        return symbols.find_interface(base.full_atom, base.name_atom, this.scope) != null;
+    }
+
+    void collect_interfaces(Node* container) {
+        for (mut i32 i = 0; i < container.count(); i = i + 1) {
+            Node* declaration = container.child(i);
+            if (declaration.kind == NodeKind.NAMESPACE_DECL) {
+                u32 saved = this.enter(declaration);
+                this.collect_interfaces(declaration);
+                this.scope = saved;
+            } else if (declaration.kind == NodeKind.INTERFACE_DECL) {
+                InterfaceInfo* info = (InterfaceInfo*)Memory.zalloc(sizeof(InterfaceInfo));
+                info.namespace_id = this.scope;
+                info.name = this.declared_name(declaration, this.scope);
+                info.name_atom = declaration.name();
+                info.node = declaration;
+                SymbolTable* symbols = this.symbols;
+                if (!symbols.add_interface(info)) {
+                    this.error(declaration, "interface is already defined");
+                }
+            }
+        }
+    }
+
     void collect_structs(Node* container) {
         for (mut i32 i = 0; i < container.count(); i = i + 1) {
             Node* declaration = container.child(i);
@@ -54,7 +89,7 @@ struct SemanticAnalyzer {
                 u32 saved = this.enter(declaration);
                 this.collect_structs(declaration);
                 this.scope = saved;
-            } else if (declaration.kind == NodeKind.STRUCT_DECL && declaration.type() == null) {
+            } else if (declaration.kind == NodeKind.STRUCT_DECL && this.is_nominal(declaration)) {
                 this.collect_struct(declaration);
             }
         }
@@ -177,8 +212,10 @@ struct SemanticAnalyzer {
                 this.collect_function(declaration, false, (StructInfo*)0);
             } else if (declaration.kind == NodeKind.EXTERN_FUNCTION) {
                 this.collect_function(declaration, true, (StructInfo*)0);
-            } else if (declaration.kind == NodeKind.STRUCT_DECL && declaration.type() == null) {
+            } else if (declaration.kind == NodeKind.STRUCT_DECL && this.is_nominal(declaration)) {
                 this.collect_methods(declaration);
+            } else if (declaration.kind == NodeKind.IMPL_DECL) {
+                this.collect_impl(declaration);
             } else if (declaration.kind == NodeKind.STATIC_VAR) {
                 this.collect_global(declaration);
             }
@@ -197,6 +234,131 @@ struct SemanticAnalyzer {
                 this.collect_function(member, false, owner);
             }
         }
+    }
+
+    StructInfo* impl_target(Node* declaration) {
+        TypeRef* target = declaration.type();
+        SymbolTable* symbols = this.symbols;
+        if (target == null || target.kind != TypeKind.NAMED) {
+            return (StructInfo*)0;
+        }
+        return symbols.find_struct(target.full_atom, target.name_atom, this.scope);
+    }
+
+    void collect_impl(Node* declaration) {
+        StructInfo* owner = this.impl_target(declaration);
+        if (owner == null) {
+            this.error(declaration, "impl target must be a struct or an enum");
+            return;
+        }
+        for (mut i32 i = 0; i < declaration.count(); i = i + 1) {
+            Node* member = declaration.child(i);
+            if (member.kind == NodeKind.FUNCTION) {
+                this.collect_function(member, false, owner);
+            } else if (member.kind != NodeKind.PARAMETER) {
+                this.error(member, "an impl block can only contain methods");
+            }
+        }
+    }
+
+    void verify_conformance(Node* container) {
+        for (mut i32 i = 0; i < container.count(); i = i + 1) {
+            Node* declaration = container.child(i);
+            if (declaration.kind == NodeKind.NAMESPACE_DECL) {
+                u32 saved = this.enter(declaration);
+                this.verify_conformance(declaration);
+                this.scope = saved;
+            } else if (declaration.kind == NodeKind.STRUCT_DECL && declaration.type() != null && this.is_nominal(declaration)) {
+                SymbolTable* symbols = this.symbols;
+                StructInfo* owner = symbols.find_struct(declaration.name(), declaration.name(), this.scope);
+                if (owner != null) {
+                    this.check_conformance(owner, declaration.type(), declaration);
+                    for (mut i32 b = 0; b < declaration.count(); b = b + 1) {
+                        Node* base = declaration.child(b);
+                        if (base.kind == NodeKind.PARAMETER) {
+                            this.check_conformance(owner, base.type(), base);
+                        }
+                    }
+                }
+            } else if (declaration.kind == NodeKind.IMPL_DECL) {
+                StructInfo* owner = this.impl_target(declaration);
+                for (mut i32 c = 0; c < declaration.count(); c = c + 1) {
+                    Node* contract = declaration.child(c);
+                    if (contract.kind == NodeKind.PARAMETER && owner != null) {
+                        this.check_conformance(owner, contract.type(), contract);
+                    }
+                }
+            }
+        }
+    }
+
+    void conformance_error(Node* at, StructInfo* owner, InterfaceInfo* contract, i8* problem, i8* member) {
+        ByteBuffer* message = ByteBuffer.create();
+        message.append("struct '");
+        message.append(owner.name);
+        message.append("' does not implement interface '");
+        message.append(contract.name);
+        message.append("': ");
+        message.append(problem);
+        message.append(" '");
+        message.append(member);
+        message.append("'");
+        this.error(at, message.cstr());
+    }
+
+    void check_conformance(StructInfo* owner, TypeRef* reference, Node* at) {
+        SymbolTable* symbols = this.symbols;
+        InterfaceInfo* contract = symbols.find_interface(reference.full_atom, reference.name_atom, this.scope);
+        if (contract == null) {
+            this.error(at, "unknown interface");
+            return;
+        }
+        u32 saved = this.scope;
+        this.scope = contract.namespace_id;
+        Node* declaration = contract.node;
+        for (mut i32 i = 0; i < declaration.count(); i = i + 1) {
+            Node* member = declaration.child(i);
+            if (member.kind == NodeKind.FIELD_DECL) {
+                FieldInfo* field = symbols.find_field(owner, member.name());
+                if (field == null) {
+                    this.conformance_error(at, owner, contract, "missing field", member.text());
+                } else if (field.type != this.resolve(member.type(), member)) {
+                    this.conformance_error(at, owner, contract, "mismatched type of field", member.text());
+                }
+            } else if (member.kind == NodeKind.FUNCTION) {
+                FunctionInfo* method = symbols.find_method(owner, member.name());
+                if (method == null) {
+                    this.conformance_error(at, owner, contract, "missing method", member.text());
+                } else if (!this.signature_matches(method, member)) {
+                    this.conformance_error(at, owner, contract, "mismatched signature of method", member.text());
+                }
+            }
+        }
+        this.scope = saved;
+    }
+
+    bool signature_matches(FunctionInfo* method, Node* signature) {
+        if (method.is_instance == signature.flag()) {
+            return false;
+        }
+        if (method.return_type != this.resolve(signature.type(), signature)) {
+            return false;
+        }
+        IdList* param_types = method.param_types;
+        mut i32 offset = 0;
+        if (method.is_instance) {
+            offset = 1;
+        }
+        if (param_types.length - offset != signature.count()) {
+            return false;
+        }
+        for (mut i32 i = 0; i < signature.count(); i = i + 1) {
+            Node* parameter = signature.child(i);
+            if (param_types.get(i + offset) != this.resolve(parameter.type(), parameter)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     void collect_global(Node* declaration) {
@@ -237,7 +399,11 @@ struct SemanticAnalyzer {
         IdList* param_types = info.param_types;
         if (owner != null && !declaration.flag()) {
             info.is_instance = true;
-            param_types.push(Types.pointer_to(owner.type_id));
+            if (owner.is_enum) {
+                param_types.push(owner.type_id);
+            } else {
+                param_types.push(Types.pointer_to(owner.type_id));
+            }
         }
         for (mut i32 i = 0; i < declaration.count(); i = i + 1) {
             Node* parameter = declaration.child(i);

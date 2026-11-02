@@ -21,7 +21,7 @@ struct Parser {
     public static void collect_type_names(TokenList* list, SourceFile* file, U32Map* names) {
         for (mut i32 i = file.first_token; i + 1 < file.token_end; i = i + 1) {
             i32 kind = list.kind(i);
-            bool declaresType = kind == TokenKind.STRUCT || kind == TokenKind.ENUM;
+            bool declaresType = kind == TokenKind.STRUCT || kind == TokenKind.ENUM || kind == TokenKind.INTERFACE;
             if (declaresType && list.kind(i + 1) == TokenKind.IDENTIFIER) {
                 names.put(list.atom(i + 1), 1);
             }
@@ -293,8 +293,15 @@ struct Parser {
             return this.parse_static_var();
         }
 
-        if (this.kind_of(token) == TokenKind.ENUM || this.kind_of(token) == TokenKind.INTERFACE || this.kind_of(token) == TokenKind.IMPL
-            || this.kind_of(token) == TokenKind.MACRO) {
+        if (this.kind_of(token) == TokenKind.INTERFACE) {
+            return this.parse_interface();
+        }
+
+        if (this.kind_of(token) == TokenKind.IMPL) {
+            return this.parse_impl();
+        }
+
+        if (this.kind_of(token) == TokenKind.MACRO) {
             this.fail("this declaration is not supported yet");
             return (Node*)0;
         }
@@ -517,6 +524,79 @@ struct Parser {
         return node;
     }
 
+    Node* parse_interface() {
+        i32 start = this.advance();
+        Node* node = Node.create_list(NodeKind.INTERFACE_DECL, start);
+        i32 name = this.expect(TokenKind.IDENTIFIER, "expected interface name");
+        node.set_text(this.copy_of(name));
+
+        if (this.check(TokenKind.LESS)) {
+            this.fail("generic interfaces are not supported yet");
+            return node;
+        }
+
+        this.expect(TokenKind.LBRACE, "expected '{' to open interface body");
+        while (!this.check(TokenKind.RBRACE) && !this.at_end()) {
+            this.parse_interface_member(node);
+        }
+        this.expect(TokenKind.RBRACE, "expected '}' to close interface body");
+        return node;
+    }
+
+    void parse_interface_member(Node* owner) {
+        i32 start = this.current();
+        TypeRef* type = this.parse_type();
+        i32 name = this.expect(TokenKind.IDENTIFIER, "expected interface member name");
+        if (this.check(TokenKind.LPAREN)) {
+            Node* method = Node.create_list(NodeKind.FUNCTION, start);
+            method.set_type(type);
+            method.set_text(this.copy_of(name));
+            this.advance();
+            this.parse_parameters(method);
+            this.expect(TokenKind.RPAREN, "expected ')' after parameters");
+            this.expect(TokenKind.SEMICOLON, "expected ';' after interface method");
+            owner.add(method);
+            return;
+        }
+        Node* field = Node.create(NodeKind.FIELD_DECL, start);
+        field.set_type(type);
+        field.set_text(this.copy_of(name));
+        this.expect(TokenKind.SEMICOLON, "expected ';' after interface field");
+        owner.add(field);
+    }
+
+    Node* parse_impl() {
+        i32 start = this.advance();
+        Node* node = Node.create_list(NodeKind.IMPL_DECL, start);
+        i32 first_token = this.current();
+        TypeRef* first = this.parse_type();
+        if (this.check(TokenKind.COMMA) || this.check(TokenKind.FOR)) {
+            Node* contract = Node.create(NodeKind.PARAMETER, first_token);
+            contract.set_type(first);
+            node.add(contract);
+            while (this.match(TokenKind.COMMA)) {
+                Node* more = Node.create(NodeKind.PARAMETER, this.current());
+                more.set_type(this.parse_type());
+                node.add(more);
+            }
+            this.expect(TokenKind.FOR, "expected 'for' after the interfaces of an impl");
+            node.set_type(this.parse_type());
+            if (this.check(TokenKind.COMMA)) {
+                this.fail("impl for several types is not supported yet");
+                return node;
+            }
+        } else {
+            node.set_type(first);
+        }
+
+        this.expect(TokenKind.LBRACE, "expected '{' to open impl body");
+        while (!this.check(TokenKind.RBRACE) && !this.at_end()) {
+            this.parse_struct_member(node);
+        }
+        this.expect(TokenKind.RBRACE, "expected '}' to close impl body");
+        return node;
+    }
+
     Node* parse_struct() {
         i32 start = this.advance();
         Node* node = Node.create_list(NodeKind.STRUCT_DECL, start);
@@ -529,9 +609,13 @@ struct Parser {
         }
 
         if (this.match(TokenKind.COLON)) {
+            this.match(TokenKind.INTERFACE);
             node.set_type(this.parse_type());
             while (this.match(TokenKind.COMMA)) {
-                this.parse_type();
+                this.match(TokenKind.INTERFACE);
+                Node* base = Node.create(NodeKind.PARAMETER, this.current());
+                base.set_type(this.parse_type());
+                node.add(base);
             }
         }
 
