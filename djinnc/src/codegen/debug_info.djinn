@@ -87,13 +87,56 @@ struct DebugInfo {
             void* pointee = this.type_of(Types.element(type), gen);
             result = LLVMDIBuilderCreatePointerType(this.builder, pointee, 64, 0, 0, "", 0);
         } else {
-            StructInfo* info = gen.struct_of(type);
-            u64 size = LLVMABISizeOfType(this.target_data, info.llvm) * 8;
-            result = LLVMDIBuilderCreateStructType(this.builder, this.unit, info.name, (u64)strlen(info.name), this.file_for(this.file_name), 0, size, 0, 0, (void*)0, (void**)0, 0, 0, (void*)0, "", 0);
+            return this.struct_type(type, gen);
         }
         cache.put(type, (u32)list.length);
         list.push(result);
         return result;
+    }
+
+    void* struct_type(u32 type, CodeGenerator* gen) {
+        U32Map* cache = this.types;
+        PointerList* list = this.type_list;
+        StructInfo* info = gen.struct_of(type);
+        void* file = this.file_for(this.file_name);
+        void* placeholder = LLVMTemporaryMDNode(this.context, (void**)0, 0);
+        u32 slot = (u32)list.length;
+        cache.put(type, slot);
+        list.push(placeholder);
+
+        PointerList* members = PointerList.create();
+        if (!info.is_enum) {
+            PointerList* fields = info.fields;
+            for (mut i32 i = 0; i < fields.length; i = i + 1) {
+                FieldInfo* field = (FieldInfo*)fields.get(i);
+                void* field_type = this.type_of(field.type, gen);
+                u64 field_bits = LLVMABISizeOfType(this.target_data, gen.llvm_type(field.type)) * 8;
+                u64 offset = LLVMOffsetOfElement(this.target_data, info.llvm, (u32)field.index) * 8;
+                members.push(LLVMDIBuilderCreateMemberType(this.builder, this.unit, field.name, (u64)strlen(field.name), file, 0, field_bits, 0, offset, 0, field_type));
+            }
+        }
+        void** entries = CodeGenerator.array_of(members.length);
+        for (mut i32 i = 0; i < members.length; i = i + 1) {
+            entries[i] = members.get(i);
+        }
+        u64 size = LLVMABISizeOfType(this.target_data, info.llvm) * 8;
+        void* result = LLVMDIBuilderCreateStructType(this.builder, this.unit, info.name, (u64)strlen(info.name), file, 0, size, 0, 0, (void*)0, entries, (u32)members.length, 0, (void*)0, "", 0);
+        LLVMMetadataReplaceAllUsesWith(placeholder, result);
+        void** raw = list.data;
+        raw[slot] = result;
+        return result;
+    }
+
+    public void* enter_block(Node* node) {
+        void* outer = this.scope;
+        if (outer != null) {
+            this.scope = LLVMDIBuilderCreateLexicalBlock(this.builder, outer, this.file, (u32)node.line(), (u32)node.column());
+        }
+        return outer;
+    }
+
+    public void leave_block(void* outer) {
+        this.scope = outer;
     }
 
     public void begin_function(FunctionInfo* info, Node* declaration, CodeGenerator* gen) {
