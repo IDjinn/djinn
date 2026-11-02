@@ -33,6 +33,16 @@ Generator::Generator(DiagnosticEngine& diagnostics, const std::shared_ptr<Scoped
       currentScope(std::make_shared<GeneratorScope>())
 {
     globalScope_ = currentScope;
+
+    // Without a layout LLVM aligns i64 to 4 bytes, so sizeof/offsets would disagree with the 8-byte
+    // alignment the backend uses for x86_64 and structs would be allocated too small
+#if defined(__x86_64__) || defined(_M_X64)
+#ifdef _WIN32
+    module->setDataLayout("e-m:w-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128");
+#elif !defined(__APPLE__)
+    module->setDataLayout("e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128");
+#endif
+#endif
 }
 
 Generator::FunctionScope::FunctionScope(Generator& generator, llvm::Function* function, std::string structName,

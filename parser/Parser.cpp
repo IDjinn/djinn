@@ -7,6 +7,7 @@
 #include <cctype>
 #include <ranges>
 #include <sstream>
+#include <string_view>
 #include <llvm/IR/Intrinsics.h>
 #include <llvm/Support/CommandLine.h>
 #include <cassert>
@@ -17,12 +18,12 @@
 
 #define PARSER_ERROR(code, msg, location) do { \
 _diagnostics.emitAndPrint(Diagnostic(Severity::Error, code, msg, location)); \
-throw CompileError(code, msg); \
+throw CompileError(code, msg, location); \
 } while (false);
 
 #define PARSER_WARNING(code, msg, location) do { \
 _diagnostics.emitAndPrint(Diagnostic(Severity::Warning, code, msg, location)); \
-throw CompileError(code, msg); \
+throw CompileError(code, msg, location); \
 } while (false);
 
 auto makeSourceIdentifier = [](const Token& token)
@@ -146,6 +147,17 @@ bool Parser::match(const TokenType type)
     return false;
 }
 
+namespace
+{
+    // f32n, f64w, ...: a float type name carrying an integer-only suffix
+    bool isFloatWithIntSuffix(const std::string& name)
+    {
+        constexpr std::string_view intSuffixes = "wtcsn";
+        return name.starts_with('f') && name.length() > 3 && intSuffixes.contains(name.back()) &&
+            string_to_type_kind.contains(name.substr(0, name.length() - 1));
+    }
+}
+
 bool Parser::isType()
 {
     return isType(peek());
@@ -173,7 +185,8 @@ bool Parser::isType(const Token& token) const
     // Built-in float types
     if (token.value.starts_with('f'))
     {
-        return string_to_type_kind.contains(token.value);
+        // Float names with an integer suffix count as types so parse_type reports the suffix
+        return string_to_type_kind.contains(token.value) || isFloatWithIntSuffix(token.value);
     }
 
     // Built-in integer types (i32, u64, i32w, ...)
@@ -2065,13 +2078,14 @@ std::unique_ptr<Expression> Parser::parse_unary()
     {
         const size_t saved = current;
         advance(); // consume '('
+        const SourceLocation openParen(previous().position, previous().value.length());
         if (isType())
         {
             auto castType = parse_type();
             if (match(TokenType::RPAREN))
             {
                 auto operand = parse_unary();
-                auto finalLocation = operand->location - castType->location;
+                auto finalLocation = operand->location - openParen;
                 return std::make_unique<CastExpression>(
                     std::move(*castType),
                     std::move(operand),
@@ -2380,6 +2394,13 @@ std::unique_ptr<Expression> Parser::parse_primary()
         const bool isDeclaredStruct = currentScope->has_struct_declared(firstToken.value);
         const bool isKnownType = isPrimitive || isDeclaredStruct;
         const auto existingVar = currentScope->lookup_variable(firstToken.value);
+
+        if (!isAuto && !existingVar && isFloatWithIntSuffix(firstToken.value) && check(TokenType::IDENTIFIER))
+        {
+            PARSER_ERROR(DiagnosticCode::INVALID_TYPE,
+                         "suffix '" + std::string(1, firstToken.value.back()) + "' is only valid on integer types",
+                         SourceLocation(firstToken.position, firstToken.value.length()));
+        }
 
         // Step 3: Parse type modifiers — generics, pointers, arrays
         // When isAuto, the identifier is always the variable name (not a type),

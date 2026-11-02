@@ -235,12 +235,12 @@ TEST(NonZero, DivisionByNonZeroRuns)
 TEST(NonZero, DivisionByConstantSkipsZeroCheck)
 {
     const auto source = R"(
-        i32 work() {
-            return 100 / 10;
+        i32 work(i32 a) {
+            return a / 10;
         }
 
         i32 main() {
-            return work();
+            return work(100);
         }
     )";
 

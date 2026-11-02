@@ -1221,6 +1221,15 @@ void __djinn_runtime_init(int num_threads)
 }
 
 #ifdef _WIN32
+int64_t __djinn_now_us(void)
+{
+    LARGE_INTEGER frequency;
+    LARGE_INTEGER counter;
+    QueryPerformanceFrequency(&frequency);
+    QueryPerformanceCounter(&counter);
+    return (int64_t)(counter.QuadPart * 1000000 / frequency.QuadPart);
+}
+
 int __djinn_argc(void)
 {
     return __argc;
@@ -1241,6 +1250,13 @@ __attribute__((constructor)) static void djinn_capture_args(int argc, char** arg
     (void)envp;
     djinn_saved_argc = argc;
     djinn_saved_argv = argv;
+}
+
+int64_t __djinn_now_us(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
 }
 
 int __djinn_argc(void)

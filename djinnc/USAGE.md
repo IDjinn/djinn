@@ -66,7 +66,7 @@ directory).
 | `--no-link` | Stop after generating code; writes `<output>.ll`. |
 | `--emit-ir` / `--keep-ir` | Write `<output>.ll` (IR). `--keep-ir` also links. |
 | `--emit-tokens` / `--emit-ast` | Dump the token list or the AST and exit. |
-| `--stats` | Print files, tokens, AST nodes, arena usage and lex+parse ticks. |
+| `--stats` | Print files, tokens, AST nodes and arena usage, plus a `PerformanceMonitor` lap per phase (lex, parse, codegen, write-ir, object, link) and the total, in ms. |
 | `--selftest` | Run the built-in unit checks (arena, atoms, maps, ...). |
 
 Objects are emitted directly through LLVM-C (`LLVMTargetMachineEmitToFile`); only the x86 target is initialized.
@@ -111,7 +111,7 @@ djinnc --selftest
 ### Samples and error cases
 
 [tests/djinnc/run.sh](../tests/djinnc/run.sh) runs the selftest, compiles and runs every file in
-`tests/djinnc/samples` (the expected exit code is in the matching `.expected`) and checks that every file in
+`tests/djinnc/samples` (the expected exit code is in the matching `.exit`; an optional `.stdout` is compared too, ignoring ``) and checks that every file in
 `tests/djinnc/errors` fails with an `error:` diagnostic.
 
 ```bash
@@ -119,7 +119,7 @@ tests/djinnc/run.sh <djinnc> <runtime dir> [runtime lib]
 DJINN_USE_LLD=1 tests/djinnc/run.sh <djinnc> <runtime dir> <runtime lib>   # through --lld
 ```
 
-To add a sample, drop `name.djinn` and `name.expected` (the exit code of `main`) into `tests/djinnc/samples`. To add an
+To add a sample, drop `name.djinn` and `name.exit` (the exit code of `main`) into `tests/djinnc/samples`, plus `name.stdout` when the program prints. To add an
 error case, add a file to `tests/djinnc/errors` that must be rejected.
 
 ### Fixpoint

@@ -173,7 +173,8 @@ namespace djinn
             ));
             throw CompileError(DiagnosticCode::TYPE_MISMATCH,
                                "cannot cast integer literal 0 to non-zero type '" + expr.targetType.toHumanString() +
-                               "'");
+                               "'",
+                               expr.location);
         }
         _result = std::make_shared<Symbol>(SymbolKind::Variable, "cast", expr.targetType, expr.location);
     }
