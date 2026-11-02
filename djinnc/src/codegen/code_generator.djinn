@@ -656,6 +656,9 @@ struct CodeGenerator {
         if (kind == NodeKind.STRUCT_INIT) {
             return this.gen_struct_init(node);
         }
+        if (kind == NodeKind.NEW_EXPR) {
+            return this.gen_new(node);
+        }
         if (kind == NodeKind.INTRINSIC) {
             return this.gen_sizeof(node);
         }
@@ -1019,6 +1022,41 @@ struct CodeGenerator {
         return Value.create(LLVMBuildLoad2(this.builder, llvm, slot, "enum.loaded"), enum_type);
     }
 
+    void call_constructor(Node* node, void* target, FunctionInfo* constructor) {
+        if (constructor == null) {
+            return;
+        }
+        IdList* param_types = constructor.param_types;
+        void** args = CodeGenerator.array_of(node.count() + 1);
+        args[0] = target;
+        for (mut i32 i = 0; i < node.count(); i = i + 1) {
+            Value* argument = this.gen_expression(node.child(i));
+            args[i + 1] = this.coerce(argument, param_types.get(i + 1));
+        }
+        LLVMBuildCall2(this.builder, constructor.function_type, constructor.function, args, (u32)(node.count() + 1), "");
+    }
+
+    Value* gen_new(Node* node) {
+        u32 pointer_type = node.value_type();
+        StructInfo* info = this.struct_of(Types.element(pointer_type));
+        void* i64_type = LLVMIntTypeInContext(this.context, 64);
+        void* pointer_llvm = LLVMPointerTypeInContext(this.context, 0);
+        void** params = CodeGenerator.array_of(2);
+        params[0] = i64_type;
+        params[1] = i64_type;
+        void* allocator_type = LLVMFunctionType(pointer_llvm, params, 2, 0);
+        mut void* allocator = LLVMGetNamedFunction(this.module, "calloc");
+        if (allocator == null) {
+            allocator = LLVMAddFunction(this.module, "calloc", allocator_type);
+        }
+        void** args = CodeGenerator.array_of(2);
+        args[0] = LLVMConstInt(i64_type, 1, 0);
+        args[1] = LLVMSizeOf(info.llvm);
+        void* memory = LLVMBuildCall2(this.builder, allocator_type, allocator, args, 2, "new");
+        this.call_constructor(node, memory, (FunctionInfo*)node.symbol());
+        return Value.create(memory, pointer_type);
+    }
+
     Value* gen_struct_init(Node* node) {
         u32 type = node.value_type();
         void* llvm = this.llvm_type(type);
@@ -1096,6 +1134,13 @@ struct CodeGenerator {
             }
             Value* tag = this.gen_expression(variant.first());
             return Value.create(this.coerce(tag, declared), declared);
+        }
+        if (callee.symbol_kind() == SymbolKind.CONSTRUCTOR) {
+            u32 constructed = node.value_type();
+            void* slot = this.create_slot(constructed, "ctor");
+            LLVMBuildStore(this.builder, LLVMConstNull(this.llvm_type(constructed)), slot);
+            this.call_constructor(node, slot, (FunctionInfo*)callee.symbol());
+            return Value.create(LLVMBuildLoad2(this.builder, this.llvm_type(constructed), slot, "ctor.loaded"), constructed);
         }
         FunctionInfo* info = (FunctionInfo*)callee.symbol();
         mut void* receiver = (void*)0;

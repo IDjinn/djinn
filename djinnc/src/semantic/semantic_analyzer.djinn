@@ -305,7 +305,7 @@ struct SemanticAnalyzer {
                     if (member.kind != NodeKind.FUNCTION) {
                         continue;
                     }
-                    FunctionInfo* method = this.build_function(Node.clone(member), false, info);
+                    FunctionInfo* method = this.build_function(Node.clone(member), false, info, false);
                     if (method != null) {
                         method.bindings = impl_map;
                         if (!symbols.add_function(method)) {
@@ -375,6 +375,22 @@ struct SemanticAnalyzer {
         }
     }
 
+    bool is_operator_contract(TypeRef* reference) {
+        SymbolTable* symbols = this.symbols;
+        InterfaceInfo* contract = symbols.find_interface(reference.full_atom, reference.name_atom, this.scope);
+        if (contract == null) {
+            return false;
+        }
+        Node* declaration = contract.node;
+        for (mut i32 i = 0; i < declaration.count(); i = i + 1) {
+            Node* member = declaration.child(i);
+            if (member.kind != NodeKind.FUNCTION || !member.flag()) {
+                return false;
+            }
+        }
+        return declaration.count() > 0;
+    }
+
     void check_bounds(GenericParams* params, IdList* args, Node* blame) {
         SymbolTable* symbols = this.symbols;
         PointerList* bounds = params.bounds;
@@ -389,7 +405,9 @@ struct SemanticAnalyzer {
                 argument_info = symbols.enum_of_type(argument);
             }
             if (argument_info == null) {
-                this.error(blame, "type argument does not satisfy a generic constraint");
+                if (!this.is_operator_contract(bound)) {
+                    this.error(blame, "type argument does not satisfy a generic constraint");
+                }
                 continue;
             }
             this.check_conformance(argument_info, bound, blame);
@@ -582,6 +600,10 @@ struct SemanticAnalyzer {
                 FunctionInfo* method = symbols.find_method(owner, member.name());
                 if (method == null) {
                     this.conformance_error(at, owner, contract, "missing method", member.text());
+                } else if (member.generics() != null) {
+                    if (!method.is_template) {
+                        this.conformance_error(at, owner, contract, "mismatched signature of method", member.text());
+                    }
                 } else if (!this.signature_matches(method, member)) {
                     this.conformance_error(at, owner, contract, "mismatched signature of method", member.text());
                 }
@@ -635,7 +657,7 @@ struct SemanticAnalyzer {
     }
 
     void collect_function(Node* declaration, bool is_extern, StructInfo* owner) {
-        FunctionInfo* info = this.build_function(declaration, is_extern, owner);
+        FunctionInfo* info = this.build_function(declaration, is_extern, owner, false);
         if (info == null) {
             return;
         }
@@ -669,6 +691,16 @@ struct SemanticAnalyzer {
         }
 
         U32Map* bindings = U32Map.create(Memory.arena(), 8);
+        if (template.bindings != null) {
+            U32Map* inherited = template.bindings;
+            inherited.copy_into(bindings);
+        } else if (template.owner != null) {
+            StructInfo* receiver = template.owner;
+            if (receiver.bindings != null) {
+                U32Map* inherited = receiver.bindings;
+                inherited.copy_into(bindings);
+            }
+        }
         IdList* names = params.names;
         for (mut i32 a = 0; a < args.length; a = a + 1) {
             bindings.put(names.get(a), args.get(a));
@@ -679,7 +711,7 @@ struct SemanticAnalyzer {
         symbols.bindings = bindings;
 
         Node* declaration = Node.clone(template.node);
-        FunctionInfo* info = this.build_function(declaration, false, (StructInfo*)0);
+        FunctionInfo* info = this.build_function(declaration, false, template.owner, true);
         ByteBuffer* name = ByteBuffer.create();
         name.append(template.name);
         name.append_char(60);
@@ -701,29 +733,26 @@ struct SemanticAnalyzer {
         return info;
     }
 
-    FunctionInfo* build_function(Node* declaration, bool is_extern, StructInfo* owner) {
+    FunctionInfo* build_function(Node* declaration, bool is_extern, StructInfo* owner, bool concrete) {
         FunctionInfo* info = (FunctionInfo*)Memory.zalloc(sizeof(FunctionInfo));
         mut u32 function_scope = this.scope;
         if (is_extern) {
             function_scope = 0;
         }
         GenericParams* generics = declaration.generics();
-        if (generics != null && info.bindings == null) {
-            if (owner != null) {
-                this.error(declaration, "generic methods are not supported yet");
-                return (FunctionInfo*)0;
-            }
-            SymbolTable* known = this.symbols;
-            if (known.bindings == null) {
-                info.namespace_id = function_scope;
-                info.name = this.function_name(owner, declaration, is_extern, function_scope);
-                info.name_atom = declaration.name();
-                info.param_types = IdList.create();
-                info.node = declaration;
-                info.generics = generics;
-                info.is_template = true;
-                return info;
-            }
+        if (generics != null && !concrete) {
+            info.namespace_id = function_scope;
+            info.name = this.function_name(owner, declaration, is_extern, function_scope);
+            info.name_atom = declaration.name();
+            info.param_types = IdList.create();
+            info.node = declaration;
+            info.generics = generics;
+            info.is_template = true;
+            info.owner = owner;
+            SymbolTable* active = this.symbols;
+            info.bindings = active.bindings;
+            info.is_instance = owner != null && !declaration.flag();
+            return info;
         }
         info.namespace_id = function_scope;
         info.name = this.function_name(owner, declaration, is_extern, function_scope);

@@ -369,6 +369,9 @@ struct TypeChecker {
         if (kind == NodeKind.STRUCT_INIT) {
             return this.check_struct_init(node, expected);
         }
+        if (kind == NodeKind.NEW_EXPR) {
+            return this.check_new(node);
+        }
         if (kind == NodeKind.INTRINSIC) {
             u32 measured = this.resolve_type(node.type(), node);
             if (Types.is_void(measured) || measured == Types.auto_type()) {
@@ -727,7 +730,7 @@ struct TypeChecker {
 
     Node* find_enum_variant(Node* callee) {
         TypeRef* owner_ref = callee.type();
-        if (owner_ref != null && owner_ref.name != null) {
+        if (owner_ref != null && owner_ref.name != null && !callee.flag()) {
             u32 owner_type = this.resolve_type(callee.type(), callee);
             SymbolTable* known = this.symbols;
             StructInfo* generic_owner = known.enum_of_type(owner_type);
@@ -846,6 +849,61 @@ struct TypeChecker {
         return instance;
     }
 
+    FunctionInfo* check_constructor_arguments(Node* node, StructInfo* owner) {
+        SymbolTable* symbols = this.symbols;
+        FunctionInfo* constructor = symbols.find_method(owner, Ast.intern_base_name(".ctor", 5));
+        if (constructor == null) {
+            if (node.count() > 0) {
+                this.error(node, "struct has no constructor");
+            }
+            for (mut i32 i = 0; i < node.count(); i = i + 1) {
+                this.check_expression(node.child(i), 0);
+            }
+            return constructor;
+        }
+        IdList* params = constructor.param_types;
+        if (params.length != node.count() + 1) {
+            this.error(node, "wrong number of constructor arguments");
+            return constructor;
+        }
+        for (mut i32 i = 0; i < node.count(); i = i + 1) {
+            this.check_expression(node.child(i), params.get(i + 1));
+        }
+        return constructor;
+    }
+
+    u32 constructor_owner_type(Node* at, u32 type) {
+        SymbolTable* symbols = this.symbols;
+        if (!Types.is_struct(type) || symbols.enum_of_type(type) != null) {
+            this.error(at, "only structs have constructors");
+            return 0;
+        }
+        return type;
+    }
+
+    u32 check_constructor(Node* node, Node* callee, u32 type) {
+        if (this.constructor_owner_type(node, type) == 0) {
+            return Types.i32_type();
+        }
+        SymbolTable* symbols = this.symbols;
+        StructInfo* owner = symbols.struct_at(Types.struct_index(type));
+        FunctionInfo* constructor = this.check_constructor_arguments(node, owner);
+        callee.set_symbol(SymbolKind.CONSTRUCTOR, (void*)constructor);
+        return type;
+    }
+
+    u32 check_new(Node* node) {
+        u32 type = this.resolve_type(node.type(), node);
+        if (this.constructor_owner_type(node, type) == 0) {
+            return Types.pointer_to(Types.i32_type());
+        }
+        SymbolTable* symbols = this.symbols;
+        StructInfo* owner = symbols.struct_at(Types.struct_index(type));
+        FunctionInfo* constructor = this.check_constructor_arguments(node, owner);
+        node.set_symbol(SymbolKind.CONSTRUCTOR, (void*)constructor);
+        return Types.pointer_to(type);
+    }
+
     u32 check_call(Node* node) {
         Node* callee = node.first();
         SymbolTable* symbols = this.symbols;
@@ -865,7 +923,17 @@ struct TypeChecker {
                 callee.set_symbol(SymbolKind.CONSTANT, (void*)variant);
                 return variant.value_type();
             }
+            if (callee.flag() && callee.type() != null) {
+                u32 constructed = this.resolve_type(callee.type(), callee);
+                return this.check_constructor(node, callee, constructed);
+            }
             info = symbols.find_function(callee.text_atom(), callee.name(), this.scope);
+            if (info == null) {
+                StructInfo* named = symbols.find_struct(callee.text_atom(), callee.name(), this.scope);
+                if (named != null && !named.is_template && !named.is_enum) {
+                    return this.check_constructor(node, callee, named.type_id);
+                }
+            }
             if (info != null && info.is_template) {
                 info = this.instantiate_call(node, callee, info);
                 if (info == null) {
@@ -879,6 +947,12 @@ struct TypeChecker {
                 StructInfo* owner = symbols.find_struct(base.text_atom(), base.name(), this.scope);
                 base.set_symbol(SymbolKind.STRUCT_NAME, (void*)owner);
                 info = symbols.find_method(owner, callee.name());
+                if (info != null && info.is_template) {
+                    info = this.instantiate_call(node, callee, info);
+                    if (info == null) {
+                        return Types.i32_type();
+                    }
+                }
                 if (info != null && info.is_instance) {
                     this.error(callee, "instance method called without an instance");
                     return Types.i32_type();
@@ -890,6 +964,12 @@ struct TypeChecker {
                     return Types.i32_type();
                 }
                 info = symbols.find_method(owner, callee.name());
+                if (info != null && info.is_template) {
+                    info = this.instantiate_call(node, callee, info);
+                    if (info == null) {
+                        return Types.i32_type();
+                    }
+                }
                 if (info != null && !info.is_instance) {
                     this.error(callee, "static method called on an instance");
                     return Types.i32_type();

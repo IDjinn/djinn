@@ -253,6 +253,18 @@ struct Parser {
         return 0 - 1;
     }
 
+    bool scan_generic_head(i32 less) {
+        mut i32 offset = less + 1;
+        while (this.kind_of(this.peek_token(offset)) == TokenKind.IDENTIFIER) {
+            offset = offset + 1;
+            if (this.kind_of(this.peek_token(offset)) == TokenKind.COMMA) {
+                offset = offset + 1;
+            }
+        }
+        return this.kind_of(this.peek_token(offset)) == TokenKind.GREATER
+            && this.kind_of(this.peek_token(offset + 1)) == TokenKind.LPAREN;
+    }
+
     bool is_declaration_start() {
         if (this.check(TokenKind.MUT)) {
             return true;
@@ -715,11 +727,14 @@ struct Parser {
         }
         TypeRef* type = this.parse_type();
         i32 name = this.expect(TokenKind.IDENTIFIER, "expected interface member name");
-        if (this.check(TokenKind.LPAREN)) {
+        if (this.check(TokenKind.LPAREN) || this.check(TokenKind.LESS)) {
             Node* method = Node.create_list(NodeKind.FUNCTION, start);
             method.set_type(type);
             method.set_text(this.copy_of(name));
-            this.advance();
+            if (this.check(TokenKind.LESS)) {
+                method.set_generics(this.parse_generic_params());
+            }
+            this.expect(TokenKind.LPAREN, "expected '(' after the method name");
             this.parse_parameters(method);
             this.expect(TokenKind.RPAREN, "expected ')' after parameters");
             this.expect(TokenKind.SEMICOLON, "expected ';' after interface method");
@@ -852,7 +867,18 @@ struct Parser {
         i32 afterHead = this.peek_token(lookahead + 1);
         bool isConstructor = this.kind_of(head) == TokenKind.IDENTIFIER && this.kind_of(afterHead) == TokenKind.LPAREN;
         if (isConstructor) {
-            this.fail("constructors are not supported yet");
+            for (mut i32 i = 0; i < lookahead; i = i + 1) {
+                this.advance();
+            }
+            this.advance();
+            Node* constructor = Node.create_list(NodeKind.FUNCTION, head);
+            constructor.set_type(TypeRef.create(TypeKind.VOID));
+            constructor.set_text(".ctor");
+            this.expect(TokenKind.LPAREN, "expected '(' after the constructor name");
+            this.parse_parameters(constructor);
+            this.expect(TokenKind.RPAREN, "expected ')' after parameters");
+            constructor.set_first(this.parse_block());
+            owner.add(constructor);
             return;
         }
 
@@ -872,7 +898,8 @@ struct Parser {
 
         i32 afterType = this.peek_token(typeEnd);
         i32 afterName = this.peek_token(typeEnd + 1);
-        if (this.kind_of(afterType) == TokenKind.IDENTIFIER && this.kind_of(afterName) == TokenKind.LPAREN) {
+        bool genericMethod = this.kind_of(afterName) == TokenKind.LESS && this.scan_generic_head(typeEnd + 1);
+        if (this.kind_of(afterType) == TokenKind.IDENTIFIER && (this.kind_of(afterName) == TokenKind.LPAREN || genericMethod)) {
             Node* method = this.parse_function(false);
             if (method != null) {
                 owner.add(method);
@@ -1245,7 +1272,7 @@ struct Parser {
         }
 
         if (this.kind_of(token) == TokenKind.AWAIT || this.kind_of(token) == TokenKind.SPAWN || this.kind_of(token) == TokenKind.TRY
-            || this.kind_of(token) == TokenKind.NEW || this.kind_of(token) == TokenKind.THROW) {
+            || this.kind_of(token) == TokenKind.THROW) {
             this.fail("this expression is not supported yet");
             return Node.create(NodeKind.NULL_LITERAL, token);
         }
@@ -1283,6 +1310,16 @@ struct Parser {
                 access.set_first(expr);
                 i32 member = this.expect(TokenKind.IDENTIFIER, "expected member name after '.'");
                 access.set_text(this.copy_of(member));
+                if (this.check(TokenKind.LESS)) {
+                    i32 close = this.scan_type_arguments(0);
+                    bool explicit = close > 0 && !this.scan_half && this.kind_of(this.peek_token(close)) == TokenKind.LPAREN;
+                    this.scan_half = false;
+                    if (explicit) {
+                        TypeRef* holder = TypeRef.create(TypeKind.NAMED);
+                        holder.args = this.parse_type_arguments();
+                        access.set_type(holder);
+                    }
+                }
                 expr = access;
             } else if (this.kind_of(token) == TokenKind.PLUS_PLUS) {
                 this.advance();
@@ -1338,6 +1375,20 @@ struct Parser {
         if (this.kind_of(token) == TokenKind.LBRACE) {
             return this.parse_struct_init();
         }
+        if (this.kind_of(token) == TokenKind.NEW) {
+            this.advance();
+            Node* created = Node.create_list(NodeKind.NEW_EXPR, token);
+            created.set_type(this.parse_type());
+            this.expect(TokenKind.LPAREN, "expected '(' after the type of 'new'");
+            if (!this.check(TokenKind.RPAREN)) {
+                created.add(this.parse_expression());
+                while (this.match(TokenKind.COMMA)) {
+                    created.add(this.parse_expression());
+                }
+            }
+            this.expect(TokenKind.RPAREN, "expected ')' after the constructor arguments");
+            return created;
+        }
         if (this.kind_of(token) == TokenKind.THIS) {
             this.advance();
             Node* self = Node.create(NodeKind.IDENTIFIER, token);
@@ -1359,6 +1410,14 @@ struct Parser {
 
             if (this.is_known_type(token) && this.kind_of(this.peek_token(1)) == TokenKind.LESS) {
                 i32 end = this.scan_type_end(0);
+                if (end > 0 && this.kind_of(this.peek_token(end)) == TokenKind.LPAREN) {
+                    TypeRef* constructed = this.parse_type();
+                    Node* constructor_name = Node.create(NodeKind.IDENTIFIER, token);
+                    constructor_name.set_text(constructed.name);
+                    constructor_name.set_type(constructed);
+                    constructor_name.set_flag(true);
+                    return constructor_name;
+                }
                 if (end > 0 && this.kind_of(this.peek_token(end)) == TokenKind.COLON_COLON
                     && this.kind_of(this.peek_token(end + 1)) == TokenKind.IDENTIFIER) {
                     TypeRef* owner = this.parse_type();

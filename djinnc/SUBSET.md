@@ -60,5 +60,13 @@ Enum-like values are `i32` constants held in `static` structs until `==` on enum
 - Generic interfaces: `interface Comparable<T> { i32 compare(T other); }`, used as `struct P : Comparable<P>` or in bounds (`where T : Comparable<T>`); interfaces can declare `operator` members.
 - Generic functions: `T larger<T>(T a, T b) where T : Comparable<T> { ... }`; type arguments are inferred from the arguments (including `Pair<K, V>` and `T*` parameters) or given explicitly, as in `first<i64>(1, 2)`.
 - `impl Box<T> { ... }` and `impl Iface for Box<T> { ... }` add methods and interfaces to every instance; the impl names the type parameters itself.
-- Not yet: generic methods, explicit constructors.
+- Generic methods: `T pick<U>(U marker, T other)` in a struct or impl, and `public static T twice<T>(T item)`; inferred from the arguments or explicit (`holder.convert<i64>(30)`).
+- A generic constraint made only of operator members (`Equatable<T>`, `Addition<T>`) is satisfied by numbers and pointers, which have those operators natively.
+
+## Constructors
+
+- `Point(i32 x, i32 y) { ... }` inside a struct body or `impl`; one constructor per type, arguments are positional (ordered).
+- `Point p = Point(1, 2);` builds a value, `Point* heap = new Point(1, 2);` allocates zeroed memory (`calloc`) and returns a pointer. Generic types work the same way: `Box<i32>(7)`, `new Box<i32>(9)`.
+- A struct without a constructor can only be built with `Name()` (zero-initialized) or a `{ .field = value }` initializer.
+
 - Operator overloading: `operator +(T left, T right) -> T { ... }` inside `impl T { }` or the struct body defines a static operator method; binary expressions on struct values call it. `!=` is derived from `==`.
