@@ -408,6 +408,8 @@ struct CodeGenerator {
             this.gen_do_while(node);
         } else if (kind == NodeKind.FOR) {
             this.gen_for(node);
+        } else if (kind == NodeKind.SWITCH) {
+            this.gen_switch(node);
         } else if (kind == NodeKind.BREAK) {
             FunctionContext* function_context = this.function_context;
             LLVMBuildBr(this.builder, function_context.break_block());
@@ -463,6 +465,53 @@ struct CodeGenerator {
             this.gen_statement(node.third());
             this.branch_if_open(end_block);
         }
+        LLVMPositionBuilderAtEnd(this.builder, end_block);
+    }
+
+    void gen_switch(Node* node) {
+        Value* subject = this.gen_expression(node.first());
+        u32 subject_type = subject.type;
+        void* end_block = this.new_block("switch.end");
+        mut void* default_block = end_block;
+        PointerList* blocks = PointerList.create();
+        PointerList* labels = PointerList.create();
+        mut u32 case_count = 0;
+
+        for (mut i32 i = 0; i < node.count(); i = i + 1) {
+            Node* arm = node.child(i);
+            if (arm.first() == null) {
+                default_block = this.new_block("switch.default");
+                blocks.push(default_block);
+                labels.push((void*)0);
+            } else {
+                blocks.push(this.new_block("switch.case"));
+                labels.push(this.coerce(this.gen_expression(arm.first()), subject_type));
+                case_count = case_count + 1;
+            }
+        }
+
+        void* dispatch = LLVMBuildSwitch(this.builder, subject.ref, default_block, case_count);
+        for (mut i32 i = 0; i < node.count(); i = i + 1) {
+            if (labels.get(i) != null) {
+                LLVMAddCase(dispatch, labels.get(i), blocks.get(i));
+            }
+        }
+
+        FunctionContext* function_context = this.function_context;
+        mut void* continue_target = (void*)0;
+        if (function_context.in_loop()) {
+            continue_target = function_context.continue_block();
+        }
+        function_context.enter_loop(end_block, continue_target);
+        for (mut i32 i = 0; i < node.count(); i = i + 1) {
+            Node* arm = node.child(i);
+            LLVMPositionBuilderAtEnd(this.builder, blocks.get(i));
+            for (mut i32 j = 0; j < arm.count(); j = j + 1) {
+                this.gen_statement(arm.child(j));
+            }
+            this.branch_if_open(end_block);
+        }
+        function_context.leave_loop();
         LLVMPositionBuilderAtEnd(this.builder, end_block);
     }
 
