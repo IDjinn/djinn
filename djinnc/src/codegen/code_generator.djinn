@@ -872,6 +872,11 @@ struct CodeGenerator {
             return this.gen_logical(node);
         }
 
+        i32 symbol = node.symbol_kind();
+        if (symbol == SymbolKind.OPERATOR || symbol == SymbolKind.NEGATED_OPERATOR) {
+            return this.gen_operator_call(node, symbol == SymbolKind.NEGATED_OPERATOR);
+        }
+
         Value* left = this.gen_expression(node.first());
         Value* right = this.gen_expression(node.second());
 
@@ -888,6 +893,19 @@ struct CodeGenerator {
             return this.gen_comparison(node, common, lhs, rhs);
         }
         return this.gen_arithmetic(node, common, lhs, rhs);
+    }
+
+    Value* gen_operator_call(Node* node, bool negated) {
+        FunctionInfo* info = (FunctionInfo*)node.symbol();
+        IdList* param_types = info.param_types;
+        void** args = CodeGenerator.array_of(2);
+        args[0] = this.coerce(this.gen_expression(node.first()), param_types.get(0));
+        args[1] = this.coerce(this.gen_expression(node.second()), param_types.get(1));
+        mut void* result = LLVMBuildCall2(this.builder, info.function_type, info.function, args, 2, "op");
+        if (negated) {
+            result = LLVMBuildNot(this.builder, result, "op.not");
+        }
+        return Value.create(result, info.return_type);
     }
 
     Value* gen_pointer_offset(Node* node, Value* pointer, Value* offset) {

@@ -58,4 +58,4 @@ Enum-like values are `i32` constants held in `static` structs until `==` on enum
 - `where T : A, B; where U : C` constrains type parameters; a struct or enum type argument must satisfy the interfaces, checked at instantiation. A generic type can also list interfaces (`struct X<T> where T : I : J`).
 - `optional<i32>::Value(1)` builds a generic enum value; struct initializers and `switch` work on instances.
 - Not yet: generic functions, generic interfaces, `impl` on generic types, explicit constructors.
-
+- Operator overloading: `operator +(T left, T right) -> T { ... }` inside `impl T { }` or the struct body defines a static operator method; binary expressions on struct values call it. `!=` is derived from `==`.

@@ -545,6 +545,36 @@ struct TypeChecker {
             || op == TokenKind.LESS_EQUAL || op == TokenKind.GREATER || op == TokenKind.GREATER_EQUAL;
     }
 
+    FunctionInfo* find_operator(StructInfo* owner, i32 op) {
+        SymbolTable* symbols = this.symbols;
+        ByteBuffer* name = ByteBuffer.create();
+        name.append("operator");
+        name.append(TokenKind.text(op));
+        return symbols.find_method(owner, Ast.intern_base_name(name.cstr(), (i32)strlen(name.cstr())));
+    }
+
+    u32 check_operator(Node* node, i32 op, u32 left, u32 right) {
+        SymbolTable* symbols = this.symbols;
+        StructInfo* owner = symbols.struct_at(Types.struct_index(left));
+        mut FunctionInfo* method = this.find_operator(owner, op);
+        mut i32 kind = SymbolKind.OPERATOR;
+        if (method == null && op == TokenKind.BANG_EQUAL) {
+            method = this.find_operator(owner, TokenKind.EQUAL_EQUAL);
+            kind = SymbolKind.NEGATED_OPERATOR;
+        }
+        if (method == null) {
+            this.error(node, "struct does not define this operator");
+            return Types.i32_type();
+        }
+        IdList* params = method.param_types;
+        if (params.length != 2 || params.get(0) != left || params.get(1) != right) {
+            this.error(node, "operator operands do not match its parameters");
+            return method.return_type;
+        }
+        node.set_symbol(kind, (void*)method);
+        return method.return_type;
+    }
+
     u32 check_binary(Node* node, u32 expected) {
         i32 op = node.op();
         if (op == TokenKind.AND_AND || op == TokenKind.OR_OR) {
@@ -580,6 +610,10 @@ struct TypeChecker {
 
         if (Types.is_pointer(left) && Types.is_integer(right) && (op == TokenKind.PLUS || op == TokenKind.MINUS)) {
             return left;
+        }
+
+        if (Types.is_struct(left)) {
+            return this.check_operator(node, op, left, right);
         }
 
         u32 common = Types.common(left, right);
