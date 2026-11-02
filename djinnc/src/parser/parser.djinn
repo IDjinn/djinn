@@ -560,7 +560,7 @@ struct Parser {
         return function;
     }
 
-    Node* parse_operator() {
+    Node* parse_operator(bool with_body) {
         i32 start = this.advance();
         Node* function = Node.create_list(NodeKind.FUNCTION, start);
         function.set_flag(true);
@@ -574,7 +574,11 @@ struct Parser {
         this.expect(TokenKind.RPAREN, "expected ')' after parameters");
         this.expect(TokenKind.THIN_ARROW, "expected '->' and the return type of the operator");
         function.set_type(this.parse_type());
-        function.set_first(this.parse_block());
+        if (with_body) {
+            function.set_first(this.parse_block());
+        } else {
+            this.expect(TokenKind.SEMICOLON, "expected ';' after the operator signature");
+        }
         return function;
     }
 
@@ -662,9 +666,9 @@ struct Parser {
         node.set_text(this.copy_of(name));
 
         if (this.check(TokenKind.LESS)) {
-            this.fail("generic interfaces are not supported yet");
-            return node;
+            node.set_generics(this.parse_generic_params());
         }
+        this.parse_bases_and_constraints(node);
 
         this.expect(TokenKind.LBRACE, "expected '{' to open interface body");
         while (!this.check(TokenKind.RBRACE) && !this.at_end()) {
@@ -676,6 +680,10 @@ struct Parser {
 
     void parse_interface_member(Node* owner) {
         i32 start = this.current();
+        if (this.check(TokenKind.OPERATOR)) {
+            owner.add(this.parse_operator(false));
+            return;
+        }
         TypeRef* type = this.parse_type();
         i32 name = this.expect(TokenKind.IDENTIFIER, "expected interface member name");
         if (this.check(TokenKind.LPAREN)) {
@@ -823,7 +831,7 @@ struct Parser {
             for (mut i32 i = 0; i < lookahead; i = i + 1) {
                 this.advance();
             }
-            owner.add(this.parse_operator());
+            owner.add(this.parse_operator(true));
             return;
         }
 

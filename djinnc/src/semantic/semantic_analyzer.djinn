@@ -325,8 +325,6 @@ struct SemanticAnalyzer {
         IdList* args = info.type_args;
         PointerList* bounds = params.bounds;
         IdList* owners = params.bound_owner;
-        U32Map* active = symbols.bindings;
-        symbols.bindings = (U32Map*)0;
         for (mut i32 b = 0; b < bounds.length; b = b + 1) {
             u32 argument = args.get((i32)owners.get(b));
             TypeRef* bound = (TypeRef*)bounds.get(b);
@@ -342,7 +340,6 @@ struct SemanticAnalyzer {
             }
             this.check_conformance(argument_info, bound, blame);
         }
-        symbols.bindings = active;
         Node* declaration = info.node;
         if (declaration.type() != null && this.is_nominal(declaration)) {
             this.check_conformance(info, declaration.type(), declaration);
@@ -471,9 +468,28 @@ struct SemanticAnalyzer {
             this.error(at, "unknown interface");
             return;
         }
+        Node* declaration = contract.node;
+        mut U32Map* interface_bindings = (U32Map*)0;
+        GenericParams* params = declaration.generics();
+        if (params != null) {
+            PointerList* given = reference.args;
+            if (given == null || given.length != params.count()) {
+                this.error(at, "wrong number of interface type arguments");
+                return;
+            }
+            interface_bindings = U32Map.create(Memory.arena(), 8);
+            IdList* names = params.names;
+            for (mut i32 a = 0; a < given.length; a = a + 1) {
+                interface_bindings.put(names.get(a), this.resolve((TypeRef*)given.get(a), at));
+            }
+        } else if (reference.args != null) {
+            this.error(at, "interface is not generic");
+            return;
+        }
+        U32Map* saved_bindings = symbols.bindings;
+        symbols.bindings = interface_bindings;
         u32 saved = this.scope;
         this.scope = contract.namespace_id;
-        Node* declaration = contract.node;
         for (mut i32 i = 0; i < declaration.count(); i = i + 1) {
             Node* member = declaration.child(i);
             if (member.kind == NodeKind.FIELD_DECL) {
@@ -493,6 +509,7 @@ struct SemanticAnalyzer {
             }
         }
         this.scope = saved;
+        symbols.bindings = saved_bindings;
     }
 
     bool signature_matches(FunctionInfo* method, Node* signature) {
