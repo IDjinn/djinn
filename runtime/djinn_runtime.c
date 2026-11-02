@@ -1223,11 +1223,19 @@ void __djinn_runtime_init(int num_threads)
 #ifdef _WIN32
 int64_t __djinn_now_us(void)
 {
-    LARGE_INTEGER frequency;
+    static int64_t frequency = 0;
+    if (frequency == 0)
+    {
+        LARGE_INTEGER queried;
+        QueryPerformanceFrequency(&queried);
+        frequency = queried.QuadPart;
+    }
+
     LARGE_INTEGER counter;
-    QueryPerformanceFrequency(&frequency);
     QueryPerformanceCounter(&counter);
-    return (int64_t)(counter.QuadPart * 1000000 / frequency.QuadPart);
+    const int64_t seconds = counter.QuadPart / frequency;
+    const int64_t remainder = counter.QuadPart % frequency;
+    return seconds * 1000000 + remainder * 1000000 / frequency;
 }
 
 int __djinn_argc(void)
