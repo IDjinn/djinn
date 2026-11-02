@@ -11,7 +11,7 @@ TEST(AddressOf, StructLocalComparesWithItsPointer)
         }
 
         i32 main() {
-            Node a = { value: 7 };
+            Node a = { .value = 7 };
             Node* p = &a;
             Node* q = &a;
             if (p == q) {
