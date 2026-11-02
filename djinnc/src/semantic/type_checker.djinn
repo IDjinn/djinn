@@ -584,6 +584,29 @@ struct TypeChecker {
         return type;
     }
 
+    Node* find_enum_variant(Node* callee) {
+        i8* text = callee.text();
+        i32 length = (i32)strlen(text);
+        mut i32 split = -1;
+        for (mut i32 i = 0; i + 1 < length; i = i + 1) {
+            if (text[i] == 58 && text[i + 1] == 58) {
+                split = i;
+            }
+        }
+        if (split < 0) {
+            return (Node*)0;
+        }
+        AtomTable* atoms = Ast.atoms();
+        u32 full = atoms.intern_copy(text, (u32)split);
+        u32 base = Ast.intern_base_name(text, split);
+        SymbolTable* symbols = this.symbols;
+        StructInfo* owner = symbols.find_struct(full, base, this.scope);
+        if (owner == null || !owner.is_enum) {
+            return (Node*)0;
+        }
+        return symbols.find_constant(owner, Ast.intern_base_name(text, length));
+    }
+
     u32 check_call(Node* node) {
         Node* callee = node.first();
         SymbolTable* symbols = this.symbols;
@@ -591,6 +614,14 @@ struct TypeChecker {
         mut i32 offset = 0;
 
         if (callee.kind == NodeKind.IDENTIFIER) {
+            Node* variant = this.find_enum_variant(callee);
+            if (variant != null) {
+                if (node.count() != 0) {
+                    this.error(node, "enum variants with payloads are not supported yet");
+                }
+                callee.set_symbol(SymbolKind.CONSTANT, (void*)variant);
+                return variant.value_type();
+            }
             info = symbols.find_function(callee.text_atom(), callee.name(), this.scope);
             callee.set_symbol(SymbolKind.FUNCTION, (void*)info);
         } else if (callee.kind == NodeKind.FIELD_ACCESS) {
