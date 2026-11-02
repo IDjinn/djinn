@@ -169,6 +169,15 @@ struct Parser {
     }
 
     i32 scan_type_end(i32 start) {
+        i32 end = this.scan_type_inner(start);
+        if (this.scan_half) {
+            this.scan_half = false;
+            return 0 - 1;
+        }
+        return end;
+    }
+
+    i32 scan_type_inner(i32 start) {
         mut i32 offset = start;
         i32 first = this.peek_token(offset);
         if (!this.is_type_start(first)) {
@@ -189,9 +198,6 @@ struct Parser {
             if (offset < 0) {
                 return offset;
             }
-            if (this.scan_half) {
-                return 0 - 1;
-            }
         }
         while (this.kind_of(this.peek_token(offset)) == TokenKind.STAR) {
             offset = offset + 1;
@@ -205,7 +211,7 @@ struct Parser {
     i32 scan_type_arguments(i32 start) {
         mut i32 offset = start + 1;
         while (true) {
-            i32 end = this.scan_type_end(offset);
+            i32 end = this.scan_type_inner(offset);
             if (end < 0) {
                 return end;
             }
@@ -1291,6 +1297,20 @@ struct Parser {
                 call.set_type(this.parse_type());
                 this.expect(TokenKind.RPAREN, "expected ')' after intrinsic type argument");
                 return call;
+            }
+
+            if (this.is_known_type(token) && this.kind_of(this.peek_token(1)) == TokenKind.LESS) {
+                i32 end = this.scan_type_end(0);
+                if (end > 0 && this.kind_of(this.peek_token(end)) == TokenKind.COLON_COLON
+                    && this.kind_of(this.peek_token(end + 1)) == TokenKind.IDENTIFIER) {
+                    TypeRef* owner = this.parse_type();
+                    this.advance();
+                    i32 variant = this.expect(TokenKind.IDENTIFIER, "expected an enum variant");
+                    Node* generic_variant = Node.create(NodeKind.IDENTIFIER, token);
+                    generic_variant.set_text(this.copy_of(variant));
+                    generic_variant.set_type(owner);
+                    return generic_variant;
+                }
             }
 
             Node* identifier = Node.create(NodeKind.IDENTIFIER, token);

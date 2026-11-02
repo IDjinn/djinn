@@ -40,6 +40,11 @@ struct StructInfo {
     U32Map* constant_map;
     U32Map* method_map;
     Node* node;
+    GenericParams* generics;
+    bool is_template;
+    StructInfo* origin;
+    U32Map* bindings;
+    IdList* type_args;
 }
 
 struct FunctionInfo {
@@ -76,6 +81,10 @@ struct SymbolTable {
     U32Map* function_map;
     U32Map* global_map;
     U32Map* namespace_map;
+    U32Map* instance_map;
+    U32Map* bindings;
+    SemanticAnalyzer* analyzer;
+    Node* blame;
 
     public static SymbolTable* create(Arena* arena) {
         SymbolTable* table = (SymbolTable*)arena.zalloc(sizeof(SymbolTable), 8);
@@ -90,6 +99,7 @@ struct SymbolTable {
         table.function_map = U32Map.create(arena, 256);
         table.global_map = U32Map.create(arena, 16);
         table.namespace_map = U32Map.create(arena, 16);
+        table.instance_map = U32Map.create(arena, 16);
         NamespaceInfo* root = (NamespaceInfo*)arena.zalloc(sizeof(NamespaceInfo), 8);
         PointerList* namespaces = table.namespaces;
         namespaces.push((void*)root);
@@ -216,11 +226,61 @@ struct SymbolTable {
             }
             return Types.pointer_to(element);
         }
+        if (ref.args == null && this.bindings != null && ref.full_atom == ref.name_atom) {
+            U32Map* active = this.bindings;
+            i64 bound = active.find(ref.name_atom);
+            if (bound >= 0) {
+                return (u32)bound;
+            }
+        }
         StructInfo* info = this.find_struct(ref.full_atom, ref.name_atom, scope);
         if (info == null) {
             return 0;
         }
+        if (info.is_template) {
+            if (ref.args == null) {
+                return 0;
+            }
+            PointerList* given = ref.args;
+            IdList* resolved = IdList.create();
+            for (mut i32 i = 0; i < given.length; i = i + 1) {
+                u32 argument = this.resolve_type((TypeRef*)given.get(i), scope);
+                if (argument == 0) {
+                    return 0;
+                }
+                resolved.push(argument);
+            }
+            SemanticAnalyzer* generator = this.analyzer;
+            return generator.instantiate(info, resolved);
+        }
+        if (ref.args != null) {
+            return 0;
+        }
         return info.type_id;
+    }
+
+    public void describe_type(u32 id, ByteBuffer* out) {
+        if (Types.is_pointer(id)) {
+            this.describe_type(Types.element(id), out);
+            out.append_char(42);
+            return;
+        }
+        StructInfo* named = this.enum_of_type(id);
+        if (named != null) {
+            out.append(named.name);
+            return;
+        }
+        if (Types.is_struct(id)) {
+            StructInfo* info = this.struct_at(Types.struct_index(id));
+            out.append(info.name);
+            return;
+        }
+        Types.describe(id, out);
+    }
+
+    public void add_instance(StructInfo* info) {
+        PointerList* list = this.structs;
+        list.push((void*)info);
     }
 
     public StructInfo* enum_of_type(u32 type) {

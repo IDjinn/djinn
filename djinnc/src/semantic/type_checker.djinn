@@ -24,6 +24,7 @@ struct TypeChecker {
 
     public u32 resolve_type(TypeRef* ref, Node* at) {
         SymbolTable* symbols = this.symbols;
+        symbols.blame = at;
         u32 resolved = symbols.resolve_type(ref, this.scope);
         if (resolved == 0) {
             this.error(at, "unknown type");
@@ -37,10 +38,15 @@ struct TypeChecker {
         PointerList* structs = symbols.structs;
         for (mut i32 i = 0; i < structs.length; i = i + 1) {
             StructInfo* info = (StructInfo*)structs.get(i);
+            if (info.is_template) {
+                continue;
+            }
+            symbols.bindings = info.bindings;
             PointerList* constants = info.constants;
             for (mut i32 c = 0; c < constants.length; c = c + 1) {
                 this.check_constant((Node*)constants.get(c), info.namespace_id);
             }
+            symbols.bindings = (U32Map*)0;
         }
         PointerList* globals = symbols.globals;
         for (mut i32 i = 0; i < globals.length; i = i + 1) {
@@ -76,6 +82,12 @@ struct TypeChecker {
     }
 
     void check_function(FunctionInfo* info) {
+        SymbolTable* active = this.symbols;
+        active.bindings = (U32Map*)0;
+        if (info.owner != null) {
+            StructInfo* owner = info.owner;
+            active.bindings = owner.bindings;
+        }
         this.scope = info.namespace_id;
         this.function = info;
         this.loop_depth = 0;
@@ -680,6 +692,18 @@ struct TypeChecker {
     }
 
     Node* find_enum_variant(Node* callee) {
+        if (callee.type() != null) {
+            u32 owner_type = this.resolve_type(callee.type(), callee);
+            SymbolTable* known = this.symbols;
+            StructInfo* generic_owner = known.enum_of_type(owner_type);
+            if (generic_owner == null) {
+                this.error(callee, "type is not an enum");
+                return (Node*)0;
+            }
+            i8* variant_text = callee.text();
+            i32 variant_length = (i32)strlen(variant_text);
+            return known.find_constant(generic_owner, Ast.intern_base_name(variant_text, variant_length));
+        }
         i8* text = callee.text();
         i32 length = (i32)strlen(text);
         mut i32 split = -1;
