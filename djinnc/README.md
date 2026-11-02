@@ -15,6 +15,8 @@ when `DJINN_USE_LLD` is set.
 `-O2` runs `default<O2>` through `LLVMRunPasses` and raises the backend codegen level.
 The object writer initializes the x86 target only.
 
+See [USAGE.md](USAGE.md) for the full guide (building, options, testing and the bootstrap).
+
 ## Build
 
 LLVM-C must be reachable by the linker. Adjust `native-libs` in `djinn.proj` to the local LLVM install and
