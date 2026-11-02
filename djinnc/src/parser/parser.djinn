@@ -285,6 +285,10 @@ struct Parser {
             return this.parse_struct();
         }
 
+        if (this.kind_of(token) == TokenKind.ENUM) {
+            return this.parse_enum();
+        }
+
         if (this.kind_of(token) == TokenKind.UNSAFE || this.kind_of(token) == TokenKind.STATIC) {
             return this.parse_static_var();
         }
@@ -458,6 +462,52 @@ struct Parser {
         this.expect(TokenKind.EQUAL, "expected '=' in static variable declaration");
         node.set_first(this.parse_expression());
         this.expect(TokenKind.SEMICOLON, "expected ';' after static variable");
+        return node;
+    }
+
+    Node* parse_enum() {
+        i32 start = this.advance();
+        Node* node = Node.create_list(NodeKind.STRUCT_DECL, start);
+        node.set_flag(true);
+        i32 name = this.expect(TokenKind.IDENTIFIER, "expected enum name");
+        node.set_text(this.copy_of(name));
+
+        if (this.check(TokenKind.LESS)) {
+            this.fail("generic enums are not supported yet");
+            return node;
+        }
+
+        this.expect(TokenKind.LBRACE, "expected '{' to open enum body");
+        mut i64 next_value = 0;
+        while (!this.check(TokenKind.RBRACE) && !this.at_end()) {
+            i32 variant = this.expect(TokenKind.IDENTIFIER, "expected enum variant name");
+            if (this.match(TokenKind.EQUAL)) {
+                i32 literal_token = this.expect(TokenKind.INTEGER_LITERAL, "expected an integer enum value");
+                next_value = Strings.parse_integer(this.text_of(literal_token), this.length_of(literal_token));
+            }
+            if (this.match(TokenKind.LPAREN)) {
+                if (!this.check(TokenKind.RPAREN)) {
+                    this.fail("enum variants with payloads are not supported yet");
+                    return node;
+                }
+                this.advance();
+            }
+
+            Node* constant = Node.create(NodeKind.FIELD_DECL, variant);
+            constant.set_flag(true);
+            constant.set_type(TypeRef.integer(32, true));
+            constant.set_text(this.copy_of(variant));
+            Node* value = Node.create(NodeKind.INT_LITERAL, variant);
+            value.set_int_value(next_value);
+            constant.set_first(value);
+            node.add(constant);
+            next_value = next_value + 1;
+
+            if (!this.check(TokenKind.RBRACE)) {
+                this.expect(TokenKind.COMMA, "expected ',' between enum variants");
+            }
+        }
+        this.expect(TokenKind.RBRACE, "expected '}' to close enum body");
         return node;
     }
 
