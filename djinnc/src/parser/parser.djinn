@@ -23,6 +23,24 @@ struct Parser {
     public static void collect_type_names(TokenList* list, SourceFile* file, U32Map* names) {
         for (mut i32 i = file.first_token; i + 1 < file.token_end; i = i + 1) {
             i32 kind = list.kind(i);
+            bool endsType = kind == TokenKind.IDENTIFIER || kind == TokenKind.STAR || kind == TokenKind.GREATER || kind == TokenKind.VOID;
+            if (endsType && i + 3 < file.token_end && list.kind(i + 1) == TokenKind.IDENTIFIER
+                && list.kind(i + 2) == TokenKind.LESS && list.kind(i + 3) == TokenKind.IDENTIFIER) {
+                mut i32 scan = i + 3;
+                while (scan + 1 < file.token_end && list.kind(scan) == TokenKind.IDENTIFIER && list.kind(scan + 1) == TokenKind.COMMA) {
+                    scan = scan + 2;
+                }
+                if (scan + 2 < file.token_end && list.kind(scan) == TokenKind.IDENTIFIER
+                    && list.kind(scan + 1) == TokenKind.GREATER && list.kind(scan + 2) == TokenKind.LPAREN) {
+                    mut i32 cursor = i + 3;
+                    while (cursor <= scan) {
+                        if (list.kind(cursor) == TokenKind.IDENTIFIER) {
+                            names.put(list.atom(cursor), 1);
+                        }
+                        cursor = cursor + 1;
+                    }
+                }
+            }
             bool declaresType = kind == TokenKind.STRUCT || kind == TokenKind.ENUM || kind == TokenKind.INTERFACE;
             if (declaresType && list.kind(i + 1) == TokenKind.IDENTIFIER) {
                 names.put(list.atom(i + 1), 1);
@@ -536,9 +554,20 @@ struct Parser {
         function.set_type(this.parse_type());
         i32 name = this.expect(TokenKind.IDENTIFIER, "expected function name");
         function.set_text(this.copy_of(name));
+        if (this.check(TokenKind.LESS)) {
+            function.set_generics(this.parse_generic_params());
+        }
         this.expect(TokenKind.LPAREN, "expected '(' after function name");
         this.parse_parameters(function);
         this.expect(TokenKind.RPAREN, "expected ')' after parameters");
+        if (this.check(TokenKind.WHERE)) {
+            GenericParams* constraints = function.generics();
+            if (constraints == null) {
+                this.fail("'where' needs a generic function");
+                return function;
+            }
+            this.parse_where_clauses(constraints);
+        }
 
         if (this.check(TokenKind.THROWS) || this.check(TokenKind.REQUIRE) || this.check(TokenKind.ENSURE)) {
             this.fail("throws and contracts are not supported yet");
@@ -1344,6 +1373,16 @@ struct Parser {
 
             Node* identifier = Node.create(NodeKind.IDENTIFIER, token);
             identifier.set_text(this.qualified_name());
+            if (this.check(TokenKind.LESS) && !this.is_known_type(token)) {
+                i32 close = this.scan_type_arguments(0);
+                bool explicit = close > 0 && !this.scan_half && this.kind_of(this.peek_token(close)) == TokenKind.LPAREN;
+                this.scan_half = false;
+                if (explicit) {
+                    TypeRef* holder = TypeRef.create(TypeKind.NAMED);
+                    holder.args = this.parse_type_arguments();
+                    identifier.set_type(holder);
+                }
+            }
             return identifier;
         }
 

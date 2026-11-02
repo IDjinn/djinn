@@ -57,5 +57,7 @@ Enum-like values are `i32` constants held in `static` structs until `==` on enum
 - `struct Pair<K, V> { ... }` and `enum optional<T> { Empty(), Value(T) }`; instances are monomorphized on demand (`Pair<i32, i64>`, nested `Wrapper<Pair<i32, i32>>`) with their methods.
 - `where T : A, B; where U : C` constrains type parameters; a struct or enum type argument must satisfy the interfaces, checked at instantiation. A generic type can also list interfaces (`struct X<T> where T : I : J`).
 - `optional<i32>::Value(1)` builds a generic enum value; struct initializers and `switch` work on instances.
-- Not yet: generic functions, generic interfaces, `impl` on generic types, explicit constructors.
+- Generic interfaces: `interface Comparable<T> { i32 compare(T other); }`, used as `struct P : Comparable<P>` or in bounds (`where T : Comparable<T>`); interfaces can declare `operator` members.
+- Generic functions: `T larger<T>(T a, T b) where T : Comparable<T> { ... }`; type arguments are inferred from the arguments (including `Pair<K, V>` and `T*` parameters) or given explicitly, as in `first<i64>(1, 2)`.
+- Not yet: generic methods, `impl` on generic types, explicit constructors.
 - Operator overloading: `operator +(T left, T right) -> T { ... }` inside `impl T { }` or the struct body defines a static operator method; binary expressions on struct values call it. `!=` is derived from `==`.

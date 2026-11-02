@@ -55,7 +55,7 @@ struct TypeChecker {
         PointerList* functions = symbols.functions;
         for (mut i32 i = 0; i < functions.length; i = i + 1) {
             FunctionInfo* info = (FunctionInfo*)functions.get(i);
-            if (!info.is_extern) {
+            if (!info.is_extern && !info.is_template) {
                 this.check_function(info);
             }
         }
@@ -83,7 +83,7 @@ struct TypeChecker {
 
     void check_function(FunctionInfo* info) {
         SymbolTable* active = this.symbols;
-        active.bindings = (U32Map*)0;
+        active.bindings = info.bindings;
         if (info.owner != null) {
             StructInfo* owner = info.owner;
             active.bindings = owner.bindings;
@@ -726,7 +726,8 @@ struct TypeChecker {
     }
 
     Node* find_enum_variant(Node* callee) {
-        if (callee.type() != null) {
+        TypeRef* owner_ref = callee.type();
+        if (owner_ref != null && owner_ref.name != null) {
             u32 owner_type = this.resolve_type(callee.type(), callee);
             SymbolTable* known = this.symbols;
             StructInfo* generic_owner = known.enum_of_type(owner_type);
@@ -760,6 +761,91 @@ struct TypeChecker {
         return symbols.find_constant(owner, Ast.intern_base_name(text, length));
     }
 
+    bool unify(TypeRef* pattern, u32 actual, GenericParams* params, IdList* found) {
+        SymbolTable* symbols = this.symbols;
+        if (pattern.kind == TypeKind.POINTER) {
+            if (!Types.is_pointer(actual)) {
+                return false;
+            }
+            return this.unify(pattern.element, Types.element(actual), params, found);
+        }
+        if (pattern.kind != TypeKind.NAMED) {
+            return true;
+        }
+        if (pattern.args == null) {
+            i32 index = params.index_of(pattern.name_atom);
+            if (index < 0) {
+                return true;
+            }
+            u32 current = found.get(index);
+            if (current == 0) {
+                found.data[index] = actual;
+                return true;
+            }
+            return current == actual;
+        }
+        if (!Types.is_struct(actual)) {
+            return true;
+        }
+        StructInfo* instance = symbols.struct_at(Types.struct_index(actual));
+        if (instance.origin == null) {
+            return true;
+        }
+        PointerList* inner = pattern.args;
+        IdList* actual_args = instance.type_args;
+        for (mut i32 i = 0; i < inner.length && i < actual_args.length; i = i + 1) {
+            if (!this.unify((TypeRef*)inner.get(i), actual_args.get(i), params, found)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    FunctionInfo* instantiate_call(Node* node, Node* callee, FunctionInfo* template) {
+        GenericParams* generics = template.generics;
+        i32 count = generics.count();
+        IdList* found = IdList.create();
+        for (mut i32 i = 0; i < count; i = i + 1) {
+            found.push(0);
+        }
+        if (callee.type() != null) {
+            TypeRef* holder = callee.type();
+            PointerList* given = holder.args;
+            for (mut i32 i = 0; i < given.length && i < count; i = i + 1) {
+                found.data[i] = this.resolve_type((TypeRef*)given.get(i), callee);
+            }
+        }
+        Node* declaration = template.node;
+        for (mut i32 a = 0; a < node.count() && a < declaration.count(); a = a + 1) {
+            Node* parameter = declaration.child(a);
+            mut u32 hint = 0;
+            TypeRef* pattern = parameter.type();
+            if (pattern.kind == TypeKind.NAMED && pattern.args == null) {
+                i32 slot = generics.index_of(pattern.name_atom);
+                if (slot >= 0) {
+                    hint = found.get(slot);
+                }
+            }
+            u32 actual = this.check_expression(node.child(a), hint);
+            if (!this.unify(parameter.type(), actual, generics, found)) {
+                this.error(node.child(a), "argument conflicts with the inferred type argument");
+                return (FunctionInfo*)0;
+            }
+        }
+        for (mut i32 i = 0; i < count; i = i + 1) {
+            if (found.get(i) == 0) {
+                this.error(node, "cannot infer a type argument of this generic function");
+                return (FunctionInfo*)0;
+            }
+        }
+        SymbolTable* symbols = this.symbols;
+        SemanticAnalyzer* analyzer = symbols.analyzer;
+        U32Map* saved_bindings = symbols.bindings;
+        FunctionInfo* instance = analyzer.instantiate_function(template, found, node);
+        symbols.bindings = saved_bindings;
+        return instance;
+    }
+
     u32 check_call(Node* node) {
         Node* callee = node.first();
         SymbolTable* symbols = this.symbols;
@@ -780,6 +866,12 @@ struct TypeChecker {
                 return variant.value_type();
             }
             info = symbols.find_function(callee.text_atom(), callee.name(), this.scope);
+            if (info != null && info.is_template) {
+                info = this.instantiate_call(node, callee, info);
+                if (info == null) {
+                    return Types.i32_type();
+                }
+            }
             callee.set_symbol(SymbolKind.FUNCTION, (void*)info);
         } else if (callee.kind == NodeKind.FIELD_ACCESS) {
             Node* base = callee.first();

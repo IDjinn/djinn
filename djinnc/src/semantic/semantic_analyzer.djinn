@@ -319,10 +319,22 @@ struct SemanticAnalyzer {
     }
 
     void check_instance(StructInfo* info, Node* blame) {
-        SymbolTable* symbols = this.symbols;
         StructInfo* template = info.origin;
-        GenericParams* params = template.generics;
-        IdList* args = info.type_args;
+        this.check_bounds(template.generics, info.type_args, blame);
+        Node* declaration = info.node;
+        if (declaration.type() != null && this.is_nominal(declaration)) {
+            this.check_conformance(info, declaration.type(), declaration);
+        }
+        for (mut i32 c = 0; c < declaration.count(); c = c + 1) {
+            Node* base = declaration.child(c);
+            if (base.kind == NodeKind.PARAMETER) {
+                this.check_conformance(info, base.type(), base);
+            }
+        }
+    }
+
+    void check_bounds(GenericParams* params, IdList* args, Node* blame) {
+        SymbolTable* symbols = this.symbols;
         PointerList* bounds = params.bounds;
         IdList* owners = params.bound_owner;
         for (mut i32 b = 0; b < bounds.length; b = b + 1) {
@@ -339,16 +351,6 @@ struct SemanticAnalyzer {
                 continue;
             }
             this.check_conformance(argument_info, bound, blame);
-        }
-        Node* declaration = info.node;
-        if (declaration.type() != null && this.is_nominal(declaration)) {
-            this.check_conformance(info, declaration.type(), declaration);
-        }
-        for (mut i32 c = 0; c < declaration.count(); c = c + 1) {
-            Node* base = declaration.child(c);
-            if (base.kind == NodeKind.PARAMETER) {
-                this.check_conformance(info, base.type(), base);
-            }
         }
     }
 
@@ -556,10 +558,95 @@ struct SemanticAnalyzer {
     }
 
     void collect_function(Node* declaration, bool is_extern, StructInfo* owner) {
+        FunctionInfo* info = this.build_function(declaration, is_extern, owner);
+        if (info == null) {
+            return;
+        }
+        SymbolTable* symbols = this.symbols;
+        if (!symbols.add_function(info) && !is_extern) {
+            this.error(declaration, "function is already defined");
+        }
+    }
+
+    public FunctionInfo* instantiate_function(FunctionInfo* template, IdList* args, Node* blame) {
+        SymbolTable* symbols = this.symbols;
+        GenericParams* params = template.generics;
+        if (args.length != params.count()) {
+            this.error(blame, "wrong number of type arguments");
+            return (FunctionInfo*)0;
+        }
+        ByteBuffer* key_text = ByteBuffer.create();
+        key_text.append("fn ");
+        key_text.append(template.name);
+        for (mut i32 a = 0; a < args.length; a = a + 1) {
+            key_text.append_char(58);
+            key_text.append_int((i64)args.get(a));
+        }
+        AtomTable* atoms = Ast.atoms();
+        u32 key = atoms.intern_copy(key_text.cstr(), (u32)strlen(key_text.cstr()));
+        U32Map* instances = symbols.instance_map;
+        i64 existing = instances.find(key);
+        PointerList* registered = symbols.functions;
+        if (existing >= 0) {
+            return (FunctionInfo*)registered.get((i32)existing);
+        }
+
+        U32Map* bindings = U32Map.create(Memory.arena(), 8);
+        IdList* names = params.names;
+        for (mut i32 a = 0; a < args.length; a = a + 1) {
+            bindings.put(names.get(a), args.get(a));
+        }
+        U32Map* saved_bindings = symbols.bindings;
+        u32 saved_scope = this.scope;
+        this.scope = template.namespace_id;
+        symbols.bindings = bindings;
+
+        Node* declaration = Node.clone(template.node);
+        FunctionInfo* info = this.build_function(declaration, false, (StructInfo*)0);
+        ByteBuffer* name = ByteBuffer.create();
+        name.append(template.name);
+        name.append_char(60);
+        for (mut i32 a = 0; a < args.length; a = a + 1) {
+            if (a > 0) {
+                name.append(", ");
+            }
+            symbols.describe_type(args.get(a), name);
+        }
+        name.append_char(62);
+        info.name = name.cstr();
+        info.bindings = bindings;
+        symbols.add_function_instance(info);
+        instances.put(key, (u32)(registered.length - 1));
+        this.check_bounds(params, args, blame);
+
+        symbols.bindings = saved_bindings;
+        this.scope = saved_scope;
+        return info;
+    }
+
+    FunctionInfo* build_function(Node* declaration, bool is_extern, StructInfo* owner) {
         FunctionInfo* info = (FunctionInfo*)Memory.zalloc(sizeof(FunctionInfo));
         mut u32 function_scope = this.scope;
         if (is_extern) {
             function_scope = 0;
+        }
+        GenericParams* generics = declaration.generics();
+        if (generics != null && info.bindings == null) {
+            if (owner != null) {
+                this.error(declaration, "generic methods are not supported yet");
+                return (FunctionInfo*)0;
+            }
+            SymbolTable* known = this.symbols;
+            if (known.bindings == null) {
+                info.namespace_id = function_scope;
+                info.name = this.function_name(owner, declaration, is_extern, function_scope);
+                info.name_atom = declaration.name();
+                info.param_types = IdList.create();
+                info.node = declaration;
+                info.generics = generics;
+                info.is_template = true;
+                return info;
+            }
         }
         info.namespace_id = function_scope;
         info.name = this.function_name(owner, declaration, is_extern, function_scope);
@@ -585,10 +672,7 @@ struct SemanticAnalyzer {
             param_types.push(this.resolve(parameter.type(), parameter));
         }
 
-        SymbolTable* symbols = this.symbols;
-        if (!symbols.add_function(info) && !is_extern) {
-            this.error(declaration, "function is already defined");
-        }
+        return info;
     }
 
     i8* function_name(StructInfo* owner, Node* declaration, bool is_extern, u32 namespace_id) {
