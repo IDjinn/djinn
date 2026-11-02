@@ -75,6 +75,10 @@ struct CodeGenerator {
         return true;
     }
 
+    public bool write_object(i8* path, bool optimize) {
+        return ObjectWriter.emit(this.module, path, optimize);
+    }
+
     void error(Node* at, i8* message) {
         Diagnostics* diagnostics = this.diagnostics;
         diagnostics.error_in(at.file_name(), at.line(), at.column(), message);
@@ -758,8 +762,37 @@ struct CodeGenerator {
         return Value.create(merged, flag);
     }
 
+    Value* gen_coalesce(Node* node) {
+        Value* left = this.gen_expression(node.first());
+        u32 type = left.type;
+        void* present = LLVMBuildICmp(this.builder, LlvmConst.INT_NE, left.ref, LLVMConstNull(LLVMTypeOf(left.ref)), "present");
+        void* left_block = LLVMGetInsertBlock(this.builder);
+        void* right_block = this.new_block("coalesce.rhs");
+        void* end_block = this.new_block("coalesce.end");
+        LLVMBuildCondBr(this.builder, present, end_block, right_block);
+
+        LLVMPositionBuilderAtEnd(this.builder, right_block);
+        void* right = this.coerce(this.gen_expression(node.second()), type);
+        void* right_end = LLVMGetInsertBlock(this.builder);
+        LLVMBuildBr(this.builder, end_block);
+
+        LLVMPositionBuilderAtEnd(this.builder, end_block);
+        void* merged = LLVMBuildPhi(this.builder, this.llvm_type(type), "coalesce");
+        void** values = CodeGenerator.array_of(2);
+        void** blocks = CodeGenerator.array_of(2);
+        values[0] = left.ref;
+        blocks[0] = left_block;
+        values[1] = right;
+        blocks[1] = right_end;
+        LLVMAddIncoming(merged, values, blocks, 2);
+        return Value.create(merged, type);
+    }
+
     Value* gen_binary(Node* node) {
         i32 op = node.op();
+        if (op == TokenKind.QUESTION_QUESTION) {
+            return this.gen_coalesce(node);
+        }
         if (op == TokenKind.AND_AND || op == TokenKind.OR_OR) {
             return this.gen_logical(node);
         }

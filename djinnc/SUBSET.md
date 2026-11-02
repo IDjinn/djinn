@@ -28,7 +28,7 @@ of them. A construct outside this list is forbidden in `djinnc/src` until the dj
 ## Expressions
 
 - integer, float, bool, string (`i8*`) and `null` literals
-- `+ - * / %`, comparisons, `&& || !`
+- `+ - * / %`, comparisons, `&& || !`, `a ?? b` on pointers (right associative, lowest precedence)
 - calls, method calls, static calls
 
 ## Structs in codegen
@@ -44,7 +44,7 @@ of them. A construct outside this list is forbidden in `djinnc/src` until the dj
 
 ## Forbidden
 
-generics, enums, `switch`, interfaces, `impl`, async/await, `try`/`throws`, `??`, `ensure`, string
+generics, enums, `switch`, interfaces, `impl`, async/await, `try`/`throws`, `ensure`, string
 interpolation, closures, `auto`, destructuring.
 
 Enum-like values are `i32` constants held in `static` structs until `==` on enums exists in both compilers.

@@ -1,7 +1,35 @@
 namespace djinnc;
 
 struct Linker {
-    public static i32 link(Options* options, i8* ir_path) {
+    static i32 link_lld(Options* options, i8* object_path) {
+        if (options.runtime_lib == null) {
+            logger_error(Log.get(), "djinnc: --lld needs --runtime-lib");
+            return 1;
+        }
+        i8* lld = Process.env_or("DJINN_LLD_LINK", "lld-link");
+
+        ByteBuffer* command = ByteBuffer.create();
+        command.append("\"");
+        command.append("\"");
+        command.append(lld);
+        command.append("\" \"");
+        command.append(object_path);
+        command.append("\" \"");
+        command.append(options.runtime_lib);
+        command.append("\" /subsystem:console /defaultlib:msvcrt /defaultlib:legacy_stdio_definitions");
+        ByteBuffer* link_args = options.link_args;
+        command.append(link_args.cstr());
+        command.append(" \"/out:");
+        command.append(options.output);
+        command.append("\"\"");
+
+        return Process.run(command.cstr());
+    }
+
+    public static i32 link(Options* options, i8* object_path) {
+        if (options.use_lld) {
+            return Linker.link_lld(options, object_path);
+        }
         i8* clang = Process.env_or("DJINN_CLANG", "clang");
 
         ByteBuffer* command = ByteBuffer.create();
@@ -9,15 +37,22 @@ struct Linker {
         command.append("\"");
         command.append(clang);
         command.append("\" \"");
-        command.append(ir_path);
-        command.append("\" \"");
-        command.append(options.runtime_dir);
-        command.append("/djinn_runtime.c\" \"");
-        command.append(options.runtime_dir);
-        command.append("/logger.c\"");
+        command.append(object_path);
+        command.append("\"");
+        if (options.runtime_lib != null) {
+            command.append(" \"");
+            command.append(options.runtime_lib);
+            command.append("\"");
+        } else {
+            command.append(" \"");
+            command.append(options.runtime_dir);
+            command.append("/djinn_runtime.c\" \"");
+            command.append(options.runtime_dir);
+            command.append("/logger.c\" -O2");
+        }
         ByteBuffer* link_args = options.link_args;
         command.append(link_args.cstr());
-        command.append(" -flto -fuse-ld=lld -O2 -o \"");
+        command.append(" -fuse-ld=lld -o \"");
         command.append(options.output);
         command.append("\"\"");
 
