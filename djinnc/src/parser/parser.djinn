@@ -485,21 +485,27 @@ struct Parser {
                 i32 literal_token = this.expect(TokenKind.INTEGER_LITERAL, "expected an integer enum value");
                 next_value = Strings.parse_integer(this.text_of(literal_token), this.length_of(literal_token));
             }
-            if (this.match(TokenKind.LPAREN)) {
-                if (!this.check(TokenKind.RPAREN)) {
-                    this.fail("enum variants with payloads are not supported yet");
-                    return node;
-                }
-                this.advance();
-            }
-
-            Node* constant = Node.create(NodeKind.FIELD_DECL, variant);
+            Node* constant = Node.create_list(NodeKind.FIELD_DECL, variant);
             constant.set_flag(true);
             constant.set_type(TypeRef.integer(32, true));
             constant.set_text(this.copy_of(variant));
             Node* value = Node.create(NodeKind.INT_LITERAL, variant);
             value.set_int_value(next_value);
             constant.set_first(value);
+
+            if (this.match(TokenKind.LPAREN)) {
+                while (!this.check(TokenKind.RPAREN) && !this.at_end()) {
+                    i32 payload_token = this.current();
+                    Node* payload = Node.create(NodeKind.PARAMETER, payload_token);
+                    payload.set_type(this.parse_type());
+                    payload.set_text("payload");
+                    constant.add(payload);
+                    if (!this.match(TokenKind.COMMA)) {
+                        break;
+                    }
+                }
+                this.expect(TokenKind.RPAREN, "expected ')' after enum variant payload");
+            }
             node.add(constant);
             next_value = next_value + 1;
 
@@ -720,6 +726,32 @@ struct Parser {
             node.add(arm);
         }
         this.expect(TokenKind.RBRACE, "expected '}' to close switch");
+        return node;
+    }
+
+    Node* parse_switch_expression() {
+        i32 start = this.advance();
+        Node* node = Node.create_list(NodeKind.SWITCH_EXPR, start);
+        node.set_first(this.parse_expression());
+        this.expect(TokenKind.LBRACE, "expected '{' to open switch expression");
+        while (!this.check(TokenKind.RBRACE) && !this.at_end()) {
+            i32 label = this.current();
+            Node* arm = Node.create_list(NodeKind.MATCH_ARM, label);
+            arm.set_text(this.qualified_name());
+            while (this.check(TokenKind.IDENTIFIER)) {
+                i32 binding_token = this.advance();
+                Node* binding = Node.create(NodeKind.PARAMETER, binding_token);
+                binding.set_text(this.copy_of(binding_token));
+                arm.add(binding);
+            }
+            this.expect(TokenKind.THIN_ARROW, "expected '->' after match pattern");
+            arm.set_first(this.parse_expression());
+            node.add(arm);
+            if (!this.check(TokenKind.RBRACE)) {
+                this.expect(TokenKind.COMMA, "expected ',' between match arms");
+            }
+        }
+        this.expect(TokenKind.RBRACE, "expected '}' to close switch expression");
         return node;
     }
 
@@ -1002,6 +1034,9 @@ struct Parser {
         if (this.kind_of(token) == TokenKind.NULL) {
             this.advance();
             return Node.create(NodeKind.NULL_LITERAL, token);
+        }
+        if (this.kind_of(token) == TokenKind.SWITCH) {
+            return this.parse_switch_expression();
         }
         if (this.kind_of(token) == TokenKind.THIS) {
             this.advance();
