@@ -76,3 +76,11 @@ Enum-like values are `i32` constants held in `static` structs until `==` on enum
 - Functions, methods, constructors and operators can share a name when their parameter types differ; a redefinition with the same parameter types is still an error.
 - The call picks the candidate whose parameter types match best (exact type beats numeric conversion); no match or a tie is a compile error. Overloads after the first get a `$n` suffix in the symbol name.
 
+
+## Core types: `str` and `arr<T>`
+
+A core prelude (`<core>`, built in `driver/prelude.djinn`) is compiled with every program and declares `str { i8* data; u32 length; }` and `arr<T> { T* data; u32 length; }`, both with `is_empty()` and `ptr()`.
+
+- `T[]` is `arr<T>`; `[a, b, c]` is an array literal, allocated with `__djinn_malloc`. The element type comes from the context or the first element; an empty literal needs a context.
+- A string literal is `i8*` unless the expected type is `str`, which gives `{ data, length }`.
+- `array[i]` indexes `arr<T>` (read and write); `length` is a field.

@@ -332,7 +332,14 @@ struct TypeChecker {
             return Types.floating(64);
         }
         if (kind == NodeKind.STRING_LITERAL) {
+            u32 text_type = this.core_type("str");
+            if (expected != 0 && expected == text_type) {
+                return text_type;
+            }
             return Types.byte_pointer();
+        }
+        if (kind == NodeKind.ARRAY_LITERAL) {
+            return this.check_array_literal(node, expected);
         }
         if (kind == NodeKind.BOOL_LITERAL) {
             return Types.bool_type();
@@ -416,6 +423,10 @@ struct TypeChecker {
         if (kind == NodeKind.INDEX) {
             u32 base = this.check_expression(node.first(), 0);
             this.check_expression(node.second(), Types.i64_type());
+            u32 held = this.array_element(base);
+            if (held != 0) {
+                return held;
+            }
             if (!Types.is_sized_pointer(base)) {
                 this.error(node, "only pointers to sized types can be indexed");
                 return Types.i32_type();
@@ -656,6 +667,60 @@ struct TypeChecker {
         }
         this.check_expression(node.second(), type);
         return type;
+    }
+
+    u32 core_type(i8* name) {
+        SymbolTable* symbols = this.symbols;
+        u32 atom = Ast.intern_base_name(name, (i32)strlen(name));
+        StructInfo* info = symbols.find_struct(atom, atom, 0);
+        if (info == null || info.is_template) {
+            return 0;
+        }
+        return info.type_id;
+    }
+
+    u32 array_element(u32 type) {
+        SymbolTable* symbols = this.symbols;
+        if (type == 0 || !Types.is_struct(type)) {
+            return 0;
+        }
+        StructInfo* info = symbols.struct_at(Types.struct_index(type));
+        if (info.origin == null || info.type_args == null) {
+            return 0;
+        }
+        StructInfo* origin = info.origin;
+        u32 atom = Ast.intern_base_name("arr", 3);
+        if (origin.name_atom != atom) {
+            return 0;
+        }
+        IdList* args = info.type_args;
+        return args.get(0);
+    }
+
+    u32 check_array_literal(Node* node, u32 expected) {
+        SymbolTable* symbols = this.symbols;
+        mut u32 element = this.array_element(expected);
+        if (element == 0 && node.count() == 0) {
+            this.error(node, "an empty array literal needs an array type from its context");
+            return Types.i32_type();
+        }
+        for (mut i32 i = 0; i < node.count(); i = i + 1) {
+            u32 actual = this.check_expression(node.child(i), element);
+            if (element == 0) {
+                element = actual;
+            }
+        }
+        u32 atom = Ast.intern_base_name("arr", 3);
+        StructInfo* template = symbols.find_struct(atom, atom, 0);
+        if (template == null || !template.is_template) {
+            this.error(node, "array literals need the core 'arr' type");
+            return Types.i32_type();
+        }
+        IdList* args = IdList.create();
+        args.push(element);
+        symbols.blame = node;
+        SemanticAnalyzer* analyzer = symbols.analyzer;
+        return analyzer.instantiate(template, args);
     }
 
     u32 check_struct_init(Node* node, u32 expected) {

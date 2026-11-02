@@ -620,6 +620,9 @@ struct CodeGenerator {
         }
         if (kind == NodeKind.STRING_LITERAL) {
             void* text = LLVMBuildGlobalStringPtr(this.builder, node.text(), "str");
+            if (Types.is_struct(type)) {
+                return this.gen_text_value(node, text, type);
+            }
             return Value.create(text, type);
         }
         if (kind == NodeKind.BOOL_LITERAL) {
@@ -655,6 +658,9 @@ struct CodeGenerator {
         }
         if (kind == NodeKind.STRUCT_INIT) {
             return this.gen_struct_init(node);
+        }
+        if (kind == NodeKind.ARRAY_LITERAL) {
+            return this.gen_array_literal(node);
         }
         if (kind == NodeKind.NEW_EXPR) {
             return this.gen_new(node);
@@ -762,8 +768,11 @@ struct CodeGenerator {
         }
 
         if (kind == NodeKind.INDEX) {
-            Value* base = this.gen_expression(node.first());
+            mut Value* base = this.gen_expression(node.first());
             Value* index = this.gen_expression(node.second());
+            if (Types.is_struct(base.type)) {
+                base = Value.create(LLVMBuildExtractValue(this.builder, base.ref, 0, "array.data"), Types.pointer_to(node.value_type()));
+            }
             void** indices = CodeGenerator.array_of(1);
             indices[0] = this.coerce(index, Types.i64_type());
             void* element_type = this.llvm_type(node.value_type());
@@ -1053,6 +1062,57 @@ struct CodeGenerator {
         void* memory = LLVMBuildCall2(this.builder, allocator_type, allocator, args, 1, "new");
         this.call_constructor(node, memory, (FunctionInfo*)node.symbol());
         return Value.create(memory, pointer_type);
+    }
+
+    Value* gen_text_value(Node* node, void* text, u32 type) {
+        StructInfo* info = this.struct_of(type);
+        PointerList* fields = info.fields;
+        FieldInfo* length_field = (FieldInfo*)fields.get(1);
+        void* llvm = this.llvm_type(type);
+        void* slot = this.create_slot(type, "text");
+        void* data_address = LLVMBuildStructGEP2(this.builder, llvm, slot, 0, "text.data");
+        LLVMBuildStore(this.builder, text, data_address);
+        void* length_address = LLVMBuildStructGEP2(this.builder, llvm, slot, 1, "text.length");
+        Value* length = Value.create(LLVMConstInt(LLVMIntTypeInContext(this.context, 64), (u64)strlen(node.text()), 0), Types.i64_type());
+        LLVMBuildStore(this.builder, this.coerce(length, length_field.type), length_address);
+        return Value.create(LLVMBuildLoad2(this.builder, llvm, slot, "text.loaded"), type);
+    }
+
+    Value* gen_array_literal(Node* node) {
+        u32 type = node.value_type();
+        StructInfo* info = this.struct_of(type);
+        IdList* arguments = info.type_args;
+        u32 element = arguments.get(0);
+        void* element_llvm = this.llvm_type(element);
+        PointerList* fields = info.fields;
+        FieldInfo* length_field = (FieldInfo*)fields.get(1);
+        void* i64_type = LLVMIntTypeInContext(this.context, 64);
+        void* pointer_llvm = LLVMPointerTypeInContext(this.context, 0);
+        void** params = CodeGenerator.array_of(1);
+        params[0] = i64_type;
+        void* allocator_type = LLVMFunctionType(pointer_llvm, params, 1, 0);
+        mut void* allocator = LLVMGetNamedFunction(this.module, "__djinn_malloc");
+        if (allocator == null) {
+            allocator = LLVMAddFunction(this.module, "__djinn_malloc", allocator_type);
+        }
+        void** args = CodeGenerator.array_of(1);
+        args[0] = LLVMBuildMul(this.builder, LLVMSizeOf(element_llvm), LLVMConstInt(i64_type, (u64)node.count(), 0), "array.size");
+        void* memory = LLVMBuildCall2(this.builder, allocator_type, allocator, args, 1, "array.new");
+        for (mut i32 i = 0; i < node.count(); i = i + 1) {
+            Value* item = this.gen_expression(node.child(i));
+            void** indices = CodeGenerator.array_of(1);
+            indices[0] = LLVMConstInt(i64_type, (u64)i, 0);
+            void* address = LLVMBuildGEP2(this.builder, element_llvm, memory, indices, 1, "array.item");
+            LLVMBuildStore(this.builder, this.coerce(item, element), address);
+        }
+        void* llvm = this.llvm_type(type);
+        void* slot = this.create_slot(type, "array");
+        void* data_address = LLVMBuildStructGEP2(this.builder, llvm, slot, 0, "array.data.ptr");
+        LLVMBuildStore(this.builder, memory, data_address);
+        void* length_address = LLVMBuildStructGEP2(this.builder, llvm, slot, 1, "array.length.ptr");
+        Value* length = Value.create(LLVMConstInt(i64_type, (u64)node.count(), 0), Types.i64_type());
+        LLVMBuildStore(this.builder, this.coerce(length, length_field.type), length_address);
+        return Value.create(LLVMBuildLoad2(this.builder, llvm, slot, "array.loaded"), type);
     }
 
     Value* gen_struct_init(Node* node) {
