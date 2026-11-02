@@ -264,6 +264,7 @@ private:
 
     llvm::Value* generate_field_access(const FieldAccess& expr, PointeeHint* pointee = nullptr);
 
+    PointeeHint bound_pointee(const Expression& expr);
     PointeeHint resolve_field_pointee(const std::string& ownerStruct, unsigned fieldIdx, llvm::Type* fieldType);
 
     llvm::Value* generate_field_assignment(const FieldAssignment& expr);
@@ -273,6 +274,7 @@ private:
     llvm::Value* generate_index_assignment(const IndexAssignment& expr);
 
     llvm::Type* resolve_index_element_type(const Expression& objectExpr);
+    [[nodiscard]] const Type* type_of(const Expression& expr) const { return symbols->typeOf(expr); }
 
     llvm::Value* generate_variable_init(const VariableInit& expr);
 
