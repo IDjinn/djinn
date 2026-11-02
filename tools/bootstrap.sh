@@ -97,6 +97,20 @@ for source in "$root"/tests/djinnc/samples/*.djinn; do
         fi
         [ -z "$reference" ] && reference="$result"
     done
+    debug_binary="$out/samples/$name.debug$ext"
+    if ! "$out/stage2/djinnc$ext" "$source" -g -o "$debug_binary" --runtime-dir "$runtime" ${link_flags[@]+"${link_flags[@]}"} >"$out/samples/$name.debug.log" 2>&1; then
+        echo "FAIL $name (-g compile)"
+        failed=1
+    else
+        set +e
+        "$debug_binary" >/dev/null
+        code=$?
+        set -e
+        if [ "$code" != "$expected" ]; then
+            echo "FAIL $name (-g exit $code, expected $expected)"
+            failed=1
+        fi
+    fi
     echo "done $name"
 done
 [ "$failed" = 0 ] || exit 1

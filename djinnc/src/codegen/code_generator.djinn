@@ -20,6 +20,7 @@ struct CodeGenerator {
     Diagnostics* diagnostics;
     SymbolTable* symbols;
     FunctionContext* function_context;
+    DebugInfo* debug;
 
     public static CodeGenerator* create(Diagnostics* diagnostics, i8* module_name) {
         CodeGenerator* gen = (CodeGenerator*)Memory.zalloc(sizeof(CodeGenerator));
@@ -34,6 +35,24 @@ struct CodeGenerator {
         LLVMSetTarget(gen.module, triple);
         LLVMDisposeMessage(triple);
         return gen;
+    }
+
+    public void enable_debug(i8* first_file) {
+        this.debug = DebugInfo.create(this.context, this.module, this.builder, first_file);
+    }
+
+    void locate(Node* node) {
+        if (this.debug != null) {
+            DebugInfo* debug = this.debug;
+            debug.locate(node);
+        }
+    }
+
+    void declare_variable(void* slot, i8* name, u32 type, Node* at, i32 argument) {
+        if (this.debug != null) {
+            DebugInfo* debug = this.debug;
+            debug.declare(slot, name, type, at, argument, LLVMGetInsertBlock(this.builder), this);
+        }
     }
 
     public bool generate(Node* program) {
@@ -51,6 +70,10 @@ struct CodeGenerator {
         this.define_all();
         this.emit_entry_point();
         CoroWrappers.emit(this);
+        if (this.debug != null) {
+            DebugInfo* debug = this.debug;
+            debug.finalize();
+        }
         Diagnostics* diagnostics = this.diagnostics;
         if (diagnostics.failed()) {
             return false;
@@ -232,6 +255,10 @@ struct CodeGenerator {
     void define_function(Node* declaration, FunctionInfo* info) {
         FunctionContext* function_context = this.function_context;
         function_context.begin(info);
+        if (this.debug != null) {
+            DebugInfo* debug = this.debug;
+            debug.begin_function(info, declaration, this);
+        }
 
         void* entry = LLVMAppendBasicBlockInContext(this.context, info.function, "entry");
         void* body = LLVMAppendBasicBlockInContext(this.context, info.function, "body");
@@ -246,12 +273,14 @@ struct CodeGenerator {
             LocalVariable* receiver = info.this_variable;
             receiver.slot = this.create_slot(receiver.type, "this");
             LLVMBuildStore(this.builder, LLVMGetParam(info.function, 0), receiver.slot);
+            this.declare_variable(receiver.slot, "this", receiver.type, declaration, 1);
         }
         for (mut i32 i = 0; i < declaration.count(); i = i + 1) {
             Node* parameter = declaration.child(i);
             LocalVariable* variable = (LocalVariable*)parameter.symbol();
             variable.slot = this.create_slot(variable.type, variable.name);
             LLVMBuildStore(this.builder, LLVMGetParam(info.function, (u32)(i + offset)), variable.slot);
+            this.declare_variable(variable.slot, variable.name, variable.type, parameter, i + offset + 1);
         }
 
         this.gen_statement(declaration.first());
@@ -262,6 +291,10 @@ struct CodeGenerator {
             } else {
                 LLVMBuildUnreachable(this.builder);
             }
+        }
+        if (this.debug != null) {
+            DebugInfo* debug = this.debug;
+            debug.end_function();
         }
     }
 
@@ -407,6 +440,7 @@ struct CodeGenerator {
 
     void gen_statement(Node* node) {
         i32 kind = node.kind;
+        this.locate(node);
 
         if (kind == NodeKind.BLOCK) {
             for (mut i32 i = 0; i < node.count(); i = i + 1) {
@@ -451,6 +485,7 @@ struct CodeGenerator {
         } else {
             LLVMBuildStore(this.builder, LLVMConstNull(this.llvm_type(declared)), variable.slot);
         }
+        this.declare_variable(variable.slot, variable.name, declared, node, 0);
     }
 
     void gen_return(Node* node) {
@@ -607,6 +642,7 @@ struct CodeGenerator {
 
     Value* gen_expression(Node* node) {
         i32 kind = node.kind;
+        this.locate(node);
         u32 type = node.value_type();
 
         if (kind == NodeKind.INT_LITERAL) {

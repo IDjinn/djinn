@@ -567,7 +567,7 @@ Medição (Windows, stage2 compilando os 21 arquivos do djinnc, 37 mil tokens, 2
 - [ ] `Mem.arena()` sem verificação de `null` a cada alocação (init explícita no início de `main`).
 - [ ] Linker: IR -> objeto sem passar pelo clang quando possível (LLVM-C `LLVMTargetMachineEmitToFile`).
 - [ ] Benchmarks na Fase 6: stage0 vs stage1 vs stage2 em arquivos de 1k, 10k e 100k linhas, com o resultado fixado em CI.
-- [ ] Debug symbols como metadata nativa do LLVM em vez de strings embutidas. Hoje o stage0 não usa `DIBuilder`:
+- [~] Debug symbols como metadata nativa do LLVM em vez de strings embutidas. Feito no djinnc (`-g`, `codegen/debug_info.djinn`): `DICompileUnit`, `DIFile`, `DISubprogram`, `DILocation` por instrução, `DILocalVariable` (locais e parâmetros) e tipos básicos/ponteiro/struct (sem membros), PDB no Windows. Falta: membros de struct, blocos lexicais, stage0 e ids de localização nos descritores de trap. Hoje o stage0 não usa `DIBuilder`:
       localização, nomes e fonte vão como globals de texto nos descritores de erro de runtime
       (`generator/RuntimeDiagnostics.cpp`), o que incha o IR e o binário e não é lido por debuggers. Alvo: `DICompileUnit`,
       `DIFile`, `DISubprogram` (nome, linkageName, escopo, arquivo, linha, tipo, `spFlags: DISPFlagDefinition`),

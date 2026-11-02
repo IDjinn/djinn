@@ -1,0 +1,149 @@
+namespace djinnc;
+
+struct DebugInfo {
+    void* context;
+    void* module;
+    void* builder;
+    void* ir_builder;
+    void* target_data;
+    void* unit;
+    void* scope;
+    void* file;
+    i8* file_name;
+    PointerList* file_names;
+    PointerList* files;
+    PointerList* type_list;
+    U32Map* types;
+
+    public static DebugInfo* create(void* context, void* module, void* ir_builder, i8* first_file) {
+        DebugInfo* debug = (DebugInfo*)Memory.zalloc(sizeof(DebugInfo));
+        debug.context = context;
+        debug.module = module;
+        debug.ir_builder = ir_builder;
+        debug.builder = LLVMCreateDIBuilder(module);
+        debug.target_data = LLVMCreateTargetData("");
+        debug.file_names = PointerList.create();
+        debug.files = PointerList.create();
+        debug.type_list = PointerList.create();
+        debug.types = U32Map.create(Memory.arena(), 64);
+
+        void* file = debug.file_for(first_file);
+        i8* producer = "djinnc";
+        debug.unit = LLVMDIBuilderCreateCompileUnit(debug.builder, 12, file, producer, (u64)strlen(producer), 0, "", 0, 0, "", 0, 1, 0, 0, 0, "", 0, "", 0);
+
+        void* i32_type = LLVMIntTypeInContext(context, 32);
+        void* version = LLVMValueAsMetadata(LLVMConstInt(i32_type, 3, 0));
+        LLVMAddModuleFlag(module, 1, "Debug Info Version", 18, version);
+        if (Linker.is_windows()) {
+            LLVMAddModuleFlag(module, 1, "CodeView", 8, LLVMValueAsMetadata(LLVMConstInt(i32_type, 1, 0)));
+        } else {
+            LLVMAddModuleFlag(module, 1, "Dwarf Version", 13, LLVMValueAsMetadata(LLVMConstInt(i32_type, 4, 0)));
+        }
+        return debug;
+    }
+
+    void* file_for(i8* name) {
+        PointerList* names = this.file_names;
+        PointerList* files = this.files;
+        for (mut i32 i = 0; i < names.length; i = i + 1) {
+            if (Strings.same((i8*)names.get(i), name)) {
+                return files.get(i);
+            }
+        }
+        void* file = LLVMDIBuilderCreateFile(this.builder, name, (u64)strlen(name), "", 0);
+        names.push((void*)name);
+        files.push(file);
+        return file;
+    }
+
+    public void* type_of(u32 type, CodeGenerator* gen) {
+        if (Types.is_void(type)) {
+            return (void*)0;
+        }
+        U32Map* cache = this.types;
+        PointerList* list = this.type_list;
+        i64 cached = cache.find(type);
+        if (cached >= 0) {
+            return list.get((i32)cached);
+        }
+        mut void* result = (void*)0;
+        i32 kind = Types.kind(type);
+        if (kind == TypeKind.INTEGER) {
+            ByteBuffer* name = ByteBuffer.create();
+            Types.describe(type, name);
+            u32 bits = Types.bits(type);
+            mut u32 encoding = 7;
+            if (bits == 1) {
+                encoding = 2;
+            } else if (Types.is_signed(type)) {
+                encoding = 5;
+            }
+            result = LLVMDIBuilderCreateBasicType(this.builder, name.cstr(), (u64)strlen(name.cstr()), (u64)bits, encoding, 0);
+        } else if (kind == TypeKind.FLOAT) {
+            ByteBuffer* name = ByteBuffer.create();
+            Types.describe(type, name);
+            result = LLVMDIBuilderCreateBasicType(this.builder, name.cstr(), (u64)strlen(name.cstr()), (u64)Types.bits(type), 4, 0);
+        } else if (kind == TypeKind.POINTER) {
+            void* pointee = this.type_of(Types.element(type), gen);
+            result = LLVMDIBuilderCreatePointerType(this.builder, pointee, 64, 0, 0, "", 0);
+        } else {
+            StructInfo* info = gen.struct_of(type);
+            u64 size = LLVMABISizeOfType(this.target_data, info.llvm) * 8;
+            result = LLVMDIBuilderCreateStructType(this.builder, this.unit, info.name, (u64)strlen(info.name), this.file_for(this.file_name), 0, size, 0, 0, (void*)0, (void**)0, 0, 0, (void*)0, "", 0);
+        }
+        cache.put(type, (u32)list.length);
+        list.push(result);
+        return result;
+    }
+
+    public void begin_function(FunctionInfo* info, Node* declaration, CodeGenerator* gen) {
+        this.file_name = declaration.file_name();
+        this.file = this.file_for(this.file_name);
+        PointerList* signature = PointerList.create();
+        signature.push(this.type_of(info.return_type, gen));
+        IdList* params = info.param_types;
+        for (mut i32 i = 0; i < params.length; i = i + 1) {
+            signature.push(this.type_of(params.get(i), gen));
+        }
+        void** entries = CodeGenerator.array_of(signature.length);
+        for (mut i32 i = 0; i < signature.length; i = i + 1) {
+            entries[i] = signature.get(i);
+        }
+        void* subroutine = LLVMDIBuilderCreateSubroutineType(this.builder, this.file, entries, (u32)signature.length, 0);
+        u32 line = (u32)declaration.line();
+        this.scope = LLVMDIBuilderCreateFunction(this.builder, this.file, info.name, (u64)strlen(info.name), info.name, (u64)strlen(info.name), this.file, line, subroutine, 0, 1, line, 0, 0);
+        LLVMSetSubprogram(info.function, this.scope);
+        this.locate(declaration);
+    }
+
+    public void end_function() {
+        this.scope = (void*)0;
+        LLVMSetCurrentDebugLocation2(this.ir_builder, (void*)0);
+    }
+
+    public void locate(Node* node) {
+        if (this.scope == null) {
+            return;
+        }
+        void* location = LLVMDIBuilderCreateDebugLocation(this.context, (u32)node.line(), (u32)node.column(), this.scope, (void*)0);
+        LLVMSetCurrentDebugLocation2(this.ir_builder, location);
+    }
+
+    public void declare(void* slot, i8* name, u32 type, Node* at, i32 argument, void* block, CodeGenerator* gen) {
+        void* di_type = this.type_of(type, gen);
+        u32 line = (u32)at.line();
+        mut void* variable = (void*)0;
+        if (argument > 0) {
+            variable = LLVMDIBuilderCreateParameterVariable(this.builder, this.scope, name, (u64)strlen(name), (u32)argument, this.file, line, di_type, 1, 0);
+        } else {
+            variable = LLVMDIBuilderCreateAutoVariable(this.builder, this.scope, name, (u64)strlen(name), this.file, line, di_type, 1, 0, 0);
+        }
+        void* expression = LLVMDIBuilderCreateExpression(this.builder, (u64*)0, 0);
+        void* location = LLVMDIBuilderCreateDebugLocation(this.context, line, (u32)at.column(), this.scope, (void*)0);
+        LLVMDIBuilderInsertDeclareRecordAtEnd(this.builder, slot, variable, expression, location, block);
+    }
+
+    public void finalize() {
+        LLVMDIBuilderFinalize(this.builder);
+    }
+}
