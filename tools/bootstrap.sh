@@ -69,7 +69,8 @@ echo "== samples on stage1, stage2 and stage3"
 failed=0
 for source in "$root"/tests/djinnc/samples/*.djinn; do
     name="$(basename "$source" .djinn)"
-    expected="$(cat "$root/tests/djinnc/samples/$name.expected")"
+    expected="$(cat "$root/tests/djinnc/samples/$name.exit")"
+    expected_stdout="$root/tests/djinnc/samples/$name.stdout"
     reference=""
     for stage in stage1 stage2 stage3; do
         binary="$out/samples/$name.$stage$ext"
@@ -82,9 +83,13 @@ for source in "$root"/tests/djinnc/samples/*.djinn; do
         "$binary" >"$out/samples/$name.$stage.stdout"
         code=$?
         set -e
-        result="$code:$(cat "$out/samples/$name.$stage.stdout")"
+        tr -d '\r' <"$out/samples/$name.$stage.stdout" >"$out/samples/$name.$stage.stdout.lf"
+        result="$code:$(cat "$out/samples/$name.$stage.stdout.lf")"
         if [ "$code" != "$expected" ]; then
             echo "FAIL $name ($stage exit $code, expected $expected)"
+            failed=1
+        elif [ -f "$expected_stdout" ] && ! cmp -s "$out/samples/$name.$stage.stdout.lf" "$expected_stdout"; then
+            echo "FAIL $name ($stage stdout differs from $name.stdout)"
             failed=1
         elif [ -n "$reference" ] && [ "$result" != "$reference" ]; then
             echo "FAIL $name ($stage disagrees with stage1)"
@@ -107,12 +112,23 @@ done
 tokens="$(sed -n 's/^tokens: \([0-9]*\).*/\1/p' "$out/bench.stats")"
 nodes="$(sed -n 's/^ast: \([0-9]*\) nodes.*/\1/p' "$out/bench.stats")"
 arena="$(sed -n 's/^arena: \([0-9]*\) bytes allocated.*/\1/p' "$out/bench.stats")"
+phase_us() {
+    local value
+    value="$(sed -n "s/^\[PerformanceMonitor [^]]*\] lap $1 ([0-9]*) \([0-9]*\)\.\([0-9]*\) ms/\1\2/p" "$out/bench.stats" | head -1)"
+    [ -n "$value" ] && echo $(( 10#$value ))
+}
+lex_us="$(phase_us lex)"
+parse_us="$(phase_us parse)"
+codegen_us="$(phase_us codegen)"
 cat >"$out/bench.json" <<JSON
 {
   "compile_ms": $best,
   "tokens": ${tokens:-0},
   "nodes": ${nodes:-0},
-  "arena_bytes": ${arena:-0}
+  "arena_bytes": ${arena:-0},
+  "lex_us": ${lex_us:-0},
+  "parse_us": ${parse_us:-0},
+  "codegen_us": ${codegen_us:-0}
 }
 JSON
 cat "$out/bench.json"

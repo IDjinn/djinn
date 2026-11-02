@@ -213,6 +213,9 @@ void __djinn_runtime_shutdown(void);
 int __djinn_argc(void);
 char* __djinn_argv(int index);
 
+// Monotonic clock in microseconds, independent of CLOCKS_PER_SEC.
+int64_t __djinn_now_us(void);
+
 // Recursively lists files under `directory` whose name ends with `extension`.
 // Returns a malloc'd, path-sorted, newline-separated list (NULL when the directory cannot be read).
 char* __djinn_list_files(const char* directory, const char* extension);

@@ -191,8 +191,11 @@ llvm::Value* Generator::generate_variable_init(const VariableInit& expr)
         return alloca;
     }
 
+    const auto* addressOf = dynamic_cast<const UnaryExpression*>(expr.value.get());
+    const bool takesAddress = addressOf && addressOf->op == TokenType::AMPERSAND;
+
     // If the init value is an alloca (e.g. from a constructor call), reuse it directly
-    if (auto* allocaInit = llvm::dyn_cast<llvm::AllocaInst>(initVal))
+    if (auto* allocaInit = llvm::dyn_cast<llvm::AllocaInst>(initVal); allocaInit && !takesAddress)
     {
         if (allocaInit->getAllocatedType()->isStructTy())
         {

@@ -23,17 +23,21 @@ fi
 
 for source in "$here"/samples/*.djinn; do
     name="$(basename "$source" .djinn)"
-    expected="$(cat "$here/samples/$name.expected")"
+    expected="$(cat "$here/samples/$name.exit")"
     if ! "$compiler" "$source" -o "$out/$name" --runtime-dir "$runtime" ${link_flags[@]+"${link_flags[@]}"} >"$out/$name.log" 2>&1; then
         echo "FAIL $name (compile)"
         cat "$out/$name.log"
         failed=1
         continue
     fi
-    "$out/$name" >/dev/null
+    "$out/$name" >"$out/$name.stdout"
     actual=$?
     if [ "$actual" != "$expected" ]; then
-        echo "FAIL $name (expected $expected, got $actual)"
+        echo "FAIL $name (expected exit $expected, got $actual)"
+        failed=1
+    elif [ -f "$here/samples/$name.stdout" ] && ! diff <(tr -d '\r' <"$out/$name.stdout") "$here/samples/$name.stdout" >/dev/null; then
+        echo "FAIL $name (stdout differs)"
+        diff <(tr -d '\r' <"$out/$name.stdout") "$here/samples/$name.stdout" | head -10
         failed=1
     else
         echo "PASS $name"

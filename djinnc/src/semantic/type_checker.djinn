@@ -7,6 +7,7 @@ struct TypeChecker {
     FunctionInfo* function;
     u32 scope;
     i32 loop_depth;
+    i32 switch_depth;
 
     public static TypeChecker* create(Diagnostics* diagnostics, SymbolTable* symbols) {
         TypeChecker* checker = (TypeChecker*)Memory.zalloc(sizeof(TypeChecker));
@@ -78,6 +79,7 @@ struct TypeChecker {
         this.scope = info.namespace_id;
         this.function = info;
         this.loop_depth = 0;
+        this.switch_depth = 0;
         LocalScopes* scopes = this.scopes;
         scopes.reset_to(0);
 
@@ -151,16 +153,48 @@ struct TypeChecker {
             this.check_loop_body(node.fourth());
             scopes.reset_to(mark);
         } else if (kind == NodeKind.BREAK) {
-            if (this.loop_depth == 0) {
-                this.error(node, "'break' outside of a loop");
+            if (this.loop_depth == 0 && this.switch_depth == 0) {
+                this.error(node, "'break' outside of a loop or switch");
             }
         } else if (kind == NodeKind.CONTINUE) {
             if (this.loop_depth == 0) {
                 this.error(node, "'continue' outside of a loop");
             }
+        } else if (kind == NodeKind.SWITCH) {
+            this.check_switch(node);
         } else {
             this.error(node, "statement is not supported yet");
         }
+    }
+
+    void check_switch(Node* node) {
+        u32 value_type = this.check_expression(node.first(), 0);
+        if (!Types.is_integer(value_type)) {
+            this.error(node.first(), "switch value must be an integer");
+        }
+        mut bool has_default = false;
+        this.switch_depth = this.switch_depth + 1;
+        for (mut i32 i = 0; i < node.count(); i = i + 1) {
+            Node* arm = node.child(i);
+            if (arm.first() == null) {
+                if (has_default) {
+                    this.error(arm, "switch has more than one 'default'");
+                }
+                has_default = true;
+            } else {
+                u32 label_type = this.check_expression(arm.first(), value_type);
+                if (!Types.is_integer(label_type)) {
+                    this.error(arm.first(), "case label must be an integer constant");
+                }
+            }
+            LocalScopes* scopes = this.scopes;
+            i32 mark = scopes.mark();
+            for (mut i32 j = 0; j < arm.count(); j = j + 1) {
+                this.check_statement(arm.child(j));
+            }
+            scopes.reset_to(mark);
+        }
+        this.switch_depth = this.switch_depth - 1;
     }
 
     void check_loop_body(Node* body) {
