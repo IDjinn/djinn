@@ -42,7 +42,11 @@ struct NodeKind {
     const i32 INDEX = 51;
     const i32 FIELD_ACCESS = 52;
     const i32 INTRINSIC = 53;
-    const i32 COUNT = 54;
+    const i32 STRUCT_INIT = 54;
+    const i32 FIELD_INIT = 55;
+    const i32 NEW_EXPR = 56;
+    const i32 ARRAY_LITERAL = 57;
+    const i32 COUNT = 58;
 
     public static i8* name(i32 kind) {
         if (kind == NodeKind.PROGRAM) { return "Program"; }
@@ -69,6 +73,10 @@ struct NodeKind {
         if (kind == NodeKind.SWITCH) { return "Switch"; }
         if (kind == NodeKind.CASE) { return "Case"; }
         if (kind == NodeKind.SWITCH_EXPR) { return "SwitchExpr"; }
+        if (kind == NodeKind.STRUCT_INIT) { return "StructInit"; }
+        if (kind == NodeKind.NEW_EXPR) { return "NewExpr"; }
+        if (kind == NodeKind.ARRAY_LITERAL) { return "ArrayLiteral"; }
+        if (kind == NodeKind.FIELD_INIT) { return "FieldInit"; }
         if (kind == NodeKind.MATCH_ARM) { return "MatchArm"; }
         if (kind == NodeKind.INT_LITERAL) { return "IntLiteral"; }
         if (kind == NodeKind.FLOAT_LITERAL) { return "FloatLiteral"; }
@@ -184,6 +192,9 @@ struct SymbolKind {
     const i32 CONSTANT = 7;
     const i32 STRUCT_NAME = 8;
     const i32 TYPE = 9;
+    const i32 OPERATOR = 10;
+    const i32 NEGATED_OPERATOR = 11;
+    const i32 CONSTRUCTOR = 12;
 }
 
 struct NodeField {
@@ -196,7 +207,8 @@ struct NodeField {
     const i32 LIST = 6;
     const i32 VALUE_LOW = 7;
     const i32 VALUE_HIGH = 8;
-    const i32 COUNT = 9;
+    const i32 GENERICS = 9;
+    const i32 COUNT = 10;
 }
 
 struct Slot {
@@ -221,6 +233,7 @@ struct NodeLayout {
         NodeLayout.define(NodeKind.FUNCTION, NodeField.TEXT, Slot.EXTRA);
         NodeLayout.define(NodeKind.FUNCTION, NodeField.TYPE, Slot.EXTRA + 1);
         NodeLayout.define(NodeKind.FUNCTION, NodeField.LIST, Slot.EXTRA + 2);
+        NodeLayout.define(NodeKind.FUNCTION, NodeField.GENERICS, Slot.EXTRA + 3);
         NodeLayout.define(NodeKind.EXTERN_FUNCTION, NodeField.LIST, Slot.A);
         NodeLayout.define(NodeKind.EXTERN_FUNCTION, NodeField.TEXT, Slot.EXTRA);
         NodeLayout.define(NodeKind.EXTERN_FUNCTION, NodeField.TYPE, Slot.EXTRA + 1);
@@ -229,8 +242,10 @@ struct NodeLayout {
         NodeLayout.define(NodeKind.STRUCT_DECL, NodeField.LIST, Slot.A);
         NodeLayout.define(NodeKind.STRUCT_DECL, NodeField.TEXT, Slot.EXTRA);
         NodeLayout.define(NodeKind.STRUCT_DECL, NodeField.TYPE, Slot.EXTRA + 1);
+        NodeLayout.define(NodeKind.STRUCT_DECL, NodeField.GENERICS, Slot.EXTRA + 2);
         NodeLayout.define(NodeKind.INTERFACE_DECL, NodeField.LIST, Slot.A);
         NodeLayout.define(NodeKind.INTERFACE_DECL, NodeField.TEXT, Slot.EXTRA);
+        NodeLayout.define(NodeKind.INTERFACE_DECL, NodeField.GENERICS, Slot.EXTRA + 1);
         NodeLayout.define(NodeKind.IMPL_DECL, NodeField.LIST, Slot.A);
         NodeLayout.define(NodeKind.IMPL_DECL, NodeField.TYPE, Slot.EXTRA);
         NodeLayout.declaration(NodeKind.FIELD_DECL);
@@ -253,6 +268,12 @@ struct NodeLayout {
         NodeLayout.define(NodeKind.SWITCH, NodeField.LIST, Slot.B);
         NodeLayout.define(NodeKind.CASE, NodeField.FIRST, Slot.A);
         NodeLayout.define(NodeKind.CASE, NodeField.LIST, Slot.B);
+        NodeLayout.list_only(NodeKind.STRUCT_INIT);
+        NodeLayout.list_only(NodeKind.ARRAY_LITERAL);
+        NodeLayout.define(NodeKind.NEW_EXPR, NodeField.TYPE, Slot.A);
+        NodeLayout.define(NodeKind.NEW_EXPR, NodeField.LIST, Slot.B);
+        NodeLayout.define(NodeKind.FIELD_INIT, NodeField.FIRST, Slot.A);
+        NodeLayout.define(NodeKind.FIELD_INIT, NodeField.TEXT, Slot.B);
         NodeLayout.define(NodeKind.SWITCH_EXPR, NodeField.FIRST, Slot.A);
         NodeLayout.define(NodeKind.SWITCH_EXPR, NodeField.LIST, Slot.B);
         NodeLayout.define(NodeKind.MATCH_ARM, NodeField.FIRST, Slot.A);
@@ -266,6 +287,7 @@ struct NodeLayout {
         NodeLayout.define(NodeKind.STRING_LITERAL, NodeField.VALUE_LOW, Slot.A);
         NodeLayout.define(NodeKind.BOOL_LITERAL, NodeField.VALUE_LOW, Slot.A);
         NodeLayout.define(NodeKind.IDENTIFIER, NodeField.TEXT, Slot.A);
+        NodeLayout.define(NodeKind.IDENTIFIER, NodeField.TYPE, Slot.B);
         NodeLayout.define(NodeKind.UNARY, NodeField.FIRST, Slot.A);
         NodeLayout.pair(NodeKind.BINARY);
         NodeLayout.pair(NodeKind.ASSIGN);
@@ -275,7 +297,8 @@ struct NodeLayout {
         NodeLayout.define(NodeKind.CAST, NodeField.FIRST, Slot.A);
         NodeLayout.define(NodeKind.CAST, NodeField.TYPE, Slot.B);
         NodeLayout.define(NodeKind.FIELD_ACCESS, NodeField.FIRST, Slot.A);
-        NodeLayout.define(NodeKind.FIELD_ACCESS, NodeField.TEXT, Slot.B);
+        NodeLayout.define(NodeKind.FIELD_ACCESS, NodeField.TEXT, Slot.EXTRA);
+        NodeLayout.define(NodeKind.FIELD_ACCESS, NodeField.TYPE, Slot.EXTRA + 1);
         NodeLayout.define(NodeKind.INTRINSIC, NodeField.TYPE, Slot.A);
     }
 
@@ -556,6 +579,49 @@ struct Node {
         PointerList* types = (PointerList*)ast_types;
         types.push((void*)type);
         this.set_field(NodeField.TYPE, (u32)types.length);
+    }
+
+    public GenericParams* generics() {
+        u32 stored = this.get_field(NodeField.GENERICS);
+        if (stored == 0) {
+            return (GenericParams*)0;
+        }
+        PointerList* lists = (PointerList*)ast_lists;
+        return (GenericParams*)lists.get((i32)stored - 1);
+    }
+
+    public void set_generics(GenericParams* params) {
+        PointerList* lists = (PointerList*)ast_lists;
+        lists.push((void*)params);
+        this.set_field(NodeField.GENERICS, (u32)lists.length);
+    }
+
+    public static Node* clone(Node* source) {
+        mut Node* copy = (Node*)0;
+        if (source.has_items()) {
+            copy = Node.create_list((i32)source.kind, source.token);
+        } else {
+            copy = Node.create((i32)source.kind, source.token);
+        }
+        copy.flags = source.flags;
+        for (mut i32 field = NodeField.FIRST; field <= NodeField.FOURTH; field = field + 1) {
+            u32 stored = source.get_field(field);
+            if (stored != 0) {
+                Node* child = Ast.at((i32)stored);
+                copy.set_field(field, (u32)Ast.id_of(Node.clone(child)));
+            }
+        }
+        copy.set_field(NodeField.TEXT, source.get_field(NodeField.TEXT));
+        copy.set_field(NodeField.TYPE, source.get_field(NodeField.TYPE));
+        copy.set_field(NodeField.VALUE_LOW, source.get_field(NodeField.VALUE_LOW));
+        copy.set_field(NodeField.VALUE_HIGH, source.get_field(NodeField.VALUE_HIGH));
+        copy.set_field(NodeField.GENERICS, source.get_field(NodeField.GENERICS));
+        if (source.has_items()) {
+            for (mut i32 i = 0; i < source.count(); i = i + 1) {
+                copy.add(Node.clone(source.child(i)));
+            }
+        }
+        return copy;
     }
 
     public bool flag() {

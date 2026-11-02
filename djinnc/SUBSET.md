@@ -38,7 +38,7 @@ of them. A construct outside this list is forbidden in `djinnc/src` until the dj
 
 - fields (pointer, integer, float or struct-typed), `const` members, instance and `public static` methods, `this`
 - member access through pointers (`p.field`, `p.method()`), `Struct.method()` and `Struct.CONST`
-- by-value struct locals, struct parameters and returns are not exercised by djinnc itself
+- by-value struct locals, parameters, returns and copies, plus struct initializers `{ .x = 1, .y = 2 }` (the target struct comes from the context: declaration, return, argument, assignment or an outer field)
 
 ## Globals
 
@@ -47,7 +47,40 @@ of them. A construct outside this list is forbidden in `djinnc/src` until the dj
 
 ## Forbidden
 
-generics, async/await, `try`/`throws`, `ensure`, string
+async/await, `try`/`throws`, `ensure`, string
 interpolation, closures, `auto`, destructuring.
 
 Enum-like values are `i32` constants held in `static` structs until `==` on enums exists in both compilers.
+
+## Generics
+
+- `struct Pair<K, V> { ... }` and `enum optional<T> { Empty(), Value(T) }`; instances are monomorphized on demand (`Pair<i32, i64>`, nested `Wrapper<Pair<i32, i32>>`) with their methods.
+- `where T : A, B; where U : C` constrains type parameters; a struct or enum type argument must satisfy the interfaces, checked at instantiation. A generic type can also list interfaces (`struct X<T> where T : I : J`).
+- `optional<i32>::Value(1)` builds a generic enum value; struct initializers and `switch` work on instances.
+- Generic interfaces: `interface Comparable<T> { i32 compare(T other); }`, used as `struct P : Comparable<P>` or in bounds (`where T : Comparable<T>`); interfaces can declare `operator` members.
+- Generic functions: `T larger<T>(T a, T b) where T : Comparable<T> { ... }`; type arguments are inferred from the arguments (including `Pair<K, V>` and `T*` parameters) or given explicitly, as in `first<i64>(1, 2)`.
+- `impl Box<T> { ... }` and `impl Iface for Box<T> { ... }` add methods and interfaces to every instance; the impl names the type parameters itself.
+- Generic methods: `T pick<U>(U marker, T other)` in a struct or impl, and `public static T twice<T>(T item)`; inferred from the arguments or explicit (`holder.convert<i64>(30)`).
+- A generic constraint made only of operator members (`Equatable<T>`, `Addition<T>`) is satisfied by numbers and pointers, which have those operators natively.
+
+## Constructors
+
+- `Point(i32 x, i32 y) { ... }` inside a struct body or `impl`; one constructor per type, arguments are positional (ordered).
+- `Point p = Point(1, 2);` builds a value, `Point* heap = new Point(1, 2);` allocates zeroed memory through the runtime allocator (`__djinn_malloc`, which traces the allocation) and returns a pointer. Generic types work the same way: `Box<i32>(7)`, `new Box<i32>(9)`.
+- A struct without a constructor can only be built with `Name()` (zero-initialized) or a `{ .field = value }` initializer.
+
+- Operator overloading: `operator +(T left, T right) -> T { ... }` inside `impl T { }` or the struct body defines a static operator method; binary expressions on struct values call it. `!=` is derived from `==`.
+
+## Overloading
+
+- Functions, methods, constructors and operators can share a name when their parameter types differ; a redefinition with the same parameter types is still an error.
+- The call picks the candidate whose parameter types match best (exact type beats numeric conversion); no match or a tie is a compile error. Overloads after the first get a `$n` suffix in the symbol name.
+
+
+## Core types: `str` and `arr<T>`
+
+A core prelude (`<core>`, built in `driver/prelude.djinn`) is compiled with every program and declares `str { i8* data; u32 length; }` and `arr<T> { T* data; u32 length; }`, both with `is_empty()` and `ptr()`.
+
+- `T[]` is `arr<T>`; `[a, b, c]` is an array literal, allocated with `__djinn_malloc`. The element type comes from the context or the first element; an empty literal needs a context.
+- A string literal is `i8*` unless the expected type is `str`, which gives `{ data, length }`.
+- `array[i]` indexes `arr<T>` (read and write); `length` is a field.

@@ -5,6 +5,8 @@ struct Parser {
     i32 pos;
     i32 end;
     bool failed;
+    bool scan_half;
+    bool half_greater;
     Diagnostics* diagnostics;
     U32Map* type_names;
 
@@ -21,9 +23,37 @@ struct Parser {
     public static void collect_type_names(TokenList* list, SourceFile* file, U32Map* names) {
         for (mut i32 i = file.first_token; i + 1 < file.token_end; i = i + 1) {
             i32 kind = list.kind(i);
+            bool endsType = kind == TokenKind.IDENTIFIER || kind == TokenKind.STAR || kind == TokenKind.GREATER || kind == TokenKind.VOID;
+            if (endsType && i + 3 < file.token_end && list.kind(i + 1) == TokenKind.IDENTIFIER
+                && list.kind(i + 2) == TokenKind.LESS && list.kind(i + 3) == TokenKind.IDENTIFIER) {
+                mut i32 scan = i + 3;
+                while (scan + 1 < file.token_end && list.kind(scan) == TokenKind.IDENTIFIER && list.kind(scan + 1) == TokenKind.COMMA) {
+                    scan = scan + 2;
+                }
+                if (scan + 2 < file.token_end && list.kind(scan) == TokenKind.IDENTIFIER
+                    && list.kind(scan + 1) == TokenKind.GREATER && list.kind(scan + 2) == TokenKind.LPAREN) {
+                    mut i32 cursor = i + 3;
+                    while (cursor <= scan) {
+                        if (list.kind(cursor) == TokenKind.IDENTIFIER) {
+                            names.put(list.atom(cursor), 1);
+                        }
+                        cursor = cursor + 1;
+                    }
+                }
+            }
             bool declaresType = kind == TokenKind.STRUCT || kind == TokenKind.ENUM || kind == TokenKind.INTERFACE;
             if (declaresType && list.kind(i + 1) == TokenKind.IDENTIFIER) {
                 names.put(list.atom(i + 1), 1);
+                if (list.kind(i + 2) == TokenKind.LESS) {
+                    mut i32 cursor = i + 3;
+                    while (cursor < file.token_end && list.kind(cursor) == TokenKind.IDENTIFIER) {
+                        names.put(list.atom(cursor), 1);
+                        cursor = cursor + 1;
+                        if (list.kind(cursor) == TokenKind.COMMA) {
+                            cursor = cursor + 1;
+                        }
+                    }
+                }
             }
         }
     }
@@ -157,6 +187,15 @@ struct Parser {
     }
 
     i32 scan_type_end(i32 start) {
+        i32 end = this.scan_type_inner(start);
+        if (this.scan_half) {
+            this.scan_half = false;
+            return 0 - 1;
+        }
+        return end;
+    }
+
+    i32 scan_type_inner(i32 start) {
         mut i32 offset = start;
         i32 first = this.peek_token(offset);
         if (!this.is_type_start(first)) {
@@ -172,13 +211,61 @@ struct Parser {
                 break;
             }
         }
+        if (this.kind_of(this.peek_token(offset)) == TokenKind.LESS) {
+            offset = this.scan_type_arguments(offset);
+            if (offset < 0) {
+                return offset;
+            }
+        }
         while (this.kind_of(this.peek_token(offset)) == TokenKind.STAR) {
             offset = offset + 1;
+        }
+        while (this.kind_of(this.peek_token(offset)) == TokenKind.LBRACKET && this.kind_of(this.peek_token(offset + 1)) == TokenKind.RBRACKET) {
+            offset = offset + 2;
         }
         if (this.kind_of(this.peek_token(offset)) == TokenKind.QUESTION) {
             offset = offset + 1;
         }
         return offset;
+    }
+
+    i32 scan_type_arguments(i32 start) {
+        mut i32 offset = start + 1;
+        while (true) {
+            i32 end = this.scan_type_inner(offset);
+            if (end < 0) {
+                return end;
+            }
+            offset = end;
+            if (this.scan_half) {
+                this.scan_half = false;
+                return offset;
+            }
+            i32 kind = this.kind_of(this.peek_token(offset));
+            if (kind == TokenKind.COMMA) {
+                offset = offset + 1;
+            } else if (kind == TokenKind.GREATER) {
+                return offset + 1;
+            } else if (kind == TokenKind.GREATER_GREATER) {
+                this.scan_half = true;
+                return offset + 1;
+            } else {
+                return 0 - 1;
+            }
+        }
+        return 0 - 1;
+    }
+
+    bool scan_generic_head(i32 less) {
+        mut i32 offset = less + 1;
+        while (this.kind_of(this.peek_token(offset)) == TokenKind.IDENTIFIER) {
+            offset = offset + 1;
+            if (this.kind_of(this.peek_token(offset)) == TokenKind.COMMA) {
+                offset = offset + 1;
+            }
+        }
+        return this.kind_of(this.peek_token(offset)) == TokenKind.GREATER
+            && this.kind_of(this.peek_token(offset + 1)) == TokenKind.LPAREN;
     }
 
     bool is_declaration_start() {
@@ -223,6 +310,65 @@ struct Parser {
         }
     }
 
+    PointerList* parse_type_arguments() {
+        this.expect(TokenKind.LESS, "expected '<'");
+        PointerList* args = PointerList.create();
+        while (!this.failed) {
+            args.push((void*)this.parse_type());
+            if (this.half_greater) {
+                this.half_greater = false;
+                return args;
+            }
+            if (this.match(TokenKind.COMMA)) {
+                continue;
+            }
+            if (this.match(TokenKind.GREATER)) {
+                return args;
+            }
+            if (this.match(TokenKind.GREATER_GREATER)) {
+                this.half_greater = true;
+                return args;
+            }
+            this.fail("expected '>' after type arguments");
+        }
+        return args;
+    }
+
+    GenericParams* parse_generic_params() {
+        GenericParams* params = GenericParams.create();
+        IdList* names = params.names;
+        this.expect(TokenKind.LESS, "expected '<'");
+        while (!this.failed) {
+            i32 token = this.expect(TokenKind.IDENTIFIER, "expected a type parameter name");
+            names.push(this.atom_of(token));
+            if (this.match(TokenKind.COMMA)) {
+                continue;
+            }
+            this.expect(TokenKind.GREATER, "expected '>' after type parameters");
+            break;
+        }
+        return params;
+    }
+
+    void parse_where_clauses(GenericParams* params) {
+        while (this.match(TokenKind.WHERE)) {
+            i32 token = this.expect(TokenKind.IDENTIFIER, "expected a type parameter after 'where'");
+            i32 owner = params.index_of(this.atom_of(token));
+            if (owner < 0) {
+                this.fail("'where' names an unknown type parameter");
+                return;
+            }
+            this.expect(TokenKind.COLON, "expected ':' after the constrained type parameter");
+            params.add_bound(owner, this.parse_type());
+            while (this.match(TokenKind.COMMA)) {
+                params.add_bound(owner, this.parse_type());
+            }
+            if (this.check(TokenKind.SEMICOLON) && this.kind_of(this.peek_token(1)) == TokenKind.WHERE) {
+                this.advance();
+            }
+        }
+    }
+
     TypeRef* parse_type() {
         i32 token = this.current();
         mut TypeRef* base = (TypeRef*)0;
@@ -243,16 +389,22 @@ struct Parser {
             return TypeRef.create(TypeKind.VOID);
         }
 
+        if (this.check(TokenKind.LESS) && base.kind == TypeKind.NAMED) {
+            base.args = this.parse_type_arguments();
+        }
+
         while (this.match(TokenKind.STAR)) {
             base = TypeRef.pointer_to(base);
         }
 
-        if (this.check(TokenKind.LBRACKET) && this.kind_of(this.peek_token(1)) == TokenKind.RBRACKET) {
-            this.fail("array types are not supported yet");
-        }
-
-        if (this.check(TokenKind.LESS) && base.kind == TypeKind.NAMED) {
-            this.fail("generic types are not supported yet");
+        while (this.check(TokenKind.LBRACKET) && this.kind_of(this.peek_token(1)) == TokenKind.RBRACKET) {
+            this.advance();
+            this.advance();
+            TypeRef* array = TypeRef.named("arr");
+            PointerList* element = PointerList.create();
+            element.push((void*)base);
+            array.args = element;
+            base = array;
         }
 
         if (this.match(TokenKind.QUESTION)) {
@@ -423,9 +575,20 @@ struct Parser {
         function.set_type(this.parse_type());
         i32 name = this.expect(TokenKind.IDENTIFIER, "expected function name");
         function.set_text(this.copy_of(name));
+        if (this.check(TokenKind.LESS)) {
+            function.set_generics(this.parse_generic_params());
+        }
         this.expect(TokenKind.LPAREN, "expected '(' after function name");
         this.parse_parameters(function);
         this.expect(TokenKind.RPAREN, "expected ')' after parameters");
+        if (this.check(TokenKind.WHERE)) {
+            GenericParams* constraints = function.generics();
+            if (constraints == null) {
+                this.fail("'where' needs a generic function");
+                return function;
+            }
+            this.parse_where_clauses(constraints);
+        }
 
         if (this.check(TokenKind.THROWS) || this.check(TokenKind.REQUIRE) || this.check(TokenKind.ENSURE)) {
             this.fail("throws and contracts are not supported yet");
@@ -444,6 +607,28 @@ struct Parser {
         }
 
         function.set_first(this.parse_block());
+        return function;
+    }
+
+    Node* parse_operator(bool with_body) {
+        i32 start = this.advance();
+        Node* function = Node.create_list(NodeKind.FUNCTION, start);
+        function.set_flag(true);
+        i32 symbol = this.advance();
+        ByteBuffer* name = ByteBuffer.create();
+        name.append("operator");
+        name.append(TokenKind.text(this.kind_of(symbol)));
+        function.set_text(name.cstr());
+        this.expect(TokenKind.LPAREN, "expected '(' after the operator");
+        this.parse_parameters(function);
+        this.expect(TokenKind.RPAREN, "expected ')' after parameters");
+        this.expect(TokenKind.THIN_ARROW, "expected '->' and the return type of the operator");
+        function.set_type(this.parse_type());
+        if (with_body) {
+            function.set_first(this.parse_block());
+        } else {
+            this.expect(TokenKind.SEMICOLON, "expected ';' after the operator signature");
+        }
         return function;
     }
 
@@ -480,9 +665,9 @@ struct Parser {
         node.set_text(this.copy_of(name));
 
         if (this.check(TokenKind.LESS)) {
-            this.fail("generic enums are not supported yet");
-            return node;
+            node.set_generics(this.parse_generic_params());
         }
+        this.parse_bases_and_constraints(node);
 
         this.expect(TokenKind.LBRACE, "expected '{' to open enum body");
         mut i64 next_value = 0;
@@ -531,9 +716,9 @@ struct Parser {
         node.set_text(this.copy_of(name));
 
         if (this.check(TokenKind.LESS)) {
-            this.fail("generic interfaces are not supported yet");
-            return node;
+            node.set_generics(this.parse_generic_params());
         }
+        this.parse_bases_and_constraints(node);
 
         this.expect(TokenKind.LBRACE, "expected '{' to open interface body");
         while (!this.check(TokenKind.RBRACE) && !this.at_end()) {
@@ -545,13 +730,20 @@ struct Parser {
 
     void parse_interface_member(Node* owner) {
         i32 start = this.current();
+        if (this.check(TokenKind.OPERATOR)) {
+            owner.add(this.parse_operator(false));
+            return;
+        }
         TypeRef* type = this.parse_type();
         i32 name = this.expect(TokenKind.IDENTIFIER, "expected interface member name");
-        if (this.check(TokenKind.LPAREN)) {
+        if (this.check(TokenKind.LPAREN) || this.check(TokenKind.LESS)) {
             Node* method = Node.create_list(NodeKind.FUNCTION, start);
             method.set_type(type);
             method.set_text(this.copy_of(name));
-            this.advance();
+            if (this.check(TokenKind.LESS)) {
+                method.set_generics(this.parse_generic_params());
+            }
+            this.expect(TokenKind.LPAREN, "expected '(' after the method name");
             this.parse_parameters(method);
             this.expect(TokenKind.RPAREN, "expected ')' after parameters");
             this.expect(TokenKind.SEMICOLON, "expected ';' after interface method");
@@ -597,6 +789,40 @@ struct Parser {
         return node;
     }
 
+    void parse_bases_and_constraints(Node* node) {
+        mut bool has_base = false;
+        while (!this.failed) {
+            if (this.check(TokenKind.COLON)) {
+                this.advance();
+                this.match(TokenKind.INTERFACE);
+                TypeRef* first = this.parse_type();
+                if (has_base) {
+                    Node* extra = Node.create(NodeKind.PARAMETER, this.current());
+                    extra.set_type(first);
+                    node.add(extra);
+                } else {
+                    node.set_type(first);
+                    has_base = true;
+                }
+                while (this.match(TokenKind.COMMA)) {
+                    this.match(TokenKind.INTERFACE);
+                    Node* base = Node.create(NodeKind.PARAMETER, this.current());
+                    base.set_type(this.parse_type());
+                    node.add(base);
+                }
+            } else if (this.check(TokenKind.WHERE)) {
+                GenericParams* params = node.generics();
+                if (params == null) {
+                    this.fail("'where' needs a generic declaration");
+                    return;
+                }
+                this.parse_where_clauses(params);
+            } else {
+                return;
+            }
+        }
+    }
+
     Node* parse_struct() {
         i32 start = this.advance();
         Node* node = Node.create_list(NodeKind.STRUCT_DECL, start);
@@ -604,20 +830,9 @@ struct Parser {
         node.set_text(this.copy_of(name));
 
         if (this.check(TokenKind.LESS)) {
-            this.fail("generic structs are not supported yet");
-            return node;
+            node.set_generics(this.parse_generic_params());
         }
-
-        if (this.match(TokenKind.COLON)) {
-            this.match(TokenKind.INTERFACE);
-            node.set_type(this.parse_type());
-            while (this.match(TokenKind.COMMA)) {
-                this.match(TokenKind.INTERFACE);
-                Node* base = Node.create(NodeKind.PARAMETER, this.current());
-                base.set_type(this.parse_type());
-                node.add(base);
-            }
-        }
+        this.parse_bases_and_constraints(node);
 
         if (this.match(TokenKind.SEMICOLON)) {
             return node;
@@ -661,12 +876,26 @@ struct Parser {
         i32 afterHead = this.peek_token(lookahead + 1);
         bool isConstructor = this.kind_of(head) == TokenKind.IDENTIFIER && this.kind_of(afterHead) == TokenKind.LPAREN;
         if (isConstructor) {
-            this.fail("constructors are not supported yet");
+            for (mut i32 i = 0; i < lookahead; i = i + 1) {
+                this.advance();
+            }
+            this.advance();
+            Node* constructor = Node.create_list(NodeKind.FUNCTION, head);
+            constructor.set_type(TypeRef.create(TypeKind.VOID));
+            constructor.set_text(".ctor");
+            this.expect(TokenKind.LPAREN, "expected '(' after the constructor name");
+            this.parse_parameters(constructor);
+            this.expect(TokenKind.RPAREN, "expected ')' after parameters");
+            constructor.set_first(this.parse_block());
+            owner.add(constructor);
             return;
         }
 
         if (this.kind_of(head) == TokenKind.OPERATOR) {
-            this.fail("operator overloads are not supported yet");
+            for (mut i32 i = 0; i < lookahead; i = i + 1) {
+                this.advance();
+            }
+            owner.add(this.parse_operator(true));
             return;
         }
 
@@ -678,7 +907,8 @@ struct Parser {
 
         i32 afterType = this.peek_token(typeEnd);
         i32 afterName = this.peek_token(typeEnd + 1);
-        if (this.kind_of(afterType) == TokenKind.IDENTIFIER && this.kind_of(afterName) == TokenKind.LPAREN) {
+        bool genericMethod = this.kind_of(afterName) == TokenKind.LESS && this.scan_generic_head(typeEnd + 1);
+        if (this.kind_of(afterType) == TokenKind.IDENTIFIER && (this.kind_of(afterName) == TokenKind.LPAREN || genericMethod)) {
             Node* method = this.parse_function(false);
             if (method != null) {
                 owner.add(method);
@@ -810,6 +1040,25 @@ struct Parser {
             node.add(arm);
         }
         this.expect(TokenKind.RBRACE, "expected '}' to close switch");
+        return node;
+    }
+
+    Node* parse_struct_init() {
+        i32 start = this.advance();
+        Node* node = Node.create_list(NodeKind.STRUCT_INIT, start);
+        while (!this.check(TokenKind.RBRACE) && !this.at_end() && !this.failed) {
+            this.expect(TokenKind.DOT, "expected '.field = value' in struct initializer");
+            i32 name = this.expect(TokenKind.IDENTIFIER, "expected field name in struct initializer");
+            Node* field = Node.create(NodeKind.FIELD_INIT, name);
+            field.set_text(this.copy_of(name));
+            this.expect(TokenKind.EQUAL, "expected '=' after field name");
+            field.set_first(this.parse_expression());
+            node.add(field);
+            if (!this.check(TokenKind.RBRACE)) {
+                this.expect(TokenKind.COMMA, "expected ',' between field initializers");
+            }
+        }
+        this.expect(TokenKind.RBRACE, "expected '}' to close struct initializer");
         return node;
     }
 
@@ -1032,7 +1281,7 @@ struct Parser {
         }
 
         if (this.kind_of(token) == TokenKind.AWAIT || this.kind_of(token) == TokenKind.SPAWN || this.kind_of(token) == TokenKind.TRY
-            || this.kind_of(token) == TokenKind.NEW || this.kind_of(token) == TokenKind.THROW) {
+            || this.kind_of(token) == TokenKind.THROW) {
             this.fail("this expression is not supported yet");
             return Node.create(NodeKind.NULL_LITERAL, token);
         }
@@ -1070,6 +1319,16 @@ struct Parser {
                 access.set_first(expr);
                 i32 member = this.expect(TokenKind.IDENTIFIER, "expected member name after '.'");
                 access.set_text(this.copy_of(member));
+                if (this.check(TokenKind.LESS)) {
+                    i32 close = this.scan_type_arguments(0);
+                    bool explicit = close > 0 && !this.scan_half && this.kind_of(this.peek_token(close)) == TokenKind.LPAREN;
+                    this.scan_half = false;
+                    if (explicit) {
+                        TypeRef* holder = TypeRef.create(TypeKind.NAMED);
+                        holder.args = this.parse_type_arguments();
+                        access.set_type(holder);
+                    }
+                }
                 expr = access;
             } else if (this.kind_of(token) == TokenKind.PLUS_PLUS) {
                 this.advance();
@@ -1122,6 +1381,35 @@ struct Parser {
         if (this.kind_of(token) == TokenKind.SWITCH) {
             return this.parse_switch_expression();
         }
+        if (this.kind_of(token) == TokenKind.LBRACKET) {
+            this.advance();
+            Node* literal = Node.create_list(NodeKind.ARRAY_LITERAL, token);
+            if (!this.check(TokenKind.RBRACKET)) {
+                literal.add(this.parse_expression());
+                while (this.match(TokenKind.COMMA)) {
+                    literal.add(this.parse_expression());
+                }
+            }
+            this.expect(TokenKind.RBRACKET, "expected ']' after the array elements");
+            return literal;
+        }
+        if (this.kind_of(token) == TokenKind.LBRACE) {
+            return this.parse_struct_init();
+        }
+        if (this.kind_of(token) == TokenKind.NEW) {
+            this.advance();
+            Node* created = Node.create_list(NodeKind.NEW_EXPR, token);
+            created.set_type(this.parse_type());
+            this.expect(TokenKind.LPAREN, "expected '(' after the type of 'new'");
+            if (!this.check(TokenKind.RPAREN)) {
+                created.add(this.parse_expression());
+                while (this.match(TokenKind.COMMA)) {
+                    created.add(this.parse_expression());
+                }
+            }
+            this.expect(TokenKind.RPAREN, "expected ')' after the constructor arguments");
+            return created;
+        }
         if (this.kind_of(token) == TokenKind.THIS) {
             this.advance();
             Node* self = Node.create(NodeKind.IDENTIFIER, token);
@@ -1141,8 +1429,40 @@ struct Parser {
                 return call;
             }
 
+            if (this.is_known_type(token) && this.kind_of(this.peek_token(1)) == TokenKind.LESS) {
+                i32 end = this.scan_type_end(0);
+                if (end > 0 && this.kind_of(this.peek_token(end)) == TokenKind.LPAREN) {
+                    TypeRef* constructed = this.parse_type();
+                    Node* constructor_name = Node.create(NodeKind.IDENTIFIER, token);
+                    constructor_name.set_text(constructed.name);
+                    constructor_name.set_type(constructed);
+                    constructor_name.set_flag(true);
+                    return constructor_name;
+                }
+                if (end > 0 && this.kind_of(this.peek_token(end)) == TokenKind.COLON_COLON
+                    && this.kind_of(this.peek_token(end + 1)) == TokenKind.IDENTIFIER) {
+                    TypeRef* owner = this.parse_type();
+                    this.advance();
+                    i32 variant = this.expect(TokenKind.IDENTIFIER, "expected an enum variant");
+                    Node* generic_variant = Node.create(NodeKind.IDENTIFIER, token);
+                    generic_variant.set_text(this.copy_of(variant));
+                    generic_variant.set_type(owner);
+                    return generic_variant;
+                }
+            }
+
             Node* identifier = Node.create(NodeKind.IDENTIFIER, token);
             identifier.set_text(this.qualified_name());
+            if (this.check(TokenKind.LESS) && !this.is_known_type(token)) {
+                i32 close = this.scan_type_arguments(0);
+                bool explicit = close > 0 && !this.scan_half && this.kind_of(this.peek_token(close)) == TokenKind.LPAREN;
+                this.scan_half = false;
+                if (explicit) {
+                    TypeRef* holder = TypeRef.create(TypeKind.NAMED);
+                    holder.args = this.parse_type_arguments();
+                    identifier.set_type(holder);
+                }
+            }
             return identifier;
         }
 
