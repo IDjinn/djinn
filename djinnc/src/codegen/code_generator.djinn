@@ -697,6 +697,11 @@ struct CodeGenerator {
             return address;
         }
         Value* value = this.gen_expression(base);
+        if (!Types.is_pointer(value.type)) {
+            void* spill = this.create_slot(value.type, "receiver");
+            LLVMBuildStore(this.builder, value.ref, spill);
+            return spill;
+        }
         return value.ref;
     }
 
@@ -1053,7 +1058,16 @@ struct CodeGenerator {
         mut i32 offset = 0;
 
         if (callee.symbol_kind() == SymbolKind.INSTANCE_METHOD) {
-            receiver = this.struct_pointer(callee.first());
+            StructInfo* receiver_owner = info.owner;
+            if (receiver_owner.is_enum) {
+                Value* enum_value = this.gen_expression(callee.first());
+                receiver = enum_value.ref;
+                if (Types.is_pointer(enum_value.type)) {
+                    receiver = LLVMBuildLoad2(this.builder, this.llvm_type(receiver_owner.type_id), enum_value.ref, "enum.load");
+                }
+            } else {
+                receiver = this.struct_pointer(callee.first());
+            }
             offset = 1;
         }
 
