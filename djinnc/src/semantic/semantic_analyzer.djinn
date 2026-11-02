@@ -19,6 +19,7 @@ struct SemanticAnalyzer {
     public bool collect(Node* program) {
         this.collect_interfaces(program);
         this.collect_structs(program);
+        this.collect_template_impls(program);
         this.resolve_structs();
         this.collect_functions(program);
         this.methods_ready = true;
@@ -290,6 +291,31 @@ struct SemanticAnalyzer {
                 this.collect_function(member, false, info);
             }
         }
+        PointerList* impls = template.impls;
+        if (impls != null) {
+            for (mut i32 m = 0; m < impls.length; m = m + 1) {
+                Node* impl_node = (Node*)impls.get(m);
+                U32Map* impl_map = this.impl_bindings(impl_node, args);
+                if (impl_map == null) {
+                    continue;
+                }
+                symbols.bindings = impl_map;
+                for (mut i32 k = 0; k < impl_node.count(); k = k + 1) {
+                    Node* member = impl_node.child(k);
+                    if (member.kind != NodeKind.FUNCTION) {
+                        continue;
+                    }
+                    FunctionInfo* method = this.build_function(Node.clone(member), false, info);
+                    if (method != null) {
+                        method.bindings = impl_map;
+                        if (!symbols.add_function(method)) {
+                            this.error(member, "function is already defined");
+                        }
+                    }
+                }
+            }
+            symbols.bindings = info.bindings;
+        }
         if (this.methods_ready) {
             this.check_instance(info, blame);
         } else {
@@ -330,6 +356,22 @@ struct SemanticAnalyzer {
             if (base.kind == NodeKind.PARAMETER) {
                 this.check_conformance(info, base.type(), base);
             }
+        }
+        PointerList* impls = template.impls;
+        if (impls != null) {
+            SymbolTable* symbols = this.symbols;
+            U32Map* saved = symbols.bindings;
+            for (mut i32 m = 0; m < impls.length; m = m + 1) {
+                Node* impl_node = (Node*)impls.get(m);
+                symbols.bindings = this.impl_bindings(impl_node, info.type_args);
+                for (mut i32 k = 0; k < impl_node.count(); k = k + 1) {
+                    Node* contract = impl_node.child(k);
+                    if (contract.kind == NodeKind.PARAMETER) {
+                        this.check_conformance(info, contract.type(), contract);
+                    }
+                }
+            }
+            symbols.bindings = saved;
         }
     }
 
@@ -375,6 +417,42 @@ struct SemanticAnalyzer {
         }
     }
 
+    void collect_template_impls(Node* container) {
+        SymbolTable* symbols = this.symbols;
+        for (mut i32 i = 0; i < container.count(); i = i + 1) {
+            Node* declaration = container.child(i);
+            if (declaration.kind == NodeKind.NAMESPACE_DECL) {
+                u32 saved = this.enter(declaration);
+                this.collect_template_impls(declaration);
+                this.scope = saved;
+            } else if (declaration.kind == NodeKind.IMPL_DECL) {
+                StructInfo* owner = this.impl_target(declaration);
+                if (owner != null && owner.is_template) {
+                    if (owner.impls == null) {
+                        owner.impls = PointerList.create();
+                    }
+                    PointerList* registered = owner.impls;
+                    registered.push((void*)declaration);
+                }
+            }
+        }
+    }
+
+    U32Map* impl_bindings(Node* declaration, IdList* args) {
+        TypeRef* target = declaration.type();
+        PointerList* names = target.args;
+        if (names == null || names.length != args.length) {
+            this.error(declaration, "impl must name every type parameter of the generic type");
+            return (U32Map*)0;
+        }
+        U32Map* bindings = U32Map.create(Memory.arena(), 8);
+        for (mut i32 a = 0; a < names.length; a = a + 1) {
+            TypeRef* name = (TypeRef*)names.get(a);
+            bindings.put(name.name_atom, args.get(a));
+        }
+        return bindings;
+    }
+
     void collect_methods(Node* declaration) {
         SymbolTable* symbols = this.symbols;
         StructInfo* owner = symbols.find_struct(declaration.name(), declaration.name(), this.scope);
@@ -405,7 +483,6 @@ struct SemanticAnalyzer {
             return;
         }
         if (owner.is_template) {
-            this.error(declaration, "impl on a generic type is not supported yet");
             return;
         }
         for (mut i32 i = 0; i < declaration.count(); i = i + 1) {
@@ -441,7 +518,7 @@ struct SemanticAnalyzer {
                 StructInfo* owner = this.impl_target(declaration);
                 for (mut i32 c = 0; c < declaration.count(); c = c + 1) {
                     Node* contract = declaration.child(c);
-                    if (contract.kind == NodeKind.PARAMETER && owner != null) {
+                    if (contract.kind == NodeKind.PARAMETER && owner != null && !owner.is_template) {
                         this.check_conformance(owner, contract.type(), contract);
                     }
                 }
