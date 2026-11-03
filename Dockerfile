@@ -30,6 +30,6 @@ COPY . /work
 
 # /build is a BuildKit cache mount: ninja only recompiles what changed between builds.
 # Cache mounts are not part of the image, so the artifacts are copied to /opt/djinn.
-RUN --mount=type=cache,target=/build,id=djinn-build     sed -i "s|'-LC:/dev/llvm-[^']*',|'-L/usr/lib/llvm-${LLVM_VERSION}/lib',|; s|'-lLLVM-C'|'-lLLVM-${LLVM_VERSION}'|" djinnc/djinn.proj     && cmake -S . -B /build -G Ninja -DCMAKE_BUILD_TYPE=Release         -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++         -DLLVM_DIR=/usr/lib/llvm-${LLVM_VERSION}/lib/cmake/llvm     && cmake --build /build --target djinn djinn_runtime     && mkdir -p /opt/djinn     && cp /build/djinn /opt/djinn/djinn     && cp -r /build/runtime /opt/djinn/runtime     && cp "$(find /build -maxdepth 2 -name 'libdjinn_runtime.a' | head -1)" /opt/djinn/libdjinn_runtime.a
+RUN --mount=type=cache,target=/build,id=djinn-build     sed -i "s|'-LC:/dev/llvm-[^']*',|'-L/usr/lib/llvm-${LLVM_VERSION}/lib',|; s|'-lLLVM-C'|'-lLLVM-${LLVM_VERSION}'|" djinnc/djinn.proj     && cmake -S . -B /build -G Ninja -DCMAKE_BUILD_TYPE=Release         -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++         -DLLVM_DIR=/usr/lib/llvm-${LLVM_VERSION}/lib/cmake/llvm     && cmake --build /build --target djinn djinn_runtime     && mkdir -p /opt/djinn     && cp /build/djinn /opt/djinn/djinn     && cp -r runtime /opt/djinn/runtime     && cp "$(find /build -maxdepth 2 -name 'libdjinn_runtime.a' | head -1)" /opt/djinn/libdjinn_runtime.a
 
 CMD ["bash", "docker/run.sh"]

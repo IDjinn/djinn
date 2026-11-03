@@ -1009,6 +1009,8 @@ static int djinn_render_frames(char* buf, int used, const djinn_frame_t* frames,
     return used;
 }
 
+static void djinn_native_stack(void);
+
 static int djinn_append_stack_trace(char* buf, int used)
 {
     used = djinn_render_frames(buf, used, djinn_shadow_stack.frames, djinn_shadow_stack.depth);
@@ -1046,6 +1048,7 @@ void __djinn_runtime_error(const djinn_error_info_t* info)
 
     fputs(report, stderr);
     fflush(stderr);
+    if (djinn_shadow_stack.depth == 0) djinn_native_stack();
     abort();
 }
 
@@ -2345,3 +2348,130 @@ char* __djinn_list_files(const char* directory, const char* extension)
     free(list.paths);
     return result;
 }
+
+// ── Native stack trace (symbolized through the debug info emitted by -g) ──
+// Windows resolves frames with dbghelp and the PDB; POSIX with addr2line
+// against the DWARF of the running executable. Without debug info the frames
+// still print, just without file and line.
+#ifdef _WIN32
+#include <windows.h>
+#include <dbghelp.h>
+#pragma comment(lib, "dbghelp.lib")
+
+static void djinn_native_stack(void)
+{
+    void* addresses[64];
+    const USHORT count = CaptureStackBackTrace(1, 64, addresses, NULL);
+    const HANDLE process = GetCurrentProcess();
+    static int initialized;
+    if (!initialized)
+    {
+        SymSetOptions(SYMOPT_LOAD_LINES | SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS);
+        SymInitialize(process, NULL, TRUE);
+        initialized = 1;
+    }
+
+    char storage[sizeof(SYMBOL_INFO) + 256];
+    SYMBOL_INFO* symbol = (SYMBOL_INFO*)storage;
+    fputs("native stack trace:\n", stderr);
+    for (USHORT i = 0; i < count; i++)
+    {
+        const DWORD64 address = (DWORD64)(uintptr_t)addresses[i];
+        memset(symbol, 0, sizeof(SYMBOL_INFO));
+        symbol->SizeOfStruct = sizeof(SYMBOL_INFO);
+        symbol->MaxNameLen = 255;
+        DWORD64 symbol_offset = 0;
+        const char* name = SymFromAddr(process, address, &symbol_offset, symbol) ? symbol->Name : "<unknown>";
+        IMAGEHLP_LINE64 line;
+        memset(&line, 0, sizeof line);
+        line.SizeOfStruct = sizeof line;
+        DWORD line_offset = 0;
+        if (SymGetLineFromAddr64(process, address, &line_offset, &line))
+            fprintf(stderr, "  at %s (%s:%lu)\n", name, line.FileName, (unsigned long)line.LineNumber);
+        else
+            fprintf(stderr, "  at %s\n", name);
+    }
+    fflush(stderr);
+}
+
+static LPTOP_LEVEL_EXCEPTION_FILTER djinn_previous_filter;
+
+static LONG WINAPI djinn_crash_filter(EXCEPTION_POINTERS* info)
+{
+    fprintf(stderr, "djinn crash: exception 0x%08lx\n", (unsigned long)info->ExceptionRecord->ExceptionCode);
+    djinn_native_stack();
+    if (djinn_previous_filter != NULL) return djinn_previous_filter(info);
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+__attribute__((constructor)) static void djinn_install_crash_trace(void)
+{
+    djinn_previous_filter = SetUnhandledExceptionFilter(djinn_crash_filter);
+}
+#else
+#include <execinfo.h>
+#include <signal.h>
+#include <dlfcn.h>
+#include <elf.h>
+
+extern const Elf64_Ehdr __ehdr_start;
+
+static void djinn_native_stack(void)
+{
+    void* addresses[64];
+    const int count = backtrace(addresses, 64);
+    fputs("native stack trace:\n", stderr);
+
+    char command[2048];
+    char executable[1024];
+    const ssize_t executable_length = readlink("/proc/self/exe", executable, sizeof executable - 1);
+    executable[executable_length > 0 ? executable_length : 0] = ' ';
+    int used = snprintf(command, sizeof command, "addr2line -f -C -p -e '%s'", executable);
+    for (int i = 1; i < count && used < (int)sizeof command - 32; i++)
+    {
+        Dl_info info;
+        uintptr_t address = (uintptr_t)addresses[i] - 1;
+        if (__ehdr_start.e_type == ET_DYN && dladdr(addresses[i], &info) && info.dli_fbase != NULL)
+            address -= (uintptr_t)info.dli_fbase;
+        used += snprintf(command + used, sizeof command - (size_t)used, " 0x%lx", (unsigned long)address);
+    }
+
+    FILE* pipe = popen(command, "r");
+    int printed = 0;
+    if (pipe != NULL)
+    {
+        char row[512];
+        while (fgets(row, sizeof row, pipe) != NULL)
+        {
+            fprintf(stderr, "  at %s", row);
+            printed = 1;
+        }
+        pclose(pipe);
+    }
+    if (!printed) backtrace_symbols_fd(addresses + 1, count - 1, 2);
+    fflush(stderr);
+}
+
+static void djinn_crash_signal(const int signal_number)
+{
+    fprintf(stderr, "djinn crash: signal %d\n", signal_number);
+    djinn_native_stack();
+    signal(signal_number, SIG_DFL);
+    raise(signal_number);
+}
+
+__attribute__((constructor)) static void djinn_install_crash_trace(void)
+{
+    const int signals[] = {SIGSEGV, SIGBUS, SIGFPE, SIGILL};
+    for (size_t i = 0; i < sizeof signals / sizeof signals[0]; i++)
+    {
+        struct sigaction current;
+        if (sigaction(signals[i], NULL, &current) != 0 || current.sa_handler != SIG_DFL) continue;
+        struct sigaction handler;
+        memset(&handler, 0, sizeof handler);
+        handler.sa_handler = djinn_crash_signal;
+        sigemptyset(&handler.sa_mask);
+        sigaction(signals[i], &handler, NULL);
+    }
+}
+#endif

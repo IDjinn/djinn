@@ -31,6 +31,29 @@ run_case() {
     echo "PASS $name"
 }
 
+run_crash() {
+    local source="$1"
+    shift
+    local name
+    name="crash_$(basename "$source" .djinn)"
+    local binary="$out/$name.exe"
+    if ! "$compiler" "$root/tests/djinnc/crash/$source" -g -o "$binary" --runtime-dir "$runtime" >"$out/$name.build.log" 2>&1; then
+        echo "FAIL $name (compile)"
+        failed=1
+        return
+    fi
+    "$binary" >"$out/$name.run.log" 2>&1
+    tr -d '' <"$out/$name.run.log" >"$out/$name.run.txt"
+    for pattern in "$@"; do
+        if ! grep -q -- "$pattern" "$out/$name.run.txt"; then
+            echo "FAIL $name (missing: $pattern)"
+            failed=1
+            return
+        fi
+    done
+    echo "PASS $name"
+}
+
 run_case_stage0() {
     local source="$1" line="$2"
     shift 2
@@ -65,6 +88,8 @@ run_case scopes.djinn 11 "inner = 14" "sum = 0" "current = 0x"
 run_case scopes.djinn 20 "value = 5" "value = 7" "next = NULL" "Node"
 run_case structs.djinn 8 "x = 3" "y = 4" "result = 12" "Point"
 run_case enums.djinn 12 "base = 11" "result = 33" "level = " "weight"
+
+run_crash null_read.djinn "native stack trace" "read" "outer" "null_read.djinn:6" "null_read.djinn:10"
 
 if [ -n "${STAGE0:-}" ]; then
     stage0="$STAGE0"
