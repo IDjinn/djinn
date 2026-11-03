@@ -22,8 +22,8 @@ if (-not (Test-Path $runtime)) { $runtime = "$root\runtime" }
 $llvm = "C:\Program Files\LLVM\bin"
 if ((Test-Path $llvm) -and ($env:PATH -notlike "*$llvm*")) { $env:PATH += ";$llvm" }
 
-New-Item -ItemType Directory -Force "$root\build" | Out-Null
-$out = "$root\build\playground.exe"
+New-Item -ItemType Directory -Force "$root\playground\build" | Out-Null
+$out = "$root\playground\build\playground.exe"
 
 & $compiler "$root\playground\main.djinn" -o $out --runtime-dir $runtime @CompilerArgs
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

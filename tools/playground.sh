@@ -12,8 +12,8 @@ fi
 
 runtime="${DJINN_RUNTIME_DIR:-$root/cmake-build-debug-visual-studio/runtime}"
 [ -d "$runtime" ] || runtime="$root/runtime"
-out="$root/build/playground$ext"
-mkdir -p "$root/build"
+out="$root/playground/build/playground$ext"
+mkdir -p "$root/playground/build"
 
 "$compiler" "$root/playground/main.djinn" -o "$out" --runtime-dir "$runtime" "$@"
 "$out"
