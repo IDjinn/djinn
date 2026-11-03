@@ -20,7 +20,7 @@ export class DjinnCompiler extends BaseCompiler {
         if (filters.binary) {
             return ['-o', outputFilename];
         }
-        return ['--emit-asm', '-o', outputFilename];
+        return ['--emit-asm', '-g', '-o', outputFilename];
     }
 
     protected override getSharedLibraryPathsAsArguments(): string[] {

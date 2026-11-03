@@ -2,6 +2,10 @@ namespace djinnc;
 
 impl CodeGenerator {
     Value* gen_text_value(Node* node, void* text, u32 type) {
+        return this.gen_constant_text(node.text(), text, type);
+    }
+
+    Value* gen_constant_text(i8* content, void* text, u32 type) {
         StructInfo* info = this.struct_of(type);
         PointerList* fields = info.fields;
         FieldInfo* length_field = (FieldInfo*)fields.get(1);
@@ -10,7 +14,7 @@ impl CodeGenerator {
         void* data_address = LLVMBuildStructGEP2(this.builder, llvm, slot, 0, "text.data");
         LLVMBuildStore(this.builder, text, data_address);
         void* length_address = LLVMBuildStructGEP2(this.builder, llvm, slot, 1, "text.length");
-        Value* length = Value.create(LLVMConstInt(LLVMIntTypeInContext(this.context, 64), (u64)strlen(node.text()), 0), Types.i64_type());
+        Value* length = Value.create(LLVMConstInt(LLVMIntTypeInContext(this.context, 64), (u64)strlen(content), 0), Types.i64_type());
         LLVMBuildStore(this.builder, this.coerce(length, length_field.type), length_address);
         if (fields.length > 2) {
             void* capacity_address = LLVMBuildStructGEP2(this.builder, llvm, slot, 2, "text.capacity");
@@ -91,8 +95,77 @@ impl CodeGenerator {
         this.call_runtime("__djinn_text_slice", LLVMVoidTypeInContext(this.context), parameters, arguments, 3);
     }
 
+    bool fold_interpolation(Node* node, ByteBuffer* out, i32 depth) {
+        for (mut i32 i = 0; i < node.count(); i = i + 1) {
+            Node* part = node.child(i);
+            if (i % 2 == 0) {
+                i64 text_length = part.int_value() & 4294967295;
+                if (text_length > 0) {
+                    out.append(part.text());
+                }
+                continue;
+            }
+            Node* before = node.child(i - 1);
+            if ((before.int_value() >> 32) != 0) {
+                return false;
+            }
+            if (!this.fold_constant(part, out, depth)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    bool fold_constant(Node* part, ByteBuffer* out, i32 depth) {
+        if (depth > 8) {
+            return false;
+        }
+        i32 kind = part.kind;
+        if (kind == NodeKind.STRING_LITERAL) {
+            out.append(part.text());
+            return true;
+        }
+        if (kind == NodeKind.INT_LITERAL) {
+            u32 type = part.value_type();
+            if (Types.is_float(type) || (!Types.is_signed(type) && part.int_value() < 0)) {
+                return false;
+            }
+            out.append_int(part.int_value());
+            return true;
+        }
+        if (kind == NodeKind.BOOL_LITERAL) {
+            if (part.int_value() != 0) {
+                out.append("true");
+            } else {
+                out.append("false");
+            }
+            return true;
+        }
+        if (kind == NodeKind.INTERPOLATION) {
+            return this.fold_interpolation(part, out, depth + 1);
+        }
+        if (kind == NodeKind.IDENTIFIER && part.symbol_kind() == SymbolKind.LOCAL) {
+            LocalVariable* variable = (LocalVariable*)part.symbol();
+            Node* declaration = variable.node;
+            if (variable.is_mutable || declaration == null || declaration.kind != NodeKind.VAR_DECL) {
+                return false;
+            }
+            Node* initial = declaration.first();
+            if (initial == null) {
+                return false;
+            }
+            return this.fold_constant(initial, out, depth + 1);
+        }
+        return false;
+    }
+
     Value* gen_interpolation(Node* node) {
         u32 type = node.value_type();
+        ByteBuffer* folded = ByteBuffer.create();
+        if (this.fold_interpolation(node, folded, 0)) {
+            void* constant = LLVMBuildGlobalStringPtr(this.builder, folded.cstr(), "interp.const");
+            return this.gen_constant_text(folded.cstr(), constant, type);
+        }
         void* pointer_llvm = LLVMPointerTypeInContext(this.context, 0);
         void* i32_type = LLVMIntTypeInContext(this.context, 32);
         void* i64_type = LLVMIntTypeInContext(this.context, 64);

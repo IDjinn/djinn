@@ -174,6 +174,20 @@ impl TypeChecker {
         return constructor;
     }
 
+    void require_argument_shape(Node* argument, u32 passed, u32 wanted) {
+        if (wanted == 0 || passed == wanted || wanted == this.core_type("object")) {
+            return;
+        }
+        SymbolTable* symbols = this.symbols;
+        bool passed_struct = Types.is_struct(passed) && symbols.enum_of_type(passed) == null;
+        bool wanted_struct = Types.is_struct(wanted) && symbols.enum_of_type(wanted) == null;
+        bool passed_scalar = Types.is_integer(passed) || Types.is_float(passed) || Types.is_pointer(passed);
+        bool wanted_scalar = Types.is_integer(wanted) || Types.is_float(wanted) || Types.is_pointer(wanted);
+        if ((passed_struct && wanted_scalar) || (passed_scalar && wanted_struct)) {
+            this.error(argument, "argument type does not match the parameter; a struct and a scalar or pointer are not convertible (use .ptr() to get the text pointer of a str or string)");
+        }
+    }
+
     u32 constructor_owner_type(Node* at, u32 type) {
         SymbolTable* symbols = this.symbols;
         if (!Types.is_struct(type) || symbols.enum_of_type(type) != null) {
@@ -321,7 +335,9 @@ impl TypeChecker {
         for (mut i32 i = offset; i < given; i = i + 1) {
             Node* argument = node.child(i - offset);
             if (i < fixed) {
-                this.check_expression(argument, param_types.get(i));
+                u32 wanted = param_types.get(i);
+                u32 passed = this.check_expression(argument, wanted);
+                this.require_argument_shape(argument, passed, wanted);
             } else {
                 this.check_expression(argument, 0);
             }
