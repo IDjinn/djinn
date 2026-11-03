@@ -25,7 +25,7 @@ of them. A construct outside this list is forbidden in `djinnc/src` until the dj
 - `if / else if / else`, `while`, `do-while`, `for`, `break`, `continue`, `return`
 - `switch (integer) { case <const>: ... default: ... }` as a statement: no fallthrough, `break` leaves the switch, `continue` targets the enclosing loop
 - `enum Name { A(), B = 5, C }` and tagged enums `enum Msg { Empty(), Number(i32), Pair(i32, i32) }`: `Msg::Pair(1, 2)` builds a value, payload-less enums are `i32` tags with `==`, `!=` and `case Name::A():`. `switch value { Empty -> 1, Number n -> n, Pair a b -> a * b }` is an expression and must cover every variant. A payload can be any type: the enum is a tag plus an inline byte area sized to the largest variant, and a type that contains itself by value (not through a pointer) is an error.
-- `interface Name { Type field; Ret method(params); }`, `struct X : interface Name` (or `struct X : Name`), `impl X { methods }` and `impl Name for X { methods }`: conformance (fields and method signatures) is checked at compile time; there is no interface-typed value or dynamic dispatch, no generic interface, and `impl` takes a single struct, enum or primitive target (`impl Hashable for u64 { u64 hash() { ... } }`; `this` is the primitive value and `x.hash()` works on any primitive receiver and as a `where K : Hashable` bound). `impl A, B for X` lists several interfaces, and `impl` on an enum adds methods whose `this` is the enum value (e.g. `switch this { ... }`).
+- `interface Name { Type field; Ret method(params); }`, `struct X : interface Name` (or `struct X : Name`), `impl X { methods }` and `impl Name for X { methods }`: conformance (fields and method signatures) is checked at compile time; there is no interface-typed value or dynamic dispatch, no generic interface, and `impl` takes a single struct, enum or primitive target (`impl Hashable for u64 { u64 hash() { ... } }`; `this` is the primitive value and `x.hash()` works on any primitive receiver and as a `where K : Hashable` bound). `impl A, B for X` lists several interfaces, `impl Hashable for u8, u16, i32 { ... }` repeats the body for each type, and `impl` on an enum adds methods whose `this` is the enum value (e.g. `switch this { ... }`).
 - assignment to locals, fields and indexed pointers
 
 ## Expressions
@@ -99,3 +99,7 @@ Calls, method calls and constructors (`Point(y: 4, x: 3)`, `new Point(x: 1, y: 2
 ## Inference
 
 `auto` and `var` are interchangeable keywords: `var total = a + b;` takes the type of the initializer.
+
+## Playground
+
+`tools/playground.sh [djinnc flags]` (or `tools/playground.ps1`) compiles `playground/main.djinn` with the newest bootstrapped djinnc, runs it and prints the exit code. `DJINNC` and `DJINN_RUNTIME_DIR` override the compiler and the runtime directory. `Type { .field = value }` builds a struct without an expected type.

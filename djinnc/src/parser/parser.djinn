@@ -8,6 +8,7 @@ struct Parser {
     bool scan_half;
     bool half_greater;
     i32 hidden_count;
+    PointerList* extra_declarations;
     Diagnostics* diagnostics;
     U32Map* type_names;
 
@@ -94,14 +95,25 @@ struct Parser {
         return list.atom(token);
     }
 
+    void add_declaration(Node* container, Node* declaration) {
+        if (declaration != null) {
+            container.add(declaration);
+        }
+        PointerList* extra = this.extra_declarations;
+        if (extra == null) {
+            return;
+        }
+        for (mut i32 i = 0; i < extra.length; i = i + 1) {
+            container.add((Node*)extra.get(i));
+        }
+        extra.length = 0;
+    }
+
     public Node* parse_program() {
         i32 first = this.current();
         Node* program = Node.create_list(NodeKind.PROGRAM, first);
         while (!this.at_end()) {
-            Node* declaration = this.parse_declaration();
-            if (declaration != null) {
-                program.add(declaration);
-            }
+            this.add_declaration(program, this.parse_declaration());
         }
         return program;
     }
@@ -468,20 +480,14 @@ struct Parser {
         node.set_text(this.qualified_name());
         if (this.match(TokenKind.SEMICOLON)) {
             while (!this.at_end()) {
-                Node* declaration = this.parse_declaration();
-                if (declaration != null) {
-                    node.add(declaration);
-                }
+                this.add_declaration(node, this.parse_declaration());
             }
             return node;
         }
 
         this.expect(TokenKind.LBRACE, "expected ';' or '{' after namespace name");
         while (!this.check(TokenKind.RBRACE) && !this.at_end()) {
-            Node* declaration = this.parse_declaration();
-            if (declaration != null) {
-                node.add(declaration);
-            }
+            this.add_declaration(node, this.parse_declaration());
         }
         this.expect(TokenKind.RBRACE, "expected '}' to close namespace");
         return node;
@@ -761,6 +767,7 @@ struct Parser {
     Node* parse_impl() {
         i32 start = this.advance();
         Node* node = Node.create_list(NodeKind.IMPL_DECL, start);
+        PointerList* targets = PointerList.create();
         i32 first_token = this.current();
         TypeRef* first = this.parse_type();
         if (this.check(TokenKind.COMMA) || this.check(TokenKind.FOR)) {
@@ -774,9 +781,8 @@ struct Parser {
             }
             this.expect(TokenKind.FOR, "expected 'for' after the interfaces of an impl");
             node.set_type(this.parse_type());
-            if (this.check(TokenKind.COMMA)) {
-                this.fail("impl for several types is not supported yet");
-                return node;
+            while (this.match(TokenKind.COMMA)) {
+                targets.push((void*)this.parse_type());
             }
         } else {
             node.set_type(first);
@@ -787,6 +793,15 @@ struct Parser {
             this.parse_struct_member(node);
         }
         this.expect(TokenKind.RBRACE, "expected '}' to close impl body");
+        for (mut i32 t = 0; t < targets.length; t = t + 1) {
+            Node* copy = Node.clone(node);
+            copy.set_type((TypeRef*)targets.get(t));
+            if (this.extra_declarations == null) {
+                this.extra_declarations = PointerList.create();
+            }
+            PointerList* pending = this.extra_declarations;
+            pending.push((void*)copy);
+        }
         return node;
     }
 
@@ -1556,6 +1571,11 @@ struct Parser {
 
             Node* identifier = Node.create(NodeKind.IDENTIFIER, token);
             identifier.set_text(this.qualified_name());
+            if (this.is_known_type(token) && this.check(TokenKind.LBRACE) && this.kind_of(this.peek_token(1)) == TokenKind.DOT) {
+                Node* typed_init = this.parse_struct_init();
+                typed_init.set_type(TypeRef.named(identifier.text()));
+                return typed_init;
+            }
             if (this.check(TokenKind.LESS) && !this.is_known_type(token)) {
                 i32 close = this.scan_type_arguments(0);
                 bool explicit = close > 0 && !this.scan_half && this.kind_of(this.peek_token(close)) == TokenKind.LPAREN;
