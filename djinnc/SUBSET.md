@@ -124,11 +124,21 @@ runs the event loop in sync ones; `spawn task;` schedules it. `async main` is dr
 a sync `main` can still `await`. `yield` is not a coroutine yield (it is the switch-arm value in stage0) and is not supported.
 
 ## Attributes
-`[Name]`, `[Name(16)]`, `[Name(key = "text")]` and `[A, B]` before functions, methods, structs and fields. Known names and targets are built in
-(the `attribute` declarations of `std` are not read): `ForceInline`, `NoInline`, `NoReturn`, `Hot`, `Cold`, `NoSync`, `NoUnwind`, `WillReturn`,
-`NoRecurse` and `Llvm("attr")` become LLVM function attributes; `Align`, `Volatile`, `ReadOnly`, `NoMangle`, `Reflect` and `Deprecated` are
-validated but have no effect yet. Every function is implicitly `nounwind`. An unknown name is an error; a wrong target is a warning.
-Parameter attributes are not supported.
+`[Name]`, `[Name(16)]`, `[Name(key = "text")]` and `[A, B]` before functions, methods, structs, fields and parameters. The builtin names and
+targets are in `ast/attributes/attributes.djinn`: `ForceInline`, `NoInline`, `NoReturn`, `Hot`, `Cold`, `NoSync`, `NoUnwind`, `WillReturn`,
+`NoRecurse` and `Llvm("attr")` become LLVM function attributes; `Align`, `Volatile`, `ReadOnly`, `Restrict`, `NoCapture`, `WriteOnly`,
+`NonNull`, `NoMangle`, `Reflect` and `Deprecated` are validated but have no effect yet. Every function is implicitly `nounwind`.
+An unknown name is an error; a wrong target is a warning.
+
+`attribute Name(targets);` and `attribute Name(targets) { fields }` declare attributes (the targets expression is skipped, so declared
+attributes are valid everywhere); the form with fields also defines a struct `Name`. `[attribute(...)] struct XAttribute {...}` declares `X`
+and `XAttribute`. `[intrinsic]` structs are parsed and dropped.
+
+A parameter marked `[Location]` whose type is a struct with `fileName`, `line` and `column` is filled by the compiler with the call site
+when the call omits it (only the last parameter, no overloads).
+
+Intrinsics: `unlikely(bool)`, `assume(bool)`, `debugtrap()`, `trap()`, `unreachable()`. Struct initializers also accept positional values
+(`{ 0, 0, 0 }`).
 
 ## Ownership
 Non-copy values (structs, tagged enums, `str`, `string`, `arr<T>`) move on `T x = y;` and `x = y;`. Using a moved variable is an error;

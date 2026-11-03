@@ -326,6 +326,9 @@ impl TypeChecker {
 
         IdList* param_types = info.param_types;
         i32 fixed = param_types.length;
+        if (node.count() + offset + 1 == fixed && this.takes_location(info)) {
+            this.append_location(node);
+        }
         i32 given = node.count() + offset;
         if (given < fixed || (given > fixed && !info.is_variadic)) {
             this.error(node, "wrong number of arguments");
@@ -349,5 +352,57 @@ impl TypeChecker {
             this.fold_call(node, info);
         }
         return info.return_type;
+    }
+
+    bool takes_location(FunctionInfo* info) {
+        Node* declaration = info.node;
+        IdList* param_types = info.param_types;
+        if (declaration == null || declaration.kind != NodeKind.FUNCTION || !Types.is_struct(param_types.get(param_types.length - 1))) {
+            return false;
+        }
+        Node* last = declaration.child(declaration.count() - 1);
+        if (last.kind != NodeKind.PARAMETER) {
+            return false;
+        }
+        PointerList* uses = Attributes.all();
+        for (mut i32 i = uses.length - 1; i >= 0; i = i - 1) {
+            AttributeUse* use = (AttributeUse*)uses.get(i);
+            if (use.target == last && Strings.same(use.name, "Location")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void append_location(Node* call) {
+        i32 token = call.token;
+        i8* path = Strings.duplicate(call.file_name(), strlen(call.file_name()));
+        i32 length = strlen(path);
+        for (mut i32 i = 0; i < length; i = i + 1) {
+            if (path[i] == 92) {
+                path[i] = 47;
+            }
+        }
+        Node* init = Node.create_list(NodeKind.STRUCT_INIT, token);
+        Node* file_field = Node.create(NodeKind.FIELD_INIT, token);
+        file_field.set_text("fileName");
+        Node* file = Node.create(NodeKind.STRING_LITERAL, token);
+        file.set_text_n(path, length);
+        file.set_int_value(length);
+        file_field.set_first(file);
+        init.add(file_field);
+        Node* line_field = Node.create(NodeKind.FIELD_INIT, token);
+        line_field.set_text("line");
+        Node* line = Node.create(NodeKind.INT_LITERAL, token);
+        line.set_int_value(call.line());
+        line_field.set_first(line);
+        init.add(line_field);
+        Node* column_field = Node.create(NodeKind.FIELD_INIT, token);
+        column_field.set_text("column");
+        Node* column = Node.create(NodeKind.INT_LITERAL, token);
+        column.set_int_value(call.column());
+        column_field.set_first(column);
+        init.add(column_field);
+        call.add(init);
     }
 }

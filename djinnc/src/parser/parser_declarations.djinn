@@ -25,6 +25,9 @@ impl Parser {
     Node* parse_declaration() {
         PointerList* attributes = this.parse_attributes();
         Node* declaration = this.parse_declaration_body();
+        if (declaration != null && declaration.kind == NodeKind.STRUCT_DECL && this.has_attribute(attributes, "intrinsic")) {
+            return null;
+        }
         if (attributes.length > 0) {
             mut i32 target_kind = AttributeTarget.OTHER;
             if (declaration != null && declaration.kind == NodeKind.STRUCT_DECL) {
@@ -35,6 +38,16 @@ impl Parser {
             this.attach_attributes(attributes, declaration, target_kind);
         }
         return declaration;
+    }
+
+    bool has_attribute(PointerList* found, i8* name) {
+        for (mut i32 i = 0; i < found.length; i = i + 1) {
+            AttributeUse* use = (AttributeUse*)found.get(i);
+            if (Strings.same(use.name, name)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     Node* parse_declaration_body() {
@@ -58,6 +71,10 @@ impl Parser {
 
         if (this.kind_of(token) == TokenKind.STRUCT) {
             return this.parse_struct();
+        }
+
+        if (this.kind_of(token) == TokenKind.IDENTIFIER && this.is_attribute_declaration()) {
+            return this.parse_attribute_declaration();
         }
 
         if (this.kind_of(token) == TokenKind.ENUM) {
@@ -92,6 +109,46 @@ impl Parser {
         }
 
         return this.parse_function(false);
+    }
+
+    bool is_attribute_declaration() {
+        TokenList* list = this.tokens;
+        i32 token = this.current();
+        if (!Strings.equals(list.text(token), list.text_length(token), "attribute")) {
+            return false;
+        }
+        if (this.kind_of(this.peek_token(1)) != TokenKind.IDENTIFIER) {
+            return false;
+        }
+        i32 follow = this.kind_of(this.peek_token(2));
+        return follow == TokenKind.LPAREN || follow == TokenKind.LBRACE || follow == TokenKind.SEMICOLON;
+    }
+
+    Node* parse_attribute_declaration() {
+        i32 start = this.advance();
+        i32 name = this.expect(TokenKind.IDENTIFIER, "expected attribute name");
+        if (this.match(TokenKind.LPAREN)) {
+            mut i32 depth = 1;
+            while (depth > 0 && !this.at_end()) {
+                i32 token = this.advance();
+                if (this.kind_of(token) == TokenKind.LPAREN) {
+                    depth = depth + 1;
+                } else if (this.kind_of(token) == TokenKind.RPAREN) {
+                    depth = depth - 1;
+                }
+            }
+        }
+        if (this.match(TokenKind.SEMICOLON)) {
+            return null;
+        }
+        Node* node = Node.create_list(NodeKind.STRUCT_DECL, start);
+        node.set_text(this.copy_of(name));
+        this.expect(TokenKind.LBRACE, "expected ';' or '{' after the attribute declaration");
+        while (!this.check(TokenKind.RBRACE) && !this.at_end()) {
+            this.parse_member(node);
+        }
+        this.expect(TokenKind.RBRACE, "expected '}' to close the attribute declaration");
+        return node;
     }
 
     Node* parse_compile_time_var() {
@@ -177,8 +234,15 @@ impl Parser {
                 break;
             }
 
+            mut PointerList* found = (PointerList*)0;
+            if (this.check(TokenKind.LBRACKET)) {
+                found = this.parse_attributes();
+            }
             i32 start = this.current();
             Node* parameter = Node.create(NodeKind.PARAMETER, start);
+            if (found != null) {
+                this.attach_attributes(found, parameter, AttributeTarget.PARAMETER);
+            }
             if (this.match(TokenKind.MUT)) {
                 parameter.set_flag(true);
             }

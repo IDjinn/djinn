@@ -5,7 +5,16 @@ impl Parser {
         i32 start = this.advance();
         Node* node = Node.create_list(NodeKind.STRUCT_INIT, start);
         while (!this.check(TokenKind.RBRACE) && !this.at_end() && !this.failed) {
-            this.expect(TokenKind.DOT, "expected '.field = value' in struct initializer");
+            if (!this.check(TokenKind.DOT)) {
+                Node* positional = Node.create(NodeKind.FIELD_INIT, this.current());
+                positional.set_first(this.parse_expression());
+                node.add(positional);
+                if (!this.check(TokenKind.RBRACE)) {
+                    this.expect(TokenKind.COMMA, "expected ',' between field initializers");
+                }
+                continue;
+            }
+            this.advance();
             i32 name = this.expect(TokenKind.IDENTIFIER, "expected field name in struct initializer");
             Node* field = Node.create(NodeKind.FIELD_INIT, name);
             field.set_text(this.copy_of(name));
@@ -332,8 +341,15 @@ impl Parser {
                 this.advance();
                 Node* call = Node.create(NodeKind.INTRINSIC, token);
                 call.set_op(intrinsic);
-                call.set_type(this.parse_type());
-                this.expect(TokenKind.RPAREN, "expected ')' after intrinsic type argument");
+                if (intrinsic == Intrinsic.SIZEOF) {
+                    call.set_type(this.parse_type());
+                    this.expect(TokenKind.RPAREN, "expected ')' after intrinsic type argument");
+                    return call;
+                }
+                if (intrinsic == Intrinsic.UNLIKELY || intrinsic == Intrinsic.ASSUME) {
+                    call.set_first(this.parse_expression());
+                }
+                this.expect(TokenKind.RPAREN, "expected ')' after the intrinsic arguments");
                 return call;
             }
 
