@@ -817,7 +817,32 @@ struct Parser {
             return this.parse_macro_declaration();
         }
 
+        if (this.kind_of(token) == TokenKind.CONSTEXPR || this.kind_of(token) == TokenKind.CONSTEVAL) {
+            if (this.kind_of(this.peek_token(1)) == TokenKind.STRUCT) {
+                this.advance();
+                return this.parse_struct();
+            }
+            i32 end = this.scan_type_end(1);
+            if (end >= 0 && this.kind_of(this.peek_token(end)) == TokenKind.IDENTIFIER && this.kind_of(this.peek_token(end + 1)) == TokenKind.EQUAL) {
+                return this.parse_compile_time_var();
+            }
+        }
+
         return this.parse_function(false);
+    }
+
+    Node* parse_compile_time_var() {
+        i32 start = this.current();
+        this.advance();
+        Node* node = Node.create(NodeKind.STATIC_VAR, start);
+        node.set_op(1);
+        node.set_type(this.parse_type());
+        i32 name = this.expect(TokenKind.IDENTIFIER, "expected constant name");
+        node.set_text(this.copy_of(name));
+        this.expect(TokenKind.EQUAL, "expected '=' in constant declaration");
+        node.set_first(this.parse_expression());
+        this.expect(TokenKind.SEMICOLON, "expected ';' after constant");
+        return node;
     }
 
     Node* parse_namespace() {
@@ -911,7 +936,9 @@ struct Parser {
     Node* parse_function(bool allowConstructor) {
         mut bool is_static = false;
         mut bool is_async = false;
-        while (this.check(TokenKind.PUBLIC) || this.check(TokenKind.PRIVATE) || this.check(TokenKind.STATIC) || this.check(TokenKind.ASYNC)) {
+        mut i32 compile_time = 0;
+        while (this.check(TokenKind.PUBLIC) || this.check(TokenKind.PRIVATE) || this.check(TokenKind.STATIC) || this.check(TokenKind.ASYNC)
+            || this.check(TokenKind.CONSTEXPR) || this.check(TokenKind.CONSTEVAL)) {
             i32 modifier = this.advance();
             if (this.kind_of(modifier) == TokenKind.STATIC) {
                 is_static = true;
@@ -919,10 +946,16 @@ struct Parser {
             if (this.kind_of(modifier) == TokenKind.ASYNC) {
                 is_async = true;
             }
+            if (this.kind_of(modifier) == TokenKind.CONSTEXPR) {
+                compile_time = 2;
+            }
+            if (this.kind_of(modifier) == TokenKind.CONSTEVAL) {
+                compile_time = 4;
+            }
         }
 
-        if (this.check(TokenKind.CONSTEXPR) || this.check(TokenKind.CONSTEVAL)) {
-            this.fail("constexpr and consteval functions are not supported yet");
+        if (is_async && compile_time != 0) {
+            this.fail("a constexpr or consteval function cannot be async");
             return null;
         }
 
@@ -931,6 +964,8 @@ struct Parser {
         function.set_flag(is_static);
         if (is_async) {
             function.set_op(1);
+        } else if (compile_time != 0) {
+            function.set_op(compile_time);
         }
         function.set_type(this.parse_type());
         i32 name = this.expect(TokenKind.IDENTIFIER, "expected function name");
@@ -1513,6 +1548,14 @@ struct Parser {
             return spawned;
         }
 
+        if (this.kind_of(token) == TokenKind.CONSTEXPR || this.kind_of(token) == TokenKind.CONSTEVAL) {
+            this.advance();
+            Node* constant = this.parse_variable_declaration();
+            constant.set_op(1);
+            this.expect(TokenKind.SEMICOLON, "expected ';' after declaration");
+            return constant;
+        }
+
         if (this.is_declaration_start()) {
             Node* declaration = this.parse_variable_declaration();
             this.expect(TokenKind.SEMICOLON, "expected ';' after declaration");
@@ -1629,9 +1672,20 @@ struct Parser {
     Node* parse_if() {
         i32 start = this.advance();
         Node* node = Node.create(NodeKind.IF, start);
-        this.expect(TokenKind.LPAREN, "expected '(' after if");
-        node.set_first(this.parse_expression());
-        this.expect(TokenKind.RPAREN, "expected ')' after condition");
+        mut bool compile_time = false;
+        if (this.match(TokenKind.CONSTEXPR) || this.match(TokenKind.CONSTEVAL)) {
+            compile_time = true;
+        } else if (!this.check(TokenKind.LPAREN)) {
+            compile_time = true;
+        }
+        if (compile_time) {
+            node.set_op(1);
+            node.set_first(this.parse_expression());
+        } else {
+            this.expect(TokenKind.LPAREN, "expected '(' after if");
+            node.set_first(this.parse_expression());
+            this.expect(TokenKind.RPAREN, "expected ')' after condition");
+        }
         node.set_second(this.parse_statement_or_empty());
         if (this.match(TokenKind.ELSE)) {
             node.set_third(this.parse_statement_or_empty());

@@ -1,6 +1,17 @@
 namespace djinnc;
 
+struct CheckState {
+    FunctionInfo* function;
+    u32 scope;
+    LocalScopes* scopes;
+    i32 loop_depth;
+    i32 switch_depth;
+    Node* assign_target;
+    U32Map* bindings;
+}
+
 struct TypeChecker {
+    ConstEval* const_eval;
     Diagnostics* diagnostics;
     SymbolTable* symbols;
     LocalScopes* scopes;
@@ -15,6 +26,7 @@ struct TypeChecker {
         checker.diagnostics = diagnostics;
         checker.symbols = symbols;
         checker.scopes = LocalScopes.create();
+        checker.const_eval = ConstEval.create(checker);
         return checker;
     }
 
@@ -56,7 +68,7 @@ struct TypeChecker {
         PointerList* functions = symbols.functions;
         for (mut i32 i = 0; i < functions.length; i = i + 1) {
             FunctionInfo* info = (FunctionInfo*)functions.get(i);
-            if (!info.is_extern && !info.is_template) {
+            if (!info.is_extern && !info.is_template && info.check_state == 0) {
                 this.check_function(info);
             }
         }
@@ -73,16 +85,163 @@ struct TypeChecker {
     }
 
     void check_global(LocalVariable* variable) {
+        if (variable.const_state != 0) {
+            return;
+        }
         this.scope = variable.namespace_id;
         this.function = null;
         LocalScopes* scopes = this.scopes;
         scopes.reset_to(0);
         Node* declaration = variable.node;
         declaration.set_value_type(variable.type);
+        if (declaration.op() == 0) {
+            variable.const_state = 3;
+            this.check_expression(declaration.first(), variable.type);
+            return;
+        }
+        variable.const_state = 1;
         this.check_expression(declaration.first(), variable.type);
+        this.evaluate_variable(variable, declaration);
+    }
+
+    public CheckState* enter_nested() {
+        CheckState* state = (CheckState*)Memory.zalloc(sizeof(CheckState));
+        SymbolTable* symbols = this.symbols;
+        state.function = this.function;
+        state.scope = this.scope;
+        state.scopes = this.scopes;
+        state.loop_depth = this.loop_depth;
+        state.switch_depth = this.switch_depth;
+        state.assign_target = this.assign_target;
+        state.bindings = symbols.bindings;
+        this.scopes = LocalScopes.create();
+        return state;
+    }
+
+    public void leave_nested(CheckState* state) {
+        SymbolTable* symbols = this.symbols;
+        this.function = state.function;
+        this.scope = state.scope;
+        this.scopes = state.scopes;
+        this.loop_depth = state.loop_depth;
+        this.switch_depth = state.switch_depth;
+        this.assign_target = state.assign_target;
+        symbols.bindings = state.bindings;
+    }
+
+    public void ensure_checked(FunctionInfo* info) {
+        if (info.check_state != 0 || info.is_extern || info.is_template) {
+            return;
+        }
+        CheckState* state = this.enter_nested();
+        this.check_function(info);
+        this.leave_nested(state);
+    }
+
+    public void ensure_global(LocalVariable* variable) {
+        if (variable.const_state != 0 || variable.node == null) {
+            return;
+        }
+        CheckState* state = this.enter_nested();
+        this.check_global(variable);
+        this.leave_nested(state);
+    }
+
+    void error_reason(Node* at, i8* prefix, i8* reason) {
+        ByteBuffer* message = ByteBuffer.create();
+        message.append(prefix);
+        message.append(reason);
+        this.error(at, message.cstr());
+    }
+
+    void evaluate_variable(LocalVariable* variable, Node* declaration) {
+        Node* initial = declaration.first();
+        if (initial == null) {
+            this.error(declaration, "a constexpr variable needs an initializer");
+            variable.const_state = 3;
+            return;
+        }
+        ConstEval* evaluator = this.const_eval;
+        if (evaluator.evaluate(initial, initial.value_type(), variable.type)) {
+            variable.const_int = evaluator.ri;
+            variable.const_float = evaluator.rf;
+            variable.const_state = 2;
+            evaluator.fold(initial, variable.type);
+            return;
+        }
+        variable.const_state = 3;
+        mut Node* at = evaluator.failure_node;
+        if (at == null) {
+            at = initial;
+        }
+        this.error_reason(at, "not a compile-time constant: ", evaluator.failure);
+    }
+
+    void check_compile_time_if(Node* node) {
+        Node* condition = node.first();
+        this.check_condition(condition);
+        ConstEval* evaluator = this.const_eval;
+        if (!evaluator.evaluate(condition, condition.value_type(), Types.bool_type())) {
+            mut Node* at = evaluator.failure_node;
+            if (at == null) {
+                at = condition;
+            }
+            this.error_reason(at, "compile-time condition is not constant: ", evaluator.failure);
+            node.set_op(3);
+            return;
+        }
+        if (evaluator.ri != 0) {
+            node.set_op(2);
+            this.check_statement(node.second());
+            return;
+        }
+        node.set_op(3);
+        if (node.third() != null) {
+            this.check_statement(node.third());
+        }
+    }
+
+    u32 fold_constant(Node* node, u32 type) {
+        i32 symbol_kind = node.symbol_kind();
+        if (symbol_kind != SymbolKind.LOCAL && symbol_kind != SymbolKind.GLOBAL) {
+            return type;
+        }
+        LocalVariable* variable = (LocalVariable*)node.symbol();
+        if (variable.const_state == 0 && symbol_kind == SymbolKind.GLOBAL && variable.node != null) {
+            Node* declaration = variable.node;
+            if (declaration.op() != 0) {
+                this.ensure_global(variable);
+            }
+        }
+        if (variable.const_state != 2) {
+            return type;
+        }
+        ConstEval* evaluator = this.const_eval;
+        evaluator.ri = variable.const_int;
+        evaluator.rf = variable.const_float;
+        evaluator.fold(node, variable.type);
+        return variable.type;
+    }
+
+    void fold_call(Node* node, FunctionInfo* info) {
+        ConstEval* evaluator = this.const_eval;
+        if (evaluator.evaluate(node, info.return_type, info.return_type)) {
+            evaluator.fold(node, info.return_type);
+            return;
+        }
+        FunctionInfo* current = this.function;
+        bool inside_compile_time = current != null && current.const_kind != 0;
+        if (info.const_kind == 2 && !inside_compile_time) {
+            mut Node* at = evaluator.failure_node;
+            if (at == null) {
+                at = node;
+            }
+            this.error_reason(at, "consteval call is not a constant expression: ", evaluator.failure);
+        }
     }
 
     void check_function(FunctionInfo* info) {
+        info.check_state = 1;
         SymbolTable* active = this.symbols;
         active.bindings = info.bindings;
         if (info.owner != null && info.bindings == null) {
@@ -122,6 +281,7 @@ struct TypeChecker {
         }
 
         this.check_statement(declaration.first());
+        info.check_state = 2;
     }
 
     void check_statement(Node* node) {
@@ -146,10 +306,14 @@ struct TypeChecker {
         } else if (kind == NodeKind.RETURN) {
             this.check_return(node);
         } else if (kind == NodeKind.IF) {
-            this.check_condition(node.first());
-            this.check_statement(node.second());
-            if (node.third() != null) {
-                this.check_statement(node.third());
+            if (node.op() != 0) {
+                this.check_compile_time_if(node);
+            } else {
+                this.check_condition(node.first());
+                this.check_statement(node.second());
+                if (node.third() != null) {
+                    this.check_statement(node.third());
+                }
             }
         } else if (kind == NodeKind.WHILE) {
             this.check_condition(node.first());
@@ -263,6 +427,12 @@ struct TypeChecker {
         if (node.first() != null) {
             this.move_from(node.first(), null);
         }
+        if (node.op() != 0) {
+            if (node.flag()) {
+                this.error(node, "a constexpr variable cannot be mut");
+            }
+            this.evaluate_variable(variable, node);
+        }
         LocalScopes* scopes = this.scopes;
         scopes.define(variable.name_atom, variable);
     }
@@ -357,7 +527,10 @@ struct TypeChecker {
         if (kind == NodeKind.NULL_LITERAL) {
             return Types.pointer_to(Types.void_type());
         }
-        if (kind == NodeKind.IDENTIFIER || kind == NodeKind.INDEX) {
+        if (kind == NodeKind.IDENTIFIER) {
+            return this.fold_constant(node, this.check_lvalue(node));
+        }
+        if (kind == NodeKind.INDEX) {
             return this.check_lvalue(node);
         }
         if (kind == NodeKind.FIELD_ACCESS) {
@@ -627,7 +800,7 @@ struct TypeChecker {
         return node.kind == NodeKind.UNARY && node.op() == TokenKind.MINUS && node.first().kind == NodeKind.INT_LITERAL;
     }
 
-    static bool is_comparison(i32 op) {
+    public static bool is_comparison(i32 op) {
         return op == TokenKind.EQUAL_EQUAL || op == TokenKind.BANG_EQUAL || op == TokenKind.LESS
             || op == TokenKind.LESS_EQUAL || op == TokenKind.GREATER || op == TokenKind.GREATER_EQUAL;
     }
@@ -1561,6 +1734,9 @@ struct TypeChecker {
         }
         if (info.is_async) {
             return this.task_of(info.return_type, node);
+        }
+        if (info.const_kind != 0 && !info.is_instance && !info.is_template) {
+            this.fold_call(node, info);
         }
         return info.return_type;
     }
