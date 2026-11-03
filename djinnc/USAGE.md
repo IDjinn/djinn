@@ -63,6 +63,7 @@ directory).
 | `--link-arg <arg>` | Extra linker argument; repeatable. |
 | `-O2` | Run `default<O2>` through `LLVMRunPasses`. Without it the pipeline is `default<O0>`. |
 | `--lld` | Call the linker directly: `lld-link` on Windows, `ld.lld` on POSIX. Needs `--runtime-lib`. |
+| `--std` / `--std-dir <dir>` | Compile the `std/` library too (also `libs: ['std']` in `djinn.proj`, or `DJINN_STD_DIR`); see [STD_ROADMAP.md](STD_ROADMAP.md). |
 | `--target <triple>` | Target triple (default: the host). Sets the width of `usize`/`isize`; non-x86 targets only support `--emit-ir`. |
 | `--run` | Run `main` in process through ORC LLJIT (`driver/jit.djinn`) instead of writing an object and linking. Needs `--runtime-lib` and the host target; the exit code of `main` is the exit code of djinnc. |
 | `--no-link` | Stop after generating code; writes `<output>.ll`. |

@@ -648,7 +648,7 @@ O djinnc só compila o subset de `djinnc/SUBSET.md`. Falta, em ordem de dependê
 7. [ ] **`impl`/interfaces** e constraints (`Hashable`, `Comparable`): depende de 6.
 8. [ ] **`try`/`throws`/`ensure`/`require`**, **`async`/`await`**: por último, pois exigem lowering de corrotinas e cleanup.
 9. [ ] Enums tagged (ADT), destructuring, closures, macros, `constexpr`: fora do alvo até o std compilar.
-10. [ ] Compilar `std/` com o djinnc e reativar `libs: ['std']` (critério de saída da Fase 7).
+10. [~] Compilar `std/` com o djinnc e reativar `libs: ['std']` (critério de saída da Fase 7): `--std`, `import`, alias de tipo e substituição dos tipos do core implementados; ver `STD_ROADMAP.md` (ainda não compilado nem testado).
 
 ## Status: `var`/`auto`, impl em primitivos e README
 

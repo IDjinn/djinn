@@ -1,0 +1,66 @@
+namespace djinnc;
+
+struct StdLibrary {
+    public static i8* locate(Options* options) {
+        if (options.std_dir != null) {
+            return options.std_dir;
+        }
+        i8* configured = getenv("DJINN_STD_DIR");
+        if (configured != null) {
+            return configured;
+        }
+        ByteBuffer* sibling = ByteBuffer.create();
+        sibling.append(options.runtime_dir);
+        sibling.append("/../std");
+        return sibling.cstr();
+    }
+
+    static bool is_excluded(i8* path) {
+        i32 length = strlen(path);
+        i8** pending = StdLibrary.pending_files();
+        for (mut i32 i = 0; pending[i] != null; i = i + 1) {
+            i32 suffix = strlen(pending[i]);
+            if (length >= suffix && Strings.equals(path + length - suffix, suffix, pending[i])) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static i8** pending_files() {
+        i8** files = (i8**)Memory.zalloc(8 * 10);
+        files[0] = "sys/intrinsics.djinn";
+        files[1] = "sys/debug.djinn";
+        files[2] = "sys/spectre.djinn";
+        files[3] = "sys/console.djinn";
+        files[4] = "net/socket.djinn";
+        files[5] = "sys/task.djinn";
+        files[6] = "builtin/coro.djinn";
+        files[7] = "util/version.djinn";
+        return files;
+    }
+
+    public static bool add(Options* options) {
+        i8* directory = StdLibrary.locate(options);
+        i8* listing = __djinn_list_files(directory, ".djinn");
+        if (listing == null) {
+            logger_error(Log.get(), "djinnc: cannot list the std directory '%s' (see --std-dir)", directory);
+            return false;
+        }
+        i32 length = strlen(listing);
+        PointerList* inputs = options.inputs;
+        mut i32 start = 0;
+        for (mut i32 i = 0; i <= length; i = i + 1) {
+            if (i == length || listing[i] == 10) {
+                if (i > start) {
+                    i8* path = Strings.duplicate(listing + start, i - start);
+                    if (!StdLibrary.is_excluded(path)) {
+                        inputs.push((void*)path);
+                    }
+                }
+                start = i + 1;
+            }
+        }
+        return true;
+    }
+}

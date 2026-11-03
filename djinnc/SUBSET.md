@@ -102,6 +102,10 @@ Calls, method calls and constructors (`Point(y: 4, x: 3)`, `new Point(x: 1, y: 2
 
 `auto` and `var` are interchangeable keywords: `var total = a + b;` takes the type of the initializer.
 
+## Std and imports
+
+`import a::b;` makes the names of namespace `a::b` visible in the namespace declared in the same file (namespaces are flat: `std::types` is one namespace, not `types` inside `std`). `struct size : u32;` declares an alias. `--std` loads `std/` (see `STD_ROADMAP.md`). The source of `djinnc/src` keeps using none of this.
+
 ## Playground
 
 `tools/playground.sh [djinnc flags]` (or `tools/playground.ps1`) compiles `playground/main.djinn` with the newest bootstrapped djinnc, runs it and prints the exit code. `DJINNC` and `DJINN_RUNTIME_DIR` override the compiler and the runtime directory. `Type { .field = value }` builds a struct without an expected type.
