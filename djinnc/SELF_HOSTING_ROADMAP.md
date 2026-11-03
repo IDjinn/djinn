@@ -649,3 +649,8 @@ O djinnc só compila o subset de `djinnc/SUBSET.md`. Falta, em ordem de dependê
 9. [ ] Enums tagged (ADT), destructuring, closures, macros, `constexpr`: fora do alvo até o std compilar.
 10. [ ] Compilar `std/` com o djinnc e reativar `libs: ['std']` (critério de saída da Fase 7).
 
+## Status: `var`/`auto`, impl em primitivos e README
+
+- [x] `var` e `auto` são sinônimos (atom pré-internado + `TypeRef`); stage0 e djinnc.
+- [x] `impl Iface for <primitivo>` e `impl <primitivo>`, chamada `x.hash()` e restrições `where K : Hashable` para argumentos primitivos (`tests/djinnc/samples/primitive_methods.djinn`). `impl A for X, Y` (vários tipos) ainda não.
+- Exemplos do README que o djinnc ainda não compila: `printf` sem `extern` (std), propriedades (`string display { get => name; }`), `async/await`, `macro`, `consteval/constexpr`, `optional/result` da std (enum genérico com payload gera 'type 0 has no code generation').

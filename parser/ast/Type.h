@@ -121,6 +121,7 @@ const std::unordered_map<std::string, TypeKind> string_to_type_kind = {
     {"f128", TypeKind::F128},
     {"void", TypeKind::VOID},
     {"auto", TypeKind::AUTO},
+    {"var", TypeKind::AUTO},
     {"struct", TypeKind::STRUCT},
 };
 
@@ -411,7 +412,7 @@ struct Type : Location
         if (token.value == "f64") return Type(TypeKind::F64, 64, true);
         if (token.value == "f128") return Type(TypeKind::F128, 128, true);
         if (token.value == "void") return Type(TypeKind::VOID, 0, false);
-        if (token.value == "auto") return Type(TypeKind::AUTO, 0, false);
+        if (token.value == "auto" || token.value == "var") return Type(TypeKind::AUTO, 0, false);
 
         return Type(TypeKind::VOID, 0, false);
     }

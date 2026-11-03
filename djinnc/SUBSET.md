@@ -25,7 +25,7 @@ of them. A construct outside this list is forbidden in `djinnc/src` until the dj
 - `if / else if / else`, `while`, `do-while`, `for`, `break`, `continue`, `return`
 - `switch (integer) { case <const>: ... default: ... }` as a statement: no fallthrough, `break` leaves the switch, `continue` targets the enclosing loop
 - `enum Name { A(), B = 5, C }` and tagged enums `enum Msg { Empty(), Number(i32), Pair(i32, i32) }`: `Msg::Pair(1, 2)` builds a value, payload-less enums are `i32` tags with `==`, `!=` and `case Name::A():`. `switch value { Empty -> 1, Number n -> n, Pair a b -> a * b }` is an expression and must cover every variant. Payload types are scalars; generic enums are not supported yet.
-- `interface Name { Type field; Ret method(params); }`, `struct X : interface Name` (or `struct X : Name`), `impl X { methods }` and `impl Name for X { methods }`: conformance (fields and method signatures) is checked at compile time; there is no interface-typed value or dynamic dispatch, no generic interface, and `impl` takes a single struct or enum target. `impl A, B for X` lists several interfaces, and `impl` on an enum adds methods whose `this` is the enum value (e.g. `switch this { ... }`).
+- `interface Name { Type field; Ret method(params); }`, `struct X : interface Name` (or `struct X : Name`), `impl X { methods }` and `impl Name for X { methods }`: conformance (fields and method signatures) is checked at compile time; there is no interface-typed value or dynamic dispatch, no generic interface, and `impl` takes a single struct, enum or primitive target (`impl Hashable for u64 { u64 hash() { ... } }`; `this` is the primitive value and `x.hash()` works on any primitive receiver and as a `where K : Hashable` bound). `impl A, B for X` lists several interfaces, and `impl` on an enum adds methods whose `this` is the enum value (e.g. `switch this { ... }`).
 - assignment to locals, fields and indexed pointers
 
 ## Expressions
@@ -47,7 +47,7 @@ of them. A construct outside this list is forbidden in `djinnc/src` until the dj
 
 ## Forbidden
 
-async/await, `try`/`throws`, `ensure`, closures, `auto`, destructuring.
+async/await, `try`/`throws`, `ensure`, closures, destructuring.
 
 Enum-like values are `i32` constants held in `static` structs until `==` on enums exists in both compilers.
 
@@ -95,3 +95,7 @@ Calls, method calls and constructors (`Point(y: 4, x: 3)`, `new Point(x: 1, y: 2
 ## `string` and interpolation
 
 `core.djinn` also declares `string { i8* data; u32 length; u32 capacity; }` with `is_empty()`, `ptr()` and `operator +` (concatenation). A string literal gets type `string` when that is the expected type. Only a `$"..."` literal interpolates, as in C#: `$"count={count}"` or `$"sum={p.x + p.y}"` has type `string`, and its parts can be integers, bools, floats, `i8*`, `str` and `string`. A plain `"..."` never interpolates, so `"{count}"` is just text. Inside `$"..."`, `{{` and `}}` are literal braces and a lone `}` is an error. The lexer splits an interpolated literal into `INTERP_BEGIN`/`INTERP_MIDDLE`/`INTERP_END` tokens around the ordinary expression tokens. The builder (`__djinn_text_*`) is Djinn code in `core.djinn`; sizes are checked against the `u32` limit, and allocation failure is reported only by `__djinn_malloc`.
+
+## Inference
+
+`auto` and `var` are interchangeable keywords: `var total = a + b;` takes the type of the initializer.

@@ -31,6 +31,7 @@ struct StructInfo {
     u32 index;
     u32 type_id;
     bool is_enum;
+    bool is_primitive;
     bool has_payload;
     i32 slot_count;
     void* llvm;
@@ -88,6 +89,8 @@ struct SymbolTable {
     U32Map* global_map;
     U32Map* namespace_map;
     U32Map* instance_map;
+    U32Map* primitive_map;
+    PointerList* primitives;
     U32Map* bindings;
     SemanticAnalyzer* analyzer;
     Node* blame;
@@ -106,6 +109,8 @@ struct SymbolTable {
         table.global_map = U32Map.create(arena, 16);
         table.namespace_map = U32Map.create(arena, 16);
         table.instance_map = U32Map.create(arena, 16);
+        table.primitive_map = U32Map.create(arena, 16);
+        table.primitives = PointerList.create();
         NamespaceInfo* root = (NamespaceInfo*)arena.zalloc(sizeof(NamespaceInfo), 8);
         PointerList* namespaces = table.namespaces;
         namespaces.push((void*)root);
@@ -307,6 +312,30 @@ struct SymbolTable {
             return (StructInfo*)0;
         }
         return this.struct_at((u32)index);
+    }
+
+    public StructInfo* primitive_owner(u32 type) {
+        U32Map* map = this.primitive_map;
+        PointerList* list = this.primitives;
+        i64 found = map.find(type);
+        if (found >= 0) {
+            return (StructInfo*)list.get((i32)found);
+        }
+        Arena* arena = this.arena;
+        StructInfo* info = (StructInfo*)arena.zalloc(sizeof(StructInfo), 8);
+        ByteBuffer* name = ByteBuffer.create();
+        this.describe_type(type, name);
+        info.name = name.cstr();
+        info.type_id = type;
+        info.is_primitive = true;
+        info.fields = PointerList.create();
+        info.constants = PointerList.create();
+        info.field_map = U32Map.create(arena, 8);
+        info.constant_map = U32Map.create(arena, 8);
+        info.method_map = U32Map.create(arena, 8);
+        map.put(type, (u32)list.length);
+        list.push((void*)info);
+        return info;
     }
 
     public StructInfo* struct_at(u32 index) {

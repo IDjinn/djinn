@@ -405,10 +405,14 @@ struct SemanticAnalyzer {
                 argument_info = symbols.enum_of_type(argument);
             }
             if (argument_info == null) {
-                if (!this.is_operator_contract(bound)) {
-                    this.error(blame, "type argument does not satisfy a generic constraint");
+                if (this.is_operator_contract(bound)) {
+                    continue;
                 }
-                continue;
+                if (Types.is_void(argument)) {
+                    this.error(blame, "type argument does not satisfy a generic constraint");
+                    continue;
+                }
+                argument_info = symbols.primitive_owner(argument);
             }
             this.check_conformance(argument_info, bound, blame);
         }
@@ -488,8 +492,11 @@ struct SemanticAnalyzer {
     StructInfo* impl_target(Node* declaration) {
         TypeRef* target = declaration.type();
         SymbolTable* symbols = this.symbols;
-        if (target == null || target.kind != TypeKind.NAMED) {
+        if (target == null || target.kind == TypeKind.VOID || target.kind == TypeKind.AUTO || target.kind == TypeKind.NONE) {
             return (StructInfo*)0;
+        }
+        if (target.kind != TypeKind.NAMED) {
+            return symbols.primitive_owner(this.resolve(target, declaration));
         }
         return symbols.find_struct(target.full_atom, target.name_atom, this.scope);
     }
@@ -497,7 +504,7 @@ struct SemanticAnalyzer {
     void collect_impl(Node* declaration) {
         StructInfo* owner = this.impl_target(declaration);
         if (owner == null) {
-            this.error(declaration, "impl target must be a struct or an enum");
+            this.error(declaration, "impl target must be a struct, an enum or a primitive type");
             return;
         }
         if (owner.is_template) {
@@ -775,7 +782,7 @@ struct SemanticAnalyzer {
         IdList* param_types = info.param_types;
         if (owner != null && !declaration.flag()) {
             info.is_instance = true;
-            if (owner.is_enum) {
+            if (owner.is_enum || owner.is_primitive) {
                 param_types.push(owner.type_id);
             } else {
                 param_types.push(Types.pointer_to(owner.type_id));

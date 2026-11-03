@@ -35,7 +35,7 @@ auto makeSourceIdentifier = [](const Token& token)
 
 auto isPrimitiveType = [](const std::string& name)
 {
-    if (name == "void" || name == "auto") return true;
+    if (name == "void" || name == "auto" || name == "var") return true;
     if (name == "nfloat" || name == "ndouble") return true;
     if (name.starts_with("nint")) return parse_integer_type_name(name).has_value();
     if (name.starts_with('f') && string_to_type_kind.contains(name)) return true;
@@ -207,7 +207,7 @@ bool Parser::isType(const Token& token) const
         return true;
     }
 
-    return token.value == "void" || token.value == "auto";
+    return token.value == "void" || token.value == "auto" || token.value == "var";
 }
 
 Token& Parser::expect(const std::string& message, const TokenType type)
@@ -317,7 +317,7 @@ std::unique_ptr<Type> Parser::parse_type()
     {
         baseType = std::make_unique<Type>(Type::voided());
     }
-    else if (identifier.value == "auto" || identifier.type == TokenType::AUTO)
+    else if (identifier.value == "auto" || identifier.value == "var" || identifier.type == TokenType::AUTO)
     {
         baseType = std::make_unique<Type>(Type::auto_type());
     }

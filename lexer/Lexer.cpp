@@ -11,6 +11,7 @@ static std::unordered_map<std::string, TokenType> keywords = {
     {"void", TokenType::VOID},
     {"return", TokenType::RETURN},
     {"auto", TokenType::AUTO},
+    {"var", TokenType::AUTO},
     {"extern", TokenType::EXTERN},
     {"struct", TokenType::STRUCT},
     {"namespace", TokenType::NAMESPACE},
