@@ -132,7 +132,7 @@ An unknown name is an error; a wrong target is a warning.
 
 `attribute Name(targets);` and `attribute Name(targets) { fields }` declare attributes (the targets expression is skipped, so declared
 attributes are valid everywhere); the form with fields also defines a struct `Name`. `[attribute(...)] struct XAttribute {...}` declares `X`
-and `XAttribute`. `[intrinsic]` structs are parsed and dropped.
+and `XAttribute`. `[intrinsic]` and `[no_mangle]` structs are parsed and dropped (the core provides `task<T>` and the coroutine primitives).
 
 A parameter marked `[Location]` whose type is a struct with `fileName`, `line` and `column` is filled by the compiler with the call site
 when the call omits it (only the last parameter, no overloads).

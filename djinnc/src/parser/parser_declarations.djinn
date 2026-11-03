@@ -24,8 +24,17 @@ impl Parser {
 
     Node* parse_declaration() {
         PointerList* attributes = this.parse_attributes();
+        this.bodyless_seen = false;
         Node* declaration = this.parse_declaration_body();
-        if (declaration != null && declaration.kind == NodeKind.STRUCT_DECL && this.has_attribute(attributes, "intrinsic")) {
+        if (this.bodyless_seen) {
+            bool provided = declaration != null && declaration.kind == NodeKind.STRUCT_DECL
+                && (this.has_attribute(attributes, "intrinsic") || this.has_attribute(attributes, "no_mangle"));
+            this.bodyless_seen = false;
+            if (!provided) {
+                this.diagnostics.error(this.line_of(this.bodyless_token), this.column_of(this.bodyless_token), "expected '{' (a function without a body is only allowed in [intrinsic] and [no_mangle] structs)");
+            }
+        }
+        if (declaration != null && declaration.kind == NodeKind.STRUCT_DECL && (this.has_attribute(attributes, "intrinsic") || this.has_attribute(attributes, "no_mangle"))) {
             return null;
         }
         if (attributes.length > 0) {
@@ -325,6 +334,15 @@ impl Parser {
             body.add(ret);
             this.expect(TokenKind.SEMICOLON, "expected ';' after expression body");
             function.set_first(body);
+            return function;
+        }
+
+        if (this.check(TokenKind.SEMICOLON)) {
+            if (!this.bodyless_seen) {
+                this.bodyless_seen = true;
+                this.bodyless_token = this.current();
+            }
+            this.advance();
             return function;
         }
 
