@@ -1,0 +1,286 @@
+namespace djinnc;
+
+impl CodeGenerator {
+    void gen_statement(Node* node) {
+        i32 kind = node.kind;
+        this.locate(node);
+
+        if (kind == NodeKind.BLOCK) {
+            mut void* outer_scope = (void*)0;
+            if (this.debug != null) {
+                DebugInfo* debug = this.debug;
+                outer_scope = debug.enter_block(node);
+            }
+            for (mut i32 i = 0; i < node.count(); i = i + 1) {
+                this.gen_statement(node.child(i));
+            }
+            if (this.debug != null) {
+                DebugInfo* debug = this.debug;
+                debug.leave_block(outer_scope);
+            }
+        } else if (kind == NodeKind.VAR_DECL) {
+            this.gen_variable(node);
+        } else if (kind == NodeKind.EXPR_STMT) {
+            this.gen_expression(node.first());
+        } else if (kind == NodeKind.SPAWN_STMT) {
+            this.gen_spawn(node);
+        } else if (kind == NodeKind.RETURN) {
+            this.gen_return(node);
+        } else if (kind == NodeKind.IF) {
+            this.gen_if(node);
+        } else if (kind == NodeKind.WHILE) {
+            this.gen_while(node);
+        } else if (kind == NodeKind.DO_WHILE) {
+            this.gen_do_while(node);
+        } else if (kind == NodeKind.FOR) {
+            this.gen_for(node);
+        } else if (kind == NodeKind.SWITCH) {
+            this.gen_switch(node);
+        } else if (kind == NodeKind.BREAK) {
+            FunctionContext* function_context = this.function_context;
+            LLVMBuildBr(this.builder, function_context.break_block());
+            this.start_dead_block();
+        } else if (kind == NodeKind.CONTINUE) {
+            FunctionContext* function_context = this.function_context;
+            LLVMBuildBr(this.builder, function_context.continue_block());
+            this.start_dead_block();
+        } else {
+            this.error(node, "statement is not supported by code generation yet");
+        }
+    }
+
+    void gen_variable(Node* node) {
+        LocalVariable* variable = (LocalVariable*)node.symbol();
+        u32 declared = variable.type;
+        variable.slot = this.create_slot(declared, variable.name);
+        if (node.first() != null) {
+            Value* initial = this.gen_expression(node.first());
+            LLVMBuildStore(this.builder, this.coerce(initial, declared), variable.slot);
+        } else {
+            LLVMBuildStore(this.builder, LLVMConstNull(this.llvm_type(declared)), variable.slot);
+        }
+        this.declare_variable(variable.slot, variable.name, declared, node, 0);
+    }
+
+    void gen_return(Node* node) {
+        FunctionContext* function_context = this.function_context;
+        if (function_context.is_async) {
+            if (node.first() != null) {
+                Value* produced = this.gen_expression(node.first());
+                LLVMBuildStore(this.builder, this.coerce(produced, this.current_function().return_type), function_context.promise);
+            }
+            LLVMBuildBr(this.builder, function_context.final_block);
+            this.start_dead_block();
+            return;
+        }
+        if (node.first() == null) {
+            LLVMBuildRetVoid(this.builder);
+        } else {
+            u32 expected = this.current_function().return_type;
+            Value* returned = this.gen_expression(node.first());
+            LLVMBuildRet(this.builder, this.coerce(returned, expected));
+        }
+        this.start_dead_block();
+    }
+
+    void gen_if(Node* node) {
+        if (node.op() == 2) {
+            this.gen_statement(node.second());
+            return;
+        }
+        if (node.op() == 3) {
+            if (node.third() != null) {
+                this.gen_statement(node.third());
+            }
+            return;
+        }
+        void* condition = this.to_condition(this.gen_expression(node.first()));
+        void* then_block = this.new_block("if.then");
+        void* end_block = this.new_block("if.end");
+        mut void* else_block = end_block;
+        if (node.third() != null) {
+            else_block = this.new_block("if.else");
+        }
+
+        LLVMBuildCondBr(this.builder, condition, then_block, else_block);
+        LLVMPositionBuilderAtEnd(this.builder, then_block);
+        this.gen_statement(node.second());
+        this.branch_if_open(end_block);
+
+        if (node.third() != null) {
+            LLVMPositionBuilderAtEnd(this.builder, else_block);
+            this.gen_statement(node.third());
+            this.branch_if_open(end_block);
+        }
+        LLVMPositionBuilderAtEnd(this.builder, end_block);
+    }
+
+    void gen_switch(Node* node) {
+        Value* subject = this.gen_expression(node.first());
+        u32 subject_type = subject.type;
+        void* end_block = this.new_block("switch.end");
+        mut void* default_block = end_block;
+        PointerList* blocks = PointerList.create();
+        PointerList* labels = PointerList.create();
+        mut u32 case_count = 0;
+
+        for (mut i32 i = 0; i < node.count(); i = i + 1) {
+            Node* arm = node.child(i);
+            if (arm.first() == null) {
+                default_block = this.new_block("switch.default");
+                blocks.push(default_block);
+                labels.push(null);
+            } else {
+                blocks.push(this.new_block("switch.case"));
+                labels.push(this.coerce(this.gen_expression(arm.first()), subject_type));
+                case_count = case_count + 1;
+            }
+        }
+
+        void* dispatch = LLVMBuildSwitch(this.builder, subject.ref, default_block, case_count);
+        for (mut i32 i = 0; i < node.count(); i = i + 1) {
+            if (labels.get(i) != null) {
+                LLVMAddCase(dispatch, labels.get(i), blocks.get(i));
+            }
+        }
+
+        FunctionContext* function_context = this.function_context;
+        mut void* continue_target = (void*)0;
+        if (function_context.in_loop()) {
+            continue_target = function_context.continue_block();
+        }
+        function_context.enter_loop(end_block, continue_target);
+        for (mut i32 i = 0; i < node.count(); i = i + 1) {
+            Node* arm = node.child(i);
+            LLVMPositionBuilderAtEnd(this.builder, blocks.get(i));
+            for (mut i32 j = 0; j < arm.count(); j = j + 1) {
+                this.gen_statement(arm.child(j));
+            }
+            this.branch_if_open(end_block);
+        }
+        function_context.leave_loop();
+        LLVMPositionBuilderAtEnd(this.builder, end_block);
+    }
+
+    void gen_while(Node* node) {
+        void* condition_block = this.new_block("while.cond");
+        void* body_block = this.new_block("while.body");
+        void* end_block = this.new_block("while.end");
+
+        this.branch_if_open(condition_block);
+        LLVMPositionBuilderAtEnd(this.builder, condition_block);
+        void* condition = this.to_condition(this.gen_expression(node.first()));
+        LLVMBuildCondBr(this.builder, condition, body_block, end_block);
+
+        this.run_loop_body(node.second(), body_block, end_block, condition_block);
+        this.branch_if_open(condition_block);
+        LLVMPositionBuilderAtEnd(this.builder, end_block);
+    }
+
+    void gen_do_while(Node* node) {
+        void* body_block = this.new_block("do.body");
+        void* condition_block = this.new_block("do.cond");
+        void* end_block = this.new_block("do.end");
+
+        this.branch_if_open(body_block);
+        this.run_loop_body(node.second(), body_block, end_block, condition_block);
+        this.branch_if_open(condition_block);
+
+        LLVMPositionBuilderAtEnd(this.builder, condition_block);
+        void* condition = this.to_condition(this.gen_expression(node.first()));
+        LLVMBuildCondBr(this.builder, condition, body_block, end_block);
+        LLVMPositionBuilderAtEnd(this.builder, end_block);
+    }
+
+    void gen_for(Node* node) {
+        if (node.first() != null) {
+            this.gen_statement(node.first());
+        }
+
+        void* condition_block = this.new_block("for.cond");
+        void* body_block = this.new_block("for.body");
+        void* step_block = this.new_block("for.step");
+        void* end_block = this.new_block("for.end");
+
+        this.branch_if_open(condition_block);
+        LLVMPositionBuilderAtEnd(this.builder, condition_block);
+        if (node.second() != null) {
+            void* condition = this.to_condition(this.gen_expression(node.second()));
+            LLVMBuildCondBr(this.builder, condition, body_block, end_block);
+        } else {
+            LLVMBuildBr(this.builder, body_block);
+        }
+
+        this.run_loop_body(node.fourth(), body_block, end_block, step_block);
+        this.branch_if_open(step_block);
+
+        LLVMPositionBuilderAtEnd(this.builder, step_block);
+        if (node.third() != null) {
+            this.gen_expression(node.third());
+        }
+        LLVMBuildBr(this.builder, condition_block);
+        LLVMPositionBuilderAtEnd(this.builder, end_block);
+    }
+
+    void run_loop_body(Node* body, void* body_block, void* break_block, void* continue_block) {
+        FunctionContext* function_context = this.function_context;
+        function_context.enter_loop(break_block, continue_block);
+        LLVMPositionBuilderAtEnd(this.builder, body_block);
+        this.gen_statement(body);
+        function_context.leave_loop();
+    }
+
+    Value* gen_switch_expression(Node* node) {
+        SymbolTable* symbols = this.symbols;
+        Node* subject_node = node.first();
+        Value* subject = this.gen_expression(subject_node);
+        u32 subject_type = subject.type;
+        StructInfo* owner = symbols.enum_of_type(subject_type);
+        u32 result_type = node.value_type();
+
+        mut void* tag = subject.ref;
+        mut void* spill = (void*)0;
+        void* enum_llvm = this.llvm_type(subject_type);
+        if (Types.is_struct(subject_type)) {
+            spill = this.create_slot(subject_type, "match.subject");
+            LLVMBuildStore(this.builder, subject.ref, spill);
+            void* tag_address = LLVMBuildStructGEP2(this.builder, enum_llvm, spill, 0, "match.tag.ptr");
+            tag = LLVMBuildLoad2(this.builder, LLVMIntTypeInContext(this.context, 32), tag_address, "match.tag");
+        }
+
+        void* result_slot = this.create_slot(result_type, "match.result");
+        void* end_block = this.new_block("match.end");
+        PointerList* blocks = PointerList.create();
+        for (mut i32 i = 0; i < node.count(); i = i + 1) {
+            blocks.push(this.new_block("match.arm"));
+        }
+        void* dispatch = LLVMBuildSwitch(this.builder, tag, blocks.get(node.count() - 1), (u32)node.count());
+        for (mut i32 i = 0; i < node.count(); i = i + 1) {
+            Node* case_arm = node.child(i);
+            Node* variant = (Node*)case_arm.symbol();
+            Node* tag_value = variant.first();
+            void* label = LLVMConstInt(LLVMIntTypeInContext(this.context, 32), (u64)tag_value.int_value(), 0);
+            LLVMAddCase(dispatch, label, blocks.get(i));
+        }
+
+        for (mut i32 i = 0; i < node.count(); i = i + 1) {
+            Node* arm = node.child(i);
+            LLVMPositionBuilderAtEnd(this.builder, blocks.get(i));
+            Node* arm_variant = (Node*)arm.symbol();
+            for (mut i32 b = 0; b < arm.count(); b = b + 1) {
+                Node* binding = arm.child(b);
+                LocalVariable* variable = (LocalVariable*)binding.symbol();
+                variable.slot = this.create_slot(variable.type, variable.name);
+                void* address = this.payload_address(enum_llvm, spill, arm_variant, b);
+                void* loaded = LLVMBuildLoad2(this.builder, this.llvm_type(variable.type), address, "match.bound");
+                LLVMBuildStore(this.builder, loaded, variable.slot);
+                this.declare_variable(variable.slot, variable.name, variable.type, binding, 0);
+            }
+            Value* produced = this.gen_expression(arm.first());
+            LLVMBuildStore(this.builder, this.coerce(produced, result_type), result_slot);
+            this.branch_if_open(end_block);
+        }
+        LLVMPositionBuilderAtEnd(this.builder, end_block);
+        return Value.create(LLVMBuildLoad2(this.builder, this.llvm_type(result_type), result_slot, "match.value"), result_type);
+    }
+}

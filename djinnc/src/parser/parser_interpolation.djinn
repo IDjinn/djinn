@@ -1,0 +1,90 @@
+namespace djinnc;
+
+impl Parser {
+    Node* interpolation_text(i32 token) {
+        this.advance();
+        Node* literal = Node.create(NodeKind.STRING_LITERAL, token);
+        literal.set_text_n(this.text_of(token), this.length_of(token));
+        literal.set_int_value(this.length_of(token));
+        return literal;
+    }
+
+    void apply_interpolation_format(Node* before, i32 token) {
+        i8* text = this.text_of(token);
+        i32 length = this.length_of(token);
+        mut i32 pos = 0;
+        mut i64 flags = 8;
+        mut i64 width = 0;
+        mut i64 precision = 0;
+        if (pos < length && text[pos] == 45) {
+            flags = flags | 1;
+            pos = pos + 1;
+        }
+        if (pos < length && text[pos] == 48) {
+            flags = flags | 2;
+            pos = pos + 1;
+        }
+        while (pos < length && Strings.is_digit(text[pos])) {
+            i32 digit = text[pos];
+            width = width * 10 + (i64)(digit - 48);
+            pos = pos + 1;
+            if (width > 4096) {
+                this.fail("the width of an interpolation format is at most 4096");
+                return;
+            }
+        }
+        if (pos < length && text[pos] == 46) {
+            flags = flags | 4;
+            pos = pos + 1;
+            mut i32 digits = 0;
+            while (pos < length && Strings.is_digit(text[pos])) {
+                i32 digit = text[pos];
+                precision = precision * 10 + (i64)(digit - 48);
+                pos = pos + 1;
+                digits = digits + 1;
+                if (precision > 99) {
+                    this.fail("the precision of an interpolation format is at most 99");
+                    return;
+                }
+            }
+            if (digits == 0) {
+                this.fail("expected the precision digits after '.' in the interpolation format");
+                return;
+            }
+        }
+        if (pos != length || length == 0) {
+            this.fail("an interpolation format is [-][0]width[.precision], as in {value:8.2}");
+            return;
+        }
+        i64 packed = width | (flags << 16) | (precision << 20);
+        before.set_int_value(before.int_value() | (packed << 32));
+    }
+
+    Node* parse_interpolation() {
+        i32 start = this.current();
+        Node* node = Node.create_list(NodeKind.INTERPOLATION, start);
+        node.add(this.interpolation_text(start));
+        while (!this.failed) {
+            if (this.kind_of(this.current()) == TokenKind.INTERP_END) {
+                node.add(this.interpolation_text(this.current()));
+                break;
+            }
+            node.add(this.parse_expression());
+            if (this.kind_of(this.current()) == TokenKind.INTERP_FORMAT) {
+                this.apply_interpolation_format(node.child(node.count() - 2), this.current());
+                this.advance();
+            }
+            i32 next = this.current();
+            if (this.kind_of(next) == TokenKind.INTERP_MIDDLE) {
+                node.add(this.interpolation_text(next));
+            } else if (this.kind_of(next) == TokenKind.INTERP_END) {
+                node.add(this.interpolation_text(next));
+                break;
+            } else {
+                this.fail("expected the end of the string interpolation");
+                break;
+            }
+        }
+        return node;
+    }
+}

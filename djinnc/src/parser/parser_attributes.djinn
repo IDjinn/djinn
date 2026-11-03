@@ -1,0 +1,80 @@
+namespace djinnc;
+
+impl Parser {
+    void skip_attributes() {
+        while (this.check(TokenKind.LBRACKET) && !this.failed) {
+            mut i32 depth = 0;
+            while (!this.at_end()) {
+                i32 token = this.advance();
+                if (this.kind_of(token) == TokenKind.LBRACKET) {
+                    depth = depth + 1;
+                } else if (this.kind_of(token) == TokenKind.RBRACKET) {
+                    depth = depth - 1;
+                    if (depth == 0) {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    PointerList* parse_attributes() {
+        PointerList* found = PointerList.create();
+        while (this.check(TokenKind.LBRACKET) && !this.failed) {
+            this.advance();
+            while (!this.check(TokenKind.RBRACKET) && !this.at_end()) {
+                i32 name = this.expect(TokenKind.IDENTIFIER, "expected an attribute name");
+                AttributeUse* use = (AttributeUse*)Memory.zalloc(sizeof(AttributeUse));
+                use.name = this.copy_of(name);
+                use.line = this.line_of(name);
+                use.column = this.column_of(name);
+                if (this.match(TokenKind.LPAREN)) {
+                    while (!this.check(TokenKind.RPAREN) && !this.at_end()) {
+                        i32 argument = this.advance();
+                        if (this.kind_of(argument) == TokenKind.INTEGER_LITERAL) {
+                            use.int_arg = Strings.parse_integer(this.text_of(argument), this.length_of(argument));
+                        } else if (this.kind_of(argument) == TokenKind.STRING_LITERAL) {
+                            use.text_arg = this.copy_of(argument);
+                        }
+                    }
+                    this.expect(TokenKind.RPAREN, "expected ')' after the attribute arguments");
+                }
+                found.push((void*)use);
+                if (!this.match(TokenKind.COMMA)) {
+                    break;
+                }
+            }
+            this.expect(TokenKind.RBRACKET, "expected ']' after the attribute");
+        }
+        return found;
+    }
+
+    void attach_attributes(PointerList* found, Node* target, i32 target_kind) {
+        Diagnostics* diagnostics = this.diagnostics;
+        for (mut i32 i = 0; i < found.length; i = i + 1) {
+            AttributeUse* use = (AttributeUse*)found.get(i);
+            use.target = target;
+            use.target_kind = target_kind;
+            i32 allowed = Attributes.allowed_targets(use.name);
+            if (allowed == 0) {
+                ByteBuffer* message = ByteBuffer.create();
+                message.append("unknown attribute '");
+                message.append(use.name);
+                message.append("'");
+                diagnostics.error(use.line, use.column, message.cstr());
+                continue;
+            }
+            if (target != null && (allowed & target_kind) == 0) {
+                ByteBuffer* message = ByteBuffer.create();
+                message.append("attribute '");
+                message.append(use.name);
+                message.append("' is not valid on ");
+                message.append(Attributes.target_name(target_kind));
+                diagnostics.warning(use.line, use.column, message.cstr());
+            }
+            if (target != null) {
+                Attributes.record(use);
+            }
+        }
+    }
+}

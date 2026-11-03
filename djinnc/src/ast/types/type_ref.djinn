@@ -1,0 +1,202 @@
+namespace djinnc;
+
+unsafe static mut void* primitive_map = null;
+unsafe static mut void* primitive_list = null;
+
+struct TypeRef {
+    i32 kind;
+    i32 bits;
+    bool is_signed;
+    bool nullable;
+    TypeRef* element;
+    PointerList* args;
+    i8* name;
+    u32 name_atom;
+    u32 full_atom;
+
+    public static TypeRef* create(i32 kind) {
+        TypeRef* type = (TypeRef*)Memory.zalloc(sizeof(TypeRef));
+        type.kind = kind;
+        return type;
+    }
+
+    public static TypeRef* integer(i32 bits, bool is_signed) {
+        TypeRef* type = TypeRef.create(TypeKind.INTEGER);
+        type.bits = bits;
+        type.is_signed = is_signed;
+        return type;
+    }
+
+    public static TypeRef* floating(i32 bits) {
+        TypeRef* type = TypeRef.create(TypeKind.FLOAT);
+        type.bits = bits;
+        type.is_signed = true;
+        return type;
+    }
+
+    public static TypeRef* pointer_to(TypeRef* element) {
+        TypeRef* type = TypeRef.create(TypeKind.POINTER);
+        type.element = element;
+        return type;
+    }
+
+    public static TypeRef* named(i8* name) {
+        TypeRef* type = TypeRef.create(TypeKind.NAMED);
+        type.name = name;
+        AtomTable* atoms = Atoms.get();
+        type.full_atom = atoms.intern_copy(name, (u32)strlen(name));
+        type.name_atom = atoms.base_of(type.full_atom);
+        return type;
+    }
+
+    public static TypeRef* named_atoms(i8* name, u32 full_atom, u32 base_atom) {
+        TypeRef* type = TypeRef.create(TypeKind.NAMED);
+        type.name = name;
+        type.full_atom = full_atom;
+        type.name_atom = base_atom;
+        return type;
+    }
+
+    public static TypeRef* from_primitive_atom(u32 atom) {
+        if (primitive_map == null) {
+            primitive_map = (void*)U32Map.create(Memory.arena(), 256);
+            primitive_list = (void*)PointerList.create();
+        }
+        U32Map* map = (U32Map*)primitive_map;
+        PointerList* list = (PointerList*)primitive_list;
+        mut i64 found = map.find(atom);
+        if (found < 0) {
+            AtomTable* atoms = Atoms.get();
+            TypeRef* parsed = TypeRef.from_primitive_name(atoms.text(atom), (i32)atoms.length(atom));
+            if (parsed == null) {
+                map.put(atom, 0);
+                return null;
+            }
+            list.push((void*)parsed);
+            map.put(atom, (u32)list.length);
+            found = (i64)list.length;
+        }
+        if (found == 0) {
+            return null;
+        }
+        TypeRef* template = (TypeRef*)list.get((i32)found - 1);
+        TypeRef* copy = TypeRef.create(template.kind);
+        copy.bits = template.bits;
+        copy.is_signed = template.is_signed;
+        return copy;
+    }
+
+    public static TypeRef* from_primitive_name(i8* text, i32 length) {
+        if (Strings.equals(text, length, "void")) {
+            return TypeRef.create(TypeKind.VOID);
+        }
+        if (Strings.equals(text, length, "auto") || Strings.equals(text, length, "var")) {
+            return TypeRef.create(TypeKind.AUTO);
+        }
+        if (Strings.equals(text, length, "bool")) {
+            return TypeRef.integer(1, false);
+        }
+        if (Strings.equals(text, length, "nint") || Strings.equals(text, length, "isize") || Strings.equals(text, length, "iptr")) {
+            return TypeRef.integer((i32)Target.pointer_bits(), true);
+        }
+        if (Strings.equals(text, length, "usize") || Strings.equals(text, length, "uptr")) {
+            return TypeRef.integer((i32)Target.pointer_bits(), false);
+        }
+        if (Strings.equals(text, length, "nfloat") || Strings.equals(text, length, "ndouble")) {
+            return TypeRef.floating(64);
+        }
+        if (length < 2) {
+            return null;
+        }
+
+        i32 lead = text[0];
+        bool isIntegerLead = lead == 105 || lead == 117;
+        if (!isIntegerLead && lead != 102) {
+            return null;
+        }
+
+        mut i32 pos = 1;
+        mut i32 bits = 0;
+        while (pos < length && Strings.is_digit(text[pos])) {
+            bits = bits * 10 + (text[pos] - 48);
+            pos = pos + 1;
+        }
+        if (pos == 1 || bits == 0) {
+            return null;
+        }
+
+        while (pos < length) {
+            i32 suffix = text[pos];
+            bool validSuffix = suffix == 119 || suffix == 116 || suffix == 99 || suffix == 115 || suffix == 110;
+            if (!validSuffix || lead == 102) {
+                return null;
+            }
+            pos = pos + 1;
+        }
+
+        if (lead == 102) {
+            return TypeRef.floating(bits);
+        }
+        return TypeRef.integer(bits, lead == 105);
+    }
+
+    public bool is_void() {
+        return this.kind == TypeKind.VOID;
+    }
+
+    public bool is_integer() {
+        return this.kind == TypeKind.INTEGER;
+    }
+
+    public bool is_float() {
+        return this.kind == TypeKind.FLOAT;
+    }
+
+    public bool is_pointer() {
+        return this.kind == TypeKind.POINTER;
+    }
+
+    public void describe(ByteBuffer* out) {
+        if (this.kind == TypeKind.VOID) {
+            out.append("void");
+        } else if (this.kind == TypeKind.AUTO) {
+            out.append("auto");
+        } else if (this.kind == TypeKind.INTEGER) {
+            if (this.bits == 1) {
+                out.append("bool");
+            } else {
+                if (this.is_signed) {
+                    out.append_char(105);
+                } else {
+                    out.append_char(117);
+                }
+                out.append_int(this.bits);
+            }
+        } else if (this.kind == TypeKind.FLOAT) {
+            out.append_char(102);
+            out.append_int(this.bits);
+        } else if (this.kind == TypeKind.POINTER) {
+            TypeRef* inner = this.element;
+            inner.describe(out);
+            out.append_char(42);
+        } else {
+            out.append(this.name);
+            if (this.args != null) {
+                PointerList* args = this.args;
+                out.append_char(60);
+                for (mut i32 i = 0; i < args.length; i = i + 1) {
+                    if (i > 0) {
+                        out.append(", ");
+                    }
+                    TypeRef* argument = (TypeRef*)args.get(i);
+                    argument.describe(out);
+                }
+                out.append_char(62);
+            }
+        }
+
+        if (this.nullable) {
+            out.append_char(63);
+        }
+    }
+}

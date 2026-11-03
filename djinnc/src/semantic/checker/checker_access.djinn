@@ -1,0 +1,196 @@
+namespace djinnc;
+
+impl TypeChecker {
+    bool is_struct_name(Node* node) {
+        if (node.kind != NodeKind.IDENTIFIER) {
+            return false;
+        }
+        if (this.find_variable(node.name()) != null) {
+            return false;
+        }
+        SymbolTable* symbols = this.symbols;
+        return symbols.find_struct(node.text_atom(), node.name(), this.scope) != null;
+    }
+
+    bool is_addressable(Node* node) {
+        i32 kind = node.kind;
+        if (kind == NodeKind.IDENTIFIER || kind == NodeKind.INDEX) {
+            return true;
+        }
+        if (kind == NodeKind.FIELD_ACCESS) {
+            return !this.is_struct_name(node.first());
+        }
+        return kind == NodeKind.UNARY && node.op() == TokenKind.STAR;
+    }
+
+    u32 check_lvalue(Node* node) {
+        u32 type = this.compute_lvalue(node);
+        node.set_value_type(type);
+        return type;
+    }
+
+    u32 compute_lvalue(Node* node) {
+        i32 kind = node.kind;
+
+        if (kind == NodeKind.IDENTIFIER) {
+            LocalVariable* variable = this.find_variable(node.name());
+            if (variable == null) {
+                FieldInfo* implicit = this.implicit_field(node);
+                if (implicit != null) {
+                    node.set_symbol(SymbolKind.IMPLICIT_FIELD, (void*)implicit);
+                    return implicit.type;
+                }
+                FunctionInfo* implicit_getter = this.implicit_accessor(node, "get:");
+                if (implicit_getter != null) {
+                    node.set_symbol(SymbolKind.IMPLICIT_GET, (void*)implicit_getter);
+                    return implicit_getter.return_type;
+                }
+                this.error(node, "undefined variable");
+                return Types.i32_type();
+            }
+            LocalScopes* scopes = this.scopes;
+            if (variable.moved && this.assign_target != node) {
+                this.error(node, "use of moved value");
+            }
+            if (scopes.find(node.name()) != null) {
+                node.set_symbol(SymbolKind.LOCAL, (void*)variable);
+            } else {
+                node.set_symbol(SymbolKind.GLOBAL, (void*)variable);
+            }
+            return variable.type;
+        }
+
+        if (kind == NodeKind.FIELD_ACCESS) {
+            return this.check_field(node);
+        }
+
+        if (kind == NodeKind.INDEX) {
+            u32 base = this.check_expression(node.first(), 0);
+            this.check_expression(node.second(), Types.i64_type());
+            u32 held = this.array_element(base);
+            if (held != 0) {
+                return held;
+            }
+            if (!Types.is_sized_pointer(base)) {
+                this.error(node, "only pointers to sized types can be indexed");
+                return Types.i32_type();
+            }
+            return Types.element(base);
+        }
+
+        if (kind == NodeKind.UNARY && node.op() == TokenKind.STAR) {
+            u32 pointer = this.check_expression(node.first(), 0);
+            if (!Types.is_sized_pointer(pointer)) {
+                this.error(node, "cannot dereference this value");
+                return Types.i32_type();
+            }
+            return Types.element(pointer);
+        }
+
+        this.error(node, "expression is not addressable");
+        return Types.i32_type();
+    }
+
+    StructInfo* struct_of_base(Node* base) {
+        mut u32 type = 0;
+        if (this.is_addressable(base)) {
+            type = this.check_lvalue(base);
+        } else {
+            type = this.check_expression(base, 0);
+            SymbolTable* known = this.symbols;
+            if (!Types.is_pointer(type) && known.enum_of_type(type) == null && (Types.is_struct(type) || Types.is_void(type))) {
+                this.error(base, "member access needs a struct or a pointer to one");
+                return null;
+            }
+        }
+        mut u32 target = type;
+        if (Types.is_pointer(type)) {
+            target = Types.element(type);
+        }
+        SymbolTable* enumerations = this.symbols;
+        StructInfo* enumeration = enumerations.enum_of_type(target);
+        if (enumeration != null) {
+            return enumeration;
+        }
+        SymbolTable* symbols = this.symbols;
+        if (!Types.is_struct(target)) {
+            if (Types.is_void(target)) {
+                this.error(base, "member access on a value that is not a struct");
+                return null;
+            }
+            return symbols.primitive_owner(target);
+        }
+        return symbols.struct_at(Types.struct_index(target));
+    }
+
+    u32 check_field(Node* node) {
+        Node* base = node.first();
+        if (this.is_struct_name(base)) {
+            this.error(node, "a struct constant cannot be used as a variable");
+            return Types.i32_type();
+        }
+        StructInfo* info = this.struct_of_base(base);
+        if (info == null) {
+            return Types.i32_type();
+        }
+        SymbolTable* symbols = this.symbols;
+        FieldInfo* field = symbols.find_field(info, node.name());
+        if (field == null) {
+            FunctionInfo* getter = this.find_accessor(info, "get:", node.text());
+            if (getter != null) {
+                node.set_symbol(SymbolKind.PROPERTY_GET, (void*)getter);
+                return getter.return_type;
+            }
+            this.error(node, "struct has no such field");
+            return Types.i32_type();
+        }
+        node.set_symbol(SymbolKind.FIELD, (void*)field);
+        return field.type;
+    }
+
+    FunctionInfo* find_accessor(StructInfo* owner, i8* prefix, i8* name) {
+        ByteBuffer* full = ByteBuffer.create();
+        full.append(prefix);
+        full.append(name);
+        SymbolTable* symbols = this.symbols;
+        return symbols.find_method(owner, Ast.intern_base_name(full.cstr(), (i32)strlen(full.cstr())));
+    }
+
+    FunctionInfo* implicit_accessor(Node* node, i8* prefix) {
+        FunctionInfo* current = this.function;
+        if (current == null || !current.is_instance || current.owner == null) {
+            return null;
+        }
+        return this.find_accessor(current.owner, prefix, node.text());
+    }
+
+    FieldInfo* implicit_field(Node* node) {
+        FunctionInfo* current = this.function;
+        if (current == null || !current.is_instance || current.owner == null) {
+            return null;
+        }
+        StructInfo* owner = current.owner;
+        SymbolTable* symbols = this.symbols;
+        return symbols.find_field(owner, node.name());
+    }
+
+    u32 check_member(Node* node) {
+        Node* base = node.first();
+        if (this.is_struct_name(base)) {
+            SymbolTable* symbols = this.symbols;
+            StructInfo* info = symbols.find_struct(base.text_atom(), base.name(), this.scope);
+            base.set_symbol(SymbolKind.STRUCT_NAME, (void*)info);
+            Node* constant = symbols.find_constant(info, node.name());
+            if (constant == null) {
+                this.error(node, "struct has no such constant");
+                return Types.i32_type();
+            }
+            if (info.has_payload) {
+                this.error(node, "a payload enum is built with Enum::Variant(...)");
+            }
+            node.set_symbol(SymbolKind.CONSTANT, (void*)constant);
+            return constant.value_type();
+        }
+        return this.check_field(node);
+    }
+}

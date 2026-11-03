@@ -1,0 +1,335 @@
+namespace djinnc;
+
+struct Node {
+    u16 kind;
+    u16 flags;
+    i32 token;
+    u32 a;
+    u32 b;
+
+    public static Node* create(i32 kind, i32 token) {
+        if (ast_count >= ast_capacity) {
+            logger_error(Log.get(), "djinnc: ast node capacity exceeded (%d)", ast_capacity);
+            exit(1);
+        }
+        Node* node = Ast.at(ast_count);
+        ast_count = ast_count + 1;
+        node.kind = (u16)kind;
+        node.token = token;
+        i32 extra = NodeLayout.extra_size(kind);
+        if (extra > 0) {
+            Node.reserve_extra(extra);
+            node.b = (u32)ast_extra_count;
+            ast_extra_count = ast_extra_count + extra;
+        }
+        return node;
+    }
+
+    static void reserve_extra(i32 count) {
+        if (ast_extra_count + count <= ast_extra_capacity) {
+            return;
+        }
+        Arena* arena = Memory.arena();
+        i32 capacity = ast_extra_capacity * 2;
+        u32* grown = (u32*)arena.zalloc((u64)capacity * 4, 4);
+        memcpy(grown, ast_extra, (u64)ast_extra_count * 4);
+        ast_extra = (void*)grown;
+        ast_extra_capacity = capacity;
+    }
+
+    public static Node* create_list(i32 kind, i32 token) {
+        Node* node = Node.create(kind, token);
+        PointerList* lists = (PointerList*)ast_lists;
+        lists.push((void*)IdList.create());
+        node.set_field(NodeField.LIST, (u32)lists.length);
+        return node;
+    }
+
+    u32 get_field(i32 field) {
+        i32 slot = NodeLayout.slot((i32)this.kind, field);
+        if (slot == Slot.NONE) {
+            return 0;
+        }
+        u32* words = (u32*)this;
+        if (slot == Slot.A) {
+            return words[2];
+        }
+        if (slot == Slot.B) {
+            return words[3];
+        }
+        if (slot == Slot.TOKEN) {
+            TokenList* tokens = TokenList.get();
+            return tokens.raw_atom(this.token);
+        }
+        u32* extra = (u32*)ast_extra;
+        return extra[(i32)words[3] + slot - Slot.EXTRA];
+    }
+
+    void set_field(i32 field, u32 value) {
+        i32 slot = NodeLayout.slot((i32)this.kind, field);
+        if (slot == Slot.NONE || slot == Slot.TOKEN) {
+            return;
+        }
+        u32* words = (u32*)this;
+        if (slot == Slot.A) {
+            words[2] = value;
+        } else if (slot == Slot.B) {
+            words[3] = value;
+        } else {
+            u32* extra = (u32*)ast_extra;
+            extra[(i32)words[3] + slot - Slot.EXTRA] = value;
+        }
+    }
+
+    public u32 value_type() {
+        u32* types = (u32*)ast_value_types;
+        return types[Ast.id_of(this)];
+    }
+
+    public void set_value_type(u32 type) {
+        u32* types = (u32*)ast_value_types;
+        types[Ast.id_of(this)] = type;
+    }
+
+    public void* symbol() {
+        void** symbols = (void**)ast_symbols;
+        return symbols[Ast.id_of(this)];
+    }
+
+    public i32 symbol_kind() {
+        u8* kinds = (u8*)ast_symbol_kinds;
+        return (i32)kinds[Ast.id_of(this)];
+    }
+
+    public void set_symbol(i32 kind, void* symbol) {
+        i32 id = Ast.id_of(this);
+        void** symbols = (void**)ast_symbols;
+        u8* kinds = (u8*)ast_symbol_kinds;
+        symbols[id] = symbol;
+        kinds[id] = (u8)kind;
+    }
+
+    public i32 line() {
+        TokenList* tokens = TokenList.get();
+        return tokens.line(this.token);
+    }
+
+    public i32 column() {
+        TokenList* tokens = TokenList.get();
+        return tokens.column(this.token);
+    }
+
+    public i8* file_name() {
+        SourceFile* file = Sources.of_token(this.token);
+        return file.path;
+    }
+
+    public Node* first() {
+        return Ast.at((i32)this.get_field(NodeField.FIRST));
+    }
+
+    public Node* second() {
+        return Ast.at((i32)this.get_field(NodeField.SECOND));
+    }
+
+    public Node* third() {
+        return Ast.at((i32)this.get_field(NodeField.THIRD));
+    }
+
+    public Node* fourth() {
+        return Ast.at((i32)this.get_field(NodeField.FOURTH));
+    }
+
+    public void set_first(Node* node) {
+        this.set_field(NodeField.FIRST, (u32)Ast.id_of(node));
+    }
+
+    public void set_second(Node* node) {
+        this.set_field(NodeField.SECOND, (u32)Ast.id_of(node));
+    }
+
+    public void set_third(Node* node) {
+        this.set_field(NodeField.THIRD, (u32)Ast.id_of(node));
+    }
+
+    public void set_fourth(Node* node) {
+        this.set_field(NodeField.FOURTH, (u32)Ast.id_of(node));
+    }
+
+    public i8* text() {
+        u32 stored = this.get_field(NodeField.TEXT);
+        if (stored == 0) {
+            return null;
+        }
+        AtomTable* atoms = Ast.atoms();
+        return atoms.text(stored - 1);
+    }
+
+    public void set_text(i8* text) {
+        this.set_text_n(text, strlen(text));
+    }
+
+    public void set_text_n(i8* text, i32 length) {
+        AtomTable* atoms = Ast.atoms();
+        this.set_field(NodeField.TEXT, atoms.intern_copy(text, (u32)length) + 1);
+    }
+
+    public void set_text_atom(u32 atom) {
+        this.set_field(NodeField.TEXT, atom + 1);
+    }
+
+    public u32 text_atom() {
+        u32 stored = this.get_field(NodeField.TEXT);
+        if (stored == 0) {
+            return 0;
+        }
+        return stored - 1;
+    }
+
+    public u32 name() {
+        u32 stored = this.get_field(NodeField.TEXT);
+        if (stored == 0) {
+            return 0;
+        }
+        AtomTable* atoms = Ast.atoms();
+        return atoms.base_of(stored - 1);
+    }
+
+    public TypeRef* type() {
+        u32 stored = this.get_field(NodeField.TYPE);
+        if (stored == 0) {
+            return null;
+        }
+        PointerList* types = (PointerList*)ast_types;
+        return (TypeRef*)types.get((i32)stored - 1);
+    }
+
+    public void set_type(TypeRef* type) {
+        PointerList* types = (PointerList*)ast_types;
+        types.push((void*)type);
+        this.set_field(NodeField.TYPE, (u32)types.length);
+    }
+
+    public GenericParams* generics() {
+        u32 stored = this.get_field(NodeField.GENERICS);
+        if (stored == 0) {
+            return null;
+        }
+        PointerList* lists = (PointerList*)ast_lists;
+        return (GenericParams*)lists.get((i32)stored - 1);
+    }
+
+    public void set_generics(GenericParams* params) {
+        PointerList* lists = (PointerList*)ast_lists;
+        lists.push((void*)params);
+        this.set_field(NodeField.GENERICS, (u32)lists.length);
+    }
+
+    public static Node* clone(Node* source) {
+        mut Node* copy = (Node*)0;
+        if (source.has_items()) {
+            copy = Node.create_list((i32)source.kind, source.token);
+        } else {
+            copy = Node.create((i32)source.kind, source.token);
+        }
+        copy.flags = source.flags;
+        for (mut i32 field = NodeField.FIRST; field <= NodeField.FOURTH; field = field + 1) {
+            u32 stored = source.get_field(field);
+            if (stored != 0) {
+                Node* child = Ast.at((i32)stored);
+                copy.set_field(field, (u32)Ast.id_of(Node.clone(child)));
+            }
+        }
+        copy.set_field(NodeField.TEXT, source.get_field(NodeField.TEXT));
+        copy.set_field(NodeField.TYPE, source.get_field(NodeField.TYPE));
+        copy.set_field(NodeField.VALUE_LOW, source.get_field(NodeField.VALUE_LOW));
+        copy.set_field(NodeField.VALUE_HIGH, source.get_field(NodeField.VALUE_HIGH));
+        copy.set_field(NodeField.GENERICS, source.get_field(NodeField.GENERICS));
+        if (source.has_items()) {
+            for (mut i32 i = 0; i < source.count(); i = i + 1) {
+                copy.add(Node.clone(source.child(i)));
+            }
+        }
+        return copy;
+    }
+
+    public bool flag() {
+        return ((u32)this.flags & 1) != 0;
+    }
+
+    public void set_flag(bool value) {
+        u32 cleared = (u32)this.flags & 65534;
+        if (value) {
+            this.flags = (u16)(cleared | 1);
+        } else {
+            this.flags = (u16)cleared;
+        }
+    }
+
+    public bool is_variadic() {
+        return ((u32)this.flags & 2) != 0;
+    }
+
+    public void set_variadic(bool value) {
+        u32 cleared = (u32)this.flags & 65533;
+        if (value) {
+            this.flags = (u16)(cleared | 2);
+        } else {
+            this.flags = (u16)cleared;
+        }
+    }
+
+    public i32 op() {
+        return (i32)((u32)this.flags >> 2);
+    }
+
+    public void set_op(i32 op) {
+        this.flags = (u16)(((u32)this.flags & 3) | ((u32)op << 2));
+    }
+
+    public i64 int_value() {
+        u64 low = (u64)this.get_field(NodeField.VALUE_LOW);
+        u64 high = (u64)this.get_field(NodeField.VALUE_HIGH);
+        return (i64)(low | (high << 32));
+    }
+
+    public void set_int_value(i64 value) {
+        u64 bits = (u64)value;
+        this.set_field(NodeField.VALUE_LOW, (u32)(bits & Limits.U32_MAX));
+        this.set_field(NodeField.VALUE_HIGH, (u32)(bits >> 32));
+    }
+
+    public f64 float_value() {
+        i8* literal = this.text();
+        return Strings.parse_float(literal, strlen(literal));
+    }
+
+    public void add(Node* child) {
+        IdList* list = this.items();
+        list.push((u32)Ast.id_of(child));
+    }
+
+    public bool has_items() {
+        return this.get_field(NodeField.LIST) != 0;
+    }
+
+    IdList* items() {
+        PointerList* lists = (PointerList*)ast_lists;
+        return (IdList*)lists.get((i32)this.get_field(NodeField.LIST) - 1);
+    }
+
+    public Node* child(i32 index) {
+        IdList* list = this.items();
+        return Ast.at((i32)list.data[index]);
+    }
+
+    public i32 count() {
+        IdList* list = this.items();
+        return list.length;
+    }
+
+    public void set_child(i32 index, Node* child) {
+        IdList* list = this.items();
+        list.data[index] = (u32)Ast.id_of(child);
+    }
+}

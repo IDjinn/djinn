@@ -2475,3 +2475,8 @@ __attribute__((constructor)) static void djinn_install_crash_trace(void)
     }
 }
 #endif
+
+int __djinn_call_entry(void* address)
+{
+    return ((int (*)(void))address)();
+}

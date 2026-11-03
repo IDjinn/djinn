@@ -1,0 +1,106 @@
+namespace djinnc;
+
+unsafe static mut void* macro_list = null;
+unsafe static mut i32 macro_counter = 0;
+
+struct Macros {
+    static PointerList* all() {
+        if (macro_list == null) {
+            macro_list = (void*)PointerList.create();
+        }
+        return (PointerList*)macro_list;
+    }
+
+    public static MacroInfo* find(u32 atom) {
+        PointerList* macros = Macros.all();
+        for (mut i32 i = 0; i < macros.length; i = i + 1) {
+            MacroInfo* info = (MacroInfo*)macros.get(i);
+            if (info.name_atom == atom) {
+                return info;
+            }
+        }
+        return null;
+    }
+
+    public static MacroInfo* declare(u32 atom, i8* name) {
+        MacroInfo* existing = Macros.find(atom);
+        if (existing != null) {
+            return existing;
+        }
+        MacroInfo* info = (MacroInfo*)Memory.zalloc(sizeof(MacroInfo));
+        info.name_atom = atom;
+        info.name = name;
+        info.rules = PointerList.create();
+        PointerList* macros = Macros.all();
+        macros.push((void*)info);
+        return info;
+    }
+
+    public static i8* unique_name(i8* parameter) {
+        macro_counter = macro_counter + 1;
+        ByteBuffer* name = ByteBuffer.create();
+        name.append("__macro");
+        name.append_int(macro_counter);
+        name.append("_");
+        name.append(parameter);
+        return name.cstr();
+    }
+
+    public static bool same_signature(MacroRule* left, MacroRule* right) {
+        PointerList* a = left.params;
+        PointerList* b = right.params;
+        if (a.length != b.length) {
+            return false;
+        }
+        for (mut i32 i = 0; i < a.length; i = i + 1) {
+            MacroParam* x = (MacroParam*)a.get(i);
+            MacroParam* y = (MacroParam*)b.get(i);
+            if (x.kind != y.kind) {
+                return false;
+            }
+            if (x.kind == MacroParamKind.TOKEN && x.name_atom != y.name_atom) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    public static Node* replace(Node* node, PointerList* bindings) {
+        if (node.kind == NodeKind.IDENTIFIER) {
+            u32 atom = node.text_atom();
+            for (mut i32 i = 0; i < bindings.length; i = i + 1) {
+                MacroBinding* binding = (MacroBinding*)bindings.get(i);
+                if (binding.name_atom == atom) {
+                    binding.uses = binding.uses + 1;
+                    if (binding.is_local) {
+                        Node* reference = Node.create(NodeKind.IDENTIFIER, node.token);
+                        reference.set_text(binding.temp);
+                        return reference;
+                    }
+                    return Node.clone(binding.node);
+                }
+            }
+            return node;
+        }
+        for (mut i32 field = NodeField.FIRST; field <= NodeField.FOURTH; field = field + 1) {
+            u32 stored = node.get_field(field);
+            if (stored != 0) {
+                Node* child = Ast.at((i32)stored);
+                Node* replaced = Macros.replace(child, bindings);
+                if (replaced != child) {
+                    node.set_field(field, (u32)Ast.id_of(replaced));
+                }
+            }
+        }
+        if (node.has_items()) {
+            for (mut i32 i = 0; i < node.count(); i = i + 1) {
+                Node* child = node.child(i);
+                Node* replaced = Macros.replace(child, bindings);
+                if (replaced != child) {
+                    node.set_child(i, replaced);
+                }
+            }
+        }
+        return node;
+    }
+}

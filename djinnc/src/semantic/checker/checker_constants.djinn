@@ -1,0 +1,142 @@
+namespace djinnc;
+
+impl TypeChecker {
+    void check_constant(Node* member, u32 namespace_id) {
+        this.scope = namespace_id;
+        this.function = null;
+        LocalScopes* scopes = this.scopes;
+        scopes.reset_to(0);
+        this.check_expression(member.first(), member.value_type());
+    }
+
+    void check_global(LocalVariable* variable) {
+        if (variable.const_state != 0) {
+            return;
+        }
+        this.scope = variable.namespace_id;
+        this.function = null;
+        LocalScopes* scopes = this.scopes;
+        scopes.reset_to(0);
+        Node* declaration = variable.node;
+        declaration.set_value_type(variable.type);
+        if (declaration.op() == 0) {
+            variable.const_state = 3;
+            this.check_expression(declaration.first(), variable.type);
+            return;
+        }
+        variable.const_state = 1;
+        this.check_expression(declaration.first(), variable.type);
+        this.evaluate_variable(variable, declaration);
+    }
+
+    public void ensure_checked(FunctionInfo* info) {
+        if (info.check_state != 0 || info.is_extern || info.is_template) {
+            return;
+        }
+        CheckState* state = this.enter_nested();
+        this.check_function(info);
+        this.leave_nested(state);
+    }
+
+    public void ensure_global(LocalVariable* variable) {
+        if (variable.const_state != 0 || variable.node == null) {
+            return;
+        }
+        CheckState* state = this.enter_nested();
+        this.check_global(variable);
+        this.leave_nested(state);
+    }
+
+    void error_reason(Node* at, i8* prefix, i8* reason) {
+        ByteBuffer* message = ByteBuffer.create();
+        message.append(prefix);
+        message.append(reason);
+        this.error(at, message.cstr());
+    }
+
+    void evaluate_variable(LocalVariable* variable, Node* declaration) {
+        Node* initial = declaration.first();
+        if (initial == null) {
+            this.error(declaration, "a constexpr variable needs an initializer");
+            variable.const_state = 3;
+            return;
+        }
+        ConstEval* evaluator = this.const_eval;
+        if (evaluator.evaluate(initial, initial.value_type(), variable.type)) {
+            variable.const_int = evaluator.ri;
+            variable.const_float = evaluator.rf;
+            variable.const_state = 2;
+            evaluator.fold(initial, variable.type);
+            return;
+        }
+        variable.const_state = 3;
+        mut Node* at = evaluator.failure_node;
+        if (at == null) {
+            at = initial;
+        }
+        this.error_reason(at, "not a compile-time constant: ", evaluator.failure);
+    }
+
+    void check_compile_time_if(Node* node) {
+        Node* condition = node.first();
+        this.check_condition(condition);
+        ConstEval* evaluator = this.const_eval;
+        if (!evaluator.evaluate(condition, condition.value_type(), Types.bool_type())) {
+            mut Node* at = evaluator.failure_node;
+            if (at == null) {
+                at = condition;
+            }
+            this.error_reason(at, "compile-time condition is not constant: ", evaluator.failure);
+            node.set_op(3);
+            return;
+        }
+        if (evaluator.ri != 0) {
+            node.set_op(2);
+            this.check_statement(node.second());
+            return;
+        }
+        node.set_op(3);
+        if (node.third() != null) {
+            this.check_statement(node.third());
+        }
+    }
+
+    u32 fold_constant(Node* node, u32 type) {
+        i32 symbol_kind = node.symbol_kind();
+        if (symbol_kind != SymbolKind.LOCAL && symbol_kind != SymbolKind.GLOBAL) {
+            return type;
+        }
+        LocalVariable* variable = (LocalVariable*)node.symbol();
+        if (variable.const_state == 0 && symbol_kind == SymbolKind.GLOBAL && variable.node != null) {
+            Node* declaration = variable.node;
+            if (declaration.op() != 0) {
+                this.ensure_global(variable);
+            }
+        }
+        if (variable.const_state != 2) {
+            return type;
+        }
+        ConstEval* evaluator = this.const_eval;
+        evaluator.ri = variable.const_int;
+        evaluator.rf = variable.const_float;
+        evaluator.fold(node, variable.type);
+        return variable.type;
+    }
+
+    void fold_call(Node* node, FunctionInfo* info) {
+        ConstEval* evaluator = this.const_eval;
+        if (evaluator.evaluate(node, info.return_type, info.return_type)) {
+            evaluator.fold(node, info.return_type);
+            return;
+        }
+        FunctionInfo* current = this.function;
+        bool inside_compile_time = current != null && current.const_kind != 0;
+        if (info.const_kind == 2 && !inside_compile_time) {
+            mut Node* at = evaluator.failure_node;
+            if (at == null) {
+                at = node;
+            }
+            this.error_reason(at, "consteval call is not a constant expression: ", evaluator.failure);
+        }
+    }
+}

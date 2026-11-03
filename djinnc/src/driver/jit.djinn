@@ -1,0 +1,68 @@
+namespace djinnc;
+
+struct Jit {
+    static bool check(void* error, i8* what) {
+        if (error == null) {
+            return true;
+        }
+        i8* message = LLVMGetErrorMessage(error);
+        logger_error(Log.get(), "djinnc: jit: %s: %s", what, message);
+        LLVMDisposeErrorMessage(message);
+        return false;
+    }
+
+    public static i32 run(CodeGenerator* gen, Options* options) {
+        if (!Target.is_native()) {
+            logger_error(Log.get(), "djinnc: --run needs the host target, but the target is '%s'", Target.triple());
+            return 1;
+        }
+        if (options.runtime_lib == null) {
+            logger_error(Log.get(), "djinnc: --run needs --runtime-lib <lib> with the precompiled runtime");
+            return 1;
+        }
+        if (!Target.initialize_backend()) {
+            return 1;
+        }
+
+        mut i8* pipeline = "default<O0>";
+        if (options.optimize) {
+            pipeline = "default<O2>";
+        }
+        if (!ObjectWriter.run_passes(gen.module, null, pipeline)) {
+            return 1;
+        }
+
+        void* jit = null;
+        if (!Jit.check(LLVMOrcCreateLLJIT(&jit, null), "cannot create the JIT")) {
+            return 1;
+        }
+        void* dylib = LLVMOrcLLJITGetMainJITDylib(jit);
+
+        void* runtime = null;
+        if (!Jit.check(LLVMOrcCreateStaticLibrarySearchGeneratorForPath(&runtime, LLVMOrcLLJITGetObjLinkingLayer(jit), options.runtime_lib), "cannot load the runtime library")) {
+            return 1;
+        }
+        LLVMOrcJITDylibAddGenerator(dylib, runtime);
+
+        void* process = null;
+        if (!Jit.check(LLVMOrcCreateDynamicLibrarySearchGeneratorForProcess(&process, LLVMOrcLLJITGetGlobalPrefix(jit), null, null), "cannot expose the process symbols")) {
+            return 1;
+        }
+        LLVMOrcJITDylibAddGenerator(dylib, process);
+
+        void* shared_context = LLVMOrcCreateNewThreadSafeContextFromLLVMContext(gen.context);
+        void* shared_module = LLVMOrcCreateNewThreadSafeModule(gen.module, shared_context);
+        LLVMOrcDisposeThreadSafeContext(shared_context);
+        if (!Jit.check(LLVMOrcLLJITAddLLVMIRModule(jit, dylib, shared_module), "cannot add the module")) {
+            return 1;
+        }
+
+        u64 entry = 0;
+        if (!Jit.check(LLVMOrcLLJITLookup(jit, &entry, "main"), "cannot find 'main'")) {
+            return 1;
+        }
+        logger_info(Log.get(), "djinnc: running 'main' in process");
+        fflush(null);
+        return __djinn_call_entry((void*)entry);
+    }
+}

@@ -1,0 +1,317 @@
+namespace djinnc;
+
+impl Parser {
+    void parse_member(Node* owner) {
+        PointerList* found = this.parse_attributes();
+        i32 before = owner.count();
+        this.parse_struct_member(owner);
+        if (found.length == 0) {
+            return;
+        }
+        if (owner.count() <= before) {
+            this.attach_attributes(found, null, AttributeTarget.OTHER);
+            return;
+        }
+        Node* member = owner.child(before);
+        mut i32 target_kind = AttributeTarget.OTHER;
+        if (member.kind == NodeKind.FUNCTION) {
+            target_kind = AttributeTarget.METHOD;
+        } else if (member.kind == NodeKind.FIELD_DECL) {
+            target_kind = AttributeTarget.FIELD;
+        }
+        this.attach_attributes(found, member, target_kind);
+    }
+
+    Node* parse_declaration() {
+        PointerList* attributes = this.parse_attributes();
+        Node* declaration = this.parse_declaration_body();
+        if (attributes.length > 0) {
+            mut i32 target_kind = AttributeTarget.OTHER;
+            if (declaration != null && declaration.kind == NodeKind.STRUCT_DECL) {
+                target_kind = AttributeTarget.STRUCT;
+            } else if (declaration != null && declaration.kind == NodeKind.FUNCTION) {
+                target_kind = AttributeTarget.FUNCTION;
+            }
+            this.attach_attributes(attributes, declaration, target_kind);
+        }
+        return declaration;
+    }
+
+    Node* parse_declaration_body() {
+        i32 token = this.current();
+
+        if (this.kind_of(token) == TokenKind.IMPORT) {
+            this.advance();
+            Node* import_node = Node.create(NodeKind.IMPORT, token);
+            import_node.set_text(this.qualified_name());
+            this.expect(TokenKind.SEMICOLON, "expected ';' after import");
+            return import_node;
+        }
+
+        if (this.kind_of(token) == TokenKind.NAMESPACE) {
+            return this.parse_namespace();
+        }
+
+        if (this.kind_of(token) == TokenKind.EXTERN) {
+            return this.parse_extern();
+        }
+
+        if (this.kind_of(token) == TokenKind.STRUCT) {
+            return this.parse_struct();
+        }
+
+        if (this.kind_of(token) == TokenKind.ENUM) {
+            return this.parse_enum();
+        }
+
+        if (this.kind_of(token) == TokenKind.UNSAFE || this.kind_of(token) == TokenKind.STATIC) {
+            return this.parse_static_var();
+        }
+
+        if (this.kind_of(token) == TokenKind.INTERFACE) {
+            return this.parse_interface();
+        }
+
+        if (this.kind_of(token) == TokenKind.IMPL) {
+            return this.parse_impl();
+        }
+
+        if (this.kind_of(token) == TokenKind.MACRO) {
+            return this.parse_macro_declaration();
+        }
+
+        if (this.kind_of(token) == TokenKind.CONSTEXPR || this.kind_of(token) == TokenKind.CONSTEVAL) {
+            if (this.kind_of(this.peek_token(1)) == TokenKind.STRUCT) {
+                this.advance();
+                return this.parse_struct();
+            }
+            i32 end = this.scan_type_end(1);
+            if (end >= 0 && this.kind_of(this.peek_token(end)) == TokenKind.IDENTIFIER && this.kind_of(this.peek_token(end + 1)) == TokenKind.EQUAL) {
+                return this.parse_compile_time_var();
+            }
+        }
+
+        return this.parse_function(false);
+    }
+
+    Node* parse_compile_time_var() {
+        i32 start = this.current();
+        this.advance();
+        Node* node = Node.create(NodeKind.STATIC_VAR, start);
+        node.set_op(1);
+        node.set_type(this.parse_type());
+        i32 name = this.expect(TokenKind.IDENTIFIER, "expected constant name");
+        node.set_text(this.copy_of(name));
+        this.expect(TokenKind.EQUAL, "expected '=' in constant declaration");
+        node.set_first(this.parse_expression());
+        this.expect(TokenKind.SEMICOLON, "expected ';' after constant");
+        return node;
+    }
+
+    Node* parse_namespace() {
+        i32 start = this.advance();
+        Node* node = Node.create_list(NodeKind.NAMESPACE_DECL, start);
+        node.set_text(this.qualified_name());
+        if (this.match(TokenKind.SEMICOLON)) {
+            while (!this.at_end()) {
+                this.add_declaration(node, this.parse_declaration());
+            }
+            return node;
+        }
+
+        this.expect(TokenKind.LBRACE, "expected ';' or '{' after namespace name");
+        while (!this.check(TokenKind.RBRACE) && !this.at_end()) {
+            this.add_declaration(node, this.parse_declaration());
+        }
+        this.expect(TokenKind.RBRACE, "expected '}' to close namespace");
+        return node;
+    }
+
+    Node* parse_extern() {
+        i32 start = this.advance();
+        Node* group = Node.create_list(NodeKind.NAMESPACE_DECL, start);
+        group.set_text("");
+        group.set_flag(true);
+
+        if (this.check(TokenKind.STRING_LITERAL)) {
+            this.advance();
+        }
+
+        if (this.match(TokenKind.LBRACE)) {
+            while (!this.check(TokenKind.RBRACE) && !this.at_end()) {
+                this.skip_attributes();
+                group.add(this.parse_extern_function());
+            }
+            this.expect(TokenKind.RBRACE, "expected '}' to close extern block");
+            return group;
+        }
+
+        group.add(this.parse_extern_function());
+        return group;
+    }
+
+    Node* parse_extern_function() {
+        i32 start = this.current();
+        Node* node = Node.create_list(NodeKind.EXTERN_FUNCTION, start);
+        node.set_type(this.parse_type());
+        i32 name = this.expect(TokenKind.IDENTIFIER, "expected extern function name");
+        node.set_text(this.copy_of(name));
+        this.expect(TokenKind.LPAREN, "expected '(' after function name");
+        this.parse_parameters(node);
+        this.expect(TokenKind.RPAREN, "expected ')' after parameters");
+        this.expect(TokenKind.SEMICOLON, "expected ';' after extern function");
+        return node;
+    }
+
+    void parse_parameters(Node* owner) {
+        if (this.check(TokenKind.RPAREN)) {
+            return;
+        }
+        while (!this.at_end()) {
+            if (this.check(TokenKind.DOT_DOT_DOT)) {
+                this.advance();
+                owner.set_variadic(true);
+                if (this.check(TokenKind.IDENTIFIER)) {
+                    this.advance();
+                }
+                break;
+            }
+
+            i32 start = this.current();
+            Node* parameter = Node.create(NodeKind.PARAMETER, start);
+            if (this.match(TokenKind.MUT)) {
+                parameter.set_flag(true);
+            }
+            parameter.set_type(this.parse_type());
+            i32 name = this.expect(TokenKind.IDENTIFIER, "expected parameter name");
+            parameter.set_text(this.copy_of(name));
+            if (this.match(TokenKind.MUT)) {
+                parameter.set_flag(true);
+            }
+            owner.add(parameter);
+
+            if (!this.match(TokenKind.COMMA)) {
+                break;
+            }
+        }
+    }
+
+    Node* parse_function(bool allowConstructor) {
+        mut bool is_static = false;
+        mut bool is_async = false;
+        mut i32 compile_time = 0;
+        while (this.check(TokenKind.PUBLIC) || this.check(TokenKind.PRIVATE) || this.check(TokenKind.STATIC) || this.check(TokenKind.ASYNC)
+            || this.check(TokenKind.CONSTEXPR) || this.check(TokenKind.CONSTEVAL)) {
+            i32 modifier = this.advance();
+            if (this.kind_of(modifier) == TokenKind.STATIC) {
+                is_static = true;
+            }
+            if (this.kind_of(modifier) == TokenKind.ASYNC) {
+                is_async = true;
+            }
+            if (this.kind_of(modifier) == TokenKind.CONSTEXPR) {
+                compile_time = 2;
+            }
+            if (this.kind_of(modifier) == TokenKind.CONSTEVAL) {
+                compile_time = 4;
+            }
+        }
+
+        if (is_async && compile_time != 0) {
+            this.fail("a constexpr or consteval function cannot be async");
+            return null;
+        }
+
+        i32 start = this.current();
+        Node* function = Node.create_list(NodeKind.FUNCTION, start);
+        function.set_flag(is_static);
+        if (is_async) {
+            function.set_op(1);
+        } else if (compile_time != 0) {
+            function.set_op(compile_time);
+        }
+        function.set_type(this.parse_type());
+        i32 name = this.expect(TokenKind.IDENTIFIER, "expected function name");
+        function.set_text(this.copy_of(name));
+        if (this.check(TokenKind.LESS)) {
+            function.set_generics(this.parse_generic_params());
+        }
+        this.expect(TokenKind.LPAREN, "expected '(' after function name");
+        this.parse_parameters(function);
+        this.expect(TokenKind.RPAREN, "expected ')' after parameters");
+        if (this.check(TokenKind.WHERE)) {
+            GenericParams* constraints = function.generics();
+            if (constraints == null) {
+                this.fail("'where' needs a generic function");
+                return function;
+            }
+            this.parse_where_clauses(constraints);
+        }
+
+        if (this.check(TokenKind.THROWS) || this.check(TokenKind.REQUIRE) || this.check(TokenKind.ENSURE)) {
+            this.fail("throws and contracts are not supported yet");
+            return function;
+        }
+
+        if (this.match(TokenKind.ARROW)) {
+            i32 arrow = this.current();
+            Node* body = Node.create_list(NodeKind.BLOCK, arrow);
+            Node* ret = Node.create(NodeKind.RETURN, arrow);
+            ret.set_first(this.parse_expression());
+            body.add(ret);
+            this.expect(TokenKind.SEMICOLON, "expected ';' after expression body");
+            function.set_first(body);
+            return function;
+        }
+
+        function.set_first(this.parse_block());
+        return function;
+    }
+
+    Node* parse_operator(bool with_body) {
+        i32 start = this.advance();
+        Node* function = Node.create_list(NodeKind.FUNCTION, start);
+        function.set_flag(true);
+        i32 symbol = this.advance();
+        ByteBuffer* name = ByteBuffer.create();
+        name.append("operator");
+        name.append(TokenKind.text(this.kind_of(symbol)));
+        function.set_text(name.cstr());
+        this.expect(TokenKind.LPAREN, "expected '(' after the operator");
+        this.parse_parameters(function);
+        this.expect(TokenKind.RPAREN, "expected ')' after parameters");
+        this.expect(TokenKind.THIN_ARROW, "expected '->' and the return type of the operator");
+        function.set_type(this.parse_type());
+        if (with_body) {
+            function.set_first(this.parse_block());
+        } else {
+            this.expect(TokenKind.SEMICOLON, "expected ';' after the operator signature");
+        }
+        return function;
+    }
+
+    Node* parse_static_var() {
+        i32 start = this.current();
+        bool has_unsafe = this.match(TokenKind.UNSAFE);
+        Node* node = Node.create(NodeKind.STATIC_VAR, start);
+        i32 after_static = this.peek_token(1);
+        if (!has_unsafe && this.kind_of(after_static) == TokenKind.MUT) {
+            this.fail("'static mut' requires 'unsafe'");
+            return node;
+        }
+        this.expect(TokenKind.STATIC, "expected 'static'");
+        bool is_mutable = this.match(TokenKind.MUT);
+        if (has_unsafe && !is_mutable) {
+            this.fail("'unsafe' is only valid on 'static mut'");
+            return node;
+        }
+        node.set_flag(is_mutable);
+        node.set_type(this.parse_type());
+        i32 name = this.expect(TokenKind.IDENTIFIER, "expected static variable name");
+        node.set_text(this.copy_of(name));
+        this.expect(TokenKind.EQUAL, "expected '=' in static variable declaration");
+        node.set_first(this.parse_expression());
+        this.expect(TokenKind.SEMICOLON, "expected ';' after static variable");
+        return node;
+    }
+}

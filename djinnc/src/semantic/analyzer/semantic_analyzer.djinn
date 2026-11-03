@@ -1,0 +1,85 @@
+namespace djinnc;
+
+struct SemanticAnalyzer {
+    Diagnostics* diagnostics;
+
+    SymbolTable* symbols;
+
+    u32 scope;
+
+    bool methods_ready;
+
+    PointerList* pending;
+
+    public static SemanticAnalyzer* create(Diagnostics* diagnostics, SymbolTable* symbols) {
+        SemanticAnalyzer* analyzer = (SemanticAnalyzer*)Memory.zalloc(sizeof(SemanticAnalyzer));
+        analyzer.diagnostics = diagnostics;
+        analyzer.symbols = symbols;
+        analyzer.pending = PointerList.create();
+        symbols.analyzer = analyzer;
+        return analyzer;
+    }
+
+    public bool collect(Node* program) {
+        this.collect_interfaces(program);
+        this.collect_structs(program);
+        this.collect_template_impls(program);
+        this.resolve_structs();
+        this.collect_functions(program);
+        this.methods_ready = true;
+        this.verify_conformance(program);
+        this.check_pending_bounds();
+        Diagnostics* diagnostics = this.diagnostics;
+        return !diagnostics.failed();
+    }
+
+    void error(Node* at, i8* message) {
+        Diagnostics* diagnostics = this.diagnostics;
+        diagnostics.error_in(at.file_name(), at.line(), at.column(), message);
+    }
+
+    u32 enter(Node* namespace_node) {
+        u32 saved = this.scope;
+        if (!namespace_node.flag()) {
+            SymbolTable* symbols = this.symbols;
+            this.scope = symbols.enter_namespace(saved, namespace_node.text_atom());
+        }
+        return saved;
+    }
+
+    i8* declared_name(Node* declaration, u32 namespace_id) {
+        SymbolTable* symbols = this.symbols;
+        i8* prefix = symbols.namespace_prefix(namespace_id);
+        if (prefix == null) {
+            return declaration.text();
+        }
+        ByteBuffer* name = ByteBuffer.create();
+        name.append(prefix);
+        name.append("::");
+        name.append(declaration.text());
+        return name.cstr();
+    }
+
+    bool is_nominal(Node* declaration) {
+        TypeRef* base = declaration.type();
+        if (base == null) {
+            return true;
+        }
+        if (base.kind != TypeKind.NAMED) {
+            return false;
+        }
+        SymbolTable* symbols = this.symbols;
+        return symbols.find_interface(base.full_atom, base.name_atom, this.scope) != null;
+    }
+
+    u32 resolve(TypeRef* ref, Node* at) {
+        SymbolTable* symbols = this.symbols;
+        symbols.blame = at;
+        u32 resolved = symbols.resolve_type(ref, this.scope);
+        if (resolved == 0) {
+            this.error(at, "unknown type");
+            return Types.i32_type();
+        }
+        return resolved;
+    }
+}

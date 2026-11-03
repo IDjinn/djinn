@@ -1,0 +1,946 @@
+namespace djinnc;
+
+struct ConstEval {
+    const i32 SIGNED = 256;
+    const i32 FLOAT = 512;
+    const i32 INTEGER = 1024;
+    const i32 KNOWN = 2048;
+    const i32 NUMERIC = 1536;
+    const i32 STEP_LIMIT = 1000000;
+    const i32 DEPTH_LIMIT = 512;
+    const i32 FRAME_CAPACITY = 16384;
+    const i32 SHAPE_CAPACITY = 8192;
+
+    TypeChecker* checker;
+    i64* ints;
+    f64* floats;
+    i32* shapes;
+    i32 base;
+    i32 top;
+    i32 depth;
+    i32 steps;
+    i32 nesting;
+    bool in_frame;
+    i32 return_shape;
+    i64 ri;
+    f64 rf;
+    i8* reason;
+    Node* blame;
+    i8* failure;
+    Node* failure_node;
+    i64 evaluations;
+    i64 total_steps;
+
+    public static ConstEval* create(TypeChecker* checker) {
+        Arena* arena = Memory.arena();
+        ConstEval* evaluator = (ConstEval*)arena.zalloc(sizeof(ConstEval), 8);
+        evaluator.checker = checker;
+        evaluator.shapes = (i32*)arena.zalloc((u64)ConstEval.SHAPE_CAPACITY * 4, 4);
+        return evaluator;
+    }
+
+    public static i32 kind_of(i32 op) {
+        if ((op & 4) != 0) {
+            return 2;
+        }
+        if ((op & 2) != 0) {
+            return 1;
+        }
+        return 0;
+    }
+
+    void ensure_storage() {
+        if (this.ints != null) {
+            return;
+        }
+        Arena* arena = Memory.arena();
+        this.ints = (i64*)arena.zalloc((u64)ConstEval.FRAME_CAPACITY * 8, 8);
+        this.floats = (f64*)arena.zalloc((u64)ConstEval.FRAME_CAPACITY * 8, 8);
+    }
+
+    static i32 describe(u32 type) {
+        mut i32 shape = ConstEval.KNOWN;
+        if (Types.is_integer(type)) {
+            shape = shape | ConstEval.INTEGER | (i32)Types.bits(type);
+            if (Types.is_signed(type)) {
+                shape = shape | ConstEval.SIGNED;
+            }
+        } else if (Types.is_float(type)) {
+            shape = shape | ConstEval.FLOAT | (i32)Types.bits(type);
+        }
+        return shape;
+    }
+
+    i32 shape_of(u32 type) {
+        if (type < (u32)ConstEval.SHAPE_CAPACITY) {
+            i32 cached = this.shapes[type];
+            if (cached != 0) {
+                return cached;
+            }
+            i32 shape = ConstEval.describe(type);
+            this.shapes[type] = shape;
+            return shape;
+        }
+        return ConstEval.describe(type);
+    }
+
+    static i64 wrap(i64 value, i32 shape) {
+        i32 bits = shape & 255;
+        if (bits >= 64) {
+            return value;
+        }
+        if (bits == 1) {
+            if (value != 0) {
+                return 1;
+            }
+            return 0;
+        }
+        i64 modulus = (i64)1 << bits;
+        i64 low = value & (modulus - 1);
+        if ((shape & ConstEval.SIGNED) != 0 && (low & (modulus >> 1)) != 0) {
+            return low - modulus;
+        }
+        return low;
+    }
+
+    static f64 int_to_float(i64 value, i32 shape) {
+        if ((shape & 255) == 64 && (shape & ConstEval.SIGNED) == 0) {
+            return (f64)(u64)value;
+        }
+        return (f64)value;
+    }
+
+    void convert(i32 from, i32 to) {
+        if (from == to) {
+            return;
+        }
+        bool from_float = (from & ConstEval.FLOAT) != 0;
+        if ((to & ConstEval.FLOAT) != 0) {
+            if (!from_float) {
+                this.rf = ConstEval.int_to_float(this.ri, from);
+            }
+            if ((to & 255) == 32) {
+                this.rf = (f64)(f32)this.rf;
+            }
+            return;
+        }
+        if (from_float) {
+            if ((to & 255) == 1) {
+                if (this.rf != 0.0) {
+                    this.ri = 1;
+                } else {
+                    this.ri = 0;
+                }
+                return;
+            }
+            this.ri = (i64)this.rf;
+        }
+        this.ri = ConstEval.wrap(this.ri, to);
+    }
+
+    bool fail(Node* at, i8* reason) {
+        if (this.reason == null) {
+            this.reason = reason;
+            this.blame = at;
+        }
+        return false;
+    }
+
+    bool tick(Node* at) {
+        this.steps = this.steps + 1;
+        if (this.steps > ConstEval.STEP_LIMIT) {
+            return this.fail(at, "evaluation step limit exceeded");
+        }
+        return true;
+    }
+
+    public bool evaluate(Node* expression, u32 own_type, u32 target_type) {
+        this.ensure_storage();
+        i32 saved_base = this.base;
+        i32 saved_top = this.top;
+        bool saved_frame = this.in_frame;
+        i32 saved_return = this.return_shape;
+        i8* saved_reason = this.reason;
+        Node* saved_blame = this.blame;
+        if (this.nesting == 0) {
+            this.steps = 0;
+        }
+        this.nesting = this.nesting + 1;
+        this.base = this.top;
+        this.in_frame = false;
+        this.reason = null;
+        this.blame = null;
+
+        i32 own = this.shape_of(own_type);
+        i32 target = this.shape_of(target_type);
+        mut bool ok = false;
+        if ((own & ConstEval.NUMERIC) == 0 || (target & ConstEval.NUMERIC) == 0) {
+            ok = this.fail(expression, "only integers, floats, booleans and enums are supported");
+        } else {
+            ok = this.eval(expression);
+            if (ok) {
+                this.convert(own, target);
+            }
+        }
+
+        this.failure = this.reason;
+        this.failure_node = this.blame;
+        if (!ok && this.failure == null) {
+            this.failure = "not a constant expression";
+        }
+        this.evaluations = this.evaluations + 1;
+        this.nesting = this.nesting - 1;
+        if (this.nesting == 0) {
+            this.total_steps = this.total_steps + (i64)this.steps;
+        }
+        this.base = saved_base;
+        this.top = saved_top;
+        this.in_frame = saved_frame;
+        this.return_shape = saved_return;
+        this.reason = saved_reason;
+        this.blame = saved_blame;
+        return ok;
+    }
+
+    public void fold(Node* node, u32 type) {
+        i32 shape = this.shape_of(type);
+        i64 whole = this.ri;
+        f64 real = this.rf;
+        node.flags = (u16)0;
+        if ((shape & ConstEval.FLOAT) != 0) {
+            node.kind = (u16)NodeKind.FLOAT_CONST;
+            node.set_int_value(ConstBits.of_float(real));
+        } else if ((shape & 255) == 1) {
+            node.kind = (u16)NodeKind.BOOL_LITERAL;
+            node.set_int_value(whole);
+        } else {
+            node.kind = (u16)NodeKind.INT_LITERAL;
+            node.set_int_value(whole);
+        }
+        node.set_value_type(type);
+    }
+
+    bool eval(Node* node) {
+        i32 kind = node.kind;
+        if (kind == NodeKind.INT_LITERAL) {
+            this.ri = node.int_value();
+            this.rf = (f64)this.ri;
+            return true;
+        }
+        if (kind == NodeKind.IDENTIFIER) {
+            return this.eval_identifier(node);
+        }
+        if (kind == NodeKind.BINARY) {
+            return this.eval_binary(node);
+        }
+        if (kind == NodeKind.CALL) {
+            return this.eval_call(node);
+        }
+        if (kind == NodeKind.UNARY) {
+            return this.eval_unary(node);
+        }
+        if (kind == NodeKind.BOOL_LITERAL) {
+            this.ri = node.int_value();
+            this.rf = (f64)this.ri;
+            return true;
+        }
+        if (kind == NodeKind.FLOAT_LITERAL) {
+            this.rf = node.float_value();
+            if ((this.shape_of(node.value_type()) & 255) == 32) {
+                this.rf = (f64)(f32)this.rf;
+            }
+            return true;
+        }
+        if (kind == NodeKind.FLOAT_CONST) {
+            this.rf = ConstBits.to_float(node.int_value());
+            return true;
+        }
+        if (kind == NodeKind.CAST) {
+            return this.eval_cast(node);
+        }
+        if (kind == NodeKind.ASSIGN) {
+            return this.eval_assign(node);
+        }
+        if (kind == NodeKind.FIELD_ACCESS) {
+            return this.eval_member(node);
+        }
+        return this.fail(node, "expression cannot be evaluated at compile time");
+    }
+
+    bool eval_condition(Node* node) {
+        if (!this.eval(node)) {
+            return false;
+        }
+        i32 shape = this.shape_of(node.value_type());
+        mut bool truth = false;
+        if ((shape & ConstEval.FLOAT) != 0) {
+            if (this.rf != 0.0) {
+                truth = true;
+            }
+        } else {
+            truth = this.ri != 0;
+        }
+        if (truth) {
+            this.ri = 1;
+        } else {
+            this.ri = 0;
+        }
+        return true;
+    }
+
+    bool eval_identifier(Node* node) {
+        i32 symbol_kind = node.symbol_kind();
+        if (symbol_kind == SymbolKind.LOCAL) {
+            LocalVariable* variable = (LocalVariable*)node.symbol();
+            if (variable.const_state == 2) {
+                this.ri = variable.const_int;
+                this.rf = variable.const_float;
+                return true;
+            }
+            if (this.in_frame && variable.eval_slot != 0) {
+                i32 index = this.base + variable.eval_slot - 1;
+                this.ri = this.ints[index];
+                this.rf = this.floats[index];
+                return true;
+            }
+            return this.fail(node, "variable is not a compile-time constant");
+        }
+        if (symbol_kind == SymbolKind.GLOBAL) {
+            LocalVariable* variable = (LocalVariable*)node.symbol();
+            if (variable.const_state == 0 && variable.node != null) {
+                Node* declaration = variable.node;
+                if (declaration.op() != 0) {
+                    TypeChecker* checker = this.checker;
+                    checker.ensure_global(variable);
+                }
+            }
+            if (variable.const_state == 2) {
+                this.ri = variable.const_int;
+                this.rf = variable.const_float;
+                return true;
+            }
+            if (variable.const_state == 1) {
+                return this.fail(node, "constant depends on itself");
+            }
+            return this.fail(node, "global is not a compile-time constant");
+        }
+        return this.fail(node, "name is not a compile-time constant");
+    }
+
+    bool eval_member(Node* node) {
+        if (node.symbol_kind() != SymbolKind.CONSTANT) {
+            return this.fail(node, "field access cannot be evaluated at compile time");
+        }
+        Node* constant = (Node*)node.symbol();
+        return this.eval(constant.first());
+    }
+
+    bool eval_cast(Node* node) {
+        Node* operand = node.first();
+        if (!this.eval(operand)) {
+            return false;
+        }
+        i32 from = this.shape_of(operand.value_type());
+        i32 to = this.shape_of(node.value_type());
+        if ((from & ConstEval.NUMERIC) == 0 || (to & ConstEval.NUMERIC) == 0) {
+            return this.fail(node, "only numeric casts can be evaluated at compile time");
+        }
+        this.convert(from, to);
+        return true;
+    }
+
+    bool eval_unary(Node* node) {
+        i32 op = node.op();
+        Node* operand = node.first();
+        if (op == TokenKind.BANG) {
+            if (!this.eval_condition(operand)) {
+                return false;
+            }
+            this.ri = 1 - this.ri;
+            return true;
+        }
+        if (op != TokenKind.MINUS && op != TokenKind.TILDE) {
+            return this.fail(node, "operator cannot be evaluated at compile time");
+        }
+        if (!this.eval(operand)) {
+            return false;
+        }
+        i32 shape = this.shape_of(node.value_type());
+        if ((shape & ConstEval.NUMERIC) == 0) {
+            return this.fail(node, "operand is not a number");
+        }
+        if (op == TokenKind.MINUS) {
+            if ((shape & ConstEval.FLOAT) != 0) {
+                this.rf = 0.0 - this.rf;
+            } else {
+                this.ri = ConstEval.wrap(0 - this.ri, shape);
+            }
+            return true;
+        }
+        if ((shape & ConstEval.INTEGER) == 0) {
+            return this.fail(node, "operand is not an integer");
+        }
+        this.ri = ConstEval.wrap(this.ri ^ (0 - 1), shape);
+        return true;
+    }
+
+    bool eval_binary(Node* node) {
+        i32 op = node.op();
+        Node* left = node.first();
+        Node* right = node.second();
+
+        if (op == TokenKind.AND_AND) {
+            if (!this.eval_condition(left)) {
+                return false;
+            }
+            if (this.ri == 0) {
+                return true;
+            }
+            return this.eval_condition(right);
+        }
+        if (op == TokenKind.OR_OR) {
+            if (!this.eval_condition(left)) {
+                return false;
+            }
+            if (this.ri != 0) {
+                return true;
+            }
+            return this.eval_condition(right);
+        }
+
+        i32 left_shape = this.shape_of(left.value_type());
+        i32 right_shape = this.shape_of(right.value_type());
+        if ((left_shape & ConstEval.NUMERIC) == 0 || (right_shape & ConstEval.NUMERIC) == 0) {
+            return this.fail(node, "operands are not numbers");
+        }
+        bool use_float = ((left_shape | right_shape) & ConstEval.FLOAT) != 0;
+
+        if (!this.eval(left)) {
+            return false;
+        }
+        i64 a = this.ri;
+        mut f64 af = this.rf;
+        if (use_float && (left_shape & ConstEval.FLOAT) == 0) {
+            af = ConstEval.int_to_float(a, left_shape);
+        }
+        if (!this.eval(right)) {
+            return false;
+        }
+        i64 b = this.ri;
+        mut f64 bf = this.rf;
+        if (use_float && (right_shape & ConstEval.FLOAT) == 0) {
+            bf = ConstEval.int_to_float(b, right_shape);
+        }
+
+        if (use_float) {
+            return this.float_operation(node, op, af, bf);
+        }
+        return this.int_operation(node, op, a, b, left_shape, right_shape);
+    }
+
+    bool float_operation(Node* node, i32 op, f64 a, f64 b) {
+        if (op == TokenKind.EQUAL_EQUAL) {
+            this.ri = ConstEval.flag(a == b);
+            return true;
+        }
+        if (op == TokenKind.BANG_EQUAL) {
+            this.ri = ConstEval.flag(a != b);
+            return true;
+        }
+        if (op == TokenKind.LESS) {
+            this.ri = ConstEval.flag(a < b);
+            return true;
+        }
+        if (op == TokenKind.LESS_EQUAL) {
+            this.ri = ConstEval.flag(a <= b);
+            return true;
+        }
+        if (op == TokenKind.GREATER) {
+            this.ri = ConstEval.flag(a > b);
+            return true;
+        }
+        if (op == TokenKind.GREATER_EQUAL) {
+            this.ri = ConstEval.flag(a >= b);
+            return true;
+        }
+
+        mut f64 value = 0.0;
+        if (op == TokenKind.PLUS) {
+            value = a + b;
+        } else if (op == TokenKind.MINUS) {
+            value = a - b;
+        } else if (op == TokenKind.STAR) {
+            value = a * b;
+        } else if (op == TokenKind.SLASH) {
+            if (b == 0.0) {
+                return this.fail(node, "division by zero");
+            }
+            value = a / b;
+        } else {
+            return this.fail(node, "operator cannot be evaluated on floating point values");
+        }
+        if ((this.shape_of(node.value_type()) & 255) == 32) {
+            value = (f64)(f32)value;
+        }
+        this.rf = value;
+        return true;
+    }
+
+    static i64 flag(bool value) {
+        if (value) {
+            return 1;
+        }
+        return 0;
+    }
+
+    static bool is_wide_unsigned(i32 shape) {
+        return (shape & 255) == 64 && (shape & ConstEval.SIGNED) == 0;
+    }
+
+    bool int_operation(Node* node, i32 op, i64 a, i64 b, i32 left_shape, i32 right_shape) {
+        if (TypeChecker.is_comparison(op)) {
+            bool unsigned_compare = ConstEval.is_wide_unsigned(left_shape) || ConstEval.is_wide_unsigned(right_shape);
+            this.ri = ConstEval.compare(op, a, b, unsigned_compare);
+            return true;
+        }
+
+        i32 shape = this.shape_of(node.value_type());
+        bool wide_unsigned = ConstEval.is_wide_unsigned(shape);
+        mut i64 value = 0;
+        if (op == TokenKind.PLUS) {
+            value = a + b;
+        } else if (op == TokenKind.MINUS) {
+            value = a - b;
+        } else if (op == TokenKind.STAR) {
+            value = a * b;
+        } else if (op == TokenKind.SLASH || op == TokenKind.PERCENT) {
+            if (b == 0) {
+                return this.fail(node, "division by zero");
+            }
+            if (wide_unsigned) {
+                if (op == TokenKind.SLASH) {
+                    value = (i64)((u64)a / (u64)b);
+                } else {
+                    value = (i64)((u64)a % (u64)b);
+                }
+            } else if (b == 0 - 1) {
+                if (op == TokenKind.SLASH) {
+                    value = 0 - a;
+                }
+            } else if (op == TokenKind.SLASH) {
+                value = a / b;
+            } else {
+                value = a % b;
+            }
+        } else if (op == TokenKind.AMPERSAND) {
+            value = a & b;
+        } else if (op == TokenKind.PIPE) {
+            value = a | b;
+        } else if (op == TokenKind.CARET) {
+            value = a ^ b;
+        } else if (op == TokenKind.LESS_LESS || op == TokenKind.GREATER_GREATER) {
+            if (b < 0 || b >= (i64)(shape & 255)) {
+                return this.fail(node, "shift amount is out of range");
+            }
+            if (op == TokenKind.LESS_LESS) {
+                value = a << b;
+            } else if (wide_unsigned) {
+                value = (i64)((u64)a >> b);
+            } else {
+                value = a >> b;
+            }
+        } else {
+            return this.fail(node, "operator cannot be evaluated at compile time");
+        }
+        this.ri = ConstEval.wrap(value, shape);
+        return true;
+    }
+
+    static i64 compare(i32 op, i64 a, i64 b, bool unsigned_compare) {
+        if (op == TokenKind.EQUAL_EQUAL) {
+            return ConstEval.flag(a == b);
+        }
+        if (op == TokenKind.BANG_EQUAL) {
+            return ConstEval.flag(a != b);
+        }
+        if (unsigned_compare) {
+            u64 x = (u64)a;
+            u64 y = (u64)b;
+            if (op == TokenKind.LESS) {
+                return ConstEval.flag(x < y);
+            }
+            if (op == TokenKind.LESS_EQUAL) {
+                return ConstEval.flag(x <= y);
+            }
+            if (op == TokenKind.GREATER) {
+                return ConstEval.flag(x > y);
+            }
+            return ConstEval.flag(x >= y);
+        }
+        if (op == TokenKind.LESS) {
+            return ConstEval.flag(a < b);
+        }
+        if (op == TokenKind.LESS_EQUAL) {
+            return ConstEval.flag(a <= b);
+        }
+        if (op == TokenKind.GREATER) {
+            return ConstEval.flag(a > b);
+        }
+        return ConstEval.flag(a >= b);
+    }
+
+    bool eval_assign(Node* node) {
+        Node* target = node.first();
+        if (target.kind != NodeKind.IDENTIFIER || target.symbol_kind() != SymbolKind.LOCAL) {
+            return this.fail(node, "only local variables can be assigned at compile time");
+        }
+        LocalVariable* variable = (LocalVariable*)target.symbol();
+        if (!this.in_frame || variable.eval_slot == 0 || variable.const_state == 2) {
+            return this.fail(node, "variable cannot be assigned at compile time");
+        }
+        Node* value = node.second();
+        if (!this.eval(value)) {
+            return false;
+        }
+        i32 shape = this.shape_of(variable.type);
+        this.convert(this.shape_of(value.value_type()), shape);
+        i32 index = this.base + variable.eval_slot - 1;
+        this.ints[index] = this.ri;
+        this.floats[index] = this.rf;
+        return true;
+    }
+
+    bool prepare(Node* at, FunctionInfo* info) {
+        if (info.eval_ready) {
+            return true;
+        }
+        TypeChecker* checker = this.checker;
+        if (info.check_state == 0) {
+            checker.ensure_checked(info);
+        }
+        if (info.check_state != 2) {
+            return this.fail(at, "function is still being checked");
+        }
+        Node* declaration = info.node;
+        for (mut i32 i = 0; i < declaration.count(); i = i + 1) {
+            Node* parameter = declaration.child(i);
+            LocalVariable* variable = (LocalVariable*)parameter.symbol();
+            variable.eval_slot = i + 1;
+        }
+        info.eval_slots = declaration.count();
+        this.number_locals(declaration.first(), info);
+        info.eval_ready = true;
+        return true;
+    }
+
+    void number_locals(Node* node, FunctionInfo* info) {
+        i32 kind = node.kind;
+        if (kind == NodeKind.BLOCK) {
+            for (mut i32 i = 0; i < node.count(); i = i + 1) {
+                this.number_locals(node.child(i), info);
+            }
+        } else if (kind == NodeKind.VAR_DECL) {
+            LocalVariable* variable = (LocalVariable*)node.symbol();
+            if (variable != null) {
+                info.eval_slots = info.eval_slots + 1;
+                variable.eval_slot = info.eval_slots;
+            }
+        } else if (kind == NodeKind.IF) {
+            this.number_locals(node.second(), info);
+            if (node.third() != null) {
+                this.number_locals(node.third(), info);
+            }
+        } else if (kind == NodeKind.WHILE || kind == NodeKind.DO_WHILE) {
+            this.number_locals(node.second(), info);
+        } else if (kind == NodeKind.FOR) {
+            if (node.first() != null) {
+                this.number_locals(node.first(), info);
+            }
+            this.number_locals(node.fourth(), info);
+        } else if (kind == NodeKind.SWITCH) {
+            for (mut i32 i = 0; i < node.count(); i = i + 1) {
+                Node* arm = node.child(i);
+                for (mut i32 j = 0; j < arm.count(); j = j + 1) {
+                    this.number_locals(arm.child(j), info);
+                }
+            }
+        }
+    }
+
+    bool eval_call(Node* node) {
+        Node* callee = node.first();
+        i32 symbol_kind = callee.symbol_kind();
+        if (symbol_kind != SymbolKind.FUNCTION && symbol_kind != SymbolKind.STATIC_METHOD) {
+            return this.fail(node, "only calls to constexpr functions can be evaluated");
+        }
+        FunctionInfo* info = (FunctionInfo*)callee.symbol();
+        if (info == null || info.const_kind == 0) {
+            return this.fail(node, "call to a function that is not constexpr or consteval");
+        }
+        if (info.is_instance || info.is_async || info.is_extern || info.is_variadic || info.is_template) {
+            return this.fail(node, "this function cannot be evaluated at compile time");
+        }
+        if (!this.prepare(node, info)) {
+            return false;
+        }
+        if (this.depth >= ConstEval.DEPTH_LIMIT) {
+            return this.fail(node, "compile-time recursion is too deep");
+        }
+        Node* declaration = info.node;
+        i32 count = declaration.count();
+        if (node.count() != count) {
+            return this.fail(node, "wrong number of arguments");
+        }
+        i32 callee_return = this.shape_of(info.return_type);
+        if (!Types.is_void(info.return_type) && (callee_return & ConstEval.NUMERIC) == 0) {
+            return this.fail(node, "the return type cannot be evaluated at compile time");
+        }
+        if (!this.tick(node)) {
+            return false;
+        }
+
+        i32 frame_base = this.top;
+        i32 frame_top = frame_base + info.eval_slots;
+        if (frame_top > ConstEval.FRAME_CAPACITY) {
+            return this.fail(node, "compile-time stack overflow");
+        }
+        this.top = frame_top;
+
+        IdList* param_types = info.param_types;
+        for (mut i32 i = 0; i < count; i = i + 1) {
+            Node* argument = node.child(i);
+            i32 param_shape = this.shape_of(param_types.get(i));
+            if ((param_shape & ConstEval.NUMERIC) == 0) {
+                this.top = frame_base;
+                return this.fail(argument, "parameter type cannot be evaluated at compile time");
+            }
+            if (!this.eval(argument)) {
+                this.top = frame_base;
+                return false;
+            }
+            this.convert(this.shape_of(argument.value_type()), param_shape);
+            this.ints[frame_base + i] = this.ri;
+            this.floats[frame_base + i] = this.rf;
+        }
+
+        i32 saved_base = this.base;
+        bool saved_frame = this.in_frame;
+        i32 saved_return = this.return_shape;
+        this.base = frame_base;
+        this.in_frame = true;
+        this.return_shape = callee_return;
+        this.depth = this.depth + 1;
+        i32 status = this.exec(declaration.first());
+        this.depth = this.depth - 1;
+        this.base = saved_base;
+        this.in_frame = saved_frame;
+        this.return_shape = saved_return;
+        this.top = frame_base;
+
+        if (status == EvalStatus.FAILED) {
+            return false;
+        }
+        if (status != EvalStatus.RETURN && !Types.is_void(info.return_type)) {
+            return this.fail(node, "function ended without returning a value");
+        }
+        return true;
+    }
+
+    i32 exec(Node* node) {
+        i32 kind = node.kind;
+
+        if (kind == NodeKind.BLOCK) {
+            for (mut i32 i = 0; i < node.count(); i = i + 1) {
+                i32 status = this.exec(node.child(i));
+                if (status != EvalStatus.NORMAL) {
+                    return status;
+                }
+            }
+            return EvalStatus.NORMAL;
+        }
+        if (kind == NodeKind.EXPR_STMT) {
+            if (!this.tick(node)) {
+                return EvalStatus.FAILED;
+            }
+            if (this.eval(node.first())) {
+                return EvalStatus.NORMAL;
+            }
+            return EvalStatus.FAILED;
+        }
+        if (kind == NodeKind.RETURN) {
+            if (node.first() != null) {
+                Node* value = node.first();
+                if (!this.eval(value)) {
+                    return EvalStatus.FAILED;
+                }
+                this.convert(this.shape_of(value.value_type()), this.return_shape);
+            }
+            return EvalStatus.RETURN;
+        }
+        if (kind == NodeKind.VAR_DECL) {
+            return this.exec_declaration(node);
+        }
+        if (kind == NodeKind.IF) {
+            return this.exec_if(node);
+        }
+        if (kind == NodeKind.WHILE || kind == NodeKind.DO_WHILE || kind == NodeKind.FOR) {
+            return this.exec_loop(node);
+        }
+        if (kind == NodeKind.BREAK) {
+            return EvalStatus.BREAK;
+        }
+        if (kind == NodeKind.CONTINUE) {
+            return EvalStatus.CONTINUE;
+        }
+        if (kind == NodeKind.SWITCH) {
+            return this.exec_switch(node);
+        }
+        this.fail(node, "statement cannot be evaluated at compile time");
+        return EvalStatus.FAILED;
+    }
+
+    i32 exec_declaration(Node* node) {
+        LocalVariable* variable = (LocalVariable*)node.symbol();
+        if (variable == null || variable.eval_slot == 0) {
+            this.fail(node, "variable cannot be evaluated at compile time");
+            return EvalStatus.FAILED;
+        }
+        if (variable.const_state == 2) {
+            return EvalStatus.NORMAL;
+        }
+        i32 shape = this.shape_of(variable.type);
+        if ((shape & ConstEval.NUMERIC) == 0) {
+            this.fail(node, "variable type cannot be evaluated at compile time");
+            return EvalStatus.FAILED;
+        }
+        i32 index = this.base + variable.eval_slot - 1;
+        Node* initial = node.first();
+        if (initial == null) {
+            this.ints[index] = 0;
+            this.floats[index] = 0.0;
+            return EvalStatus.NORMAL;
+        }
+        if (!this.eval(initial)) {
+            return EvalStatus.FAILED;
+        }
+        this.convert(this.shape_of(initial.value_type()), shape);
+        this.ints[index] = this.ri;
+        this.floats[index] = this.rf;
+        return EvalStatus.NORMAL;
+    }
+
+    i32 exec_if(Node* node) {
+        i32 mode = node.op();
+        if (mode == 2) {
+            return this.exec(node.second());
+        }
+        if (mode == 3) {
+            if (node.third() != null) {
+                return this.exec(node.third());
+            }
+            return EvalStatus.NORMAL;
+        }
+        if (!this.tick(node)) {
+            return EvalStatus.FAILED;
+        }
+        if (!this.eval_condition(node.first())) {
+            return EvalStatus.FAILED;
+        }
+        if (this.ri != 0) {
+            return this.exec(node.second());
+        }
+        if (node.third() != null) {
+            return this.exec(node.third());
+        }
+        return EvalStatus.NORMAL;
+    }
+
+    i32 exec_loop(Node* node) {
+        i32 kind = node.kind;
+        mut Node* condition = node.first();
+        mut Node* body = node.second();
+        mut Node* step = (Node*)0;
+        if (kind == NodeKind.FOR) {
+            if (node.first() != null) {
+                i32 started = this.exec(node.first());
+                if (started != EvalStatus.NORMAL) {
+                    return started;
+                }
+            }
+            condition = node.second();
+            step = node.third();
+            body = node.fourth();
+        }
+
+        mut bool first_pass = kind == NodeKind.DO_WHILE;
+        while (true) {
+            if (!this.tick(node)) {
+                return EvalStatus.FAILED;
+            }
+            if (!first_pass && condition != null) {
+                if (!this.eval_condition(condition)) {
+                    return EvalStatus.FAILED;
+                }
+                if (this.ri == 0) {
+                    return EvalStatus.NORMAL;
+                }
+            }
+            first_pass = false;
+            i32 status = this.exec(body);
+            if (status == EvalStatus.BREAK) {
+                return EvalStatus.NORMAL;
+            }
+            if (status == EvalStatus.RETURN || status == EvalStatus.FAILED) {
+                return status;
+            }
+            if (step != null) {
+                if (!this.eval(step)) {
+                    return EvalStatus.FAILED;
+                }
+            }
+        }
+        return EvalStatus.NORMAL;
+    }
+
+    i32 exec_switch(Node* node) {
+        if (!this.tick(node)) {
+            return EvalStatus.FAILED;
+        }
+        if (!this.eval(node.first())) {
+            return EvalStatus.FAILED;
+        }
+        i64 subject = this.ri;
+        mut i32 selected = 0 - 1;
+        mut i32 fallback = 0 - 1;
+        for (mut i32 i = 0; i < node.count() && selected < 0; i = i + 1) {
+            Node* arm = node.child(i);
+            if (arm.first() == null) {
+                fallback = i;
+            } else {
+                if (!this.eval(arm.first())) {
+                    return EvalStatus.FAILED;
+                }
+                if (this.ri == subject) {
+                    selected = i;
+                }
+            }
+        }
+        if (selected < 0) {
+            selected = fallback;
+        }
+        if (selected < 0) {
+            return EvalStatus.NORMAL;
+        }
+        Node* chosen = node.child(selected);
+        for (mut i32 j = 0; j < chosen.count(); j = j + 1) {
+            i32 status = this.exec(chosen.child(j));
+            if (status == EvalStatus.BREAK) {
+                return EvalStatus.NORMAL;
+            }
+            if (status != EvalStatus.NORMAL) {
+                return status;
+            }
+        }
+        return EvalStatus.NORMAL;
+    }
+}
