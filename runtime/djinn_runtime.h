@@ -220,6 +220,9 @@ int64_t __djinn_now_us(void);
 // Returns a malloc'd, path-sorted, newline-separated list (NULL when the directory cannot be read).
 char* __djinn_list_files(const char* directory, const char* extension);
 
+// Calls a JIT-compiled entry point `int main(void)` at `address` and returns its exit code.
+int __djinn_call_entry(void* address);
+
 // ── Runtime error reporting (traps: integer overflow, division by zero) ──
 //
 // The generator bakes a djinn_error_info_t at each trap site and calls

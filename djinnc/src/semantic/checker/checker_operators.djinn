@@ -1,0 +1,201 @@
+namespace djinnc;
+
+impl TypeChecker {
+    u32 check_unary(Node* node, u32 expected) {
+        i32 op = node.op();
+
+        if (op == TokenKind.AMPERSAND) {
+            u32 addressed = this.check_lvalue(node.first());
+            if (node.first().symbol_kind() == SymbolKind.PROPERTY_GET) {
+                this.error(node, "cannot take the address of a property");
+            }
+            return Types.pointer_to(addressed);
+        }
+        if (op == TokenKind.STAR) {
+            return this.check_lvalue(node);
+        }
+
+        u32 operand = this.check_expression(node.first(), expected);
+        if (op == TokenKind.MINUS) {
+            if (!Types.is_integer(operand) && !Types.is_float(operand)) {
+                this.error(node, "operator is not valid for this operand");
+            }
+            return operand;
+        }
+        if (op == TokenKind.TILDE) {
+            if (!Types.is_integer(operand)) {
+                this.error(node, "operator is not valid for this operand");
+            }
+            return operand;
+        }
+        if (op == TokenKind.BANG) {
+            return Types.bool_type();
+        }
+
+        this.error(node, "unary operator is not supported yet");
+        return Types.i32_type();
+    }
+
+    bool is_untyped_literal(Node* node) {
+        if (node.kind == NodeKind.INT_LITERAL) {
+            return true;
+        }
+        return node.kind == NodeKind.UNARY && node.op() == TokenKind.MINUS && node.first().kind == NodeKind.INT_LITERAL;
+    }
+
+    public static bool is_comparison(i32 op) {
+        return op == TokenKind.EQUAL_EQUAL || op == TokenKind.BANG_EQUAL || op == TokenKind.LESS
+            || op == TokenKind.LESS_EQUAL || op == TokenKind.GREATER || op == TokenKind.GREATER_EQUAL;
+    }
+
+    FunctionInfo* find_operator(StructInfo* owner, i32 op) {
+        SymbolTable* symbols = this.symbols;
+        ByteBuffer* name = ByteBuffer.create();
+        name.append("operator");
+        name.append(TokenKind.text(op));
+        return symbols.find_method(owner, Ast.intern_base_name(name.cstr(), (i32)strlen(name.cstr())));
+    }
+
+    u32 check_operator(Node* node, i32 op, u32 left, u32 right) {
+        SymbolTable* symbols = this.symbols;
+        StructInfo* owner = symbols.struct_at(Types.struct_index(left));
+        mut FunctionInfo* method = this.find_operator(owner, op);
+        mut i32 kind = SymbolKind.OPERATOR;
+        if (method == null && op == TokenKind.BANG_EQUAL) {
+            method = this.find_operator(owner, TokenKind.EQUAL_EQUAL);
+            kind = SymbolKind.NEGATED_OPERATOR;
+        }
+        if (method == null) {
+            this.error(node, "struct does not define this operator");
+            return Types.i32_type();
+        }
+        mut FunctionInfo* exact = (FunctionInfo*)0;
+        mut FunctionInfo* walk = method;
+        while (walk != null) {
+            IdList* candidate_params = walk.param_types;
+            if (candidate_params.length == 2 && candidate_params.get(0) == left && candidate_params.get(1) == right) {
+                exact = walk;
+                break;
+            }
+            walk = walk.overload;
+        }
+        if (exact == null) {
+            this.error(node, "operator operands do not match its parameters");
+            return method.return_type;
+        }
+        method = exact;
+        node.set_symbol(kind, (void*)method);
+        return method.return_type;
+    }
+
+    u32 check_binary(Node* node, u32 expected) {
+        i32 op = node.op();
+        if (op == TokenKind.AND_AND || op == TokenKind.OR_OR) {
+            this.check_condition(node.first());
+            this.check_condition(node.second());
+            return Types.bool_type();
+        }
+
+        if (op == TokenKind.QUESTION_QUESTION) {
+            u32 pointer = this.check_expression(node.first(), expected);
+            if (!Types.is_pointer(pointer)) {
+                this.error(node, "the left operand of ?? must be a pointer");
+                return pointer;
+            }
+            this.check_expression(node.second(), pointer);
+            return pointer;
+        }
+
+        mut u32 hint = expected;
+        if (TypeChecker.is_comparison(op)) {
+            hint = 0;
+        }
+
+        mut u32 left = 0;
+        mut u32 right = 0;
+        if (this.is_untyped_literal(node.first()) && !this.is_untyped_literal(node.second())) {
+            right = this.check_expression(node.second(), hint);
+            left = this.check_expression(node.first(), right);
+        } else {
+            left = this.check_expression(node.first(), hint);
+            right = this.check_expression(node.second(), left);
+        }
+
+        if (Types.is_pointer(left) && Types.is_integer(right) && (op == TokenKind.PLUS || op == TokenKind.MINUS)) {
+            return left;
+        }
+
+        if (Types.is_struct(left)) {
+            return this.check_operator(node, op, left, right);
+        }
+
+        u32 common = Types.common(left, right);
+        if (TypeChecker.is_comparison(op)) {
+            return Types.bool_type();
+        }
+        if (Types.is_float(common)) {
+            bool valid = op == TokenKind.PLUS || op == TokenKind.MINUS || op == TokenKind.STAR
+                || op == TokenKind.SLASH || op == TokenKind.PERCENT;
+            if (!valid) {
+                this.error(node, "operator is not valid for floating point operands");
+            }
+        } else if (!Types.is_integer(common)) {
+            this.error(node, "operator is not valid for these operands");
+        }
+        return common;
+    }
+
+    u32 check_assign(Node* node) {
+        Node* target = node.first();
+        this.assign_target = target;
+        u32 type = this.check_lvalue(target);
+        this.assign_target = null;
+        if (target.kind == NodeKind.FIELD_ACCESS && target.symbol_kind() == SymbolKind.PROPERTY_GET) {
+            FunctionInfo* getter = (FunctionInfo*)target.symbol();
+            FunctionInfo* setter = this.find_accessor(getter.owner, "set:", target.text());
+            if (setter == null) {
+                this.error(target, "property has no setter");
+            } else {
+                target.set_symbol(SymbolKind.PROPERTY_SET, (void*)setter);
+            }
+        }
+        if (target.kind == NodeKind.IDENTIFIER && target.symbol_kind() == SymbolKind.IMPLICIT_GET) {
+            FunctionInfo* implicit_setter = this.implicit_accessor(target, "set:");
+            if (implicit_setter == null) {
+                this.error(target, "property has no setter");
+            } else {
+                target.set_symbol(SymbolKind.IMPLICIT_SET, (void*)implicit_setter);
+            }
+        }
+        if (target.kind == NodeKind.IDENTIFIER && (target.symbol_kind() == SymbolKind.LOCAL || target.symbol_kind() == SymbolKind.GLOBAL)) {
+            LocalVariable* variable = (LocalVariable*)target.symbol();
+            if (!variable.is_mutable) {
+                this.error(target, "cannot assign to an immutable variable");
+            }
+        }
+        this.check_expression(node.second(), type);
+        this.move_from(node.second(), target);
+        if (target.kind == NodeKind.IDENTIFIER && (target.symbol_kind() == SymbolKind.LOCAL || target.symbol_kind() == SymbolKind.GLOBAL)) {
+            LocalVariable* reinitialized = (LocalVariable*)target.symbol();
+            reinitialized.moved = false;
+        }
+        return type;
+    }
+
+    bool is_copy_type(u32 type) {
+        return !Types.is_struct(type);
+    }
+
+    void move_from(Node* source, Node* destination) {
+        if (source.kind != NodeKind.IDENTIFIER || source.symbol_kind() != SymbolKind.LOCAL) {
+            return;
+        }
+        if (destination != null && destination.kind == NodeKind.IDENTIFIER && destination.symbol() == source.symbol()) {
+            return;
+        }
+        LocalVariable* variable = (LocalVariable*)source.symbol();
+        if (!this.is_copy_type(variable.type)) {
+            variable.moved = true;
+        }
+    }
+}

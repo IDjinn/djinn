@@ -1,0 +1,163 @@
+namespace djinnc;
+
+impl CodeGenerator {
+    Value* gen_sizeof(Node* node) {
+        u32 measured = (u32)(u64)node.symbol();
+        u32 result = Types.integer(Target.pointer_bits(), true);
+        if (Types.is_struct(measured)) {
+            StructInfo* info = this.struct_of(measured);
+            mut void* size = LLVMSizeOf(info.llvm);
+            if (Target.pointer_bits() != 64) {
+                size = LLVMBuildIntCast2(this.builder, size, this.llvm_type(result), 0, "sizeof");
+            }
+            return Value.create(size, result);
+        }
+        mut i64 bytes = 8;
+        if (Types.is_integer(measured)) {
+            bytes = (i64)((Types.bits(measured) + 7) / 8);
+        } else if (Types.is_float(measured)) {
+            bytes = (i64)(Types.bits(measured) / 8);
+        }
+        return Value.create(LLVMConstInt(this.llvm_type(result), (u64)bytes, 0), result);
+    }
+
+    bool is_struct_name(Node* node) {
+        return node.kind == NodeKind.IDENTIFIER && node.symbol_kind() == SymbolKind.STRUCT_NAME;
+    }
+
+    bool is_addressable(Node* node) {
+        i32 kind = node.kind;
+        if (kind == NodeKind.IDENTIFIER || kind == NodeKind.INDEX) {
+            return true;
+        }
+        if (kind == NodeKind.FIELD_ACCESS) {
+            return !this.is_struct_name(node.first()) && node.symbol_kind() != SymbolKind.PROPERTY_GET && node.symbol_kind() != SymbolKind.PROPERTY_SET;
+        }
+        return kind == NodeKind.UNARY && node.op() == TokenKind.STAR;
+    }
+
+    void* struct_pointer(Node* base) {
+        if (this.is_addressable(base)) {
+            void* address = this.gen_address(base);
+            u32 base_type = base.value_type();
+            if (Types.is_pointer(base_type)) {
+                return LLVMBuildLoad2(this.builder, this.llvm_type(base_type), address, "load");
+            }
+            return address;
+        }
+        Value* value = this.gen_expression(base);
+        if (!Types.is_pointer(value.type)) {
+            void* spill = this.create_slot(value.type, "receiver");
+            LLVMBuildStore(this.builder, value.ref, spill);
+            return spill;
+        }
+        return value.ref;
+    }
+
+    void* field_address(Node* node) {
+        Node* base = node.first();
+        void* pointer = this.struct_pointer(base);
+        StructInfo* info = this.struct_behind(base.value_type());
+        FieldInfo* field = (FieldInfo*)node.symbol();
+        return LLVMBuildStructGEP2(this.builder, info.llvm, pointer, (u32)field.index, node.text());
+    }
+
+    Value* gen_member(Node* node) {
+        Node* base = node.first();
+        if (this.is_struct_name(base)) {
+            Node* constant = (Node*)node.symbol();
+            u32 declared = constant.value_type();
+            Value* value = this.gen_expression(constant.first());
+            return Value.create(this.coerce(value, declared), declared);
+        }
+        if (node.symbol_kind() == SymbolKind.PROPERTY_GET) {
+            FunctionInfo* getter = (FunctionInfo*)node.symbol();
+            void** args = CodeGenerator.array_of(1);
+            args[0] = this.method_receiver(getter.owner, base);
+            void* result = LLVMBuildCall2(this.builder, getter.function_type, getter.function, args, 1, "property.get");
+            return Value.create(result, getter.return_type);
+        }
+        return this.load_through(this.field_address(node), node.value_type());
+    }
+
+    void* method_receiver(StructInfo* owner, Node* base) {
+        if (owner.is_enum || owner.is_primitive) {
+            Value* value = this.gen_expression(base);
+            mut void* receiver = value.ref;
+            if (Types.is_pointer(value.type)) {
+                receiver = LLVMBuildLoad2(this.builder, this.llvm_type(owner.type_id), value.ref, "enum.load");
+            }
+            return receiver;
+        }
+        return this.struct_pointer(base);
+    }
+
+    void* implicit_field_address(Node* node) {
+        FunctionContext* context = this.function_context;
+        FunctionInfo* current = context.function;
+        LocalVariable* self = current.this_variable;
+        StructInfo* owner = current.owner;
+        void* pointer = LLVMBuildLoad2(this.builder, this.llvm_type(self.type), self.slot, "this");
+        FieldInfo* field = (FieldInfo*)node.symbol();
+        return LLVMBuildStructGEP2(this.builder, owner.llvm, pointer, (u32)field.index, node.text());
+    }
+
+    void* implicit_receiver() {
+        FunctionContext* context = this.function_context;
+        FunctionInfo* current = context.function;
+        LocalVariable* self = current.this_variable;
+        return LLVMBuildLoad2(this.builder, this.llvm_type(self.type), self.slot, "this");
+    }
+
+    Value* gen_identifier(Node* node) {
+        if (node.symbol_kind() == SymbolKind.IMPLICIT_GET) {
+            FunctionInfo* getter = (FunctionInfo*)node.symbol();
+            void** args = CodeGenerator.array_of(1);
+            args[0] = this.implicit_receiver();
+            void* result = LLVMBuildCall2(this.builder, getter.function_type, getter.function, args, 1, "property.get");
+            return Value.create(result, getter.return_type);
+        }
+        if (node.symbol_kind() == SymbolKind.IMPLICIT_FIELD) {
+            return this.load_through(this.implicit_field_address(node), node.value_type());
+        }
+        LocalVariable* variable = (LocalVariable*)node.symbol();
+        void* loaded = LLVMBuildLoad2(this.builder, this.llvm_type(variable.type), variable.slot, node.text());
+        return Value.create(loaded, variable.type);
+    }
+
+    Value* load_through(void* address, u32 type) {
+        void* loaded = LLVMBuildLoad2(this.builder, this.llvm_type(type), address, "load");
+        return Value.create(loaded, type);
+    }
+
+    void* gen_address(Node* node) {
+        i32 kind = node.kind;
+
+        if (kind == NodeKind.IDENTIFIER) {
+            if (node.symbol_kind() == SymbolKind.IMPLICIT_FIELD) {
+                return this.implicit_field_address(node);
+            }
+            LocalVariable* variable = (LocalVariable*)node.symbol();
+            return variable.slot;
+        }
+
+        if (kind == NodeKind.FIELD_ACCESS) {
+            return this.field_address(node);
+        }
+
+        if (kind == NodeKind.INDEX) {
+            mut Value* base = this.gen_expression(node.first());
+            Value* index = this.gen_expression(node.second());
+            if (Types.is_struct(base.type)) {
+                base = Value.create(LLVMBuildExtractValue(this.builder, base.ref, 0, "array.data"), Types.pointer_to(node.value_type()));
+            }
+            void** indices = CodeGenerator.array_of(1);
+            indices[0] = this.coerce(index, Types.i64_type());
+            void* element_type = this.llvm_type(node.value_type());
+            return LLVMBuildGEP2(this.builder, element_type, base.ref, indices, 1, "index");
+        }
+
+        Value* pointer = this.gen_expression(node.first());
+        return pointer.ref;
+    }
+}

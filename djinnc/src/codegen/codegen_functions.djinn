@@ -1,0 +1,254 @@
+namespace djinnc;
+
+impl CodeGenerator {
+    void declare_functions() {
+        SymbolTable* symbols = this.symbols;
+        PointerList* functions = symbols.functions;
+        for (mut i32 i = 0; i < functions.length; i = i + 1) {
+            FunctionInfo* info = (FunctionInfo*)functions.get(i);
+            if (info.is_template) {
+                continue;
+            }
+            IdList* param_types = info.param_types;
+            i32 count = param_types.length;
+            void** params = CodeGenerator.array_of(count);
+            for (mut i32 p = 0; p < count; p = p + 1) {
+                params[p] = this.llvm_type(param_types.get(p));
+            }
+
+            mut void* return_type = this.llvm_type(info.return_type);
+            if (info.is_async) {
+                return_type = LLVMPointerTypeInContext(this.context, 0);
+            }
+            mut i32 variadic = 0;
+            if (info.is_variadic) {
+                variadic = 1;
+            }
+            info.function_type = LLVMFunctionType(return_type, params, (u32)count, variadic);
+
+            mut i8* symbol = info.name;
+            if (!info.is_extern && info.owner == null && info.name_atom == Atoms.MAIN_ATOM) {
+                symbol = "__djinn_sync_main";
+            }
+            mut void* existing = (void*)0;
+            if (info.is_extern) {
+                existing = LLVMGetNamedFunction(this.module, symbol);
+            }
+            if (existing != null) {
+                info.function = existing;
+            } else {
+                info.function = LLVMAddFunction(this.module, symbol, info.function_type);
+                if (!info.is_extern) {
+                    this.apply_attributes(info);
+                }
+            }
+        }
+    }
+
+    void declare_globals() {
+        SymbolTable* symbols = this.symbols;
+        PointerList* globals = symbols.globals;
+        for (mut i32 i = 0; i < globals.length; i = i + 1) {
+            LocalVariable* variable = (LocalVariable*)globals.get(i);
+            Node* declaration = variable.node;
+            u32 type = variable.type;
+            void* global = LLVMAddGlobal(this.module, this.llvm_type(type), variable.name);
+            Value* initial = this.gen_expression(declaration.first());
+            LLVMSetInitializer(global, this.coerce(initial, type));
+            if (!variable.is_mutable) {
+                LLVMSetGlobalConstant(global, 1);
+            }
+            variable.slot = global;
+            if (this.debug != null) {
+                DebugInfo* debug = this.debug;
+                debug.declare_global(global, variable.name, type, declaration, this);
+            }
+        }
+    }
+
+    void define_all() {
+        SymbolTable* symbols = this.symbols;
+        PointerList* functions = symbols.functions;
+        for (mut i32 i = 0; i < functions.length; i = i + 1) {
+            FunctionInfo* info = (FunctionInfo*)functions.get(i);
+            if (!info.is_extern && !info.is_template) {
+                this.define_function(info.node, info);
+            }
+        }
+    }
+
+    void define_function(Node* declaration, FunctionInfo* info) {
+        FunctionContext* function_context = this.function_context;
+        function_context.begin(info);
+        if (this.debug != null) {
+            DebugInfo* debug = this.debug;
+            debug.begin_function(info, declaration, this);
+        }
+
+        void* entry = LLVMAppendBasicBlockInContext(this.context, info.function, "entry");
+        void* body = LLVMAppendBasicBlockInContext(this.context, info.function, "body");
+        LLVMPositionBuilderAtEnd(this.builder, entry);
+        mut void* jump = (void*)0;
+        if (info.is_async) {
+            void* prologue = LLVMAppendBasicBlockInContext(this.context, info.function, "coro.prologue");
+            jump = LLVMBuildBr(this.builder, prologue);
+            LLVMPositionBuilderBefore(this.alloca_builder, jump);
+            this.begin_coroutine(info, prologue, body);
+        } else {
+            jump = LLVMBuildBr(this.builder, body);
+            LLVMPositionBuilderBefore(this.alloca_builder, jump);
+        }
+        LLVMPositionBuilderAtEnd(this.builder, body);
+
+        mut i32 offset = 0;
+        if (info.is_instance) {
+            offset = 1;
+            LocalVariable* receiver = info.this_variable;
+            receiver.slot = this.create_slot(receiver.type, "this");
+            LLVMBuildStore(this.builder, LLVMGetParam(info.function, 0), receiver.slot);
+            this.declare_variable(receiver.slot, "this", receiver.type, declaration, 1);
+        }
+        for (mut i32 i = 0; i < declaration.count(); i = i + 1) {
+            Node* parameter = declaration.child(i);
+            LocalVariable* variable = (LocalVariable*)parameter.symbol();
+            variable.slot = this.create_slot(variable.type, variable.name);
+            LLVMBuildStore(this.builder, LLVMGetParam(info.function, (u32)(i + offset)), variable.slot);
+            this.declare_variable(variable.slot, variable.name, variable.type, parameter, i + offset + 1);
+        }
+
+        this.gen_statement(declaration.first());
+
+        if (info.is_async) {
+            if (!this.is_terminated()) {
+                LLVMBuildBr(this.builder, function_context.final_block);
+            }
+            this.finish_coroutine();
+        } else if (!this.is_terminated()) {
+            if (Types.is_void(info.return_type)) {
+                LLVMBuildRetVoid(this.builder);
+            } else {
+                LLVMBuildUnreachable(this.builder);
+            }
+        }
+        if (this.debug != null) {
+            DebugInfo* debug = this.debug;
+            debug.end_function();
+        }
+    }
+
+    void* create_slot(u32 type, i8* name) {
+        return LLVMBuildAlloca(this.alloca_builder, this.llvm_type(type), name);
+    }
+
+    FunctionInfo* current_function() {
+        FunctionContext* function_context = this.function_context;
+        return function_context.function;
+    }
+
+    bool is_terminated() {
+        void* block = LLVMGetInsertBlock(this.builder);
+        return LLVMGetBasicBlockTerminator(block) != null;
+    }
+
+    void* new_block(i8* name) {
+        return LLVMAppendBasicBlockInContext(this.context, this.current_function().function, name);
+    }
+
+    void branch_if_open(void* target) {
+        if (!this.is_terminated()) {
+            LLVMBuildBr(this.builder, target);
+        }
+    }
+
+    void start_dead_block() {
+        void* dead = this.new_block("dead");
+        LLVMPositionBuilderAtEnd(this.builder, dead);
+    }
+
+    void emit_entry_point() {
+        SymbolTable* symbols = this.symbols;
+        mut FunctionInfo* user = (FunctionInfo*)0;
+        PointerList* functions = symbols.functions;
+        for (mut i32 i = 0; i < functions.length; i = i + 1) {
+            FunctionInfo* candidate = (FunctionInfo*)functions.get(i);
+            if (candidate.name_atom == Atoms.MAIN_ATOM && candidate.owner == null && !candidate.is_extern) {
+                user = candidate;
+                break;
+            }
+        }
+        if (user == null) {
+            Diagnostics* diagnostics = this.diagnostics;
+            diagnostics.error(1, 1, "no 'main' function defined");
+            return;
+        }
+
+        void* i32_type = LLVMIntTypeInContext(this.context, 32);
+        void* void_type = LLVMVoidTypeInContext(this.context);
+        void** init_params = CodeGenerator.array_of(1);
+        init_params[0] = i32_type;
+        void* init_type = LLVMFunctionType(void_type, init_params, 1, 0);
+        void* init_fn = LLVMAddFunction(this.module, "__djinn_runtime_init", init_type);
+        void* shutdown_type = LLVMFunctionType(void_type, CodeGenerator.array_of(0), 0, 0);
+        void* shutdown_fn = LLVMAddFunction(this.module, "__djinn_runtime_shutdown", shutdown_type);
+
+        void* main_type = LLVMFunctionType(i32_type, CodeGenerator.array_of(0), 0, 0);
+        void* main_fn = LLVMAddFunction(this.module, "main", main_type);
+        void* entry = LLVMAppendBasicBlockInContext(this.context, main_fn, "entry");
+        LLVMPositionBuilderAtEnd(this.builder, entry);
+
+        void** init_args = CodeGenerator.array_of(1);
+        init_args[0] = LLVMConstInt(i32_type, 4, 0);
+        LLVMBuildCall2(this.builder, init_type, init_fn, init_args, 1, "");
+
+        mut void* exit_code = LLVMConstInt(i32_type, 0, 0);
+        if (user.is_async) {
+            void* pointer_llvm = LLVMPointerTypeInContext(this.context, 0);
+            void* handle = LLVMBuildCall2(this.builder, user.function_type, user.function, CodeGenerator.array_of(0), 0, "main.handle");
+            void** loop_params = CodeGenerator.array_of(1);
+            void** loop_args = CodeGenerator.array_of(1);
+            loop_params[0] = pointer_llvm;
+            loop_args[0] = handle;
+            if (Types.is_void(user.return_type)) {
+                this.call_runtime("__djinn_event_loop_run", void_type, loop_params, loop_args, 1);
+                this.call_runtime("__djinn_coro_destroy", void_type, loop_params, loop_args, 1);
+            } else {
+                exit_code = this.call_runtime("__djinn_event_loop", i32_type, loop_params, loop_args, 1);
+            }
+        } else if (Types.is_void(user.return_type)) {
+            LLVMBuildCall2(this.builder, user.function_type, user.function, CodeGenerator.array_of(0), 0, "");
+        } else {
+            void* returned = LLVMBuildCall2(this.builder, user.function_type, user.function, CodeGenerator.array_of(0), 0, "exit");
+            Value* wrapped = Value.create(returned, user.return_type);
+            exit_code = this.coerce(wrapped, Types.i32_type());
+        }
+
+        LLVMBuildCall2(this.builder, shutdown_type, shutdown_fn, CodeGenerator.array_of(0), 0, "");
+        LLVMBuildRet(this.builder, exit_code);
+    }
+
+    void add_function_attribute(void* function, i8* name) {
+        u64 length = (u64)strlen(name);
+        u32 kind = LLVMGetEnumAttributeKindForName(name, length);
+        mut void* attribute = (void*)0;
+        if (kind != 0) {
+            attribute = LLVMCreateEnumAttribute(this.context, kind, 0);
+        } else {
+            attribute = LLVMCreateStringAttribute(this.context, name, (u32)length, "", 0);
+        }
+        LLVMAddAttributeAtIndex(function, 4294967295, attribute);
+    }
+
+    void apply_attributes(FunctionInfo* info) {
+        this.add_function_attribute(info.function, "nounwind");
+        PointerList* uses = Attributes.of(info.node);
+        for (mut i32 i = 0; i < uses.length; i = i + 1) {
+            AttributeUse* use = (AttributeUse*)uses.get(i);
+            i8* mapped = Attributes.llvm_name(use.name);
+            if (mapped != null) {
+                this.add_function_attribute(info.function, mapped);
+            } else if (use.text_arg != null && Strings.equals(use.name, (i32)strlen(use.name), "Llvm")) {
+                this.add_function_attribute(info.function, use.text_arg);
+            }
+        }
+    }
+}

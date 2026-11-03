@@ -7,6 +7,7 @@ struct str {
 extern "C" {
     void* __djinn_malloc(u64 size);
     void* memcpy(void* destination, void* source, u64 count);
+    void* memmove(void* destination, void* source, u64 count);
     i32 snprintf(i8* buffer, u64 size, i8* format, ...);
     i32 strlen(i8* text);
     i64 write(i32 descriptor, void* data, u64 count);
@@ -109,6 +110,96 @@ void __djinn_text_bool(void* handle, i32 value) {
     } else {
         __djinn_text_slice(handle, "false", 5);
     }
+}
+void djinn_text_pad(djinn_text_builder* builder, u32 start, u64 format, i32 numeric) {
+    u64 width = format & 65535;
+    u32 size = builder.length - start;
+    if (width <= (u64)size) {
+        return;
+    }
+    u32 pad = (u32)width - size;
+    djinn_text_reserve(builder, pad);
+    i8* base = builder.data + (i64)start;
+    u32 offset = size;
+    if (((format >> 16) & 1) == 0) {
+        mut u32 skip = 0;
+        mut i8 filler = (i8)32;
+        if (numeric != 0 && ((format >> 16) & 2) != 0) {
+            filler = (i8)48;
+            i32 first = base[0];
+            if (size > 0 && (first == 45 || first == 43)) {
+                skip = 1;
+            }
+        }
+        memmove(base + (i64)(skip + pad), base + (i64)skip, (u64)(size - skip));
+        for (mut u32 i = 0; i < pad; i = i + 1) {
+            base[(i64)(skip + i)] = filler;
+        }
+    } else {
+        for (mut u32 i = 0; i < pad; i = i + 1) {
+            base[(i64)(offset + i)] = (i8)32;
+        }
+    }
+    builder.length = builder.length + pad;
+    builder.data[(i64)builder.length] = (i8)0;
+}
+void __djinn_text_slice_format(void* handle, i8* data, u32 length, u64 format) {
+    djinn_text_builder* builder = (djinn_text_builder*)handle;
+    mut u32 kept = length;
+    u64 precision = (format >> 20) & 127;
+    if (((format >> 16) & 4) != 0 && (u64)kept > precision) {
+        kept = (u32)precision;
+    }
+    u32 start = builder.length;
+    __djinn_text_slice(handle, data, kept);
+    djinn_text_pad(builder, start, format, 0);
+}
+void __djinn_text_cstr_format(void* handle, i8* data, u64 format) {
+    if (data == null) {
+        __djinn_text_slice_format(handle, "null", 4, format);
+        return;
+    }
+    i32 length = strlen(data);
+    if (length < 0) {
+        djinn_text_fail("djinn runtime error: invalid string length
+");
+    }
+    __djinn_text_slice_format(handle, data, (u32)length, format);
+}
+void __djinn_text_i64_format(void* handle, i64 value, u64 format) {
+    djinn_text_builder* builder = (djinn_text_builder*)handle;
+    u32 start = builder.length;
+    __djinn_text_i64(handle, value);
+    djinn_text_pad(builder, start, format, 1);
+}
+void __djinn_text_u64_format(void* handle, u64 value, u64 format) {
+    djinn_text_builder* builder = (djinn_text_builder*)handle;
+    u32 start = builder.length;
+    __djinn_text_u64(handle, value);
+    djinn_text_pad(builder, start, format, 1);
+}
+void __djinn_text_bool_format(void* handle, i32 value, u64 format) {
+    djinn_text_builder* builder = (djinn_text_builder*)handle;
+    u32 start = builder.length;
+    __djinn_text_bool(handle, value);
+    djinn_text_pad(builder, start, format, 0);
+}
+void __djinn_text_f64_format(void* handle, f64 value, u64 format) {
+    djinn_text_builder* builder = (djinn_text_builder*)handle;
+    u32 start = builder.length;
+    if (((format >> 16) & 4) == 0) {
+        __djinn_text_f64(handle, value);
+    } else {
+        djinn_text_reserve(builder, 512);
+        i32 precision = (i32)((format >> 20) & 127);
+        i32 count = snprintf(builder.data + (i64)builder.length, 512, "%.*f", precision, value);
+        if (count < 0 || count >= 512) {
+            djinn_text_fail("djinn runtime error: number formatting failed
+");
+        }
+        builder.length = builder.length + (u32)count;
+    }
+    djinn_text_pad(builder, start, format, 1);
 }
 i8* __djinn_text_finish(void* handle, u32* length) {
     djinn_text_builder* builder = (djinn_text_builder*)handle;

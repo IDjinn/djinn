@@ -3,7 +3,7 @@
 The source of `djinnc/` may only use the constructs below. Both stage0 (C++) and djinnc itself must compile all
 of them. A construct outside this list is forbidden in `djinnc/src` until the djinnc codegen supports it.
 
-`djinnc` does not depend on `std`: every external symbol is declared in `src/support/libc.djinn`.
+`djinnc` does not depend on `std`: every external symbol is declared in `src/support/system/libc.djinn`.
 
 ## Declarations
 
@@ -13,6 +13,8 @@ of them. A construct outside this list is forbidden in `djinnc/src` until the dj
 - `static` factory methods returning `T*` (heap allocated with `Memory.zalloc`)
 
 ## Types
+
+- `usize` / `uptr` and `isize` / `iptr` are the pointer-sized integers: their width comes from the target triple (`--target <triple>`, default the host), 16, 32 or 64 bits, and `sizeof` has the type `isize`. Use them for sizes and for pointer-to-integer casts instead of a fixed `u64`.
 
 - `i8 i16 i32 i64 u8 u16 u32 u64 f64 bool void`
 - pointers `T*`, `T**`, `void*`; no references, no optionals
@@ -86,7 +88,7 @@ The core library (`runtime/core.djinn`, read from `--runtime-dir`) is compiled w
 
 ## Range-for
 
-`for (i32 i in [1..10])`, `[0..5)`, `0..5` and `0..=5` loop over a range. The start is always inclusive; `[a..b]` and `..=` include the end, `[a..b)` and `..` exclude it. The parser lowers it to a plain `for` with a hidden `__limitN` variable, so the end is evaluated once. Ranges with an open start, `(a..b]`, are not supported (stage0 does not have them either).
+`for (i32 i in [1..10])`, `[0..5)`, `0..5` and `0..=5` loop over a range. The start is always inclusive; `[a..b]` and `..=` include the end, `[a..b)` and `..` exclude it. The parser lowers it to a plain `for` with a hidden `__limitN` variable, so the end is evaluated once. `(a..b]` and `(a..b)` exclude the start: the loop begins at `a + 1`. A `(` after `in` is a range only when `..` appears directly inside it, so `(n)..5` is still the ordinary range.
 
 ## Named arguments
 
@@ -94,7 +96,7 @@ Calls, method calls and constructors (`Point(y: 4, x: 3)`, `new Point(x: 1, y: 2
 
 ## `string` and interpolation
 
-`core.djinn` also declares `string { i8* data; u32 length; u32 capacity; }` with `is_empty()`, `ptr()` and `operator +` (concatenation). A string literal gets type `string` when that is the expected type. Only a `$"..."` literal interpolates, as in C#: `$"count={count}"` or `$"sum={p.x + p.y}"` has type `string`, and its parts can be integers, bools, floats, `i8*`, `str` and `string`. A plain `"..."` never interpolates, so `"{count}"` is just text. Inside `$"..."`, `{{` and `}}` are literal braces and a lone `}` is an error. The lexer splits an interpolated literal into `INTERP_BEGIN`/`INTERP_MIDDLE`/`INTERP_END` tokens around the ordinary expression tokens. The builder (`__djinn_text_*`) is Djinn code in `core.djinn`; sizes are checked against the `u32` limit, and allocation failure is reported only by `__djinn_malloc`.
+`core.djinn` also declares `string { i8* data; u32 length; u32 capacity; }` with `is_empty()`, `ptr()` and `operator +` (concatenation). A string literal gets type `string` when that is the expected type. Only a `$"..."` literal interpolates, as in C#: `$"count={count}"` or `$"sum={p.x + p.y}"` has type `string`, and its parts can be integers, bools, floats, `i8*`, `str` and `string`. An expression can carry a format, `{value:[-][0]width[.precision]}`: `{n:6}` right-aligns, `{n:-6}` left-aligns, `{n:06}` zero-pads numbers, `{x:.2}` prints a float with fixed decimals and `{s:.3}` truncates text (`{x:8.2}` combines both). The lexer reads the part after a top-level `:` (not `::`, not inside parentheses or after a `?`) as an `INTERP_FORMAT` token, the parser packs it into the preceding text part and the runtime pads with `__djinn_text_*_format`. Widths go up to 4096 and precision up to 99. A plain `"..."` never interpolates, so `"{count}"` is just text. Inside `$"..."`, `{{` and `}}` are literal braces and a lone `}` is an error. The lexer splits an interpolated literal into `INTERP_BEGIN`/`INTERP_MIDDLE`/`INTERP_END` tokens around the ordinary expression tokens. The builder (`__djinn_text_*`) is Djinn code in `core.djinn`; sizes are checked against the `u32` limit, and allocation failure is reported only by `__djinn_malloc`.
 
 ## Inference
 

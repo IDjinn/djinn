@@ -1,0 +1,177 @@
+namespace djinnc;
+
+struct TypeChecker {
+    ConstEval* const_eval;
+
+    Diagnostics* diagnostics;
+
+    SymbolTable* symbols;
+
+    LocalScopes* scopes;
+
+    FunctionInfo* function;
+
+    u32 scope;
+
+    i32 loop_depth;
+
+    i32 switch_depth;
+
+    Node* assign_target;
+
+    public static TypeChecker* create(Diagnostics* diagnostics, SymbolTable* symbols) {
+        TypeChecker* checker = (TypeChecker*)Memory.zalloc(sizeof(TypeChecker));
+        checker.diagnostics = diagnostics;
+        checker.symbols = symbols;
+        checker.scopes = LocalScopes.create();
+        checker.const_eval = ConstEval.create(checker);
+        return checker;
+    }
+
+    void error(Node* at, i8* message) {
+        Diagnostics* diagnostics = this.diagnostics;
+        diagnostics.error_in(at.file_name(), at.line(), at.column(), message);
+    }
+
+    public u32 resolve_type(TypeRef* ref, Node* at) {
+        SymbolTable* symbols = this.symbols;
+        symbols.blame = at;
+        u32 resolved = symbols.resolve_type(ref, this.scope);
+        if (resolved == 0) {
+            this.error(at, "unknown type");
+            return Types.i32_type();
+        }
+        return resolved;
+    }
+
+    public bool run() {
+        SymbolTable* symbols = this.symbols;
+        PointerList* structs = symbols.structs;
+        for (mut i32 i = 0; i < structs.length; i = i + 1) {
+            StructInfo* info = (StructInfo*)structs.get(i);
+            if (info.is_template) {
+                continue;
+            }
+            symbols.bindings = info.bindings;
+            PointerList* constants = info.constants;
+            for (mut i32 c = 0; c < constants.length; c = c + 1) {
+                this.check_constant((Node*)constants.get(c), info.namespace_id);
+            }
+            symbols.bindings = null;
+        }
+        PointerList* globals = symbols.globals;
+        for (mut i32 i = 0; i < globals.length; i = i + 1) {
+            this.check_global((LocalVariable*)globals.get(i));
+        }
+        PointerList* functions = symbols.functions;
+        for (mut i32 i = 0; i < functions.length; i = i + 1) {
+            FunctionInfo* info = (FunctionInfo*)functions.get(i);
+            if (!info.is_extern && !info.is_template && info.check_state == 0) {
+                this.check_function(info);
+            }
+        }
+        Diagnostics* diagnostics = this.diagnostics;
+        return !diagnostics.failed();
+    }
+
+    public u32 check_expression(Node* node, u32 expected) {
+        u32 type = this.compute_expression(node, expected);
+        node.set_value_type(type);
+        return type;
+    }
+
+    u32 compute_expression(Node* node, u32 expected) {
+        i32 kind = node.kind;
+
+        if (kind == NodeKind.INT_LITERAL) {
+            if (expected != 0 && (Types.is_float(expected) || Types.is_integer(expected))) {
+                return expected;
+            }
+            if (node.int_value() > 2147483647) {
+                return Types.i64_type();
+            }
+            return Types.i32_type();
+        }
+        if (kind == NodeKind.FLOAT_LITERAL) {
+            if (expected != 0 && Types.is_float(expected)) {
+                return expected;
+            }
+            return Types.floating(64);
+        }
+        if (kind == NodeKind.STRING_LITERAL) {
+            u32 text_type = this.core_type("str");
+            u32 owned_type = this.core_type("string");
+            if (expected != 0 && (expected == text_type || expected == owned_type)) {
+                return expected;
+            }
+            return Types.byte_pointer();
+        }
+        if (kind == NodeKind.ARRAY_LITERAL) {
+            return this.check_array_literal(node, expected);
+        }
+        if (kind == NodeKind.BOOL_LITERAL) {
+            return Types.bool_type();
+        }
+        if (kind == NodeKind.NULL_LITERAL) {
+            return Types.pointer_to(Types.void_type());
+        }
+        if (kind == NodeKind.IDENTIFIER) {
+            return this.fold_constant(node, this.check_lvalue(node));
+        }
+        if (kind == NodeKind.INDEX) {
+            return this.check_lvalue(node);
+        }
+        if (kind == NodeKind.FIELD_ACCESS) {
+            return this.check_member(node);
+        }
+        if (kind == NodeKind.UNARY) {
+            return this.check_unary(node, expected);
+        }
+        if (kind == NodeKind.BINARY) {
+            return this.check_binary(node, expected);
+        }
+        if (kind == NodeKind.ASSIGN) {
+            return this.check_assign(node);
+        }
+        if (kind == NodeKind.CALL) {
+            return this.check_call(node, expected);
+        }
+        if (kind == NodeKind.CAST) {
+            u32 target = this.resolve_type(node.type(), node);
+            this.check_expression(node.first(), target);
+            return target;
+        }
+        if (kind == NodeKind.SWITCH_EXPR) {
+            return this.check_switch_expression(node, expected);
+        }
+        if (kind == NodeKind.STRUCT_INIT) {
+            return this.check_struct_init(node, expected);
+        }
+        if (kind == NodeKind.IS_EXPR) {
+            return this.check_is(node);
+        }
+        if (kind == NodeKind.AWAIT_EXPR) {
+            return this.check_await(node);
+        }
+        if (kind == NodeKind.LET_EXPR) {
+            return this.check_let(node, expected);
+        }
+        if (kind == NodeKind.NEW_EXPR) {
+            return this.check_new(node);
+        }
+        if (kind == NodeKind.INTERPOLATION) {
+            return this.check_interpolation(node);
+        }
+        if (kind == NodeKind.INTRINSIC) {
+            u32 measured = this.resolve_type(node.type(), node);
+            if (Types.is_void(measured) || measured == Types.auto_type()) {
+                this.error(node, "sizeof of this type is not supported yet");
+            }
+            node.set_symbol(SymbolKind.TYPE, (void*)(u64)measured);
+            return Types.integer(Target.pointer_bits(), true);
+        }
+
+        this.error(node, "expression is not supported yet");
+        return Types.i32_type();
+    }
+}

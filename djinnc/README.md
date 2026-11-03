@@ -13,7 +13,14 @@ On POSIX `--lld` calls `ld.lld` directly with the glibc startup files (`DJINN_LD
 executable, the crt directory and the dynamic loader). The test scripts take the runtime library as an optional third argument and add `--lld`
 when `DJINN_USE_LLD` is set.
 `-O2` runs `default<O2>` through `LLVMRunPasses` and raises the backend codegen level.
-The object writer initializes the x86 target only.
+`--run` executes the program in process with ORC LLJIT (the runtime library is loaded as a static archive, libc comes from the djinnc process, `__djinn_call_entry` in the runtime calls `main`).
+`--target <triple>` selects the target (default: the host). It sets the width of `usize`/`isize`; the object writer only has the x86 backend linked in, so other targets stop at `--emit-ir`, and a non-host target is never linked.
+
+## Source layout
+
+One type per file, grouped by folder under `src/` (all files share `namespace djinnc;`): `ast/node`, `ast/attributes`, `ast/macros`, `ast/types`, `lexer`, `parser`, `semantic/{analyzer,symbols,types,checker,const_eval}`, `codegen/{function,target}`, `llvm`, `driver` (including `jit.djinn`) and `support/{memory,text,collections,source,system}`.
+
+`Parser`, `CodeGenerator`, `TypeChecker` and `SemanticAnalyzer` are split by topic with `impl` blocks: the struct and its fields stay in `parser/parser.djinn` and `codegen/code_generator.djinn`, and each group of methods lives in its own file (`parser_types`, `parser_statements`, `parser_expressions`, ..., `codegen_types`, `codegen_functions`, `codegen_operators`, `checker_calls`, `analyzer_impls`, ...).
 
 See [USAGE.md](USAGE.md) for the full guide (building, options, testing and the bootstrap).
 

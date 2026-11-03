@@ -565,6 +565,7 @@ Medição (Windows, stage2 compilando os 21 arquivos do djinnc, 37 mil tokens, 2
 - [ ] AST de 16 bytes: `kind/flags/op` empacotados, filhos fixos em `extra[]`, tipos e texto por índice.
 - [x] Keywords do lexer via `AtomTable` pré-populada (`Atoms.keyword_kind`). Símbolos ainda são lidos por caractere.
 - [ ] `Mem.arena()` sem verificação de `null` a cada alocação (init explícita no início de `main`).
+- [x] JIT no djinnc: `--run` (`driver/jit.djinn`, ORC LLJIT via LLVM-C; implementado, ainda não compilado nem testado; o stage0 já tinha JIT em `jit/JitRunner.cpp`).
 - [ ] Linker: IR -> objeto sem passar pelo clang quando possível (LLVM-C `LLVMTargetMachineEmitToFile`).
 - [ ] Benchmarks na Fase 6: stage0 vs stage1 vs stage2 em arquivos de 1k, 10k e 100k linhas, com o resultado fixado em CI.
 - [~] Debug symbols como metadata nativa do LLVM em vez de strings embutidas. Feito no djinnc (`-g`, `codegen/debug_info.djinn`) e no stage0 (`-g`, `generator/DebugInfo.cpp`, `llvm::DIBuilder`): `DICompileUnit`, `DIFile`, `DISubprogram`, `DILocation` por instrução, `DILocalVariable` (locais e parâmetros) e tipos básicos, ponteiro e struct; no djinnc também `DILexicalBlock`, membros de struct, enums, globais, bindings de `switch`, nomes de método e flag `isOptimized`; o stage0 também tem `DILexicalBlock`, membros de struct e parâmetros struct tipados. PDB no Windows; o stage0 com `-g` linka sem `-flto`, que descarta o CodeView. Testes com lldb em `tools/debug_tests.sh` (`STAGE0=<djinn.exe>` inclui o stage0). DWARF validado no Linux com lldb (Docker). Stack trace simbolizado em crashes: o runtime instala um handler (SEH no Windows com dbghelp+PDB; sinais no POSIX com addr2line+DWARF) e imprime `função (arquivo:linha)` de programas compilados com `-g`, também usado em `__djinn_runtime_error` sem shadow stack; validado no Windows e no Linux (`tests/djinnc/crash`). Falta: ids de localização nos descritores de trap (hoje substituídos por esse simbolizador; só valem a pena se os descritores forem removidos do IR).
@@ -589,7 +590,7 @@ Medição (Windows, stage2 compilando os 21 arquivos do djinnc, 37 mil tokens, 2
 - [ ] Hoje `i8*` serve ao mesmo tempo como "ponteiro para byte", "endereço bruto" e "string C" (ex.: `Ast.id_of`,
       `Ast.at`, `Arena.alloc` fazem `(i8*)node`, `base + id * sizeof(Node)` e `(i64)address - (i64)base`). Isso não
       expressa a intenção e assume ponteiros de 64 bits, então não é portável para 32 bits.
-- [ ] Tipos inteiros do tamanho do ponteiro: `usize` / `isize` (e `uptr` / `iptr` para casts ponteiro<->inteiro),
+- [~] Tipos inteiros do tamanho do ponteiro: `usize` / `isize` e `uptr` / `iptr` existem no djinnc com a largura do alvo (`--target <triple>`, `Target` em `codegen/target/target.djinn`; `sizeof` é `isize`), sample `pointer_sized`, ainda não compilado nem testado. Objeto só para x86 (o LLVM linkado só tem esse backend); outros alvos geram IR com `--emit-ir`. Falta no stage0. Original: `usize` / `isize` (e `uptr` / `iptr` para casts ponteiro<->inteiro),
       com a largura vinda do alvo (`LLVMPointerSize`), no lugar de `i64`/`u64` fixos.
 - [ ] Tipo de ponteiro cru e de byte explícito, separado de texto: por exemplo `ptr` (endereço opaco, sem aritmética de
       elemento) e `byte*` / `u8*` para buffers, com `i8*` deixando de ser usado para isso; strings continuam em `str`.
@@ -641,8 +642,8 @@ O djinnc só compila o subset de `djinnc/SUBSET.md`. Falta, em ordem de dependê
 1. [ ] **Enums simples e `==`/`!=` em enums**: `NodeKind`/`TokenKind` viram `enum` reais (`u16`). Destrava o item 2.
 2. [ ] **`switch`** sobre enums e inteiros (statement e expressão), com checagem de exaustividade na sema.
 3. [ ] **Structs por valor**: parâmetros, retornos, atribuição e inicializador `{ campo: valor }` (hoje "não exercitado").
-4. [~] **`for x in range`** feito (`[a..b]`, `[a..b)`, `a..b`, `a..=b`, lowering no parser); falta `auto` (inferência local) e início aberto `(a..b]`. Argumentos nomeados em chamadas e construtores também feitos (`Point(y: 4, x: 3)`).
-5. [x] **`string` e interpolação**: tipo `string` e `operator +` em `runtime/core.djinn`, literais `$"...{expr}..."` (estilo C#, `{{`/`}}` escapam) viram `INTERP_*` no lexer e um builder em Djinn (`__djinn_text_*`) em `runtime/core.djinn`, com limites u32 checados; falta formatação de largura/precisão e `str`/`string` em mais operadores.
+4. [~] **`for x in range`** feito (`[a..b]`, `[a..b)`, `a..b`, `a..=b`, lowering no parser); `auto` e início aberto `(a..b]` implementados (sample `range_open_start`, ainda não compilado nem testado). Argumentos nomeados em chamadas e construtores também feitos (`Point(y: 4, x: 3)`).
+5. [x] **`string` e interpolação**: tipo `string` e `operator +` em `runtime/core.djinn`, literais `$"...{expr}..."` (estilo C#, `{{`/`}}` escapam) viram `INTERP_*` no lexer e um builder em Djinn (`__djinn_text_*`) em `runtime/core.djinn`, com limites u32 checados; formatação `{x:-08.2}` (largura, alinhamento, zeros, precisão) implementada (sample `interp_format`, ainda não compilado nem testado); falta `str`/`string` em mais operadores.
 6. [ ] **Genéricos** (monomorfização com `FnCtx` + scratch arena): pré-requisito para `array<T>`, `map<K,V>`, `optional<T>`.
 7. [ ] **`impl`/interfaces** e constraints (`Hashable`, `Comparable`): depende de 6.
 8. [ ] **`try`/`throws`/`ensure`/`require`**, **`async`/`await`**: por último, pois exigem lowering de corrotinas e cleanup.

@@ -1,0 +1,401 @@
+namespace djinnc;
+
+impl Parser {
+    Node* parse_struct_init() {
+        i32 start = this.advance();
+        Node* node = Node.create_list(NodeKind.STRUCT_INIT, start);
+        while (!this.check(TokenKind.RBRACE) && !this.at_end() && !this.failed) {
+            this.expect(TokenKind.DOT, "expected '.field = value' in struct initializer");
+            i32 name = this.expect(TokenKind.IDENTIFIER, "expected field name in struct initializer");
+            Node* field = Node.create(NodeKind.FIELD_INIT, name);
+            field.set_text(this.copy_of(name));
+            this.expect(TokenKind.EQUAL, "expected '=' after field name");
+            field.set_first(this.parse_expression());
+            node.add(field);
+            if (!this.check(TokenKind.RBRACE)) {
+                this.expect(TokenKind.COMMA, "expected ',' between field initializers");
+            }
+        }
+        this.expect(TokenKind.RBRACE, "expected '}' to close struct initializer");
+        return node;
+    }
+
+    public Node* parse_expression() {
+        return this.parse_assignment();
+    }
+
+    static i32 compound_operator(i32 kind) {
+        if (kind == TokenKind.PLUS_EQUAL) { return TokenKind.PLUS; }
+        if (kind == TokenKind.MINUS_EQUAL) { return TokenKind.MINUS; }
+        if (kind == TokenKind.STAR_EQUAL) { return TokenKind.STAR; }
+        if (kind == TokenKind.SLASH_EQUAL) { return TokenKind.SLASH; }
+        if (kind == TokenKind.PERCENT_EQUAL) { return TokenKind.PERCENT; }
+        if (kind == TokenKind.AMPERSAND_EQUAL) { return TokenKind.AMPERSAND; }
+        if (kind == TokenKind.PIPE_EQUAL) { return TokenKind.PIPE; }
+        if (kind == TokenKind.CARET_EQUAL) { return TokenKind.CARET; }
+        if (kind == TokenKind.LESS_LESS_EQUAL) { return TokenKind.LESS_LESS; }
+        if (kind == TokenKind.GREATER_GREATER_EQUAL) { return TokenKind.GREATER_GREATER; }
+        return 0;
+    }
+
+    static i32 precedence(i32 kind) {
+        if (kind == TokenKind.QUESTION_QUESTION) { return 1; }
+        if (kind == TokenKind.OR_OR) { return 2; }
+        if (kind == TokenKind.AND_AND) { return 3; }
+        if (kind == TokenKind.PIPE) { return 4; }
+        if (kind == TokenKind.CARET) { return 5; }
+        if (kind == TokenKind.AMPERSAND) { return 6; }
+        if (kind == TokenKind.EQUAL_EQUAL || kind == TokenKind.BANG_EQUAL || kind == TokenKind.IS) { return 7; }
+        if (kind == TokenKind.LESS || kind == TokenKind.LESS_EQUAL
+            || kind == TokenKind.GREATER || kind == TokenKind.GREATER_EQUAL) { return 8; }
+        if (kind == TokenKind.LESS_LESS || kind == TokenKind.GREATER_GREATER) { return 9; }
+        if (kind == TokenKind.PLUS || kind == TokenKind.MINUS) { return 10; }
+        if (kind == TokenKind.STAR || kind == TokenKind.SLASH || kind == TokenKind.PERCENT) { return 11; }
+        return 0;
+    }
+
+    Node* make_assignment(Node* target, Node* value, i32 at) {
+        Node* assign = Node.create(NodeKind.ASSIGN, at);
+        assign.set_first(target);
+        assign.set_second(value);
+        return assign;
+    }
+
+    Node* make_binary(i32 op, Node* left, Node* right, i32 at) {
+        Node* binary = Node.create(NodeKind.BINARY, at);
+        binary.set_op(op);
+        binary.set_first(left);
+        binary.set_second(right);
+        return binary;
+    }
+
+    Node* make_step(Node* target, i32 op, i32 at) {
+        Node* one = Node.create(NodeKind.INT_LITERAL, at);
+        one.set_int_value(1);
+        one.set_text("1");
+        Node* sum = this.make_binary(op, target, one, at);
+        return this.make_assignment(target, sum, at);
+    }
+
+    Node* parse_assignment() {
+        Node* left = this.parse_binary(1);
+        i32 token = this.current();
+
+        if (this.kind_of(token) == TokenKind.EQUAL) {
+            this.advance();
+            Node* value = this.parse_assignment();
+            return this.make_assignment(left, value, token);
+        }
+
+        i32 compound = Parser.compound_operator(this.kind_of(token));
+        if (compound != 0) {
+            this.advance();
+            Node* rhs = this.parse_assignment();
+            Node* combined = this.make_binary(compound, left, rhs, token);
+            return this.make_assignment(left, combined, token);
+        }
+        return left;
+    }
+
+    Node* parse_is(Node* operand, i32 at) {
+        Node* test = Node.create(NodeKind.IS_EXPR, at);
+        test.set_first(operand);
+        test.set_type(this.parse_type());
+        if (this.check(TokenKind.IDENTIFIER)) {
+            ByteBuffer* names = ByteBuffer.create();
+            while (this.check(TokenKind.IDENTIFIER)) {
+                i32 binding = this.advance();
+                if (names.length > 0) {
+                    names.append_char(32);
+                }
+                names.append_slice(this.text_of(binding), this.length_of(binding));
+            }
+            test.set_text(names.cstr());
+            test.set_flag(true);
+        }
+        return test;
+    }
+
+    Node* parse_binary(i32 min_precedence) {
+        mut Node* left = this.parse_unary();
+        while (true) {
+            i32 op = this.current();
+            i32 level = Parser.precedence(this.kind_of(op));
+            if (level == 0 || level < min_precedence) {
+                break;
+            }
+            this.advance();
+            if (this.kind_of(op) == TokenKind.IS) {
+                left = this.parse_is(left, op);
+                continue;
+            }
+            mut i32 next_level = level + 1;
+            if (this.kind_of(op) == TokenKind.QUESTION_QUESTION) {
+                next_level = level;
+            }
+            Node* right = this.parse_binary(next_level);
+            left = this.make_binary(this.kind_of(op), left, right, op);
+        }
+        return left;
+    }
+
+    Node* parse_unary() {
+        i32 token = this.current();
+        bool isPrefix = this.kind_of(token) == TokenKind.BANG || this.kind_of(token) == TokenKind.MINUS
+            || this.kind_of(token) == TokenKind.TILDE || this.kind_of(token) == TokenKind.STAR || this.kind_of(token) == TokenKind.AMPERSAND;
+        if (isPrefix) {
+            this.advance();
+            Node* unary = Node.create(NodeKind.UNARY, token);
+            unary.set_op(this.kind_of(token));
+            unary.set_first(this.parse_unary());
+            return unary;
+        }
+
+        if (this.kind_of(token) == TokenKind.PLUS_PLUS || this.kind_of(token) == TokenKind.MINUS_MINUS) {
+            this.advance();
+            Node* target = this.parse_unary();
+            mut i32 op = TokenKind.PLUS;
+            if (this.kind_of(token) == TokenKind.MINUS_MINUS) {
+                op = TokenKind.MINUS;
+            }
+            return this.make_step(target, op, token);
+        }
+
+        if (this.kind_of(token) == TokenKind.AWAIT) {
+            this.advance();
+            Node* awaited = Node.create(NodeKind.AWAIT_EXPR, token);
+            awaited.set_first(this.parse_unary());
+            return awaited;
+        }
+
+        if (this.kind_of(token) == TokenKind.SPAWN || this.kind_of(token) == TokenKind.TRY
+            || this.kind_of(token) == TokenKind.THROW) {
+            this.fail("this expression is not supported yet");
+            return Node.create(NodeKind.NULL_LITERAL, token);
+        }
+
+        Node* primary = this.parse_primary();
+        return this.parse_postfix(primary);
+    }
+
+    Node* parse_argument() {
+        i32 token = this.current();
+        if (this.kind_of(token) == TokenKind.IDENTIFIER && this.kind_of(this.peek_token(1)) == TokenKind.COLON) {
+            this.advance();
+            this.advance();
+            Node* named = Node.create(NodeKind.NAMED_ARG, token);
+            named.set_text(this.copy_of(token));
+            named.set_first(this.parse_expression());
+            return named;
+        }
+        return this.parse_expression();
+    }
+
+    Node* parse_postfix(Node* start) {
+        mut Node* expr = start;
+        while (!this.failed) {
+            i32 token = this.current();
+            if (this.kind_of(token) == TokenKind.LPAREN) {
+                this.advance();
+                Node* call = Node.create_list(NodeKind.CALL, token);
+                call.set_first(expr);
+                if (!this.check(TokenKind.RPAREN)) {
+                    call.add(this.parse_argument());
+                    while (this.match(TokenKind.COMMA)) {
+                        call.add(this.parse_argument());
+                    }
+                }
+                this.expect(TokenKind.RPAREN, "expected ')' after arguments");
+                expr = call;
+            } else if (this.kind_of(token) == TokenKind.LBRACKET) {
+                this.advance();
+                Node* index = Node.create(NodeKind.INDEX, token);
+                index.set_first(expr);
+                index.set_second(this.parse_expression());
+                this.expect(TokenKind.RBRACKET, "expected ']' after index");
+                expr = index;
+            } else if (this.kind_of(token) == TokenKind.DOT) {
+                this.advance();
+                Node* access = Node.create(NodeKind.FIELD_ACCESS, token);
+                access.set_first(expr);
+                i32 member = this.expect(TokenKind.IDENTIFIER, "expected member name after '.'");
+                access.set_text(this.copy_of(member));
+                if (this.check(TokenKind.LESS)) {
+                    i32 close = this.scan_type_arguments(0);
+                    bool explicit = close > 0 && !this.scan_half && this.kind_of(this.peek_token(close)) == TokenKind.LPAREN;
+                    this.scan_half = false;
+                    if (explicit) {
+                        TypeRef* holder = TypeRef.create(TypeKind.NAMED);
+                        holder.args = this.parse_type_arguments();
+                        access.set_type(holder);
+                    }
+                }
+                expr = access;
+            } else if (this.kind_of(token) == TokenKind.PLUS_PLUS) {
+                this.advance();
+                expr = this.make_step(expr, TokenKind.PLUS, token);
+            } else if (this.kind_of(token) == TokenKind.MINUS_MINUS) {
+                this.advance();
+                expr = this.make_step(expr, TokenKind.MINUS, token);
+            } else {
+                break;
+            }
+        }
+        return expr;
+    }
+
+    Node* parse_primary() {
+        i32 token = this.current();
+
+        if (this.kind_of(token) == TokenKind.INTEGER_LITERAL) {
+            this.advance();
+            Node* literal = Node.create(NodeKind.INT_LITERAL, token);
+            literal.set_text(this.copy_of(token));
+            literal.set_int_value(Strings.parse_integer(this.text_of(token), this.length_of(token)));
+            return literal;
+        }
+        if (this.kind_of(token) == TokenKind.FLOAT_LITERAL) {
+            this.advance();
+            Node* literal = Node.create(NodeKind.FLOAT_LITERAL, token);
+            literal.set_text(this.copy_of(token));
+            return literal;
+        }
+        if (this.kind_of(token) == TokenKind.INTERP_BEGIN) {
+            return this.parse_interpolation();
+        }
+        if (this.kind_of(token) == TokenKind.STRING_LITERAL) {
+            this.advance();
+            Node* literal = Node.create(NodeKind.STRING_LITERAL, token);
+            literal.set_text_n(this.text_of(token), this.length_of(token));
+            literal.set_int_value(this.length_of(token));
+            return literal;
+        }
+        if (this.kind_of(token) == TokenKind.TRUE || this.kind_of(token) == TokenKind.FALSE) {
+            this.advance();
+            Node* literal = Node.create(NodeKind.BOOL_LITERAL, token);
+            if (this.kind_of(token) == TokenKind.TRUE) {
+                literal.set_int_value(1);
+            }
+            return literal;
+        }
+        if (this.kind_of(token) == TokenKind.NULL) {
+            this.advance();
+            return Node.create(NodeKind.NULL_LITERAL, token);
+        }
+        if (this.kind_of(token) == TokenKind.SWITCH) {
+            return this.parse_switch_expression();
+        }
+        if (this.kind_of(token) == TokenKind.LBRACKET) {
+            this.advance();
+            Node* literal = Node.create_list(NodeKind.ARRAY_LITERAL, token);
+            if (!this.check(TokenKind.RBRACKET)) {
+                literal.add(this.parse_expression());
+                while (this.match(TokenKind.COMMA)) {
+                    literal.add(this.parse_expression());
+                }
+            }
+            this.expect(TokenKind.RBRACKET, "expected ']' after the array elements");
+            return literal;
+        }
+        if (this.kind_of(token) == TokenKind.LBRACE) {
+            return this.parse_struct_init();
+        }
+        if (this.kind_of(token) == TokenKind.NEW) {
+            this.advance();
+            Node* created = Node.create_list(NodeKind.NEW_EXPR, token);
+            created.set_type(this.parse_type());
+            this.expect(TokenKind.LPAREN, "expected '(' after the type of 'new'");
+            if (!this.check(TokenKind.RPAREN)) {
+                created.add(this.parse_argument());
+                while (this.match(TokenKind.COMMA)) {
+                    created.add(this.parse_argument());
+                }
+            }
+            this.expect(TokenKind.RPAREN, "expected ')' after the constructor arguments");
+            return created;
+        }
+        if (this.kind_of(token) == TokenKind.THIS) {
+            this.advance();
+            Node* self = Node.create(NodeKind.IDENTIFIER, token);
+            self.set_text("this");
+            return self;
+        }
+
+        if (this.kind_of(token) == TokenKind.IDENTIFIER) {
+            MacroInfo* called = Macros.find(this.atom_of(token));
+            if (called != null && this.kind_of(this.peek_token(1)) == TokenKind.LPAREN) {
+                return this.expand_macro(token, called);
+            }
+            i32 intrinsic = Intrinsic.lookup(this.atom_of(token));
+            if (intrinsic != Intrinsic.NONE && this.kind_of(this.peek_token(1)) == TokenKind.LPAREN) {
+                this.advance();
+                this.advance();
+                Node* call = Node.create(NodeKind.INTRINSIC, token);
+                call.set_op(intrinsic);
+                call.set_type(this.parse_type());
+                this.expect(TokenKind.RPAREN, "expected ')' after intrinsic type argument");
+                return call;
+            }
+
+            if (this.is_known_type(token) && this.kind_of(this.peek_token(1)) == TokenKind.LESS) {
+                i32 end = this.scan_type_end(0);
+                if (end > 0 && this.kind_of(this.peek_token(end)) == TokenKind.LPAREN) {
+                    TypeRef* constructed = this.parse_type();
+                    Node* constructor_name = Node.create(NodeKind.IDENTIFIER, token);
+                    constructor_name.set_text(constructed.name);
+                    constructor_name.set_type(constructed);
+                    constructor_name.set_flag(true);
+                    return constructor_name;
+                }
+                if (end > 0 && this.kind_of(this.peek_token(end)) == TokenKind.COLON_COLON
+                    && this.kind_of(this.peek_token(end + 1)) == TokenKind.IDENTIFIER) {
+                    TypeRef* owner = this.parse_type();
+                    this.advance();
+                    i32 variant = this.expect(TokenKind.IDENTIFIER, "expected an enum variant");
+                    Node* generic_variant = Node.create(NodeKind.IDENTIFIER, token);
+                    generic_variant.set_text(this.copy_of(variant));
+                    generic_variant.set_type(owner);
+                    return generic_variant;
+                }
+            }
+
+            Node* identifier = Node.create(NodeKind.IDENTIFIER, token);
+            identifier.set_text(this.qualified_name());
+            if (this.is_known_type(token) && this.check(TokenKind.LBRACE) && this.kind_of(this.peek_token(1)) == TokenKind.DOT) {
+                Node* typed_init = this.parse_struct_init();
+                typed_init.set_type(TypeRef.named(identifier.text()));
+                return typed_init;
+            }
+            if (this.check(TokenKind.LESS) && !this.is_known_type(token)) {
+                i32 close = this.scan_type_arguments(0);
+                bool explicit = close > 0 && !this.scan_half && this.kind_of(this.peek_token(close)) == TokenKind.LPAREN;
+                this.scan_half = false;
+                if (explicit) {
+                    TypeRef* holder = TypeRef.create(TypeKind.NAMED);
+                    holder.args = this.parse_type_arguments();
+                    identifier.set_type(holder);
+                }
+            }
+            return identifier;
+        }
+
+        if (this.kind_of(token) == TokenKind.LPAREN) {
+            i32 typeEnd = this.scan_type_end(1);
+            bool isCast = typeEnd > 0 && this.kind_of(this.peek_token(typeEnd)) == TokenKind.RPAREN;
+            this.advance();
+            if (isCast) {
+                Node* cast = Node.create(NodeKind.CAST, token);
+                cast.set_type(this.parse_type());
+                this.expect(TokenKind.RPAREN, "expected ')' after cast type");
+                cast.set_first(this.parse_unary());
+                return cast;
+            }
+            Node* inner = this.parse_expression();
+            this.expect(TokenKind.RPAREN, "expected ')'");
+            return inner;
+        }
+
+        this.fail("expected an expression");
+        return Node.create(NodeKind.NULL_LITERAL, token);
+    }
+}

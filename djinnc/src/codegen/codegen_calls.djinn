@@ -1,0 +1,137 @@
+namespace djinnc;
+
+impl CodeGenerator {
+    Value* gen_operator_call(Node* node, bool negated) {
+        FunctionInfo* info = (FunctionInfo*)node.symbol();
+        IdList* param_types = info.param_types;
+        void** args = CodeGenerator.array_of(2);
+        args[0] = this.coerce(this.gen_expression(node.first()), param_types.get(0));
+        args[1] = this.coerce(this.gen_expression(node.second()), param_types.get(1));
+        mut void* result = LLVMBuildCall2(this.builder, info.function_type, info.function, args, 2, "op");
+        if (negated) {
+            result = LLVMBuildNot(this.builder, result, "op.not");
+        }
+        return Value.create(result, info.return_type);
+    }
+
+    Value* gen_enum_construct(Node* node, Node* variant, u32 enum_type) {
+        void* llvm = this.llvm_type(enum_type);
+        void* slot = this.create_slot(enum_type, "enum.value");
+        void* tag_address = LLVMBuildStructGEP2(this.builder, llvm, slot, 0, "enum.tag");
+        Node* tag_value = variant.first();
+        void* tag = LLVMConstInt(LLVMIntTypeInContext(this.context, 32), (u64)tag_value.int_value(), 0);
+        LLVMBuildStore(this.builder, tag, tag_address);
+        for (mut i32 i = 0; i < node.count(); i = i + 1) {
+            Node* payload = variant.child(i);
+            Value* argument = this.gen_expression(node.child(i));
+            void* address = this.payload_address(llvm, slot, variant, i);
+            LLVMBuildStore(this.builder, this.coerce(argument, payload.value_type()), address);
+        }
+        return Value.create(LLVMBuildLoad2(this.builder, llvm, slot, "enum.loaded"), enum_type);
+    }
+
+    void call_constructor(Node* node, void* target, FunctionInfo* constructor) {
+        if (constructor == null) {
+            return;
+        }
+        IdList* param_types = constructor.param_types;
+        void** args = CodeGenerator.array_of(node.count() + 1);
+        args[0] = target;
+        for (mut i32 i = 0; i < node.count(); i = i + 1) {
+            Value* argument = this.gen_expression(node.child(i));
+            args[i + 1] = this.coerce(argument, param_types.get(i + 1));
+        }
+        LLVMBuildCall2(this.builder, constructor.function_type, constructor.function, args, (u32)(node.count() + 1), "");
+    }
+
+    Value* gen_let(Node* node) {
+        for (mut i32 i = 0; i < node.count(); i = i + 1) {
+            Node* item = node.child(i);
+            LocalVariable* variable = (LocalVariable*)item.symbol();
+            Value* initial = this.gen_expression(item.first());
+            variable.slot = this.create_slot(variable.type, variable.name);
+            LLVMBuildStore(this.builder, this.coerce(initial, variable.type), variable.slot);
+            this.declare_variable(variable.slot, variable.name, variable.type, item, 0);
+        }
+        return this.gen_expression(node.first());
+    }
+
+    Value* gen_new(Node* node) {
+        u32 pointer_type = node.value_type();
+        StructInfo* info = this.struct_of(Types.element(pointer_type));
+        void* memory = this.allocate_bytes(LLVMSizeOf(info.llvm));
+        this.call_constructor(node, memory, (FunctionInfo*)node.symbol());
+        return Value.create(memory, pointer_type);
+    }
+
+    Value* gen_call(Node* node) {
+        Node* callee = node.first();
+        if (callee.symbol_kind() == SymbolKind.CONSTANT) {
+            Node* variant = (Node*)callee.symbol();
+            u32 declared = variant.value_type();
+            if (Types.is_struct(declared)) {
+                return this.gen_enum_construct(node, variant, declared);
+            }
+            Value* tag = this.gen_expression(variant.first());
+            return Value.create(this.coerce(tag, declared), declared);
+        }
+        if (callee.symbol_kind() == SymbolKind.CONSTRUCTOR) {
+            u32 constructed = node.value_type();
+            void* slot = this.create_slot(constructed, "ctor");
+            LLVMBuildStore(this.builder, LLVMConstNull(this.llvm_type(constructed)), slot);
+            this.call_constructor(node, slot, (FunctionInfo*)callee.symbol());
+            return Value.create(LLVMBuildLoad2(this.builder, this.llvm_type(constructed), slot, "ctor.loaded"), constructed);
+        }
+        FunctionInfo* info = (FunctionInfo*)callee.symbol();
+        mut void* receiver = (void*)0;
+        mut i32 offset = 0;
+
+        if (callee.symbol_kind() == SymbolKind.INSTANCE_METHOD) {
+            StructInfo* receiver_owner = info.owner;
+            if (receiver_owner.is_enum || receiver_owner.is_primitive) {
+                Value* enum_value = this.gen_expression(callee.first());
+                receiver = enum_value.ref;
+                if (Types.is_pointer(enum_value.type)) {
+                    receiver = LLVMBuildLoad2(this.builder, this.llvm_type(receiver_owner.type_id), enum_value.ref, "enum.load");
+                }
+            } else {
+                receiver = this.struct_pointer(callee.first());
+            }
+            offset = 1;
+        }
+
+        IdList* param_types = info.param_types;
+        i32 fixed = param_types.length;
+        i32 given = node.count() + offset;
+
+        void** args = CodeGenerator.array_of(given);
+        if (offset == 1) {
+            args[0] = receiver;
+        }
+        for (mut i32 i = offset; i < given; i = i + 1) {
+            Node* argument_node = node.child(i - offset);
+            if (i < fixed) {
+                Value* argument = this.gen_expression(argument_node);
+                args[i] = this.coerce(argument, param_types.get(i));
+            } else {
+                Value* extra = this.promote_variadic(this.gen_expression(argument_node));
+                args[i] = extra.ref;
+            }
+        }
+
+        mut i8* label = "call";
+        if (Types.is_void(info.return_type)) {
+            label = "";
+        }
+        if (info.is_async) {
+            void* handle = LLVMBuildCall2(this.builder, info.function_type, info.function, args, (u32)given, "async.handle");
+            u32 task_type = node.value_type();
+            void* task_llvm = this.llvm_type(task_type);
+            void* task_slot = this.create_slot(task_type, "task");
+            LLVMBuildStore(this.builder, handle, LLVMBuildStructGEP2(this.builder, task_llvm, task_slot, 0, "task.handle.ptr"));
+            return Value.create(LLVMBuildLoad2(this.builder, task_llvm, task_slot, "task.value"), task_type);
+        }
+        void* result = LLVMBuildCall2(this.builder, info.function_type, info.function, args, (u32)given, label);
+        return Value.create(result, info.return_type);
+    }
+}
