@@ -1,0 +1,159 @@
+struct str {
+    i8* data;
+    u32 length;
+    public bool is_empty() { return this.length == 0; }
+    public i8* ptr() { return this.data; }
+}
+extern "C" {
+    void* __djinn_malloc(u64 size);
+    void* memcpy(void* destination, void* source, u64 count);
+    i32 snprintf(i8* buffer, u64 size, i8* format, ...);
+    i32 strlen(i8* text);
+    i64 write(i32 descriptor, void* data, u64 count);
+    void abort();
+}
+struct djinn_text_builder {
+    i8* data;
+    u32 length;
+    u32 capacity;
+}
+void djinn_text_fail(i8* message) {
+    write(2, message, (u64)strlen(message));
+    abort();
+}
+void djinn_text_reserve(djinn_text_builder* builder, u32 extra) {
+    u64 limit = 4294967295;
+    u64 needed = (u64)builder.length + (u64)extra + 1;
+    if (needed > limit) {
+        djinn_text_fail("djinn runtime error: string length overflow\n");
+    }
+    if (needed <= (u64)builder.capacity) {
+        return;
+    }
+    mut u64 capacity = 32;
+    if ((u64)builder.capacity > capacity) {
+        capacity = (u64)builder.capacity;
+    }
+    while (capacity < needed) {
+        capacity = capacity * 2;
+    }
+    if (capacity > limit) {
+        capacity = limit;
+    }
+    i8* grown = (i8*)__djinn_malloc(capacity);
+    if (builder.length > 0) {
+        memcpy(grown, builder.data, (u64)builder.length);
+    }
+    builder.data = grown;
+    builder.capacity = (u32)capacity;
+}
+void djinn_text_advance(djinn_text_builder* builder, i32 count) {
+    if (count < 0 || count >= 32) {
+        djinn_text_fail("djinn runtime error: number formatting failed\n");
+    }
+    builder.length = builder.length + (u32)count;
+}
+void* __djinn_text_begin() {
+    djinn_text_builder* builder = (djinn_text_builder*)__djinn_malloc(sizeof(djinn_text_builder));
+    builder.data = null;
+    builder.length = 0;
+    builder.capacity = 0;
+    djinn_text_reserve(builder, 0);
+    builder.data[0] = (i8)0;
+    return (void*)builder;
+}
+void __djinn_text_slice(void* handle, i8* data, u32 length) {
+    djinn_text_builder* builder = (djinn_text_builder*)handle;
+    if (builder == null || (data == null && length > 0)) {
+        djinn_text_fail("djinn runtime error: invalid string argument\n");
+    }
+    djinn_text_reserve(builder, length);
+    if (length > 0) {
+        memcpy(builder.data + (i64)builder.length, data, (u64)length);
+    }
+    builder.length = builder.length + length;
+    builder.data[(i64)builder.length] = (i8)0;
+}
+void __djinn_text_cstr(void* handle, i8* data) {
+    if (data == null) {
+        __djinn_text_slice(handle, "null", 4);
+        return;
+    }
+    i32 length = strlen(data);
+    if (length < 0) {
+        djinn_text_fail("djinn runtime error: invalid string length\n");
+    }
+    __djinn_text_slice(handle, data, (u32)length);
+}
+void __djinn_text_i64(void* handle, i64 value) {
+    djinn_text_builder* builder = (djinn_text_builder*)handle;
+    djinn_text_reserve(builder, 32);
+    i32 count = snprintf(builder.data + (i64)builder.length, 32, "%lld", value);
+    djinn_text_advance(builder, count);
+}
+void __djinn_text_u64(void* handle, u64 value) {
+    djinn_text_builder* builder = (djinn_text_builder*)handle;
+    djinn_text_reserve(builder, 32);
+    i32 count = snprintf(builder.data + (i64)builder.length, 32, "%llu", value);
+    djinn_text_advance(builder, count);
+}
+void __djinn_text_f64(void* handle, f64 value) {
+    djinn_text_builder* builder = (djinn_text_builder*)handle;
+    djinn_text_reserve(builder, 32);
+    i32 count = snprintf(builder.data + (i64)builder.length, 32, "%g", value);
+    djinn_text_advance(builder, count);
+}
+void __djinn_text_bool(void* handle, i32 value) {
+    if (value != 0) {
+        __djinn_text_slice(handle, "true", 4);
+    } else {
+        __djinn_text_slice(handle, "false", 5);
+    }
+}
+i8* __djinn_text_finish(void* handle, u32* length) {
+    djinn_text_builder* builder = (djinn_text_builder*)handle;
+    if (builder == null || length == null) {
+        djinn_text_fail("djinn runtime error: invalid string builder\n");
+    }
+    length[0] = builder.length;
+    return builder.data;
+}
+i8* __djinn_text_join(i8* left, u32 left_length, i8* right, u32 right_length) {
+    if ((left == null && left_length > 0) || (right == null && right_length > 0)) {
+        djinn_text_fail("djinn runtime error: invalid string argument\n");
+    }
+    u64 limit = 4294967295;
+    u64 total = (u64)left_length + (u64)right_length;
+    if (total + 1 > limit) {
+        djinn_text_fail("djinn runtime error: string length overflow\n");
+    }
+    i8* joined = (i8*)__djinn_malloc(total + 1);
+    if (left_length > 0) {
+        memcpy(joined, left, (u64)left_length);
+    }
+    if (right_length > 0) {
+        memcpy(joined + (i64)left_length, right, (u64)right_length);
+    }
+    joined[(i64)total] = (i8)0;
+    return joined;
+}
+struct string {
+    i8* data;
+    u32 length;
+    u32 capacity;
+    public bool is_empty() { return this.length == 0; }
+    public i8* ptr() { return this.data; }
+}
+impl string {
+    operator +(string left, string right) -> string {
+        u32 total = left.length + right.length;
+        string joined = { .data = __djinn_text_join(left.data, left.length, right.data, right.length), .length = total, .capacity = total };
+        return joined;
+    }
+}
+struct arr<T> {
+    T* data;
+    u32 length;
+    public bool is_empty() { return this.length == 0; }
+    public T* ptr() { return this.data; }
+}

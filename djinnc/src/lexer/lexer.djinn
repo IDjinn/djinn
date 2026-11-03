@@ -34,7 +34,10 @@ struct Lexer {
 
             i32 c = this.peek(0);
             if (c == 34) {
-                this.read_string();
+                this.read_string(false);
+            } else if (c == 36 && this.peek(1) == 34) {
+                this.advance();
+                this.read_string(true);
             } else if (Strings.is_digit(c)) {
                 this.read_number();
             } else if (Strings.is_ident_start(c)) {
@@ -180,12 +183,15 @@ struct Lexer {
         this.emit(TokenKind.INTEGER_LITERAL, start, this.pos - start);
     }
 
-    void read_string() {
-        i32 start = this.pos;
+    void read_string(bool interpolating) {
+        mut i32 start = this.pos;
+        if (interpolating) {
+            start = start - 1;
+        }
         ByteBuffer* value = this.scratch;
         value.length = 0;
 
-        if (this.peek(1) == 34 && this.peek(2) == 34) {
+        if (!interpolating && this.peek(1) == 34 && this.peek(2) == 34) {
             this.advance();
             this.advance();
             this.advance();
@@ -205,6 +211,7 @@ struct Lexer {
         }
 
         this.advance();
+        mut bool interpolated = false;
         while (this.pos < this.length && this.peek(0) != 34) {
             if (this.peek(0) == 92) {
                 this.advance();
@@ -216,6 +223,27 @@ struct Lexer {
                 } else {
                     value.append_char(escaped);
                 }
+            } else if (interpolating && this.peek(0) == 123 && this.peek(1) == 123) {
+                this.advance();
+                this.advance();
+                value.append_char(123);
+            } else if (interpolating && this.peek(0) == 125 && this.peek(1) == 125) {
+                this.advance();
+                this.advance();
+                value.append_char(125);
+            } else if (interpolating && this.peek(0) == 125) {
+                this.error_at(this.pos, "a single '}' in an interpolated string must be written '}}'");
+                this.advance();
+            } else if (interpolating && this.peek(0) == 123) {
+                if (interpolated) {
+                    this.emit_text(TokenKind.INTERP_MIDDLE, value, start);
+                } else {
+                    this.emit_text(TokenKind.INTERP_BEGIN, value, start);
+                }
+                interpolated = true;
+                value.length = 0;
+                this.advance();
+                this.read_interpolated_expression(start);
             } else {
                 value.append_char(this.advance());
             }
@@ -226,7 +254,55 @@ struct Lexer {
         } else {
             this.error_at(start, "unterminated string literal");
         }
-        this.emit_string(value, start);
+        if (interpolated) {
+            this.emit_text(TokenKind.INTERP_END, value, start);
+        } else if (interpolating) {
+            this.emit_text(TokenKind.INTERP_BEGIN, value, start);
+            value.length = 0;
+            this.emit_text(TokenKind.INTERP_END, value, start);
+        } else {
+            this.emit_string(value, start);
+        }
+    }
+
+    void read_interpolated_expression(i32 start) {
+        mut i32 depth = 0;
+        while (true) {
+            this.skip_trivia();
+            if (this.pos >= this.length) {
+                this.error_at(start, "unterminated string interpolation");
+                return;
+            }
+            i32 c = this.peek(0);
+            if (c == 125 && depth == 0) {
+                this.advance();
+                return;
+            }
+            if (c == 34) {
+                this.read_string(false);
+            } else if (c == 36 && this.peek(1) == 34) {
+                this.advance();
+                this.read_string(true);
+            } else if (Strings.is_digit(c)) {
+                this.read_number();
+            } else if (Strings.is_ident_start(c)) {
+                this.read_identifier();
+            } else {
+                if (c == 123) {
+                    depth = depth + 1;
+                } else if (c == 125) {
+                    depth = depth - 1;
+                }
+                this.read_symbol();
+            }
+        }
+    }
+
+    void emit_text(i32 kind, ByteBuffer* value, i32 start) {
+        TokenList* list = this.tokens;
+        AtomTable* atoms = this.atoms;
+        u32 atom = atoms.intern_copy(value.data, (u32)value.length);
+        list.push(kind, (u32)start, atom + 1);
     }
 
     void emit_string(ByteBuffer* value, i32 start) {

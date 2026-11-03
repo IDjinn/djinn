@@ -641,8 +641,8 @@ O djinnc só compila o subset de `djinnc/SUBSET.md`. Falta, em ordem de dependê
 1. [ ] **Enums simples e `==`/`!=` em enums**: `NodeKind`/`TokenKind` viram `enum` reais (`u16`). Destrava o item 2.
 2. [ ] **`switch`** sobre enums e inteiros (statement e expressão), com checagem de exaustividade na sema.
 3. [ ] **Structs por valor**: parâmetros, retornos, atribuição e inicializador `{ campo: valor }` (hoje "não exercitado").
-4. [ ] **`auto`** (inferência local) e **`for x in range`**: reduzem ruído no fonte e usam o `TypeTable` da Fase 4.
-5. [ ] **Interpolação de string** e `str`: depende de um allocator/arena na linguagem.
+4. [~] **`for x in range`** feito (`[a..b]`, `[a..b)`, `a..b`, `a..=b`, lowering no parser); falta `auto` (inferência local) e início aberto `(a..b]`. Argumentos nomeados em chamadas e construtores também feitos (`Point(y: 4, x: 3)`).
+5. [x] **`string` e interpolação**: tipo `string` e `operator +` em `runtime/core.djinn`, literais `$"...{expr}..."` (estilo C#, `{{`/`}}` escapam) viram `INTERP_*` no lexer e um builder em Djinn (`__djinn_text_*`) em `runtime/core.djinn`, com limites u32 checados; falta formatação de largura/precisão e `str`/`string` em mais operadores.
 6. [ ] **Genéricos** (monomorfização com `FnCtx` + scratch arena): pré-requisito para `array<T>`, `map<K,V>`, `optional<T>`.
 7. [ ] **`impl`/interfaces** e constraints (`Hashable`, `Comparable`): depende de 6.
 8. [ ] **`try`/`throws`/`ensure`/`require`**, **`async`/`await`**: por último, pois exigem lowering de corrotinas e cleanup.

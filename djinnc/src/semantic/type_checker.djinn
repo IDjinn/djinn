@@ -333,8 +333,9 @@ struct TypeChecker {
         }
         if (kind == NodeKind.STRING_LITERAL) {
             u32 text_type = this.core_type("str");
-            if (expected != 0 && expected == text_type) {
-                return text_type;
+            u32 owned_type = this.core_type("string");
+            if (expected != 0 && (expected == text_type || expected == owned_type)) {
+                return expected;
             }
             return Types.byte_pointer();
         }
@@ -378,6 +379,9 @@ struct TypeChecker {
         }
         if (kind == NodeKind.NEW_EXPR) {
             return this.check_new(node);
+        }
+        if (kind == NodeKind.INTERPOLATION) {
+            return this.check_interpolation(node);
         }
         if (kind == NodeKind.INTRINSIC) {
             u32 measured = this.resolve_type(node.type(), node);
@@ -669,6 +673,25 @@ struct TypeChecker {
         return type;
     }
 
+    u32 check_interpolation(Node* node) {
+        u32 owned = this.core_type("string");
+        u32 view = this.core_type("str");
+        if (owned == 0) {
+            this.error(node, "string interpolation needs the core 'string' type");
+            return Types.i32_type();
+        }
+        for (mut i32 i = 1; i < node.count(); i = i + 2) {
+            Node* part = node.child(i);
+            u32 type = this.check_expression(part, 0);
+            bool printable = Types.is_integer(type) || Types.is_float(type) || type == Types.byte_pointer()
+                || type == owned || type == view;
+            if (!printable) {
+                this.error(part, "this value cannot be interpolated into a string");
+            }
+        }
+        return owned;
+    }
+
     u32 core_type(i8* name) {
         SymbolTable* symbols = this.symbols;
         u32 atom = Ast.intern_base_name(name, (i32)strlen(name));
@@ -924,6 +947,85 @@ struct TypeChecker {
         return instance;
     }
 
+    bool names_fit(Node* call, FunctionInfo* info) {
+        Node* declaration = info.node;
+        if (declaration == null || declaration.count() != call.count()) {
+            return false;
+        }
+        mut bool named_seen = false;
+        IdList* taken = IdList.create();
+        for (mut i32 i = 0; i < call.count(); i = i + 1) {
+            taken.push(0);
+        }
+        for (mut i32 i = 0; i < call.count(); i = i + 1) {
+            Node* argument = call.child(i);
+            if (argument.kind != NodeKind.NAMED_ARG) {
+                if (named_seen) {
+                    return false;
+                }
+                taken.data[i] = 1;
+            } else {
+                named_seen = true;
+                i32 position = this.parameter_index(declaration, argument.text());
+                if (position < 0 || taken.get(position) != 0) {
+                    return false;
+                }
+                taken.data[position] = 1;
+            }
+        }
+        return true;
+    }
+
+    i32 parameter_index(Node* declaration, i8* name) {
+        for (mut i32 i = 0; i < declaration.count(); i = i + 1) {
+            if (strcmp(declaration.child(i).text(), name) == 0) {
+                return i;
+            }
+        }
+        return 0 - 1;
+    }
+
+    FunctionInfo* apply_named_arguments(Node* call, FunctionInfo* head) {
+        mut bool named = false;
+        for (mut i32 i = 0; i < call.count(); i = i + 1) {
+            if (call.child(i).kind == NodeKind.NAMED_ARG) {
+                named = true;
+            }
+        }
+        if (!named || head == null) {
+            return head;
+        }
+        mut FunctionInfo* candidate = head;
+        while (candidate != null) {
+            if (this.names_fit(call, candidate)) {
+                Node* declaration = candidate.node;
+                i32 count = call.count();
+                Node** ordered = (Node**)Memory.zalloc((i64)count * 8);
+                for (mut i32 i = 0; i < count; i = i + 1) {
+                    Node* argument = call.child(i);
+                    if (argument.kind == NodeKind.NAMED_ARG) {
+                        ordered[this.parameter_index(declaration, argument.text())] = argument.first();
+                    } else {
+                        ordered[i] = argument;
+                    }
+                }
+                for (mut i32 i = 0; i < count; i = i + 1) {
+                    call.set_child(i, ordered[i]);
+                }
+                return candidate;
+            }
+            candidate = candidate.overload;
+        }
+        this.error(call, "no declaration matches these argument names");
+        for (mut i32 i = 0; i < call.count(); i = i + 1) {
+            Node* argument = call.child(i);
+            if (argument.kind == NodeKind.NAMED_ARG) {
+                call.set_child(i, argument.first());
+            }
+        }
+        return head;
+    }
+
     FunctionInfo* pick_overload(FunctionInfo* head, Node* call, i32 offset) {
         IdList* types = IdList.create();
         for (mut i32 i = 0; i < call.count(); i = i + 1) {
@@ -990,6 +1092,7 @@ struct TypeChecker {
     FunctionInfo* check_constructor_arguments(Node* node, StructInfo* owner) {
         SymbolTable* symbols = this.symbols;
         mut FunctionInfo* constructor = symbols.find_method(owner, Ast.intern_base_name(".ctor", 5));
+        constructor = this.apply_named_arguments(node, constructor);
         if (constructor != null && constructor.overload != null) {
             constructor = this.pick_overload(constructor, node, 1);
             if (constructor == null) {
@@ -1072,6 +1175,7 @@ struct TypeChecker {
                 return this.check_constructor(node, callee, constructed);
             }
             info = symbols.find_function(callee.text_atom(), callee.name(), this.scope);
+            info = this.apply_named_arguments(node, info);
             if (info == null) {
                 StructInfo* named = symbols.find_struct(callee.text_atom(), callee.name(), this.scope);
                 if (named != null && !named.is_template && !named.is_enum) {
@@ -1097,6 +1201,7 @@ struct TypeChecker {
                 StructInfo* owner = symbols.find_struct(base.text_atom(), base.name(), this.scope);
                 base.set_symbol(SymbolKind.STRUCT_NAME, (void*)owner);
                 info = symbols.find_method(owner, callee.name());
+                info = this.apply_named_arguments(node, info);
                 if (info != null && info.is_template) {
                     info = this.instantiate_call(node, callee, info);
                     if (info == null) {
@@ -1120,6 +1225,7 @@ struct TypeChecker {
                     return Types.i32_type();
                 }
                 info = symbols.find_method(owner, callee.name());
+                info = this.apply_named_arguments(node, info);
                 if (info != null && info.is_template) {
                     info = this.instantiate_call(node, callee, info);
                     if (info == null) {

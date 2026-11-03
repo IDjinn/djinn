@@ -7,6 +7,7 @@ struct Parser {
     bool failed;
     bool scan_half;
     bool half_greater;
+    i32 hidden_count;
     Diagnostics* diagnostics;
     U32Map* type_names;
 
@@ -1128,6 +1129,61 @@ struct Parser {
         return node;
     }
 
+    Node* parse_range_for(i32 start, Node* variable) {
+        this.advance();
+        bool bracket = this.match(TokenKind.LBRACKET);
+        Node* low = this.parse_expression();
+        mut bool inclusive = false;
+        if (this.match(TokenKind.DOT_DOT_EQUAL)) {
+            inclusive = true;
+        } else {
+            this.expect(TokenKind.DOT_DOT, "expected '..' or '..=' in the range");
+        }
+        Node* high = this.parse_expression();
+        if (bracket) {
+            if (this.match(TokenKind.RBRACKET)) {
+                inclusive = true;
+            } else {
+                this.expect(TokenKind.RPAREN, "expected ']' or ')' to close the range");
+                inclusive = false;
+            }
+        }
+        this.expect(TokenKind.RPAREN, "expected ')' after the range");
+
+        this.hidden_count = this.hidden_count + 1;
+        ByteBuffer* limit_name = ByteBuffer.create();
+        limit_name.append("__limit");
+        limit_name.append_int((i64)this.hidden_count);
+
+        Node* limit = Node.create(NodeKind.VAR_DECL, start);
+        limit.set_type(variable.type());
+        limit.set_text(limit_name.cstr());
+        limit.set_first(high);
+
+        variable.set_flag(true);
+        variable.set_first(low);
+
+        Node* counter = Node.create(NodeKind.IDENTIFIER, start);
+        counter.set_text(variable.text());
+        Node* bound = Node.create(NodeKind.IDENTIFIER, start);
+        bound.set_text(limit_name.cstr());
+        mut i32 comparison = TokenKind.LESS;
+        if (inclusive) {
+            comparison = TokenKind.LESS_EQUAL;
+        }
+
+        Node* loop = Node.create(NodeKind.FOR, start);
+        loop.set_first(variable);
+        loop.set_second(this.make_binary(comparison, counter, bound, start));
+        loop.set_third(this.make_step(counter, TokenKind.PLUS, start));
+        loop.set_fourth(this.parse_statement_or_empty());
+
+        Node* scope = Node.create_list(NodeKind.BLOCK, start);
+        scope.add(limit);
+        scope.add(loop);
+        return scope;
+    }
+
     Node* parse_for() {
         i32 start = this.advance();
         Node* node = Node.create(NodeKind.FOR, start);
@@ -1137,8 +1193,7 @@ struct Parser {
             if (this.is_declaration_start()) {
                 node.set_first(this.parse_variable_declaration());
                 if (this.check(TokenKind.IN)) {
-                    this.fail("range-for is not supported yet");
-                    return node;
+                    return this.parse_range_for(start, node.first());
                 }
             } else {
                 i32 initToken = this.current();
@@ -1290,6 +1345,19 @@ struct Parser {
         return this.parse_postfix(primary);
     }
 
+    Node* parse_argument() {
+        i32 token = this.current();
+        if (this.kind_of(token) == TokenKind.IDENTIFIER && this.kind_of(this.peek_token(1)) == TokenKind.COLON) {
+            this.advance();
+            this.advance();
+            Node* named = Node.create(NodeKind.NAMED_ARG, token);
+            named.set_text(this.copy_of(token));
+            named.set_first(this.parse_expression());
+            return named;
+        }
+        return this.parse_expression();
+    }
+
     Node* parse_postfix(Node* start) {
         mut Node* expr = start;
         while (!this.failed) {
@@ -1299,9 +1367,9 @@ struct Parser {
                 Node* call = Node.create_list(NodeKind.CALL, token);
                 call.set_first(expr);
                 if (!this.check(TokenKind.RPAREN)) {
-                    call.add(this.parse_expression());
+                    call.add(this.parse_argument());
                     while (this.match(TokenKind.COMMA)) {
-                        call.add(this.parse_expression());
+                        call.add(this.parse_argument());
                     }
                 }
                 this.expect(TokenKind.RPAREN, "expected ')' after arguments");
@@ -1343,6 +1411,38 @@ struct Parser {
         return expr;
     }
 
+    Node* interpolation_text(i32 token) {
+        this.advance();
+        Node* literal = Node.create(NodeKind.STRING_LITERAL, token);
+        literal.set_text_n(this.text_of(token), this.length_of(token));
+        literal.set_int_value(this.length_of(token));
+        return literal;
+    }
+
+    Node* parse_interpolation() {
+        i32 start = this.current();
+        Node* node = Node.create_list(NodeKind.INTERPOLATION, start);
+        node.add(this.interpolation_text(start));
+        while (!this.failed) {
+            if (this.kind_of(this.current()) == TokenKind.INTERP_END) {
+                node.add(this.interpolation_text(this.current()));
+                break;
+            }
+            node.add(this.parse_expression());
+            i32 next = this.current();
+            if (this.kind_of(next) == TokenKind.INTERP_MIDDLE) {
+                node.add(this.interpolation_text(next));
+            } else if (this.kind_of(next) == TokenKind.INTERP_END) {
+                node.add(this.interpolation_text(next));
+                break;
+            } else {
+                this.fail("expected the end of the string interpolation");
+                break;
+            }
+        }
+        return node;
+    }
+
     Node* parse_primary() {
         i32 token = this.current();
 
@@ -1358,6 +1458,9 @@ struct Parser {
             Node* literal = Node.create(NodeKind.FLOAT_LITERAL, token);
             literal.set_text(this.copy_of(token));
             return literal;
+        }
+        if (this.kind_of(token) == TokenKind.INTERP_BEGIN) {
+            return this.parse_interpolation();
         }
         if (this.kind_of(token) == TokenKind.STRING_LITERAL) {
             this.advance();
@@ -1402,9 +1505,9 @@ struct Parser {
             created.set_type(this.parse_type());
             this.expect(TokenKind.LPAREN, "expected '(' after the type of 'new'");
             if (!this.check(TokenKind.RPAREN)) {
-                created.add(this.parse_expression());
+                created.add(this.parse_argument());
                 while (this.match(TokenKind.COMMA)) {
-                    created.add(this.parse_expression());
+                    created.add(this.parse_argument());
                 }
             }
             this.expect(TokenKind.RPAREN, "expected ')' after the constructor arguments");

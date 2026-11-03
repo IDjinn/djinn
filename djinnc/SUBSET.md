@@ -15,7 +15,7 @@ of them. A construct outside this list is forbidden in `djinnc/src` until the dj
 ## Types
 
 - `i8 i16 i32 i64 u8 u16 u32 u64 f64 bool void`
-- pointers `T*`, `T**`, `void*`; no references, no optionals, no `arr<T>`, no `string`
+- pointers `T*`, `T**`, `void*`; no references, no optionals
 - `sizeof(T)`, casts `(T)expr` between integers, floats and pointers
 - pointer arithmetic `p + n`, indexing `p[i]`, field access through pointer `p.field`
 
@@ -47,8 +47,7 @@ of them. A construct outside this list is forbidden in `djinnc/src` until the dj
 
 ## Forbidden
 
-async/await, `try`/`throws`, `ensure`, string
-interpolation, closures, `auto`, destructuring.
+async/await, `try`/`throws`, `ensure`, closures, `auto`, destructuring.
 
 Enum-like values are `i32` constants held in `static` structs until `==` on enums exists in both compilers.
 
@@ -65,7 +64,7 @@ Enum-like values are `i32` constants held in `static` structs until `==` on enum
 
 ## Constructors
 
-- `Point(i32 x, i32 y) { ... }` inside a struct body or `impl`; one constructor per type, arguments are positional (ordered).
+- `Point(i32 x, i32 y) { ... }` inside a struct body or `impl`; arguments are positional or named (see Named arguments).
 - `Point p = Point(1, 2);` builds a value, `Point* heap = new Point(1, 2);` allocates zeroed memory through the runtime allocator (`__djinn_malloc`, which traces the allocation) and returns a pointer. Generic types work the same way: `Box<i32>(7)`, `new Box<i32>(9)`.
 - A struct without a constructor can only be built with `Name()` (zero-initialized) or a `{ .field = value }` initializer.
 
@@ -79,8 +78,20 @@ Enum-like values are `i32` constants held in `static` structs until `==` on enum
 
 ## Core types: `str` and `arr<T>`
 
-A core prelude (`<core>`, built in `driver/prelude.djinn`) is compiled with every program and declares `str { i8* data; u32 length; }` and `arr<T> { T* data; u32 length; }`, both with `is_empty()` and `ptr()`.
+The core library (`runtime/core.djinn`, read from `--runtime-dir`) is compiled with every program and declares `str { i8* data; u32 length; }` and `arr<T> { T* data; u32 length; }`, both with `is_empty()` and `ptr()`.
 
 - `T[]` is `arr<T>`; `[a, b, c]` is an array literal, allocated with `__djinn_malloc`. The element type comes from the context or the first element; an empty literal needs a context.
 - A string literal is `i8*` unless the expected type is `str`, which gives `{ data, length }`.
 - `array[i]` indexes `arr<T>` (read and write); `length` is a field.
+
+## Range-for
+
+`for (i32 i in [1..10])`, `[0..5)`, `0..5` and `0..=5` loop over a range. The start is always inclusive; `[a..b]` and `..=` include the end, `[a..b)` and `..` exclude it. The parser lowers it to a plain `for` with a hidden `__limitN` variable, so the end is evaluated once. Ranges with an open start, `(a..b]`, are not supported (stage0 does not have them either).
+
+## Named arguments
+
+Calls, method calls and constructors (`Point(y: 4, x: 3)`, `new Point(x: 1, y: 2)`, `clamp(50, high: 10, low: 0)`) accept `name: value` arguments after any positional ones. They are matched to the parameter names of the callee (the overload whose names fit is picked) and reordered into parameter order, so evaluation follows parameter order. Not available for enum variants, intrinsics or calls through generic inference of unnamed callees.
+
+## `string` and interpolation
+
+`core.djinn` also declares `string { i8* data; u32 length; u32 capacity; }` with `is_empty()`, `ptr()` and `operator +` (concatenation). A string literal gets type `string` when that is the expected type. Only a `$"..."` literal interpolates, as in C#: `$"count={count}"` or `$"sum={p.x + p.y}"` has type `string`, and its parts can be integers, bools, floats, `i8*`, `str` and `string`. A plain `"..."` never interpolates, so `"{count}"` is just text. Inside `$"..."`, `{{` and `}}` are literal braces and a lone `}` is an error. The lexer splits an interpolated literal into `INTERP_BEGIN`/`INTERP_MIDDLE`/`INTERP_END` tokens around the ordinary expression tokens. The builder (`__djinn_text_*`) is Djinn code in `core.djinn`; sizes are checked against the `u32` limit, and allocation failure is reported only by `__djinn_malloc`.

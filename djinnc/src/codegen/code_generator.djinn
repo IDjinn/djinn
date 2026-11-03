@@ -220,7 +220,15 @@ struct CodeGenerator {
             if (!info.is_extern && info.owner == null && info.name_atom == Atoms.MAIN_ATOM) {
                 symbol = "__djinn_sync_main";
             }
-            info.function = LLVMAddFunction(this.module, symbol, info.function_type);
+            mut void* existing = (void*)0;
+            if (info.is_extern) {
+                existing = LLVMGetNamedFunction(this.module, symbol);
+            }
+            if (existing != null) {
+                info.function = existing;
+            } else {
+                info.function = LLVMAddFunction(this.module, symbol, info.function_type);
+            }
         }
     }
 
@@ -714,6 +722,9 @@ struct CodeGenerator {
         if (kind == NodeKind.NEW_EXPR) {
             return this.gen_new(node);
         }
+        if (kind == NodeKind.INTERPOLATION) {
+            return this.gen_interpolation(node);
+        }
         if (kind == NodeKind.INTRINSIC) {
             return this.gen_sizeof(node);
         }
@@ -1124,7 +1135,112 @@ struct CodeGenerator {
         void* length_address = LLVMBuildStructGEP2(this.builder, llvm, slot, 1, "text.length");
         Value* length = Value.create(LLVMConstInt(LLVMIntTypeInContext(this.context, 64), (u64)strlen(node.text()), 0), Types.i64_type());
         LLVMBuildStore(this.builder, this.coerce(length, length_field.type), length_address);
+        if (fields.length > 2) {
+            void* capacity_address = LLVMBuildStructGEP2(this.builder, llvm, slot, 2, "text.capacity");
+            LLVMBuildStore(this.builder, this.coerce(length, length_field.type), capacity_address);
+        }
         return Value.create(LLVMBuildLoad2(this.builder, llvm, slot, "text.loaded"), type);
+    }
+
+    void* call_runtime(i8* name, void* return_type, void** parameters, void** arguments, i32 count) {
+        void* function_type = LLVMFunctionType(return_type, parameters, (u32)count, 0);
+        mut void* function = LLVMGetNamedFunction(this.module, name);
+        if (function == null) {
+            function = LLVMAddFunction(this.module, name, function_type);
+        }
+        return LLVMBuildCall2(this.builder, function_type, function, arguments, (u32)count, "");
+    }
+
+    void append_text(void* handle, i8* name, void* argument_type, void* argument) {
+        void* pointer_llvm = LLVMPointerTypeInContext(this.context, 0);
+        void** parameters = CodeGenerator.array_of(2);
+        void** arguments = CodeGenerator.array_of(2);
+        parameters[0] = pointer_llvm;
+        parameters[1] = argument_type;
+        arguments[0] = handle;
+        arguments[1] = argument;
+        this.call_runtime(name, LLVMVoidTypeInContext(this.context), parameters, arguments, 2);
+    }
+
+    void append_slice(void* handle, void* data, void* length) {
+        void* pointer_llvm = LLVMPointerTypeInContext(this.context, 0);
+        void* i32_type = LLVMIntTypeInContext(this.context, 32);
+        void** parameters = CodeGenerator.array_of(3);
+        void** arguments = CodeGenerator.array_of(3);
+        parameters[0] = pointer_llvm;
+        parameters[1] = pointer_llvm;
+        parameters[2] = i32_type;
+        arguments[0] = handle;
+        arguments[1] = data;
+        arguments[2] = length;
+        this.call_runtime("__djinn_text_slice", LLVMVoidTypeInContext(this.context), parameters, arguments, 3);
+    }
+
+    Value* gen_interpolation(Node* node) {
+        u32 type = node.value_type();
+        void* pointer_llvm = LLVMPointerTypeInContext(this.context, 0);
+        void* i32_type = LLVMIntTypeInContext(this.context, 32);
+        void* i64_type = LLVMIntTypeInContext(this.context, 64);
+        void* f64_type = LLVMDoubleTypeInContext(this.context);
+        u32 owned = this.symbols_core_type("string");
+        u32 view = this.symbols_core_type("str");
+
+        void* handle = this.call_runtime("__djinn_text_begin", pointer_llvm, (void**)0, (void**)0, 0);
+        for (mut i32 i = 0; i < node.count(); i = i + 1) {
+            Node* part = node.child(i);
+            if (i % 2 == 0) {
+                if (part.int_value() > 0) {
+                    void* literal = LLVMBuildGlobalStringPtr(this.builder, part.text(), "interp.text");
+                    this.append_slice(handle, literal, LLVMConstInt(i32_type, (u64)part.int_value(), 0));
+                }
+                continue;
+            }
+            Value* value = this.gen_expression(part);
+            u32 value_type = value.type;
+            if (value_type == owned || value_type == view) {
+                void* data = LLVMBuildExtractValue(this.builder, value.ref, 0, "interp.data");
+                void* length = LLVMBuildExtractValue(this.builder, value.ref, 1, "interp.length");
+                this.append_slice(handle, data, length);
+            } else if (Types.is_pointer(value_type)) {
+                this.append_text(handle, "__djinn_text_cstr", pointer_llvm, value.ref);
+            } else if (Types.is_float(value_type)) {
+                this.append_text(handle, "__djinn_text_f64", f64_type, this.coerce(value, Types.floating(64)));
+            } else if (Types.is_integer(value_type) && Types.bits(value_type) == 1) {
+                this.append_text(handle, "__djinn_text_bool", i32_type, this.coerce(value, Types.i32_type()));
+            } else if (Types.is_signed(value_type)) {
+                this.append_text(handle, "__djinn_text_i64", i64_type, this.coerce(value, Types.i64_type()));
+            } else {
+                this.append_text(handle, "__djinn_text_u64", i64_type, this.coerce(value, Types.integer(64, false)));
+            }
+        }
+
+        void* length_slot = this.create_slot(Types.integer(32, false), "interp.size");
+        void** parameters = CodeGenerator.array_of(2);
+        void** arguments = CodeGenerator.array_of(2);
+        parameters[0] = pointer_llvm;
+        parameters[1] = pointer_llvm;
+        arguments[0] = handle;
+        arguments[1] = length_slot;
+        void* data = this.call_runtime("__djinn_text_finish", pointer_llvm, parameters, arguments, 2);
+        void* length = LLVMBuildLoad2(this.builder, i32_type, length_slot, "interp.length");
+
+        void* llvm = this.llvm_type(type);
+        void* slot = this.create_slot(type, "interp");
+        LLVMBuildStore(this.builder, LLVMConstNull(llvm), slot);
+        LLVMBuildStore(this.builder, data, LLVMBuildStructGEP2(this.builder, llvm, slot, 0, "interp.data.ptr"));
+        LLVMBuildStore(this.builder, length, LLVMBuildStructGEP2(this.builder, llvm, slot, 1, "interp.length.ptr"));
+        LLVMBuildStore(this.builder, length, LLVMBuildStructGEP2(this.builder, llvm, slot, 2, "interp.capacity.ptr"));
+        return Value.create(LLVMBuildLoad2(this.builder, llvm, slot, "interp.loaded"), type);
+    }
+
+    u32 symbols_core_type(i8* name) {
+        SymbolTable* symbols = this.symbols;
+        u32 atom = Ast.intern_base_name(name, (i32)strlen(name));
+        StructInfo* info = symbols.find_struct(atom, atom, 0);
+        if (info == null || info.is_template) {
+            return 0;
+        }
+        return info.type_id;
     }
 
     Value* gen_array_literal(Node* node) {
