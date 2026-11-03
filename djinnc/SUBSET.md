@@ -47,7 +47,7 @@ of them. A construct outside this list is forbidden in `djinnc/src` until the dj
 
 ## Forbidden
 
-async/await, `try`/`throws`, `ensure`, closures, destructuring.
+`try`/`throws`, `ensure`, closures, destructuring.
 
 Enum-like values are `i32` constants held in `static` structs until `==` on enums exists in both compilers.
 
@@ -103,3 +103,16 @@ Calls, method calls and constructors (`Point(y: 4, x: 3)`, `new Point(x: 1, y: 2
 ## Playground
 
 `tools/playground.sh [djinnc flags]` (or `tools/playground.ps1`) compiles `playground/main.djinn` with the newest bootstrapped djinnc, runs it and prints the exit code. `DJINNC` and `DJINN_RUNTIME_DIR` override the compiler and the runtime directory. `Type { .field = value }` builds a struct without an expected type.
+
+## Properties and implicit `this`
+`T name { get => expr; set { ... } }`, `T name => expr;` (read-only) and auto properties desugar to `get:NAME`/`set:NAME` methods.
+Inside instance methods a bare field or property name means `this.name`.
+
+## `object` and `is`
+Assigning any value to `object` boxes it (`{TypeInfo*, void*}`, id = FNV-1a of the type name). `x is T` and `x is T name`
+test the boxed type and optionally bind the unboxed value. `is` on enum variants is not supported yet.
+
+## Async
+`async T f()` returns `task<T>` and lowers to a presplit LLVM coroutine; `await task` suspends inside async functions and
+runs the event loop in sync ones; `spawn task;` schedules it. `async main` is driven by the runtime event loop (i32 or void);
+a sync `main` can still `await`. `yield` is not a coroutine yield (it is the switch-arm value in stage0) and is not supported.

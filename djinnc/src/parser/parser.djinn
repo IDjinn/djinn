@@ -564,21 +564,28 @@ struct Parser {
 
     Node* parse_function(bool allowConstructor) {
         mut bool is_static = false;
-        while (this.check(TokenKind.PUBLIC) || this.check(TokenKind.PRIVATE) || this.check(TokenKind.STATIC)) {
+        mut bool is_async = false;
+        while (this.check(TokenKind.PUBLIC) || this.check(TokenKind.PRIVATE) || this.check(TokenKind.STATIC) || this.check(TokenKind.ASYNC)) {
             i32 modifier = this.advance();
             if (this.kind_of(modifier) == TokenKind.STATIC) {
                 is_static = true;
             }
+            if (this.kind_of(modifier) == TokenKind.ASYNC) {
+                is_async = true;
+            }
         }
 
-        if (this.check(TokenKind.ASYNC) || this.check(TokenKind.CONSTEXPR) || this.check(TokenKind.CONSTEVAL)) {
-            this.fail("async, constexpr and consteval functions are not supported yet");
+        if (this.check(TokenKind.CONSTEXPR) || this.check(TokenKind.CONSTEVAL)) {
+            this.fail("constexpr and consteval functions are not supported yet");
             return null;
         }
 
         i32 start = this.current();
         Node* function = Node.create_list(NodeKind.FUNCTION, start);
         function.set_flag(is_static);
+        if (is_async) {
+            function.set_op(1);
+        }
         function.set_type(this.parse_type());
         i32 name = this.expect(TokenKind.IDENTIFIER, "expected function name");
         function.set_text(this.copy_of(name));
@@ -1153,6 +1160,13 @@ struct Parser {
         if (this.kind_of(token) == TokenKind.SWITCH) {
             return this.parse_switch();
         }
+        if (this.kind_of(token) == TokenKind.SPAWN) {
+            this.advance();
+            Node* spawned = Node.create(NodeKind.SPAWN_STMT, token);
+            spawned.set_first(this.parse_expression());
+            this.expect(TokenKind.SEMICOLON, "expected ';' after spawn");
+            return spawned;
+        }
 
         if (this.is_declaration_start()) {
             Node* declaration = this.parse_variable_declaration();
@@ -1502,7 +1516,14 @@ struct Parser {
             return this.make_step(target, op, token);
         }
 
-        if (this.kind_of(token) == TokenKind.AWAIT || this.kind_of(token) == TokenKind.SPAWN || this.kind_of(token) == TokenKind.TRY
+        if (this.kind_of(token) == TokenKind.AWAIT) {
+            this.advance();
+            Node* awaited = Node.create(NodeKind.AWAIT_EXPR, token);
+            awaited.set_first(this.parse_unary());
+            return awaited;
+        }
+
+        if (this.kind_of(token) == TokenKind.SPAWN || this.kind_of(token) == TokenKind.TRY
             || this.kind_of(token) == TokenKind.THROW) {
             this.fail("this expression is not supported yet");
             return Node.create(NodeKind.NULL_LITERAL, token);

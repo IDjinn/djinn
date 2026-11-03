@@ -272,7 +272,10 @@ struct CodeGenerator {
                 params[p] = this.llvm_type(param_types.get(p));
             }
 
-            void* return_type = this.llvm_type(info.return_type);
+            mut void* return_type = this.llvm_type(info.return_type);
+            if (info.is_async) {
+                return_type = LLVMPointerTypeInContext(this.context, 0);
+            }
             mut i32 variadic = 0;
             if (info.is_variadic) {
                 variadic = 1;
@@ -338,8 +341,16 @@ struct CodeGenerator {
         void* entry = LLVMAppendBasicBlockInContext(this.context, info.function, "entry");
         void* body = LLVMAppendBasicBlockInContext(this.context, info.function, "body");
         LLVMPositionBuilderAtEnd(this.builder, entry);
-        void* jump = LLVMBuildBr(this.builder, body);
-        LLVMPositionBuilderBefore(this.alloca_builder, jump);
+        mut void* jump = (void*)0;
+        if (info.is_async) {
+            void* prologue = LLVMAppendBasicBlockInContext(this.context, info.function, "coro.prologue");
+            jump = LLVMBuildBr(this.builder, prologue);
+            LLVMPositionBuilderBefore(this.alloca_builder, jump);
+            this.begin_coroutine(info, prologue, body);
+        } else {
+            jump = LLVMBuildBr(this.builder, body);
+            LLVMPositionBuilderBefore(this.alloca_builder, jump);
+        }
         LLVMPositionBuilderAtEnd(this.builder, body);
 
         mut i32 offset = 0;
@@ -360,7 +371,12 @@ struct CodeGenerator {
 
         this.gen_statement(declaration.first());
 
-        if (!this.is_terminated()) {
+        if (info.is_async) {
+            if (!this.is_terminated()) {
+                LLVMBuildBr(this.builder, function_context.final_block);
+            }
+            this.finish_coroutine();
+        } else if (!this.is_terminated()) {
             if (Types.is_void(info.return_type)) {
                 LLVMBuildRetVoid(this.builder);
             } else {
@@ -371,6 +387,150 @@ struct CodeGenerator {
             DebugInfo* debug = this.debug;
             debug.end_function();
         }
+    }
+
+    void* coro_intrinsic(i8* name, void** types, u32 type_count, void** args, i32 count, i8* label) {
+        u32 id = LLVMLookupIntrinsicID(name, (u64)strlen(name));
+        void* callee_type = LLVMIntrinsicGetType(this.context, id, types, (u64)type_count);
+        void* callee = LLVMGetIntrinsicDeclaration(this.module, id, types, (u64)type_count);
+        return LLVMBuildCall2(this.builder, callee_type, callee, args, (u32)count, label);
+    }
+
+    void* none_token() {
+        return LLVMConstNull(LLVMTokenTypeInContext(this.context));
+    }
+
+    void* libc_call(i8* name, void* return_type, void* argument, i8* label) {
+        void* pointer_llvm = LLVMPointerTypeInContext(this.context, 0);
+        void** params = CodeGenerator.array_of(1);
+        void** args = CodeGenerator.array_of(1);
+        params[0] = LLVMTypeOf(argument);
+        args[0] = argument;
+        void* function_type = LLVMFunctionType(return_type, params, 1, 0);
+        mut void* function = LLVMGetNamedFunction(this.module, name);
+        if (function == null) {
+            function = LLVMAddFunction(this.module, name, function_type);
+        }
+        return LLVMBuildCall2(this.builder, function_type, function, args, 1, label);
+    }
+
+    void* suspend_switch(void* ready_block, i8* label) {
+        void** args = CodeGenerator.array_of(2);
+        args[0] = this.none_token();
+        args[1] = LLVMConstInt(LLVMIntTypeInContext(this.context, 1), 0, 0);
+        void* state = this.coro_intrinsic("llvm.coro.suspend", null, 0, args, 2, label);
+        FunctionContext* function_context = this.function_context;
+        void* dispatch = LLVMBuildSwitch(this.builder, state, function_context.suspend_block, 2);
+        void* i8_type = LLVMIntTypeInContext(this.context, 8);
+        LLVMAddCase(dispatch, LLVMConstInt(i8_type, 0, 0), ready_block);
+        LLVMAddCase(dispatch, LLVMConstInt(i8_type, 1, 0), function_context.cleanup_block);
+        return dispatch;
+    }
+
+    void begin_coroutine(FunctionInfo* info, void* prologue, void* body) {
+        FunctionContext* function_context = this.function_context;
+        function_context.is_async = true;
+        void* pointer_llvm = LLVMPointerTypeInContext(this.context, 0);
+        void* i32_type = LLVMIntTypeInContext(this.context, 32);
+        void* i64_type = LLVMIntTypeInContext(this.context, 64);
+
+        u32 kind = LLVMGetEnumAttributeKindForName("presplitcoroutine", 17);
+        LLVMAddAttributeAtIndex(info.function, 4294967295, LLVMCreateEnumAttribute(this.context, kind, 0));
+
+        mut void* promise = (void*)0;
+        mut u64 alignment = 0;
+        if (!Types.is_void(info.return_type)) {
+            void* result_llvm = this.llvm_type(info.return_type);
+            promise = LLVMBuildAlloca(this.alloca_builder, result_llvm, "coro.promise");
+            alignment = LLVMABIAlignmentOfType(this.layout_data, result_llvm);
+        } else {
+            promise = LLVMConstNull(pointer_llvm);
+        }
+        function_context.promise = promise;
+
+        void* alloc_block = LLVMAppendBasicBlockInContext(this.context, info.function, "coro.alloc");
+        void* begin_block = LLVMAppendBasicBlockInContext(this.context, info.function, "coro.begin");
+        function_context.final_block = LLVMAppendBasicBlockInContext(this.context, info.function, "coro.final");
+        function_context.cleanup_block = LLVMAppendBasicBlockInContext(this.context, info.function, "coro.cleanup");
+        function_context.suspend_block = LLVMAppendBasicBlockInContext(this.context, info.function, "coro.suspend");
+
+        LLVMPositionBuilderAtEnd(this.builder, prologue);
+        void** id_args = CodeGenerator.array_of(4);
+        id_args[0] = LLVMConstInt(i32_type, alignment, 0);
+        id_args[1] = promise;
+        id_args[2] = LLVMConstNull(pointer_llvm);
+        id_args[3] = LLVMConstNull(pointer_llvm);
+        void* coro_id = this.coro_intrinsic("llvm.coro.id", null, 0, id_args, 4, "coro.id");
+        void** alloc_args = CodeGenerator.array_of(1);
+        alloc_args[0] = coro_id;
+        void* needs_alloc = this.coro_intrinsic("llvm.coro.alloc", null, 0, alloc_args, 1, "coro.need");
+        LLVMBuildCondBr(this.builder, needs_alloc, alloc_block, begin_block);
+
+        LLVMPositionBuilderAtEnd(this.builder, alloc_block);
+        void** size_types = CodeGenerator.array_of(1);
+        size_types[0] = i64_type;
+        void* frame_size = this.coro_intrinsic("llvm.coro.size.i64", size_types, 1, CodeGenerator.array_of(0), 0, "coro.size");
+        void* frame = this.libc_call("malloc", pointer_llvm, frame_size, "coro.frame");
+        LLVMBuildBr(this.builder, begin_block);
+
+        LLVMPositionBuilderAtEnd(this.builder, begin_block);
+        void* frame_phi = LLVMBuildPhi(this.builder, pointer_llvm, "coro.frame.phi");
+        void** incoming = CodeGenerator.array_of(2);
+        void** blocks = CodeGenerator.array_of(2);
+        incoming[0] = frame;
+        incoming[1] = LLVMConstNull(pointer_llvm);
+        blocks[0] = alloc_block;
+        blocks[1] = prologue;
+        LLVMAddIncoming(frame_phi, incoming, blocks, 2);
+        void** begin_args = CodeGenerator.array_of(2);
+        begin_args[0] = coro_id;
+        begin_args[1] = frame_phi;
+        function_context.handle = this.coro_intrinsic("llvm.coro.begin", null, 0, begin_args, 2, "coro.handle");
+        function_context.coro_id = coro_id;
+
+        this.suspend_switch(body, "coro.init");
+    }
+
+    void finish_coroutine() {
+        FunctionContext* function_context = this.function_context;
+        void* pointer_llvm = LLVMPointerTypeInContext(this.context, 0);
+        void* i1_type = LLVMIntTypeInContext(this.context, 1);
+        void* i8_type = LLVMIntTypeInContext(this.context, 8);
+
+        LLVMPositionBuilderAtEnd(this.builder, function_context.final_block);
+        void** final_args = CodeGenerator.array_of(2);
+        final_args[0] = this.none_token();
+        final_args[1] = LLVMConstInt(i1_type, 1, 0);
+        void* final_state = this.coro_intrinsic("llvm.coro.suspend", null, 0, final_args, 2, "coro.final.state");
+        void* trap_block = LLVMAppendBasicBlockInContext(this.context, this.current_function().function, "coro.trap");
+        void* dispatch = LLVMBuildSwitch(this.builder, final_state, function_context.suspend_block, 2);
+        LLVMAddCase(dispatch, LLVMConstInt(i8_type, 0, 0), trap_block);
+        LLVMAddCase(dispatch, LLVMConstInt(i8_type, 1, 0), function_context.cleanup_block);
+
+        LLVMPositionBuilderAtEnd(this.builder, trap_block);
+        this.coro_intrinsic("llvm.trap", null, 0, CodeGenerator.array_of(0), 0, "");
+        LLVMBuildUnreachable(this.builder);
+
+        void* release_block = LLVMAppendBasicBlockInContext(this.context, this.current_function().function, "coro.release");
+        LLVMPositionBuilderAtEnd(this.builder, function_context.cleanup_block);
+        void** free_args = CodeGenerator.array_of(2);
+        free_args[0] = function_context.coro_id;
+        free_args[1] = function_context.handle;
+        void* memory = this.coro_intrinsic("llvm.coro.free", null, 0, free_args, 2, "coro.memory");
+        void* has_memory = LLVMBuildICmp(this.builder, LlvmConst.INT_NE, memory, LLVMConstNull(pointer_llvm), "coro.owned");
+        LLVMBuildCondBr(this.builder, has_memory, release_block, function_context.suspend_block);
+
+        LLVMPositionBuilderAtEnd(this.builder, release_block);
+        this.libc_call("free", LLVMVoidTypeInContext(this.context), memory, "");
+        LLVMBuildBr(this.builder, function_context.suspend_block);
+
+        LLVMPositionBuilderAtEnd(this.builder, function_context.suspend_block);
+        void** end_args = CodeGenerator.array_of(3);
+        end_args[0] = function_context.handle;
+        end_args[1] = LLVMConstInt(i1_type, 0, 0);
+        end_args[2] = this.none_token();
+        this.coro_intrinsic("llvm.coro.end", null, 0, end_args, 3, "");
+        LLVMBuildRet(this.builder, function_context.handle);
     }
 
     void* create_slot(u32 type, i8* name) {
@@ -438,7 +598,20 @@ struct CodeGenerator {
         LLVMBuildCall2(this.builder, init_type, init_fn, init_args, 1, "");
 
         mut void* exit_code = LLVMConstInt(i32_type, 0, 0);
-        if (Types.is_void(user.return_type)) {
+        if (user.is_async) {
+            void* pointer_llvm = LLVMPointerTypeInContext(this.context, 0);
+            void* handle = LLVMBuildCall2(this.builder, user.function_type, user.function, CodeGenerator.array_of(0), 0, "main.handle");
+            void** loop_params = CodeGenerator.array_of(1);
+            void** loop_args = CodeGenerator.array_of(1);
+            loop_params[0] = pointer_llvm;
+            loop_args[0] = handle;
+            if (Types.is_void(user.return_type)) {
+                this.call_runtime("__djinn_event_loop_run", void_type, loop_params, loop_args, 1);
+                this.call_runtime("__djinn_coro_destroy", void_type, loop_params, loop_args, 1);
+            } else {
+                exit_code = this.call_runtime("__djinn_event_loop", i32_type, loop_params, loop_args, 1);
+            }
+        } else if (Types.is_void(user.return_type)) {
             LLVMBuildCall2(this.builder, user.function_type, user.function, CodeGenerator.array_of(0), 0, "");
         } else {
             void* returned = LLVMBuildCall2(this.builder, user.function_type, user.function, CodeGenerator.array_of(0), 0, "exit");
@@ -538,6 +711,8 @@ struct CodeGenerator {
             this.gen_variable(node);
         } else if (kind == NodeKind.EXPR_STMT) {
             this.gen_expression(node.first());
+        } else if (kind == NodeKind.SPAWN_STMT) {
+            this.gen_spawn(node);
         } else if (kind == NodeKind.RETURN) {
             this.gen_return(node);
         } else if (kind == NodeKind.IF) {
@@ -577,6 +752,16 @@ struct CodeGenerator {
     }
 
     void gen_return(Node* node) {
+        FunctionContext* function_context = this.function_context;
+        if (function_context.is_async) {
+            if (node.first() != null) {
+                Value* produced = this.gen_expression(node.first());
+                LLVMBuildStore(this.builder, this.coerce(produced, this.current_function().return_type), function_context.promise);
+            }
+            LLVMBuildBr(this.builder, function_context.final_block);
+            this.start_dead_block();
+            return;
+        }
         if (node.first() == null) {
             LLVMBuildRetVoid(this.builder);
         } else {
@@ -794,6 +979,9 @@ struct CodeGenerator {
         }
         if (kind == NodeKind.IS_EXPR) {
             return this.gen_is(node);
+        }
+        if (kind == NodeKind.AWAIT_EXPR) {
+            return this.gen_await(node);
         }
         if (kind == NodeKind.INTRINSIC) {
             return this.gen_sizeof(node);
@@ -1247,6 +1435,58 @@ struct CodeGenerator {
         LLVMBuildCall2(this.builder, constructor.function_type, constructor.function, args, (u32)(node.count() + 1), "");
     }
 
+    void* task_handle(Node* operand) {
+        Value* task = this.gen_expression(operand);
+        return LLVMBuildExtractValue(this.builder, task.ref, 0, "task.handle");
+    }
+
+    void gen_spawn(Node* node) {
+        void* handle = this.task_handle(node.first());
+        void* pointer_llvm = LLVMPointerTypeInContext(this.context, 0);
+        void** params = CodeGenerator.array_of(1);
+        void** args = CodeGenerator.array_of(1);
+        params[0] = pointer_llvm;
+        args[0] = handle;
+        this.call_runtime("__djinn_spawn", LLVMVoidTypeInContext(this.context), params, args, 1);
+    }
+
+    Value* gen_await(Node* node) {
+        FunctionContext* function_context = this.function_context;
+        u32 result_type = node.value_type();
+        void* handle = this.task_handle(node.first());
+        void* pointer_llvm = LLVMPointerTypeInContext(this.context, 0);
+        void* void_llvm = LLVMVoidTypeInContext(this.context);
+        void** params = CodeGenerator.array_of(2);
+        void** args = CodeGenerator.array_of(2);
+        params[0] = pointer_llvm;
+        args[0] = handle;
+        if (function_context.is_async) {
+            params[1] = pointer_llvm;
+            args[1] = function_context.handle;
+            this.call_runtime("__djinn_await", void_llvm, params, args, 2);
+            void* ready = this.new_block("await.ready");
+            this.suspend_switch(ready, "await.state");
+            LLVMPositionBuilderAtEnd(this.builder, ready);
+        } else {
+            this.call_runtime("__djinn_event_loop_run", void_llvm, params, args, 1);
+        }
+
+        mut void* result = handle;
+        if (!Types.is_void(result_type)) {
+            void* result_llvm = this.llvm_type(result_type);
+            void** promise_args = CodeGenerator.array_of(3);
+            promise_args[0] = handle;
+            promise_args[1] = LLVMConstInt(LLVMIntTypeInContext(this.context, 32), LLVMABIAlignmentOfType(this.layout_data, result_llvm), 0);
+            promise_args[2] = LLVMConstInt(LLVMIntTypeInContext(this.context, 1), 0, 0);
+            void* promise = this.coro_intrinsic("llvm.coro.promise", null, 0, promise_args, 3, "await.promise");
+            result = LLVMBuildLoad2(this.builder, result_llvm, promise, "await.result");
+        }
+        void** destroy_args = CodeGenerator.array_of(1);
+        destroy_args[0] = handle;
+        this.coro_intrinsic("llvm.coro.destroy", null, 0, destroy_args, 1, "");
+        return Value.create(result, result_type);
+    }
+
     void* allocate_bytes(void* size) {
         void* i64_type = LLVMIntTypeInContext(this.context, 64);
         void* pointer_llvm = LLVMPointerTypeInContext(this.context, 0);
@@ -1626,6 +1866,14 @@ struct CodeGenerator {
         mut i8* label = "call";
         if (Types.is_void(info.return_type)) {
             label = "";
+        }
+        if (info.is_async) {
+            void* handle = LLVMBuildCall2(this.builder, info.function_type, info.function, args, (u32)given, "async.handle");
+            u32 task_type = node.value_type();
+            void* task_llvm = this.llvm_type(task_type);
+            void* task_slot = this.create_slot(task_type, "task");
+            LLVMBuildStore(this.builder, handle, LLVMBuildStructGEP2(this.builder, task_llvm, task_slot, 0, "task.handle.ptr"));
+            return Value.create(LLVMBuildLoad2(this.builder, task_llvm, task_slot, "task.value"), task_type);
         }
         void* result = LLVMBuildCall2(this.builder, info.function_type, info.function, args, (u32)given, label);
         return Value.create(result, info.return_type);

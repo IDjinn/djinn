@@ -137,6 +137,11 @@ struct TypeChecker {
             this.check_variable(node);
         } else if (kind == NodeKind.EXPR_STMT) {
             this.check_expression(node.first(), 0);
+        } else if (kind == NodeKind.SPAWN_STMT) {
+            u32 spawned = this.check_expression(node.first(), 0);
+            if (this.task_result(spawned) == 0) {
+                this.error(node, "'spawn' needs the task returned by an async function");
+            }
         } else if (kind == NodeKind.RETURN) {
             this.check_return(node);
         } else if (kind == NodeKind.IF) {
@@ -379,6 +384,9 @@ struct TypeChecker {
         }
         if (kind == NodeKind.IS_EXPR) {
             return this.check_is(node);
+        }
+        if (kind == NodeKind.AWAIT_EXPR) {
+            return this.check_await(node);
         }
         if (kind == NodeKind.NEW_EXPR) {
             return this.check_new(node);
@@ -739,6 +747,48 @@ struct TypeChecker {
         }
         this.check_expression(node.second(), type);
         return type;
+    }
+
+    u32 task_result(u32 type) {
+        SymbolTable* symbols = this.symbols;
+        if (type == 0 || !Types.is_struct(type) || symbols.enum_of_type(type) != null) {
+            return 0;
+        }
+        StructInfo* info = symbols.struct_at(Types.struct_index(type));
+        if (info.origin == null || info.type_args == null) {
+            return 0;
+        }
+        StructInfo* origin = info.origin;
+        if (origin.name_atom != Ast.intern_base_name("task", 4)) {
+            return 0;
+        }
+        IdList* args = info.type_args;
+        return args.get(0) + 1;
+    }
+
+    u32 task_of(u32 result, Node* at) {
+        SymbolTable* symbols = this.symbols;
+        u32 atom = Ast.intern_base_name("task", 4);
+        StructInfo* template = symbols.find_struct(atom, atom, 0);
+        if (template == null || !template.is_template) {
+            this.error(at, "async functions need the core 'task' type");
+            return Types.i32_type();
+        }
+        IdList* args = IdList.create();
+        args.push(result);
+        symbols.blame = at;
+        SemanticAnalyzer* analyzer = symbols.analyzer;
+        return analyzer.instantiate(template, args);
+    }
+
+    u32 check_await(Node* node) {
+        u32 operand = this.check_expression(node.first(), 0);
+        u32 held = this.task_result(operand);
+        if (held == 0) {
+            this.error(node, "'await' needs the task returned by an async function");
+            return Types.i32_type();
+        }
+        return held - 1;
     }
 
     u32 check_is(Node* node) {
@@ -1398,6 +1448,9 @@ struct TypeChecker {
             } else {
                 this.check_expression(argument, 0);
             }
+        }
+        if (info.is_async) {
+            return this.task_of(info.return_type, node);
         }
         return info.return_type;
     }
