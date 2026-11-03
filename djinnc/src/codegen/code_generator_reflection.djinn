@@ -1,0 +1,219 @@
+namespace djinnc;
+
+impl CodeGenerator {
+    bool is_reflected(u32 type) {
+        if (this.reflect_mode == 2 || !Types.is_struct(type)) {
+            return false;
+        }
+        SymbolTable* symbols = this.symbols;
+        if (symbols.enum_of_type(type) != null) {
+            return false;
+        }
+        StructInfo* info = symbols.struct_at(Types.struct_index(type));
+        if (info.is_template || info.is_primitive || info.node == null) {
+            return false;
+        }
+        if (this.reflect_mode == 1) {
+            return true;
+        }
+        return Attributes.has(info.node, "Reflect");
+    }
+
+    void* null_pointer() {
+        return LLVMConstNull(LLVMPointerTypeInContext(this.context, 0));
+    }
+
+    void* constant_array(void* element, void** values, i32 count, i8* name) {
+        void* array_type = LLVMArrayType2(element, (u64)count);
+        void* global = LLVMAddGlobal(this.module, array_type, name);
+        LLVMSetInitializer(global, LLVMConstArray2(element, values, (u64)count));
+        LLVMSetGlobalConstant(global, 1);
+        return global;
+    }
+
+    i8* attribute_text(AttributeUse* use) {
+        if (use.text_arg != null) {
+            return use.text_arg;
+        }
+        if (use.int_arg != 0) {
+            ByteBuffer* digits = ByteBuffer.create();
+            digits.append_int(use.int_arg);
+            return digits.cstr();
+        }
+        return "";
+    }
+
+    void* attribute_table(Node* target, i8* owner_name) {
+        PointerList* uses = Attributes.of(target);
+        if (uses.length == 0) {
+            return this.null_pointer();
+        }
+        u32 info_type = this.symbols_core_type("AttributeInfo");
+        void* info_llvm = this.llvm_type(info_type);
+        void** entries = CodeGenerator.array_of(uses.length);
+        for (mut i32 i = 0; i < uses.length; i = i + 1) {
+            AttributeUse* use = (AttributeUse*)uses.get(i);
+            void** values = CodeGenerator.array_of(2);
+            values[0] = LLVMBuildGlobalStringPtr(this.builder, use.name, "attr.name");
+            values[1] = LLVMBuildGlobalStringPtr(this.builder, this.attribute_text(use), "attr.value");
+            entries[i] = LLVMConstNamedStruct(info_llvm, values, 2);
+        }
+        return this.constant_array(info_llvm, entries, uses.length, owner_name);
+    }
+
+    Node* field_declaration(StructInfo* info, FieldInfo* field) {
+        Node* declaration = info.node;
+        for (mut i32 i = 0; i < declaration.count(); i = i + 1) {
+            Node* member = declaration.child(i);
+            if (member.kind == NodeKind.FIELD_DECL && member.first() == null && member.name() == field.name_atom) {
+                return member;
+            }
+        }
+        return null;
+    }
+
+    void* field_table(StructInfo* info, u32 type, i8* prefix) {
+        PointerList* fields = info.fields;
+        if (fields.length == 0) {
+            return this.null_pointer();
+        }
+        u32 field_info_type = this.symbols_core_type("FieldInfo");
+        void* field_llvm = this.llvm_type(field_info_type);
+        void* owner_llvm = this.llvm_type(type);
+        void* i32_type = LLVMIntTypeInContext(this.context, 32);
+        void* i16_type = LLVMIntTypeInContext(this.context, 16);
+        void* i8_type = LLVMIntTypeInContext(this.context, 8);
+        void** entries = CodeGenerator.array_of(fields.length);
+        for (mut i32 i = 0; i < fields.length; i = i + 1) {
+            FieldInfo* field = (FieldInfo*)fields.get(i);
+            Node* declaration = this.field_declaration(info, field);
+            mut u64 flags = 0;
+            mut i32 attribute_count = 0;
+            mut void* attributes = this.null_pointer();
+            if (declaration != null) {
+                if (declaration.flag()) {
+                    flags = 1;
+                }
+                PointerList* uses = Attributes.of(declaration);
+                attribute_count = uses.length;
+                ByteBuffer* table_name = ByteBuffer.create();
+                table_name.append(prefix);
+                table_name.append(".");
+                table_name.append(field.name);
+                table_name.append(".attrs");
+                attributes = this.attribute_table(declaration, table_name.cstr());
+            }
+            void** values = CodeGenerator.array_of(6);
+            values[0] = LLVMBuildGlobalStringPtr(this.builder, field.name, "field.name");
+            values[1] = LLVMConstInt(i32_type, this.type_hash(field.type), 0);
+            values[2] = LLVMConstInt(i16_type, LLVMOffsetOfElement(this.layout_data, owner_llvm, (u32)field.index), 0);
+            values[3] = LLVMConstInt(i8_type, flags, 0);
+            values[4] = LLVMConstInt(i8_type, (u64)attribute_count, 0);
+            values[5] = attributes;
+            entries[i] = LLVMConstNamedStruct(field_llvm, values, 6);
+        }
+        ByteBuffer* table_name = ByteBuffer.create();
+        table_name.append(prefix);
+        table_name.append(".fields");
+        return this.constant_array(field_llvm, entries, fields.length, table_name.cstr());
+    }
+
+    bool is_reflected_method(FunctionInfo* method, StructInfo* info) {
+        if (method.owner != info || method.is_template || method.node == null) {
+            return false;
+        }
+        return method.name[0] != 46;
+    }
+
+    void* method_table(StructInfo* info, i8* prefix, i32* count) {
+        SymbolTable* symbols = this.symbols;
+        PointerList* functions = symbols.functions;
+        mut i32 total = 0;
+        for (mut i32 i = 0; i < functions.length; i = i + 1) {
+            FunctionInfo* method = (FunctionInfo*)functions.get(i);
+            if (this.is_reflected_method(method, info)) {
+                total = total + 1;
+            }
+        }
+        count[0] = total;
+        if (total == 0) {
+            return this.null_pointer();
+        }
+        u32 method_info_type = this.symbols_core_type("MethodInfo");
+        void* method_llvm = this.llvm_type(method_info_type);
+        void* i32_type = LLVMIntTypeInContext(this.context, 32);
+        void* i8_type = LLVMIntTypeInContext(this.context, 8);
+        void** entries = CodeGenerator.array_of(total);
+        mut i32 next = 0;
+        for (mut i32 i = 0; i < functions.length; i = i + 1) {
+            FunctionInfo* method = (FunctionInfo*)functions.get(i);
+            if (!this.is_reflected_method(method, info)) {
+                continue;
+            }
+            IdList* params = method.param_types;
+            mut i32 parameter_count = params.length;
+            mut u64 flags = 0;
+            if (method.is_instance) {
+                parameter_count = parameter_count - 1;
+            } else {
+                flags = flags | 2;
+            }
+            if (method.is_async) {
+                flags = flags | 4;
+            }
+            ByteBuffer* table_name = ByteBuffer.create();
+            table_name.append(prefix);
+            table_name.append(".");
+            table_name.append(method.name);
+            table_name.append(".attrs");
+            PointerList* uses = Attributes.of(method.node);
+            mut void* pointer = this.null_pointer();
+            if (method.function != null) {
+                pointer = method.function;
+            }
+            void** values = CodeGenerator.array_of(7);
+            values[0] = LLVMBuildGlobalStringPtr(this.builder, method.name, "method.name");
+            values[1] = pointer;
+            values[2] = LLVMConstInt(i32_type, this.type_hash(method.return_type), 0);
+            values[3] = LLVMConstInt(i8_type, (u64)parameter_count, 0);
+            values[4] = LLVMConstInt(i8_type, flags, 0);
+            values[5] = LLVMConstInt(i8_type, (u64)uses.length, 0);
+            values[6] = this.attribute_table(method.node, table_name.cstr());
+            entries[next] = LLVMConstNamedStruct(method_llvm, values, 7);
+            next = next + 1;
+        }
+        ByteBuffer* table_name = ByteBuffer.create();
+        table_name.append(prefix);
+        table_name.append(".methods");
+        return this.constant_array(method_llvm, entries, total, table_name.cstr());
+    }
+
+    void* extended_type_info(u32 type, void* base) {
+        SymbolTable* symbols = this.symbols;
+        StructInfo* info = symbols.struct_at(Types.struct_index(type));
+        ByteBuffer* prefix = ByteBuffer.create();
+        prefix.append("__typeinfo_");
+        prefix.append(info.name);
+        void* ext_llvm = this.llvm_type(this.symbols_core_type("TypeInfoExt"));
+        void* i16_type = LLVMIntTypeInContext(this.context, 16);
+        void* i8_type = LLVMIntTypeInContext(this.context, 8);
+        PointerList* fields = info.fields;
+        i32* method_count = (i32*)Memory.zalloc(8);
+        void* field_pointer = this.field_table(info, type, prefix.cstr());
+        void* method_pointer = this.method_table(info, prefix.cstr(), method_count);
+        PointerList* uses = Attributes.of(info.node);
+        ByteBuffer* attrs_name = ByteBuffer.create();
+        attrs_name.append(prefix.cstr());
+        attrs_name.append(".attrs");
+        void* attribute_pointer = this.attribute_table(info.node, attrs_name.cstr());
+        void** values = CodeGenerator.array_of(7);
+        values[0] = base;
+        values[1] = LLVMConstInt(i16_type, (u64)fields.length, 0);
+        values[2] = LLVMConstInt(i16_type, (u64)method_count[0], 0);
+        values[3] = LLVMConstInt(i8_type, (u64)uses.length, 0);
+        values[4] = field_pointer;
+        values[5] = method_pointer;
+        values[6] = attribute_pointer;
+        return LLVMConstNamedStruct(ext_llvm, values, 7);
+    }
+}

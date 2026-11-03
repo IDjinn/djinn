@@ -165,3 +165,11 @@ The evaluator works on the type-checked AST, with no bytecode step: expression r
 locals live in one flat frame stack of parallel `i64`/`f64` arrays (slots are numbered once per function), type shapes are cached per type id, and a result
 is written back into the AST node as a literal (`IntLiteral`, `BoolLiteral`, `FloatConst`), so code generation pays no lookup and reads of constexpr
 variables become literals too. Compile-time `if` keeps only the taken branch.
+
+## Reflection
+`typeof(Type)` returns a `TypeInfo*` (`kind`: 0 signed int, 1 float, 2 pointer, 3 struct, 4 unsigned int, 5 `str`, 6 `string`). Boxing to `object`
+and `is` use the same lazily generated constant. A struct marked `[Reflect]` (or every struct with `--reflect-all`; `--reflect-none` disables it,
+`--reflect-annotated` is the default) gets a `TypeInfoExt` global with `FieldInfo` (name, type id, offset, `mut` flag, attributes), `MethodInfo`
+(name, function pointer, return type id, parameter count, static/async flags, attributes) and `AttributeInfo` (values flattened to text), so
+`(TypeInfoExt*)typeof(T)` or `(TypeInfoExt*)obj.type` works. Nothing is generated for types that are neither boxed, `typeof`'d nor reflected.
+The core declares these structs too; `std` overrides them.
