@@ -116,3 +116,22 @@ test the boxed type and optionally bind the unboxed value. `x is Enum::Variant [
 `async T f()` returns `task<T>` and lowers to a presplit LLVM coroutine; `await task` suspends inside async functions and
 runs the event loop in sync ones; `spawn task;` schedules it. `async main` is driven by the runtime event loop (i32 or void);
 a sync `main` can still `await`. `yield` is not a coroutine yield (it is the switch-arm value in stage0) and is not supported.
+
+## Attributes
+`[Name]`, `[Name(16)]`, `[Name(key = "text")]` and `[A, B]` before functions, methods, structs and fields. Known names and targets are built in
+(the `attribute` declarations of `std` are not read): `ForceInline`, `NoInline`, `NoReturn`, `Hot`, `Cold`, `NoSync`, `NoUnwind`, `WillReturn`,
+`NoRecurse` and `Llvm("attr")` become LLVM function attributes; `Align`, `Volatile`, `ReadOnly`, `NoMangle`, `Reflect` and `Deprecated` are
+validated but have no effect yet. Every function is implicitly `nounwind`. An unknown name is an error; a wrong target is a warning.
+Parameter attributes are not supported.
+
+## Ownership
+Non-copy values (structs, tagged enums, `str`, `string`, `arr<T>`) move on `T x = y;` and `x = y;`. Using a moved variable is an error;
+assigning to it re-initializes it. Integers, floats, `bool`, pointers and payload-less enums copy. Passing to a function does not move,
+and there is no borrow checking (same as stage0).
+
+## Macros
+`macro name { (params) => { expression } ... }`. Parameters are `expression x`, `identifier x`, `literal x`, `type T` or a bare literal token
+(`add`, `debug`, ...); `local` (on a parameter or before the parameter list) evaluates the argument once. `=> void` expands to `0`.
+Rules are chosen by arity and fragment kind, in order. Expansion happens in the parser by AST substitution, so precedence is preserved,
+a macro must be declared before it is used, and `type` parameters cannot be referenced from the body. Using a non-`local` expression
+parameter more than once warns.

@@ -8,6 +8,7 @@ struct TypeChecker {
     u32 scope;
     i32 loop_depth;
     i32 switch_depth;
+    Node* assign_target;
 
     public static TypeChecker* create(Diagnostics* diagnostics, SymbolTable* symbols) {
         TypeChecker* checker = (TypeChecker*)Memory.zalloc(sizeof(TypeChecker));
@@ -259,6 +260,9 @@ struct TypeChecker {
         variable.node = node;
         node.set_symbol(SymbolKind.LOCAL, (void*)variable);
         node.set_value_type(declared);
+        if (node.first() != null) {
+            this.move_from(node.first(), null);
+        }
         LocalScopes* scopes = this.scopes;
         scopes.define(variable.name_atom, variable);
     }
@@ -388,6 +392,9 @@ struct TypeChecker {
         if (kind == NodeKind.AWAIT_EXPR) {
             return this.check_await(node);
         }
+        if (kind == NodeKind.LET_EXPR) {
+            return this.check_let(node, expected);
+        }
         if (kind == NodeKind.NEW_EXPR) {
             return this.check_new(node);
         }
@@ -433,6 +440,9 @@ struct TypeChecker {
                 return Types.i32_type();
             }
             LocalScopes* scopes = this.scopes;
+            if (variable.moved && this.assign_target != node) {
+                this.error(node, "use of moved value");
+            }
             if (scopes.find(node.name()) != null) {
                 node.set_symbol(SymbolKind.LOCAL, (void*)variable);
             } else {
@@ -721,7 +731,9 @@ struct TypeChecker {
 
     u32 check_assign(Node* node) {
         Node* target = node.first();
+        this.assign_target = target;
         u32 type = this.check_lvalue(target);
+        this.assign_target = null;
         if (target.kind == NodeKind.FIELD_ACCESS && target.symbol_kind() == SymbolKind.PROPERTY_GET) {
             FunctionInfo* getter = (FunctionInfo*)target.symbol();
             FunctionInfo* setter = this.find_accessor(getter.owner, "set:", target.text());
@@ -746,7 +758,49 @@ struct TypeChecker {
             }
         }
         this.check_expression(node.second(), type);
+        this.move_from(node.second(), target);
+        if (target.kind == NodeKind.IDENTIFIER && (target.symbol_kind() == SymbolKind.LOCAL || target.symbol_kind() == SymbolKind.GLOBAL)) {
+            LocalVariable* reinitialized = (LocalVariable*)target.symbol();
+            reinitialized.moved = false;
+        }
         return type;
+    }
+
+    bool is_copy_type(u32 type) {
+        return !Types.is_struct(type);
+    }
+
+    void move_from(Node* source, Node* destination) {
+        if (source.kind != NodeKind.IDENTIFIER || source.symbol_kind() != SymbolKind.LOCAL) {
+            return;
+        }
+        if (destination != null && destination.kind == NodeKind.IDENTIFIER && destination.symbol() == source.symbol()) {
+            return;
+        }
+        LocalVariable* variable = (LocalVariable*)source.symbol();
+        if (!this.is_copy_type(variable.type)) {
+            variable.moved = true;
+        }
+    }
+
+    u32 check_let(Node* node, u32 expected) {
+        LocalScopes* scopes = this.scopes;
+        i32 mark = scopes.mark();
+        for (mut i32 i = 0; i < node.count(); i = i + 1) {
+            Node* item = node.child(i);
+            u32 type = this.check_expression(item.first(), 0);
+            LocalVariable* variable = (LocalVariable*)Memory.zalloc(sizeof(LocalVariable));
+            variable.name = item.text();
+            variable.name_atom = item.name();
+            variable.type = type;
+            variable.node = item;
+            item.set_symbol(SymbolKind.LOCAL, (void*)variable);
+            item.set_value_type(type);
+            scopes.define(variable.name_atom, variable);
+        }
+        u32 result = this.check_expression(node.first(), expected);
+        scopes.reset_to(mark);
+        return result;
     }
 
     u32 task_result(u32 type) {
