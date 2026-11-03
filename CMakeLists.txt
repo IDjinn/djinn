@@ -200,8 +200,10 @@ target_compile_features(djinn_lib PUBLIC cxx_std_23)
 # std::stacktrace requires the backtrace support library, shipped as a separate
 # static library next to the GCC-specific libstdc++ install
 if (UNIX AND NOT APPLE)
-    file(GLOB STDCXX_LIBBACKTRACE "/usr/lib/gcc/*-linux-gnu/*/libstdc++_libbacktrace.a")
+    file(GLOB STDCXX_LIBBACKTRACE "/usr/lib/gcc/*-linux-gnu/*/libstdc++_libbacktrace.a"
+            "/usr/lib/gcc/*-linux-gnu/*/libstdc++exp.a")
     if (STDCXX_LIBBACKTRACE)
+        list(SORT STDCXX_LIBBACKTRACE COMPARE NATURAL ORDER DESCENDING)
         list(GET STDCXX_LIBBACKTRACE 0 STDCXX_LIBBACKTRACE)
         target_link_libraries(djinn_lib PUBLIC ${STDCXX_LIBBACKTRACE})
     endif ()

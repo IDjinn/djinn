@@ -790,11 +790,7 @@ struct SwitchArm : Location
     std::unique_ptr<Expression> result; // The result expression
     std::unique_ptr<Block> block; // Block body: statements that must diverge (return/throw)
 
-    SwitchArm(SourceIdentifier variant, std::optional<SourceIdentifier> bind, std::unique_ptr<Expression> res)
-        : variantName(std::move(variant)), binding(std::move(bind)), result(std::move(res))
-    {
-        location = variant.location;
-    }
+    SwitchArm(SourceIdentifier variant, std::optional<SourceIdentifier> bind, std::unique_ptr<Expression> res);
 
     SwitchArm(SourceIdentifier variant, std::optional<SourceIdentifier> bind, std::unique_ptr<Block> blk);
 

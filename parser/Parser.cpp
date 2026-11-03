@@ -51,6 +51,12 @@ Parser::Parser(std::vector<Token> tokens, DiagnosticEngine& diagnostics) : token
 {
 }
 
+SwitchArm::SwitchArm(SourceIdentifier variant, std::optional<SourceIdentifier> bind, std::unique_ptr<Expression> res)
+    : variantName(std::move(variant)), binding(std::move(bind)), result(std::move(res))
+{
+    location = variantName.location;
+}
+
 SwitchArm::SwitchArm(SourceIdentifier variant, std::optional<SourceIdentifier> bind, std::unique_ptr<Block> blk)
     : variantName(std::move(variant)), binding(std::move(bind)), block(std::move(blk))
 {

@@ -21,6 +21,7 @@
 #define NOMINMAX
 #include <windows.h>
 #else
+#include <csetjmp>
 #include <csignal>
 #endif
 

@@ -18,7 +18,7 @@ diff stage2.ll stage3.ll  == vazio
 | 2 — Memória e dados | Concluída: arena, tokens SoA, interning de átomos (keywords pré-registradas), AST de nós de 16 bytes. |
 | 3 — Multi-arquivo | Concluída: namespaces com escopo, `import` sem efeito, entradas ordenadas, símbolos por `(namespace, atom)`. |
 | 4 — Semântica | Concluída: `TypeTable` (`TypeId` u32 interned), `SemanticAnalyzer` (coleta, layout, assinaturas), `TypeChecker` (tipo e símbolo por nó, loops, imutabilidade); o codegen só consome a AST anotada. Fixpoint stage2 == stage3 verificado. |
-| 5 — Codegen e backend | Concluída no Windows: 5.1 completa e 5.2 com objeto direto, `-O2`, `--runtime-lib` e `--lld` (`lld-link`) validados. `ld.lld` em POSIX implementado, sem teste. |
+| 5 — Codegen e backend | Concluída no Windows: 5.1 completa e 5.2 com objeto direto, `-O2`, `--runtime-lib` e `--lld` (`lld-link`) validados. `ld.lld` em POSIX validado no Linux (Docker, `Dockerfile`): bootstrap, fixpoint e samples com `--lld`. |
 | 6 — Harness de bootstrap | Concluída: `tools/bootstrap.sh`/`.ps1`, alvo CTest `djinnc_bootstrap`, `tools/bench.reference.json` (com tempo de lex, parse e codegen), samples com `.exit` e `.stdout` opcional comparados nos três estágios. |
 
 ## Estado atual (histórico, anterior às Fases 2–4)
@@ -554,7 +554,7 @@ Medição (Windows, stage2 compilando os 21 arquivos do djinnc, 37 mil tokens, 2
 | 5.2.1 objeto direto (`ObjectWriter`, `LLVMTargetMachineEmitToFile`, só x86) | implementado e testado (samples, fixpoint); roda `default<O0>` sempre, pois o lowering de corrotinas é necessário para emitir o objeto; `.ll` só com `--emit-ir`/`--no-link`/`--keep-ir` |
 | 5.2.2 `LLVMRunPasses` (`default<O2>`) | implementado e testado: `-O2` roda `default<O2>`, sem a flag roda `default<O0>` |
 | 5.2.3 runtime pré-compilado | `--runtime-lib` aceita o alvo CMake `djinn_runtime` (precisa ser build release, sem ASan); `tests/djinnc/run.sh` e `fixpoint.sh` recebem o caminho como 3º argumento. Testado no Windows: samples e fixpoint passam |
-| 5.2.4 link direto com lld | implementado com `--lld` (só Windows, `lld-link`, exige `--runtime-lib`), testado com `coalesce`; o padrão continua sendo o driver do clang; em POSIX chama `ld.lld` direto com `crt1.o`/`crti.o`/`crtn.o` (`DJINN_LD_LLD`, `DJINN_CRT_DIR`, `DJINN_DYNAMIC_LINKER`), não testado; os scripts usam `--lld` com `DJINN_USE_LLD=1`. No Windows com `--lld`, as `native-libs` do `djinn.proj` (`-L`, `-l`) são traduzidas para `/libpath:` e `.lib` |
+| 5.2.4 link direto com lld | implementado com `--lld` (só Windows, `lld-link`, exige `--runtime-lib`), testado com `coalesce`; o padrão continua sendo o driver do clang; em POSIX chama `ld.lld` direto com `crt1.o`/`crti.o`/`crtn.o` (`DJINN_LD_LLD`, `DJINN_CRT_DIR`, `DJINN_DYNAMIC_LINKER`), testado no Linux via Docker (`docker run` com `--cap-add=SYS_PTRACE --security-opt seccomp=unconfined`); os scripts usam `--lld` com `DJINN_USE_LLD=1`. No Windows com `--lld`, as `native-libs` do `djinn.proj` (`-L`, `-l`) são traduzidas para `/libpath:` e `.lib` |
 
 ## TODO — Performance (djinnc)
 
@@ -567,7 +567,7 @@ Medição (Windows, stage2 compilando os 21 arquivos do djinnc, 37 mil tokens, 2
 - [ ] `Mem.arena()` sem verificação de `null` a cada alocação (init explícita no início de `main`).
 - [ ] Linker: IR -> objeto sem passar pelo clang quando possível (LLVM-C `LLVMTargetMachineEmitToFile`).
 - [ ] Benchmarks na Fase 6: stage0 vs stage1 vs stage2 em arquivos de 1k, 10k e 100k linhas, com o resultado fixado em CI.
-- [~] Debug symbols como metadata nativa do LLVM em vez de strings embutidas. Feito no djinnc (`-g`, `codegen/debug_info.djinn`) e no stage0 (`-g`, `generator/DebugInfo.cpp`, `llvm::DIBuilder`): `DICompileUnit`, `DIFile`, `DISubprogram`, `DILocation` por instrução, `DILocalVariable` (locais e parâmetros) e tipos básicos, ponteiro e struct; no djinnc também `DILexicalBlock` e membros de struct. PDB no Windows; o stage0 com `-g` linka sem `-flto`, que descarta o CodeView. Testes com lldb em `tools/debug_tests.sh` (`STAGE0=<djinn.exe>` inclui o stage0). Falta: membros de struct e blocos lexicais no stage0, ids de localização nos descritores de trap e DWARF no POSIX (não testado).
+- [~] Debug symbols como metadata nativa do LLVM em vez de strings embutidas. Feito no djinnc (`-g`, `codegen/debug_info.djinn`) e no stage0 (`-g`, `generator/DebugInfo.cpp`, `llvm::DIBuilder`): `DICompileUnit`, `DIFile`, `DISubprogram`, `DILocation` por instrução, `DILocalVariable` (locais e parâmetros) e tipos básicos, ponteiro e struct; no djinnc também `DILexicalBlock` e membros de struct. PDB no Windows; o stage0 com `-g` linka sem `-flto`, que descarta o CodeView. Testes com lldb em `tools/debug_tests.sh` (`STAGE0=<djinn.exe>` inclui o stage0). DWARF validado no Linux com lldb (Docker). Falta: membros de struct e blocos lexicais no stage0 e ids de localização nos descritores de trap.
       localização, nomes e fonte vão como globals de texto nos descritores de erro de runtime
       (`generator/RuntimeDiagnostics.cpp`), o que incha o IR e o binário e não é lido por debuggers. Alvo: `DICompileUnit`,
       `DIFile`, `DISubprogram` (nome, linkageName, escopo, arquivo, linha, tipo, `spFlags: DISPFlagDefinition`),
