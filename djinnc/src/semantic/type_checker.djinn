@@ -46,7 +46,7 @@ struct TypeChecker {
             for (mut i32 c = 0; c < constants.length; c = c + 1) {
                 this.check_constant((Node*)constants.get(c), info.namespace_id);
             }
-            symbols.bindings = (U32Map*)0;
+            symbols.bindings = null;
         }
         PointerList* globals = symbols.globals;
         for (mut i32 i = 0; i < globals.length; i = i + 1) {
@@ -65,7 +65,7 @@ struct TypeChecker {
 
     void check_constant(Node* member, u32 namespace_id) {
         this.scope = namespace_id;
-        this.function = (FunctionInfo*)0;
+        this.function = null;
         LocalScopes* scopes = this.scopes;
         scopes.reset_to(0);
         this.check_expression(member.first(), member.value_type());
@@ -73,7 +73,7 @@ struct TypeChecker {
 
     void check_global(LocalVariable* variable) {
         this.scope = variable.namespace_id;
-        this.function = (FunctionInfo*)0;
+        this.function = null;
         LocalScopes* scopes = this.scopes;
         scopes.reset_to(0);
         Node* declaration = variable.node;
@@ -364,7 +364,7 @@ struct TypeChecker {
             return this.check_assign(node);
         }
         if (kind == NodeKind.CALL) {
-            return this.check_call(node);
+            return this.check_call(node, expected);
         }
         if (kind == NodeKind.CAST) {
             u32 target = this.resolve_type(node.type(), node);
@@ -460,7 +460,7 @@ struct TypeChecker {
             SymbolTable* known = this.symbols;
             if (!Types.is_pointer(type) && known.enum_of_type(type) == null && (Types.is_struct(type) || Types.is_void(type))) {
                 this.error(base, "member access needs a struct or a pointer to one");
-                return (StructInfo*)0;
+                return null;
             }
         }
         mut u32 target = type;
@@ -476,7 +476,7 @@ struct TypeChecker {
         if (!Types.is_struct(target)) {
             if (Types.is_void(target)) {
                 this.error(base, "member access on a value that is not a struct");
-                return (StructInfo*)0;
+                return null;
             }
             return symbols.primitive_owner(target);
         }
@@ -587,7 +587,7 @@ struct TypeChecker {
             this.error(node, "struct does not define this operator");
             return Types.i32_type();
         }
-        mut FunctionInfo* exact = (FunctionInfo*)0;
+        mut FunctionInfo* exact = null;
         mut FunctionInfo* walk = method;
         while (walk != null) {
             IdList* candidate_params = walk.param_types;
@@ -829,7 +829,39 @@ struct TypeChecker {
         return result;
     }
 
-    Node* find_enum_variant(Node* callee) {
+    Node* infer_enum_variant(StructInfo* template, u32 variant_atom, Node* call, u32 expected) {
+        SymbolTable* symbols = this.symbols;
+        StructInfo* hinted = symbols.enum_of_type(expected);
+        if (hinted != null && hinted.origin == template) {
+            return symbols.find_constant(hinted, variant_atom);
+        }
+        Node* pattern = symbols.find_constant(template, variant_atom);
+        if (pattern == null) {
+            return null;
+        }
+        GenericParams* params = template.generics;
+        IdList* found = IdList.create();
+        for (mut i32 p = 0; p < params.count(); p = p + 1) {
+            found.push(0);
+        }
+        for (mut i32 a = 0; a < call.count() && a < pattern.count(); a = a + 1) {
+            Node* payload = pattern.child(a);
+            u32 actual = this.check_expression(call.child(a), 0);
+            this.unify(payload.type(), actual, params, found);
+        }
+        for (mut i32 p = 0; p < found.length; p = p + 1) {
+            if (found.get(p) == 0) {
+                this.error(call, "cannot infer the type arguments of the generic enum; write them or give the expected type");
+                return null;
+            }
+        }
+        symbols.blame = call;
+        SemanticAnalyzer* analyzer = symbols.analyzer;
+        u32 instance = analyzer.instantiate(template, found);
+        return symbols.find_constant(symbols.enum_of_type(instance), variant_atom);
+    }
+
+    Node* find_enum_variant(Node* callee, Node* call, u32 expected) {
         TypeRef* owner_ref = callee.type();
         if (owner_ref != null && owner_ref.name != null && !callee.flag()) {
             u32 owner_type = this.resolve_type(callee.type(), callee);
@@ -837,7 +869,7 @@ struct TypeChecker {
             StructInfo* generic_owner = known.enum_of_type(owner_type);
             if (generic_owner == null) {
                 this.error(callee, "type is not an enum");
-                return (Node*)0;
+                return null;
             }
             i8* variant_text = callee.text();
             i32 variant_length = (i32)strlen(variant_text);
@@ -852,7 +884,7 @@ struct TypeChecker {
             }
         }
         if (split < 0) {
-            return (Node*)0;
+            return null;
         }
         AtomTable* atoms = Ast.atoms();
         u32 full = atoms.intern_copy(text, (u32)split);
@@ -860,9 +892,13 @@ struct TypeChecker {
         SymbolTable* symbols = this.symbols;
         StructInfo* owner = symbols.find_struct(full, base, this.scope);
         if (owner == null || !owner.is_enum) {
-            return (Node*)0;
+            return null;
         }
-        return symbols.find_constant(owner, Ast.intern_base_name(text, length));
+        u32 variant_atom = Ast.intern_base_name(text, length);
+        if (owner.is_template) {
+            return this.infer_enum_variant(owner, variant_atom, call, expected);
+        }
+        return symbols.find_constant(owner, variant_atom);
     }
 
     bool unify(TypeRef* pattern, u32 actual, GenericParams* params, IdList* found) {
@@ -933,13 +969,13 @@ struct TypeChecker {
             u32 actual = this.check_expression(node.child(a), hint);
             if (!this.unify(parameter.type(), actual, generics, found)) {
                 this.error(node.child(a), "argument conflicts with the inferred type argument");
-                return (FunctionInfo*)0;
+                return null;
             }
         }
         for (mut i32 i = 0; i < count; i = i + 1) {
             if (found.get(i) == 0) {
                 this.error(node, "cannot infer a type argument of this generic function");
-                return (FunctionInfo*)0;
+                return null;
             }
         }
         SymbolTable* symbols = this.symbols;
@@ -1039,7 +1075,7 @@ struct TypeChecker {
                 types.push(this.check_expression(argument, 0));
             }
         }
-        mut FunctionInfo* best = (FunctionInfo*)0;
+        mut FunctionInfo* best = null;
         mut i32 best_score = 0 - 1;
         mut bool ambiguous = false;
         mut FunctionInfo* candidate = head;
@@ -1083,11 +1119,11 @@ struct TypeChecker {
         }
         if (best == null) {
             this.error(call, "no overload matches these arguments");
-            return (FunctionInfo*)0;
+            return null;
         }
         if (ambiguous) {
             this.error(call, "call is ambiguous between overloads");
-            return (FunctionInfo*)0;
+            return null;
         }
         return best;
     }
@@ -1154,14 +1190,14 @@ struct TypeChecker {
         return Types.pointer_to(type);
     }
 
-    u32 check_call(Node* node) {
+    u32 check_call(Node* node, u32 expected) {
         Node* callee = node.first();
         SymbolTable* symbols = this.symbols;
-        mut FunctionInfo* info = (FunctionInfo*)0;
+        mut FunctionInfo* info = null;
         mut i32 offset = 0;
 
         if (callee.kind == NodeKind.IDENTIFIER) {
-            Node* variant = this.find_enum_variant(callee);
+            Node* variant = this.find_enum_variant(callee, node, expected);
             if (variant != null) {
                 if (node.count() != variant.count()) {
                     this.error(node, "wrong number of enum variant arguments");
