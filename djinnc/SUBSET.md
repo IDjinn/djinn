@@ -110,7 +110,7 @@ Inside instance methods a bare field or property name means `this.name`.
 
 ## `object` and `is`
 Assigning any value to `object` boxes it (`{TypeInfo*, void*}`, id = FNV-1a of the type name). `x is T` and `x is T name`
-test the boxed type and optionally bind the unboxed value. `is` on enum variants is not supported yet.
+test the boxed type and optionally bind the unboxed value. `x is Enum::Variant [a b ...]` tests an enum value and binds the variant payload.
 
 ## Async
 `async T f()` returns `task<T>` and lowers to a presplit LLVM coroutine; `await task` suspends inside async functions and

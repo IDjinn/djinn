@@ -791,8 +791,64 @@ struct TypeChecker {
         return held - 1;
     }
 
+    u32 check_is_variant(Node* node, StructInfo* enumeration) {
+        SymbolTable* symbols = this.symbols;
+        TypeRef* named = node.type();
+        Node* variant = symbols.find_constant(enumeration, named.name_atom);
+        if (variant == null) {
+            this.error(node, "enum has no such variant");
+            return Types.bool_type();
+        }
+        IsPattern* pattern = (IsPattern*)Memory.zalloc(sizeof(IsPattern));
+        pattern.variant = variant;
+        pattern.bindings = PointerList.create();
+        node.set_symbol(SymbolKind.CONSTANT, (void*)pattern);
+        if (!node.flag()) {
+            if (variant.count() != 0) {
+                this.error(node, "wrong number of bindings for the variant payload");
+            }
+            return Types.bool_type();
+        }
+
+        i8* text = node.text();
+        i32 length = (i32)strlen(text);
+        mut i32 start = 0;
+        mut i32 index = 0;
+        LocalScopes* scopes = this.scopes;
+        for (mut i32 i = 0; i <= length; i = i + 1) {
+            if (i < length && text[i] != 32) {
+                continue;
+            }
+            if (index >= variant.count()) {
+                this.error(node, "wrong number of bindings for the variant payload");
+                return Types.bool_type();
+            }
+            ByteBuffer* copy = ByteBuffer.create();
+            copy.append_slice(text + start, i - start);
+            Node* payload = variant.child(index);
+            LocalVariable* variable = (LocalVariable*)Memory.zalloc(sizeof(LocalVariable));
+            variable.name = copy.cstr();
+            variable.name_atom = Ast.intern_base_name(variable.name, i - start);
+            variable.type = payload.value_type();
+            variable.node = node;
+            scopes.define(variable.name_atom, variable);
+            pattern.bindings.push((void*)variable);
+            index = index + 1;
+            start = i + 1;
+        }
+        if (index != variant.count()) {
+            this.error(node, "wrong number of bindings for the variant payload");
+        }
+        return Types.bool_type();
+    }
+
     u32 check_is(Node* node) {
         u32 operand = this.check_expression(node.first(), 0);
+        SymbolTable* known = this.symbols;
+        StructInfo* enumeration = known.enum_of_type(operand);
+        if (enumeration != null) {
+            return this.check_is_variant(node, enumeration);
+        }
         u32 boxed = this.core_type("object");
         if (boxed == 0 || operand != boxed) {
             this.error(node, "'is' needs an object value");

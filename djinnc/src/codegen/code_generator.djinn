@@ -1549,7 +1549,48 @@ struct CodeGenerator {
         return LLVMBuildLoad2(this.builder, object_llvm, slot, "boxed.value");
     }
 
+    Value* gen_is_variant(Node* node) {
+        IsPattern* pattern = (IsPattern*)node.symbol();
+        Node* variant = pattern.variant;
+        Value* subject = this.gen_expression(node.first());
+        u32 subject_type = subject.type;
+        void* enum_llvm = this.llvm_type(subject_type);
+        mut void* tag = subject.ref;
+        mut void* spill = (void*)0;
+        void* i32_type = LLVMIntTypeInContext(this.context, 32);
+        if (Types.is_struct(subject_type)) {
+            spill = this.create_slot(subject_type, "is.subject");
+            LLVMBuildStore(this.builder, subject.ref, spill);
+            void* tag_address = LLVMBuildStructGEP2(this.builder, enum_llvm, spill, 0, "is.tag.ptr");
+            tag = LLVMBuildLoad2(this.builder, i32_type, tag_address, "is.tag");
+        }
+        Node* tag_value = variant.first();
+        void* expected = LLVMConstInt(i32_type, (u64)tag_value.int_value(), 0);
+        void* matches = LLVMBuildICmp(this.builder, LlvmConst.INT_EQ, tag, expected, "is.match");
+        PointerList* bindings = pattern.bindings;
+        if (bindings.length > 0) {
+            void* bind_block = this.new_block("is.bind");
+            void* end_block = this.new_block("is.end");
+            LLVMBuildCondBr(this.builder, matches, bind_block, end_block);
+            LLVMPositionBuilderAtEnd(this.builder, bind_block);
+            for (mut i32 b = 0; b < bindings.length; b = b + 1) {
+                LocalVariable* variable = (LocalVariable*)bindings.get(b);
+                variable.slot = this.create_slot(variable.type, variable.name);
+                void* address = this.payload_address(enum_llvm, spill, variant, b);
+                void* loaded = LLVMBuildLoad2(this.builder, this.llvm_type(variable.type), address, "is.bound");
+                LLVMBuildStore(this.builder, loaded, variable.slot);
+                this.declare_variable(variable.slot, variable.name, variable.type, node, 0);
+            }
+            LLVMBuildBr(this.builder, end_block);
+            LLVMPositionBuilderAtEnd(this.builder, end_block);
+        }
+        return Value.create(matches, Types.bool_type());
+    }
+
     Value* gen_is(Node* node) {
+        if (node.symbol_kind() == SymbolKind.CONSTANT) {
+            return this.gen_is_variant(node);
+        }
         LocalVariable* variable = (LocalVariable*)node.symbol();
         Value* operand = this.gen_expression(node.first());
         u32 info_type = this.symbols_core_type("TypeInfo");
