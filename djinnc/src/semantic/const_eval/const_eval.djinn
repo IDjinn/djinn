@@ -6,6 +6,8 @@ struct ConstEval {
     const i32 INTEGER = 1024;
     const i32 KNOWN = 2048;
     const i32 NUMERIC = 1536;
+    const i32 TEXT = 4096;
+    const i32 SCALAR = 5632;
     const i32 STEP_LIMIT = 1000000;
     const i32 DEPTH_LIMIT = 512;
     const i32 FRAME_CAPACITY = 16384;
@@ -67,6 +69,8 @@ struct ConstEval {
             }
         } else if (Types.is_float(type)) {
             shape = shape | ConstEval.FLOAT | (i32)Types.bits(type);
+        } else if (type == Types.byte_pointer()) {
+            shape = shape | ConstEval.TEXT | 64;
         }
         return shape;
     }
@@ -174,8 +178,8 @@ struct ConstEval {
         i32 own = this.shape_of(own_type);
         i32 target = this.shape_of(target_type);
         mut bool ok = false;
-        if ((own & ConstEval.NUMERIC) == 0 || (target & ConstEval.NUMERIC) == 0) {
-            ok = this.fail(expression, "only integers, floats, booleans and enums are supported");
+        if ((own & ConstEval.SCALAR) == 0 || (target & ConstEval.SCALAR) == 0) {
+            ok = this.fail(expression, "only integers, floats, booleans, enums and string literals are supported");
         } else {
             ok = this.eval(expression);
             if (ok) {
@@ -207,7 +211,10 @@ struct ConstEval {
         i64 whole = this.ri;
         f64 real = this.rf;
         node.flags = (u16)0;
-        if ((shape & ConstEval.FLOAT) != 0) {
+        if ((shape & ConstEval.TEXT) != 0) {
+            node.kind = (u16)NodeKind.INT_LITERAL;
+            node.set_int_value(whole);
+        } else if ((shape & ConstEval.FLOAT) != 0) {
             node.kind = (u16)NodeKind.FLOAT_CONST;
             node.set_int_value(ConstBits.of_float(real));
         } else if ((shape & 255) == 1) {
@@ -229,6 +236,17 @@ struct ConstEval {
         }
         if (kind == NodeKind.IDENTIFIER) {
             return this.eval_identifier(node);
+        }
+        if (kind == NodeKind.STRING_LITERAL) {
+            if ((this.shape_of(node.value_type()) & ConstEval.TEXT) == 0) {
+                return this.fail(node, "only i8* string literals can be evaluated at compile time");
+            }
+            this.ri = (i64)node.text();
+            this.rf = 0.0;
+            return true;
+        }
+        if (kind == NodeKind.INDEX) {
+            return this.eval_index(node);
         }
         if (kind == NodeKind.BINARY) {
             return this.eval_binary(node);
@@ -349,9 +367,55 @@ struct ConstEval {
         return true;
     }
 
+    bool text_reaches(Node* at, i8* text, i64 offset) {
+        if (offset < 0) {
+            return this.fail(at, "string index is negative");
+        }
+        for (mut i64 i = 0; i < offset; i = i + 1) {
+            if (text[i] == 0) {
+                return this.fail(at, "string index is out of bounds");
+            }
+        }
+        return true;
+    }
+
+    bool eval_index(Node* node) {
+        Node* base = node.first();
+        if ((this.shape_of(base.value_type()) & ConstEval.TEXT) == 0) {
+            return this.fail(node, "only strings can be indexed at compile time");
+        }
+        if (!this.eval(base)) {
+            return false;
+        }
+        i8* text = (i8*)this.ri;
+        if (!this.eval(node.second())) {
+            return false;
+        }
+        if (!this.text_reaches(node, text, this.ri)) {
+            return false;
+        }
+        i8 character = text[this.ri];
+        this.ri = (i64)character;
+        this.rf = (f64)this.ri;
+        return true;
+    }
+
     bool eval_unary(Node* node) {
         i32 op = node.op();
         Node* operand = node.first();
+        if (op == TokenKind.STAR) {
+            if ((this.shape_of(operand.value_type()) & ConstEval.TEXT) == 0) {
+                return this.fail(node, "only strings can be dereferenced at compile time");
+            }
+            if (!this.eval(operand)) {
+                return false;
+            }
+            i8* text = (i8*)this.ri;
+            i8 first = text[0];
+            this.ri = (i64)first;
+            this.rf = (f64)this.ri;
+            return true;
+        }
         if (op == TokenKind.BANG) {
             if (!this.eval_condition(operand)) {
                 return false;
@@ -410,6 +474,20 @@ struct ConstEval {
 
         i32 left_shape = this.shape_of(left.value_type());
         i32 right_shape = this.shape_of(right.value_type());
+        if ((left_shape & ConstEval.TEXT) != 0 && op == TokenKind.PLUS && (right_shape & ConstEval.INTEGER) != 0) {
+            if (!this.eval(left)) {
+                return false;
+            }
+            i8* text = (i8*)this.ri;
+            if (!this.eval(right)) {
+                return false;
+            }
+            if (!this.text_reaches(node, text, this.ri)) {
+                return false;
+            }
+            this.ri = (i64)(text + this.ri);
+            return true;
+        }
         if ((left_shape & ConstEval.NUMERIC) == 0 || (right_shape & ConstEval.NUMERIC) == 0) {
             return this.fail(node, "operands are not numbers");
         }
@@ -692,7 +770,7 @@ struct ConstEval {
             return this.fail(node, "wrong number of arguments");
         }
         i32 callee_return = this.shape_of(info.return_type);
-        if (!Types.is_void(info.return_type) && (callee_return & ConstEval.NUMERIC) == 0) {
+        if (!Types.is_void(info.return_type) && (callee_return & ConstEval.SCALAR) == 0) {
             return this.fail(node, "the return type cannot be evaluated at compile time");
         }
         if (!this.tick(node)) {
@@ -710,7 +788,7 @@ struct ConstEval {
         for (mut i32 i = 0; i < count; i = i + 1) {
             Node* argument = node.child(i);
             i32 param_shape = this.shape_of(param_types.get(i));
-            if ((param_shape & ConstEval.NUMERIC) == 0) {
+            if ((param_shape & ConstEval.SCALAR) == 0) {
                 this.top = frame_base;
                 return this.fail(argument, "parameter type cannot be evaluated at compile time");
             }
@@ -809,7 +887,7 @@ struct ConstEval {
             return EvalStatus.NORMAL;
         }
         i32 shape = this.shape_of(variable.type);
-        if ((shape & ConstEval.NUMERIC) == 0) {
+        if ((shape & ConstEval.SCALAR) == 0) {
             this.fail(node, "variable type cannot be evaluated at compile time");
             return EvalStatus.FAILED;
         }

@@ -153,12 +153,12 @@ parameter more than once warns.
 
 ## constexpr and consteval
 `constexpr T NAME = expr;` (global or local), `constexpr`/`consteval` functions and compile-time `if` (`if constexpr cond { }`, `if consteval cond { }` or
-`if cond { }` without parentheses) run in a compile-time evaluator. Supported values are integers, floats, `bool` and payload-less enums; functions may use
+`if cond { }` without parentheses) run in a compile-time evaluator. Supported values are integers, floats, `bool`, payload-less enums and `i8*` strings; functions may use
 locals, assignment, `if`, `while`, `do`, `for`, `switch`, `break`, `continue`, recursion (depth 512, 1,000,000 steps) and calls to other constexpr/consteval
 static functions. Integers wrap to their declared width. A `constexpr` variable needs a constant initializer and forward references between globals are resolved
 on demand (cycles are errors). A call with constant arguments to a `constexpr` function is folded to a literal and otherwise stays a normal call; a `consteval`
-call that cannot be evaluated is an error (except inside another constexpr/consteval body). `constexpr` and `async` cannot be combined, and structs, pointers
-and strings are not supported in the evaluator yet.
+call that cannot be evaluated is an error (except inside another constexpr/consteval body). `constexpr` and `async` cannot be combined, and structs and pointers other than strings
+are not supported in the evaluator yet. Strings are `i8*` values that always point into a string literal: a literal, `s[i]`, `*s`, `s + n`, passing and returning them, `constexpr i8* NAME = "..."` and locals work, and an index or offset past the terminating NUL is an error. There is no concatenation, comparison of pointers or building of new strings. A folded string becomes a literal in the generated code.
 
 The evaluator works on the type-checked AST, with no bytecode step: expression results travel in two registers (`ri`, `rf`) chosen by the static type,
 locals live in one flat frame stack of parallel `i64`/`f64` arrays (slots are numbered once per function), type shapes are cached per type id, and a result

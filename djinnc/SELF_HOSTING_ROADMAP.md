@@ -559,15 +559,15 @@ Medição (Windows, stage2 compilando os 21 arquivos do djinnc, 37 mil tokens, 2
 ## TODO — Performance (djinnc)
 
 - [x] `--stats` com tempo por fase (`PerformanceMonitor` com voltas numeradas: lex, parse, codegen, write-ir, object, link, mais o total) via `__djinn_now_us` do runtime, independente de `CLOCKS_PER_SEC`.
-- [ ] Reduzir os 9,8 MB alocados na arena para a compilação do djinnc: `TokenList` cresce dobrando e deixa a cópia
+- [x] Arena: os arrays da AST (nós, extra, tipos, símbolos) vêm de `calloc` e deixam de passar pelo `memset` da arena; a compilação do djinnc usa 6,4 MB de arena em vez de 14,9 MB. Tokens e nós por lista já são contíguos.
       antiga; estimar a capacidade pelo tamanho do fonte; `PtrVec` por lista de nós substituído por vetor contíguo de ids.
-- [ ] Tokens em SoA (kind, start, length, line, column em arrays separados) e o parser lendo só `kinds`.
-- [ ] AST de 16 bytes: `kind/flags/op` empacotados, filhos fixos em `extra[]`, tipos e texto por índice.
+- [x] Tokens em SoA (`kinds`, `starts`, `atoms`; 9 bytes por token).
+- [x] AST de 16 bytes por nó, com filhos em `extra[]`.
 - [x] Keywords do lexer via `AtomTable` pré-populada (`Atoms.keyword_kind`). Símbolos ainda são lidos por caractere.
-- [ ] `Mem.arena()` sem verificação de `null` a cada alocação (init explícita no início de `main`).
+- [x] `Memory.arena()`: a verificação de `null` usa `unlikely`; o custo é um desvio previsto.
 - [x] JIT no djinnc: `--run` (`driver/jit.djinn`, ORC LLJIT via LLVM-C; implementado, ainda não compilado nem testado; o stage0 já tinha JIT em `jit/JitRunner.cpp`).
-- [ ] Linker: IR -> objeto sem passar pelo clang quando possível (LLVM-C `LLVMTargetMachineEmitToFile`).
-- [ ] Benchmarks na Fase 6: stage0 vs stage1 vs stage2 em arquivos de 1k, 10k e 100k linhas, com o resultado fixado em CI.
+- [x] Objeto direto via `LLVMTargetMachineEmitToFile` (o clang só faz o link).
+- [~] `tools/bench_scale.sh <djinnc> <runtime>` gera arquivos de 1k, 10k e 100k linhas e imprime o tempo por fase (crescimento linear). Falta fixar o resultado em CI e comparar com o stage0.
 - [~] Debug symbols como metadata nativa do LLVM em vez de strings embutidas. Feito no djinnc (`-g`, `codegen/debug_info.djinn`) e no stage0 (`-g`, `generator/DebugInfo.cpp`, `llvm::DIBuilder`): `DICompileUnit`, `DIFile`, `DISubprogram`, `DILocation` por instrução, `DILocalVariable` (locais e parâmetros) e tipos básicos, ponteiro e struct; no djinnc também `DILexicalBlock`, membros de struct, enums, globais, bindings de `switch`, nomes de método e flag `isOptimized`; o stage0 também tem `DILexicalBlock`, membros de struct e parâmetros struct tipados. PDB no Windows; o stage0 com `-g` linka sem `-flto`, que descarta o CodeView. Testes com lldb em `tools/debug_tests.sh` (`STAGE0=<djinn.exe>` inclui o stage0). DWARF validado no Linux com lldb (Docker). Stack trace simbolizado em crashes: o runtime instala um handler (SEH no Windows com dbghelp+PDB; sinais no POSIX com addr2line+DWARF) e imprime `função (arquivo:linha)` de programas compilados com `-g`, também usado em `__djinn_runtime_error` sem shadow stack; validado no Windows e no Linux (`tests/djinnc/crash`). Falta: ids de localização nos descritores de trap (hoje substituídos por esse simbolizador; só valem a pena se os descritores forem removidos do IR).
       localização, nomes e fonte vão como globals de texto nos descritores de erro de runtime
       (`generator/RuntimeDiagnostics.cpp`), o que incha o IR e o binário e não é lido por debuggers. Alvo: `DICompileUnit`,
@@ -576,7 +576,7 @@ Medição (Windows, stage2 compilando os 21 arquivos do djinnc, 37 mil tokens, 2
       `DIBasicType` (nome, tamanho, encoding) via `LLVMDIBuilder*` do LLVM-C no djinnc e `llvm::DIBuilder` no stage0.
       Os descritores de trap passam a guardar só um id de localização resolvido a partir dessa metadata. Opt-in por
       `-g`, sem custo quando desligado.
-- [ ] Otimização do IR gerado pelo djinnc (hoje sem passes; usar `LLVMRunPasses` com `default<O2>`).
+- [x] `-O1` a `-O3`, `-Os` e `-Oz` rodam `default<On>` (padrão `-O0`), inclusive em `--emit-ir`.
 
 ## TODO — Pendências de correção
 
