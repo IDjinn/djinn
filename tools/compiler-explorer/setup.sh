@@ -24,8 +24,12 @@ compiler="$(cd "$(dirname "$compiler")" && pwd -W 2>/dev/null || pwd)/$(basename
 runtime="$(cd "$root/runtime" && pwd -W 2>/dev/null || pwd)"
 
 cat > "$ce/etc/config/djinn.local.properties" <<PROPS
+compilers=djinnc:djinnclib
 compiler.djinnc.exe=$compiler
 compiler.djinnc.options=--runtime-dir $runtime
+compiler.djinnclib.exe=$compiler
+compiler.djinnclib.name=djinnc (library view)
+compiler.djinnclib.options=--runtime-dir $runtime --emit-lib-view
 PROPS
 
 (cd "$ce" && npm install)

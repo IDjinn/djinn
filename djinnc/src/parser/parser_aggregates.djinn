@@ -126,8 +126,16 @@ impl Parser {
         }
 
         this.expect(TokenKind.LBRACE, "expected '{' to open impl body");
+        TypeRef* impl_target = node.type();
+        bool generic_impl = impl_target != null && impl_target.args != null;
+        if (generic_impl) {
+            this.generic_depth = this.generic_depth + 1;
+        }
         while (!this.check(TokenKind.RBRACE) && !this.at_end()) {
             this.parse_member(node);
+        }
+        if (generic_impl) {
+            this.generic_depth = this.generic_depth - 1;
         }
         this.expect(TokenKind.RBRACE, "expected '}' to close impl body");
         for (mut i32 t = 0; t < targets.length; t = t + 1) {
@@ -182,8 +190,10 @@ impl Parser {
         i32 name = this.expect(TokenKind.IDENTIFIER, "expected struct name");
         node.set_text(this.copy_of(name));
 
+        mut bool generic_struct = false;
         if (this.check(TokenKind.LESS)) {
             node.set_generics(this.parse_generic_params());
+            generic_struct = true;
         }
         this.parse_bases_and_constraints(node);
 
@@ -192,8 +202,14 @@ impl Parser {
         }
 
         this.expect(TokenKind.LBRACE, "expected '{' to open struct body");
+        if (generic_struct) {
+            this.generic_depth = this.generic_depth + 1;
+        }
         while (!this.check(TokenKind.RBRACE) && !this.at_end()) {
             this.parse_member(node);
+        }
+        if (generic_struct) {
+            this.generic_depth = this.generic_depth - 1;
         }
         this.expect(TokenKind.RBRACE, "expected '}' to close struct body");
         return node;
@@ -239,7 +255,7 @@ impl Parser {
             this.expect(TokenKind.LPAREN, "expected '(' after the constructor name");
             this.parse_parameters(constructor);
             this.expect(TokenKind.RPAREN, "expected ')' after parameters");
-            constructor.set_first(this.parse_block());
+            constructor.set_first(this.parse_body(true));
             owner.add(constructor);
             return;
         }
@@ -379,7 +395,7 @@ impl Parser {
                         body.add(statement);
                     }
                 } else {
-                    body = this.parse_block();
+                    body = this.parse_body(true);
                 }
                 if (is_get) {
                     getter_body = body;
