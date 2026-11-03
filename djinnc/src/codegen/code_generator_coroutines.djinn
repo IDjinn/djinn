@@ -203,6 +203,19 @@ impl CodeGenerator {
         i32 id = node.op();
         u32 void_result = Types.void_type();
         void** none = CodeGenerator.array_of(0);
+        if (id == Intrinsic.ALLOCA) {
+            u32 element = Types.element(node.value_type());
+            void* count = this.coerce(this.gen_expression(node.first()), Types.i64_type());
+            mut void* allocator = this.alloca_builder;
+            if (LLVMIsConstant(count) == 0) {
+                allocator = this.builder;
+            }
+            return Value.create(LLVMBuildArrayAlloca(allocator, this.llvm_type(element), count, "stack"), node.value_type());
+        }
+        if (id == Intrinsic.TYPEOF) {
+            u32 described = (u32)(u64)node.symbol();
+            return Value.create(this.type_info_of(described), node.value_type());
+        }
         if (id == Intrinsic.DEBUGTRAP) {
             this.coro_intrinsic("llvm.debugtrap", null, 0, none, 0, "");
             return Value.create(null, void_result);
@@ -229,5 +242,44 @@ impl CodeGenerator {
         args[1] = LLVMConstInt(flag, 0, 0);
         void* expected = this.coro_intrinsic("llvm.expect", overload, 1, args, 2, "unlikely");
         return Value.create(expected, Types.bool_type());
+    }
+}
+
+impl CodeGenerator {
+    Value* gen_coro_primitive(Node* call, FunctionInfo* info) {
+        FunctionContext* function_context = this.function_context;
+        i8* name = info.name;
+        i32 length = strlen(name);
+        void* none = (void*)0;
+        u32 void_result = Types.void_type();
+        void** args = CodeGenerator.array_of(1);
+        if (Strings.equals(name + length - 6, 6, "handle")) {
+            if (!function_context.is_async) {
+                this.error(call, "coro.handle is only valid inside an async function");
+                return this.fallback();
+            }
+            return Value.create(function_context.handle, Types.byte_pointer());
+        }
+        if (Strings.equals(name + length - 7, 7, "suspend")) {
+            if (!function_context.is_async) {
+                this.error(call, "coro.suspend is only valid inside an async function");
+                return this.fallback();
+            }
+            void* ready = this.new_block("coro.resumed");
+            this.suspend_switch(ready, "coro.state");
+            LLVMPositionBuilderAtEnd(this.builder, ready);
+            return Value.create(none, void_result);
+        }
+        Node* argument = call.child(0);
+        args[0] = this.gen_expression(argument).ref;
+        if (Strings.equals(name + length - 4, 4, "done")) {
+            return Value.create(this.coro_intrinsic("llvm.coro.done", null, 0, args, 1, "coro.done"), Types.bool_type());
+        }
+        if (Strings.equals(name + length - 6, 6, "resume")) {
+            this.coro_intrinsic("llvm.coro.resume", null, 0, args, 1, "");
+            return Value.create(none, void_result);
+        }
+        this.coro_intrinsic("llvm.coro.destroy", null, 0, args, 1, "");
+        return Value.create(none, void_result);
     }
 }

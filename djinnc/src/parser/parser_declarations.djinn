@@ -26,6 +26,7 @@ impl Parser {
         PointerList* attributes = this.parse_attributes();
         this.bodyless_seen = false;
         Node* declaration = this.parse_declaration_body();
+        bool declared_bodyless = this.bodyless_seen;
         if (this.bodyless_seen) {
             bool provided = declaration != null && declaration.kind == NodeKind.STRUCT_DECL
                 && (this.has_attribute(attributes, "intrinsic") || this.has_attribute(attributes, "no_mangle"));
@@ -34,7 +35,10 @@ impl Parser {
                 this.diagnostics.error(this.line_of(this.bodyless_token), this.column_of(this.bodyless_token), "expected '{' (a function without a body is only allowed in [intrinsic] and [no_mangle] structs)");
             }
         }
-        if (declaration != null && declaration.kind == NodeKind.STRUCT_DECL && (this.has_attribute(attributes, "intrinsic") || this.has_attribute(attributes, "no_mangle"))) {
+        if (declaration != null && declaration.kind == NodeKind.STRUCT_DECL && this.has_attribute(attributes, "no_mangle")) {
+            return null;
+        }
+        if (declaration != null && declaration.kind == NodeKind.STRUCT_DECL && this.has_attribute(attributes, "intrinsic") && !declared_bodyless) {
             return null;
         }
         if (attributes.length > 0) {
@@ -236,9 +240,19 @@ impl Parser {
         while (!this.at_end()) {
             if (this.check(TokenKind.DOT_DOT_DOT)) {
                 this.advance();
-                owner.set_variadic(true);
                 if (this.check(TokenKind.IDENTIFIER)) {
-                    this.advance();
+                    i32 pack_name = this.advance();
+                    Node* pack = Node.create(NodeKind.PARAMETER, pack_name);
+                    TypeRef* boxed_array = TypeRef.named("arr");
+                    PointerList* boxed_args = PointerList.create();
+                    boxed_args.push((void*)TypeRef.named("object"));
+                    boxed_array.args = boxed_args;
+                    pack.set_type(boxed_array);
+                    pack.set_text(this.copy_of(pack_name));
+                    pack.set_op(2);
+                    owner.add(pack);
+                } else {
+                    owner.set_variadic(true);
                 }
                 break;
             }
@@ -256,6 +270,15 @@ impl Parser {
                 parameter.set_flag(true);
             }
             parameter.set_type(this.parse_type());
+            if (this.match(TokenKind.DOT_DOT_DOT)) {
+                TypeRef* element = parameter.type();
+                TypeRef* packed = TypeRef.named("arr");
+                PointerList* packed_args = PointerList.create();
+                packed_args.push((void*)element);
+                packed.args = packed_args;
+                parameter.set_type(packed);
+                parameter.set_op(2);
+            }
             i32 name = this.expect(TokenKind.IDENTIFIER, "expected parameter name");
             parameter.set_text(this.copy_of(name));
             if (this.match(TokenKind.MUT)) {

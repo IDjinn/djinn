@@ -330,17 +330,28 @@ impl TypeChecker {
             this.append_location(node);
         }
         i32 given = node.count() + offset;
-        if (given < fixed || (given > fixed && !info.is_variadic)) {
+        mut i32 normal = fixed;
+        if (info.packs_variadic) {
+            normal = fixed - 1;
+        }
+        if (given < normal || (given > fixed && !info.is_variadic && !info.packs_variadic)) {
             this.error(node, "wrong number of arguments");
             return info.return_type;
         }
 
         for (mut i32 i = offset; i < given; i = i + 1) {
             Node* argument = node.child(i - offset);
-            if (i < fixed) {
+            if (i < normal) {
                 u32 wanted = param_types.get(i);
                 u32 passed = this.check_expression(argument, wanted);
                 this.require_argument_shape(argument, passed, wanted);
+            } else if (info.packs_variadic) {
+                SymbolTable* pack_symbols = this.symbols;
+                u32 element = pack_symbols.pack_element(param_types.get(fixed - 1));
+                u32 passed = this.check_expression(argument, element);
+                if (element != this.core_type("object")) {
+                    this.require_argument_shape(argument, passed, element);
+                }
             } else {
                 this.check_expression(argument, 0);
             }
