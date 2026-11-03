@@ -46,6 +46,7 @@ mkdir -p "$out/stage1" "$out/stage2" "$out/stage3" "$out/samples"
 cd "$root"
 
 echo "== stage0 -> stage1"
+rm -f "djinnc/build/djinnc$ext"
 "$stage0" -r djinnc >"$out/stage1.log" 2>&1 || true
 [ -f "djinnc/build/djinnc$ext" ] || { echo "FAIL stage1 not produced (see $out/stage1.log)"; exit 1; }
 cp "djinnc/build/djinnc$ext" "$out/stage1/djinnc$ext"

@@ -21,6 +21,7 @@ struct CodeGenerator {
     SymbolTable* symbols;
     FunctionContext* function_context;
     DebugInfo* debug;
+    void* layout_data;
 
     public static CodeGenerator* create(Diagnostics* diagnostics, i8* module_name) {
         CodeGenerator* gen = (CodeGenerator*)Memory.zalloc(sizeof(CodeGenerator));
@@ -31,6 +32,7 @@ struct CodeGenerator {
         gen.diagnostics = diagnostics;
         gen.symbols = SymbolTable.create(Memory.arena());
         gen.function_context = FunctionContext.create();
+        gen.layout_data = LLVMCreateTargetData("e-p:64:64-i64:64-i128:128-f64:64-n8:16:32:64");
         i8* triple = LLVMGetDefaultTargetTriple();
         LLVMSetTarget(gen.module, triple);
         LLVMDisposeMessage(triple);
@@ -65,6 +67,10 @@ struct CodeGenerator {
             return false;
         }
         this.declare_structs();
+        Diagnostics* layout_diagnostics = this.diagnostics;
+        if (layout_diagnostics.failed()) {
+            return false;
+        }
         this.declare_functions();
         this.declare_globals();
         this.define_all();
@@ -79,7 +85,7 @@ struct CodeGenerator {
             return false;
         }
 
-        i8* message = null;
+        i8* message = (i8*)0;
         i32 invalid = LLVMVerifyModule(this.module, LlvmConst.VERIFY_RETURN_STATUS, &message);
         if (invalid != 0) {
             logger_error(Log.get(), "djinnc: LLVM module verification failed: %s", message);
@@ -89,7 +95,7 @@ struct CodeGenerator {
     }
 
     public bool write_ir(i8* path) {
-        i8* message = null;
+        i8* message = (i8*)0;
         i32 failed = LLVMPrintModuleToFile(this.module, path, &message);
         if (failed != 0) {
             logger_error(Log.get(), "djinnc: cannot write '%s': %s", path, message);
@@ -171,20 +177,56 @@ struct CodeGenerator {
         }
         for (mut i32 i = 0; i < structs.length; i = i + 1) {
             StructInfo* info = (StructInfo*)structs.get(i);
-            if (info.is_template) {
-                continue;
+            if (!info.is_template) {
+                this.define_struct(info);
             }
-            if (info.has_payload) {
-                i32 slots = info.slot_count + 1;
-                void** layout = CodeGenerator.array_of(slots);
-                layout[0] = LLVMIntTypeInContext(this.context, 32);
-                for (mut i32 s = 1; s < slots; s = s + 1) {
-                    layout[s] = LLVMIntTypeInContext(this.context, 64);
+        }
+    }
+
+    void require_layout(u32 type, Node* at) {
+        if (!Types.is_struct(type)) {
+            return;
+        }
+        StructInfo* dependency = this.struct_of(type);
+        if (dependency.is_template) {
+            return;
+        }
+        if (dependency.layout_state == 1) {
+            this.error(at, "recursive type has infinite size; hold it through a pointer");
+            return;
+        }
+        this.define_struct(dependency);
+    }
+
+    void define_struct(StructInfo* info) {
+        if (info.layout_state != 0) {
+            return;
+        }
+        info.layout_state = 1;
+        Node* declaration = info.node;
+        if (info.has_payload) {
+            mut u64 largest = 0;
+            for (mut i32 v = 0; v < declaration.count(); v = v + 1) {
+                Node* variant = declaration.child(v);
+                for (mut i32 p = 0; p < variant.count(); p = p + 1) {
+                    Node* payload = variant.child(p);
+                    this.require_layout(payload.value_type(), declaration);
                 }
-                LLVMStructSetBody(info.llvm, layout, (u32)slots, 0);
-                continue;
+                u64 size = this.payload_offset(variant, variant.count());
+                if (size > largest) {
+                    largest = size;
+                }
             }
+            void** layout = CodeGenerator.array_of(2);
+            layout[0] = LLVMIntTypeInContext(this.context, 32);
+            layout[1] = LLVMArrayType2(LLVMIntTypeInContext(this.context, 64), (largest + 7) / 8);
+            LLVMStructSetBody(info.llvm, layout, 2, 0);
+        } else {
             PointerList* fields = info.fields;
+            for (mut i32 f = 0; f < fields.length; f = f + 1) {
+                FieldInfo* field = (FieldInfo*)fields.get(f);
+                this.require_layout(field.type, declaration);
+            }
             void** types = CodeGenerator.array_of(fields.length);
             for (mut i32 f = 0; f < fields.length; f = f + 1) {
                 FieldInfo* field = (FieldInfo*)fields.get(f);
@@ -192,6 +234,27 @@ struct CodeGenerator {
             }
             LLVMStructSetBody(info.llvm, types, (u32)fields.length, 0);
         }
+        info.layout_state = 2;
+    }
+
+    u64 payload_offset(Node* variant, i32 index) {
+        mut u64 offset = 0;
+        for (mut i32 j = 0; j <= index && j < variant.count(); j = j + 1) {
+            void* field_type = this.llvm_type(variant.child(j).value_type());
+            u64 alignment = (u64)LLVMABIAlignmentOfType(this.layout_data, field_type);
+            offset = (offset + alignment - 1) / alignment * alignment;
+            if (j < index) {
+                offset = offset + LLVMABISizeOfType(this.layout_data, field_type);
+            }
+        }
+        return offset;
+    }
+
+    void* payload_address(void* enum_llvm, void* slot, Node* variant, i32 index) {
+        void* area = LLVMBuildStructGEP2(this.builder, enum_llvm, slot, 1, "enum.area");
+        void** offsets = CodeGenerator.array_of(1);
+        offsets[0] = LLVMConstInt(LLVMIntTypeInContext(this.context, 64), this.payload_offset(variant, index), 0);
+        return LLVMBuildGEP2(this.builder, LLVMIntTypeInContext(this.context, 8), area, offsets, 1, "enum.payload");
     }
 
     void declare_functions() {
@@ -220,7 +283,7 @@ struct CodeGenerator {
             if (!info.is_extern && info.owner == null && info.name_atom == Atoms.MAIN_ATOM) {
                 symbol = "__djinn_sync_main";
             }
-            mut void* existing = null;
+            mut void* existing = (void*)0;
             if (info.is_extern) {
                 existing = LLVMGetNamedFunction(this.module, symbol);
             }
@@ -341,7 +404,7 @@ struct CodeGenerator {
 
     void emit_entry_point() {
         SymbolTable* symbols = this.symbols;
-        mut FunctionInfo* user = null;
+        mut FunctionInfo* user = (FunctionInfo*)0;
         PointerList* functions = symbols.functions;
         for (mut i32 i = 0; i < functions.length; i = i + 1) {
             FunctionInfo* candidate = (FunctionInfo*)functions.get(i);
@@ -455,7 +518,7 @@ struct CodeGenerator {
         this.locate(node);
 
         if (kind == NodeKind.BLOCK) {
-            mut void* outer_scope = null;
+            mut void* outer_scope = (void*)0;
             if (this.debug != null) {
                 DebugInfo* debug = this.debug;
                 outer_scope = debug.enter_block(node);
@@ -572,7 +635,7 @@ struct CodeGenerator {
         }
 
         FunctionContext* function_context = this.function_context;
-        mut void* continue_target = null;
+        mut void* continue_target = (void*)0;
         if (function_context.in_loop()) {
             continue_target = function_context.continue_block();
         }
@@ -1085,7 +1148,7 @@ struct CodeGenerator {
         for (mut i32 i = 0; i < node.count(); i = i + 1) {
             Node* payload = variant.child(i);
             Value* argument = this.gen_expression(node.child(i));
-            void* address = LLVMBuildStructGEP2(this.builder, llvm, slot, (u32)(i + 1), "enum.payload");
+            void* address = this.payload_address(llvm, slot, variant, i);
             LLVMBuildStore(this.builder, this.coerce(argument, payload.value_type()), address);
         }
         return Value.create(LLVMBuildLoad2(this.builder, llvm, slot, "enum.loaded"), enum_type);
@@ -1304,7 +1367,7 @@ struct CodeGenerator {
         u32 result_type = node.value_type();
 
         mut void* tag = subject.ref;
-        mut void* spill = null;
+        mut void* spill = (void*)0;
         void* enum_llvm = this.llvm_type(subject_type);
         if (Types.is_struct(subject_type)) {
             spill = this.create_slot(subject_type, "match.subject");
@@ -1331,11 +1394,12 @@ struct CodeGenerator {
         for (mut i32 i = 0; i < node.count(); i = i + 1) {
             Node* arm = node.child(i);
             LLVMPositionBuilderAtEnd(this.builder, blocks.get(i));
+            Node* arm_variant = (Node*)arm.symbol();
             for (mut i32 b = 0; b < arm.count(); b = b + 1) {
                 Node* binding = arm.child(b);
                 LocalVariable* variable = (LocalVariable*)binding.symbol();
                 variable.slot = this.create_slot(variable.type, variable.name);
-                void* address = LLVMBuildStructGEP2(this.builder, enum_llvm, spill, (u32)(b + 1), "match.payload");
+                void* address = this.payload_address(enum_llvm, spill, arm_variant, b);
                 void* loaded = LLVMBuildLoad2(this.builder, this.llvm_type(variable.type), address, "match.bound");
                 LLVMBuildStore(this.builder, loaded, variable.slot);
                 this.declare_variable(variable.slot, variable.name, variable.type, binding, 0);
@@ -1367,7 +1431,7 @@ struct CodeGenerator {
             return Value.create(LLVMBuildLoad2(this.builder, this.llvm_type(constructed), slot, "ctor.loaded"), constructed);
         }
         FunctionInfo* info = (FunctionInfo*)callee.symbol();
-        mut void* receiver = null;
+        mut void* receiver = (void*)0;
         mut i32 offset = 0;
 
         if (callee.symbol_kind() == SymbolKind.INSTANCE_METHOD) {
