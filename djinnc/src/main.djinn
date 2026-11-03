@@ -2,6 +2,11 @@ namespace djinnc;
 
 i32 main() {
     Options* options = Options.parse();
+    if (options.show_version) {
+        printf("djinnc (self-hosted) 0.1
+");
+        return 0;
+    }
     if (!options.ok) {
         Options.usage();
         return 2;
@@ -39,6 +44,8 @@ i32 main() {
         logger_error(Log.get(), "djinnc: cannot read the core library '%s' (see --runtime-dir)", core_path.cstr());
         return 1;
     }
+    PointerList* dependencies = options.dependencies;
+    dependencies.push((void*)core_path.cstr());
     i32 core_length = strlen(core);
     Sources.add(core_path.cstr(), core, (u32)core_length);
     diagnostics_list.push((void*)Diagnostics.create(core_path.cstr()));
@@ -92,7 +99,7 @@ i32 main() {
     monitor.lap("parse");
     logger_info(Log.get(), "djinnc: parsed %d ast nodes", Ast.node_count());
     if (options.emit_ast) {
-        Dump.node(program, 0);
+        Dump.program(program, options.dependencies);
         return 0;
     }
 
@@ -111,6 +118,21 @@ i32 main() {
         return Jit.run(gen, options);
     }
 
+    if (options.emit_asm || options.emit_ir) {
+        gen.exclude_dependencies(options.dependencies, options.show_async);
+    }
+
+    if (options.emit_asm && !options.emit_ir) {
+        if (!gen.write_assembly(options.output, options.opt_level, true)) {
+            return 1;
+        }
+        monitor.finish();
+        return 0;
+    }
+
+    if (options.emit_ir && !gen.optimize_ir(options.opt_level, true)) {
+        return 1;
+    }
     bool ir_only = options.emit_ir || options.no_link;
     if (ir_only || options.keep_ir) {
         ByteBuffer* ir_path = ByteBuffer.create();
@@ -129,7 +151,7 @@ i32 main() {
     ByteBuffer* object_path = ByteBuffer.create();
     object_path.append(options.output);
     object_path.append(".obj");
-    if (!gen.write_object(object_path.cstr(), options.optimize)) {
+    if (!gen.write_object(object_path.cstr(), options.opt_level)) {
         return 1;
     }
 

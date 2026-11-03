@@ -61,13 +61,19 @@ directory).
 | `--runtime-dir <dir>` | Directory with `djinn_runtime.c` and `logger.c` (default `runtime`). |
 | `--runtime-lib <lib>` | Link a prebuilt runtime instead of recompiling it (CMake target `djinn_runtime`). |
 | `--link-arg <arg>` | Extra linker argument; repeatable. |
-| `-O2` | Run `default<O2>` through `LLVMRunPasses`. Without it the pipeline is `default<O0>`. |
+| `-O0`, `-O1`, `-O2`, `-O3`, `-Os`, `-Oz` | Optimization level: runs `default<ON>` through `LLVMRunPasses` and sets the backend codegen level. Without it the pipeline is `default<O0>`. |
 | `--lld` | Call the linker directly: `lld-link` on Windows, `ld.lld` on POSIX. Needs `--runtime-lib`. |
 | `--std` / `--std-dir <dir>` | Compile the `std/` library too (also `libs: ['std']` in `djinn.proj`, or `DJINN_STD_DIR`); see [STD_ROADMAP.md](STD_ROADMAP.md). |
 | `--target <triple>` | Target triple (default: the host). Sets the width of `usize`/`isize`; non-x86 targets only support `--emit-ir`. |
 | `--run` | Run `main` in process through ORC LLJIT (`driver/jit.djinn`) instead of writing an object and linking. Needs `--runtime-lib` and the host target; the exit code of `main` is the exit code of djinnc. |
 | `--no-link` | Stop after generating code; writes `<output>.ll`. |
 | `--emit-ir` / `--keep-ir` | Write `<output>.ll` (IR). `--keep-ir` also links. |
+| `--emit-asm` | Write the assembly to `-o` and stop. |
+| `--show-async` | In the view modes, also show the compiler-generated async infrastructure (the entry `main` that starts the runtime and event loop, and the `__djinn_coro_*` wrappers). Hidden by default. |
+| `--emit-ast` | Print the AST (with `<line:col>`) to stdout and stop. |
+| `--version` | Print the compiler version. |
+
+`--emit-ir`, `--emit-asm` and `--emit-ast` are view modes: they show only the files given as inputs. The runtime (`core.djinn`) and the std loaded by `--std` are dependencies, so their functions are not emitted (only declarations when referenced) and their declarations are not dumped; pass a std file as an input to see it. `--keep-ir`, `--no-link` and linked builds keep everything.
 | `--emit-tokens` / `--emit-ast` | Dump the token list or the AST and exit. |
 | `--stats` | Print files, tokens, AST nodes and arena usage, plus a `PerformanceMonitor` lap per phase (lex, parse, codegen, write-ir, object, link) and the total, in ms. |
 | `--selftest` | Run the built-in unit checks (arena, atoms, maps, ...). |
@@ -114,7 +120,8 @@ djinnc --selftest
 ### Samples and error cases
 
 [tests/djinnc/run.sh](../tests/djinnc/run.sh) runs the selftest, compiles and runs every file in
-`tests/djinnc/samples` (the expected exit code is in the matching `.exit`; an optional `.stdout` is compared too, ignoring ``) and checks that every file in
+`tests/djinnc/samples` (the expected exit code is in the matching `.exit`; an optional `.stdout` is compared too, ignoring `
+`) and checks that every file in
 `tests/djinnc/errors` fails with an `error:` diagnostic.
 
 ```bash
