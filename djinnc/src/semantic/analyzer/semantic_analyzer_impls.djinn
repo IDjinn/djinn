@@ -76,8 +76,13 @@ impl SemanticAnalyzer {
             Node* member = declaration.child(i);
             if (member.kind == NodeKind.FUNCTION) {
                 this.collect_function(member, false, owner);
+            } else if (member.kind == NodeKind.FIELD_DECL && member.first() != null) {
+                U32Map* constant_map = owner.constant_map;
+                PointerList* constants = owner.constants;
+                constant_map.put(member.name(), (u32)constants.length);
+                constants.push((void*)member);
             } else if (member.kind != NodeKind.PARAMETER) {
-                this.error(member, "an impl block can only contain methods");
+                this.error(member, "an impl block can only contain methods and constants");
             }
         }
     }
@@ -139,14 +144,22 @@ impl SemanticAnalyzer {
         GenericParams* params = declaration.generics();
         if (params != null) {
             PointerList* given = reference.args;
-            if (given == null || given.length != params.count()) {
-                this.error(at, "wrong number of interface type arguments");
-                return;
-            }
-            interface_bindings = U32Map.create(Memory.arena(), 8);
-            IdList* names = params.names;
-            for (mut i32 a = 0; a < given.length; a = a + 1) {
-                interface_bindings.put(names.get(a), this.resolve((TypeRef*)given.get(a), at));
+            if (given == null) {
+                interface_bindings = U32Map.create(Memory.arena(), 8);
+                IdList* parameter_names = params.names;
+                for (mut i32 a = 0; a < params.count(); a = a + 1) {
+                    interface_bindings.put(parameter_names.get(a), owner.type_id);
+                }
+            } else {
+                if (given.length != params.count()) {
+                    this.error(at, "wrong number of interface type arguments");
+                    return;
+                }
+                interface_bindings = U32Map.create(Memory.arena(), 8);
+                IdList* names = params.names;
+                for (mut i32 a = 0; a < given.length; a = a + 1) {
+                    interface_bindings.put(names.get(a), this.resolve((TypeRef*)given.get(a), at));
+                }
             }
         } else if (reference.args != null) {
             this.error(at, "interface is not generic");
