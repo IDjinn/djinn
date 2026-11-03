@@ -70,7 +70,7 @@ Enum-like values are `i32` constants held in `static` structs until `==` on enum
 - `Point p = Point(1, 2);` builds a value, `Point* heap = new Point(1, 2);` allocates zeroed memory through the runtime allocator (`__djinn_malloc`, which traces the allocation) and returns a pointer. Generic types work the same way: `Box<i32>(7)`, `new Box<i32>(9)`.
 - A struct without a constructor can only be built with `Name()` (zero-initialized) or a `{ .field = value }` initializer.
 
-- Operator overloading: `operator +(T left, T right) -> T { ... }` inside `impl T { }` or the struct body defines a static operator method; binary expressions on struct values call it. `!=` is derived from `==`.
+- Operator overloading: `operator +(T left, T right) -> T { ... }` inside `impl T { }` or the struct body defines a static operator method; binary expressions on struct values call it. `!=` is derived from `==`. A one-parameter operator (`operator -(T value) -> T`, also `~` and `!`) overloads the unary form. `&&` and `||` can be overloaded for structs (both operands are evaluated). `operator get[](T collection, I index) -> R` and `operator set[](T* collection, I index, V value) -> void` overload `x[i]` and `x[i] = v`; `&x[i]` is not allowed on them.
 
 ## Overloading
 
