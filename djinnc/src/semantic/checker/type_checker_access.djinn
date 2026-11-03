@@ -45,6 +45,11 @@ impl TypeChecker {
                     node.set_symbol(SymbolKind.IMPLICIT_GET, (void*)implicit_getter);
                     return implicit_getter.return_type;
                 }
+                Node* sibling = this.implicit_constant(node);
+                if (sibling != null) {
+                    node.set_symbol(SymbolKind.CONSTANT, (void*)sibling);
+                    return sibling.value_type();
+                }
                 this.error(node, "undefined variable");
                 return Types.i32_type();
             }
@@ -166,6 +171,15 @@ impl TypeChecker {
         return this.find_accessor(current.owner, prefix, node.text());
     }
 
+    Node* implicit_constant(Node* node) {
+        FunctionInfo* current = this.function;
+        if (current == null || current.owner == null) {
+            return null;
+        }
+        SymbolTable* symbols = this.symbols;
+        return symbols.find_constant(current.owner, node.name());
+    }
+
     FieldInfo* implicit_field(Node* node) {
         FunctionInfo* current = this.function;
         if (current == null || !current.is_instance || current.owner == null) {
@@ -200,6 +214,11 @@ impl TypeChecker {
 impl TypeChecker {
     u32 check_intrinsic(Node* node) {
         i32 id = node.op();
+        if (id == Intrinsic.ALLOCA) {
+            u32 element = this.resolve_type(node.type(), node);
+            this.check_expression(node.first(), Types.i64_type());
+            return Types.pointer_to(element);
+        }
         if (id == Intrinsic.TYPEOF) {
             u32 measured = this.resolve_type(node.type(), node);
             if (Types.is_void(measured) || measured == Types.auto_type()) {

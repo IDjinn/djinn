@@ -21,8 +21,7 @@ futuro, então as mesmas fontes servem ao stage0 e ao djinnc.
 | `sys/libc.djinn`, `io.djinn`, `math.djinn`, `process.djinn`, `logger.djinn`, `test.djinn` | na build | `i8*?` já parseia; externs duplicados com o core (nomes iguais em namespaces diferentes) |
 | `sys/debug.djinn`, `sys/intrinsics.djinn`, `util/version.djinn` | na build | `[Location]`, `attribute`, `[attribute]`, intrinsics de debug e inicializador posicional |
 | `sys/task.djinn`, `builtin/coro.djinn` | na build | structs `[intrinsic]`/`[no_mangle]` são lidas e descartadas; `task<T>` e as corrotinas vêm do core |
-| `sys/console.djinn`, `sys/spectre.djinn` | fora | `for ... in`, `async` em I/O, tamanho (2,4 mil linhas) |
-| `net/socket.djinn` | fora | `async`, externs de rede |
+| `sys/console.djinn`, `sys/spectre.djinn`, `net/socket.djinn` | na build | `...args` empacotado em `arr<object>`, `i8[n]`, constantes da struct sem prefixo, `async` em métodos |
 
 A lista de exclusão está em `driver/std_library.djinn` (`pending_files`); cada item sai dela quando o djinnc passa a compilá-lo.
 
