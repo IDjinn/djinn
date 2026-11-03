@@ -37,3 +37,7 @@ The compiler-generated async infrastructure (the entry `main` that starts the ru
 ## djinnc options used
 
 `--emit-asm` writes assembly to `-o`; `--emit-ir` writes `<-o>.ll`; `--emit-ast` prints the AST with `<line:col>`; `--version` is used for the version label.
+
+## Library view
+
+The `djinnc (library view)` compiler builds the source as a `.djlib` (`--emit-lib-view`) and shows the library inspection in the output pane: header, section sizes, integrity and the interface that consumers see (declarations without bodies, macros and generics kept).

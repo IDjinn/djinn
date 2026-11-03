@@ -17,10 +17,25 @@ export class DjinnCompiler extends BaseCompiler {
     }
 
     override optionsForFilter(filters: ParseFiltersAndOutputOptions, outputFilename: string): string[] {
-        if (filters.binary) {
+        if (filters.binary || this.isLibraryView()) {
             return ['-o', outputFilename];
         }
         return ['--emit-asm', '-g', '-o', outputFilename];
+    }
+
+    private isLibraryView(): boolean {
+        return this.compiler.id === 'djinnclib';
+    }
+
+    override async processAsm(result: any, filters: ParseFiltersAndOutputOptions, options: string[]): Promise<any> {
+        if (!this.isLibraryView()) {
+            return super.processAsm(result, filters, options);
+        }
+        const lines = String(result.asm ?? '')
+            .split('
+')
+            .map((text: string) => ({text, source: null}));
+        return {asm: lines};
     }
 
     protected override getSharedLibraryPathsAsArguments(): string[] {

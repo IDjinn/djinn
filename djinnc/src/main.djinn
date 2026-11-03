@@ -14,6 +14,10 @@ i32 main() {
 
     Target.init(options.target);
 
+    if (options.inspect_path != null) {
+        return Library.inspect(options.inspect_path, null);
+    }
+
     if (options.self_test) {
         return SelfTest.run();
     }
@@ -52,8 +56,26 @@ i32 main() {
     total_bytes = total_bytes + core_length;
     i32 source_count = inputs.length + 1;
 
+    if (options.library_view) {
+        options.library = true;
+    }
+    if (options.library && !options.output_set) {
+        options.output = "a.djlib";
+    }
+    PointerList* libraries = options.libraries;
+    for (mut i32 i = 0; i < libraries.length; i = i + 1) {
+        if (Library.load(options, (i8*)libraries.get(i), diagnostics_list) < 0) {
+            return 1;
+        }
+    }
+    i32 total_sources = Sources.count();
+    for (mut i32 i = source_count; i < total_sources; i = i + 1) {
+        SourceFile* library_file = Sources.get(i);
+        total_bytes = total_bytes + (i64)library_file.length;
+    }
+
     TokenList* tokens = TokenList.create((i32)(total_bytes / 3) + 64);
-    for (mut i32 i = 0; i < source_count; i = i + 1) {
+    for (mut i32 i = 0; i < total_sources; i = i + 1) {
         SourceFile* file = Sources.get(i);
         Diagnostics* file_diagnostics = (Diagnostics*)diagnostics_list.get(i);
         Lexer* lexer = Lexer.create(file, tokens, file_diagnostics);
@@ -70,14 +92,18 @@ i32 main() {
     }
 
     U32Map* type_names = U32Map.create(Memory.arena(), 256);
-    for (mut i32 i = 0; i < source_count; i = i + 1) {
+    for (mut i32 i = 0; i < total_sources; i = i + 1) {
         Parser.collect_type_names(tokens, Sources.get(i), type_names);
     }
 
     Ast.init(tokens.length * 2 + 64);
     Diagnostics* diagnostics = (Diagnostics*)diagnostics_list.get(0);
     Node* program = Node.create_list(NodeKind.PROGRAM, 0);
-    for (mut i32 i = 0; i < source_count; i = i + 1) {
+    for (mut i32 step = 0; step < total_sources; step = step + 1) {
+        mut i32 i = step + source_count;
+        if (i >= total_sources) {
+            i = step - (total_sources - source_count);
+        }
         SourceFile* file = Sources.get(i);
         Diagnostics* file_diagnostics = (Diagnostics*)diagnostics_list.get(i);
         Parser* parser = Parser.create(tokens, file, file_diagnostics, type_names);
@@ -105,6 +131,7 @@ i32 main() {
 
     CodeGenerator* gen = CodeGenerator.create(diagnostics, options.input);
     gen.reflect_mode = options.reflect_mode;
+    gen.library_mode = options.library;
     if (options.debug) {
         gen.enable_debug((i8*)inputs.get(0), options.optimize, options.emit_asm || options.emit_ir);
     }
@@ -113,6 +140,36 @@ i32 main() {
     }
     monitor.lap("codegen");
     logger_info(Log.get(), "djinnc: generated and verified LLVM module");
+
+    if (options.library) {
+        gen.exclude_dependencies(options.dependencies, true);
+        ByteBuffer* library_object = ByteBuffer.create();
+        library_object.append(options.output);
+        library_object.append(".obj");
+        if (!gen.write_object(library_object.cstr(), options.opt_level)) {
+            return 1;
+        }
+        i8* library_path = options.output;
+        if (options.library_view) {
+            ByteBuffer* view_path = ByteBuffer.create();
+            view_path.append(options.output);
+            view_path.append(".djlib");
+            options.output = view_path.cstr();
+        }
+        bool written = Library.write(options, library_object.cstr());
+        remove(library_object.cstr());
+        monitor.finish();
+        if (!written) {
+            return 1;
+        }
+        if (options.library_view) {
+            i32 status = Library.inspect(options.output, library_path);
+            remove(options.output);
+            return status;
+        }
+        logger_info(Log.get(), "djinnc: wrote library '%s'", options.output);
+        return 0;
+    }
 
     if (options.run) {
         monitor.finish();
@@ -145,6 +202,7 @@ i32 main() {
     }
     monitor.lap("write-ir");
     if (ir_only) {
+        Library.cleanup();
         monitor.finish();
         return 0;
     }
@@ -166,6 +224,7 @@ i32 main() {
 
     logger_info(Log.get(), "djinnc: linking '%s'", options.output);
     i32 status = Linker.link(options, object_path.cstr());
+    Library.cleanup();
     monitor.lap("link");
     if (status != 0) {
         logger_error(Log.get(), "djinnc: linking failed (exit %d)", status);

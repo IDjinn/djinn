@@ -40,6 +40,7 @@ impl CodeGenerator {
                 info.function = LLVMAddFunction(this.module, symbol, info.function_type);
                 if (!info.is_extern) {
                     this.apply_attributes(info);
+                    this.share_definition(info);
                 }
             }
         }
@@ -53,10 +54,12 @@ impl CodeGenerator {
             Node* declaration = variable.node;
             u32 type = variable.type;
             void* global = LLVMAddGlobal(this.module, this.llvm_type(type), variable.name);
-            Value* initial = this.gen_expression(declaration.first());
-            LLVMSetInitializer(global, this.coerce(initial, type));
-            if (!variable.is_mutable) {
-                LLVMSetGlobalConstant(global, 1);
+            if (!declaration.is_header()) {
+                Value* initial = this.gen_expression(declaration.first());
+                LLVMSetInitializer(global, this.coerce(initial, type));
+                if (!variable.is_mutable) {
+                    LLVMSetGlobalConstant(global, 1);
+                }
             }
             variable.slot = global;
             if (this.debug != null) {
@@ -166,6 +169,9 @@ impl CodeGenerator {
     }
 
     void emit_entry_point() {
+        if (this.library_mode) {
+            return;
+        }
         SymbolTable* symbols = this.symbols;
         mut FunctionInfo* user = (FunctionInfo*)0;
         PointerList* functions = symbols.functions;
