@@ -27,13 +27,46 @@ impl CodeGenerator {
 
     bool is_addressable(Node* node) {
         i32 kind = node.kind;
-        if (kind == NodeKind.IDENTIFIER || kind == NodeKind.INDEX) {
+        if (kind == NodeKind.INDEX) {
+            return node.symbol_kind() != SymbolKind.INDEX_GET && node.symbol_kind() != SymbolKind.INDEX_SET;
+        }
+        if (kind == NodeKind.IDENTIFIER) {
             return true;
         }
         if (kind == NodeKind.FIELD_ACCESS) {
             return !this.is_struct_name(node.first()) && node.symbol_kind() != SymbolKind.PROPERTY_GET && node.symbol_kind() != SymbolKind.PROPERTY_SET;
         }
         return kind == NodeKind.UNARY && node.op() == TokenKind.STAR;
+    }
+
+    void* index_collection(Node* base, u32 parameter) {
+        if (Types.is_pointer(parameter)) {
+            return this.struct_pointer(base);
+        }
+        return this.coerce(this.gen_expression(base), parameter);
+    }
+
+    Value* gen_index_get(Node* node) {
+        FunctionInfo* getter = (FunctionInfo*)node.symbol();
+        IdList* parameters = getter.param_types;
+        void** args = CodeGenerator.array_of(2);
+        args[0] = this.index_collection(node.first(), parameters.get(0));
+        args[1] = this.coerce(this.gen_expression(node.second()), parameters.get(1));
+        void* result = LLVMBuildCall2(this.builder, getter.function_type, getter.function, args, 2, "index.get");
+        return Value.create(result, getter.return_type);
+    }
+
+    Value* gen_index_set(Node* node) {
+        Node* target = node.first();
+        FunctionInfo* setter = (FunctionInfo*)target.symbol();
+        IdList* parameters = setter.param_types;
+        void** args = CodeGenerator.array_of(3);
+        args[0] = this.index_collection(target.first(), parameters.get(0));
+        args[1] = this.coerce(this.gen_expression(target.second()), parameters.get(1));
+        Value* assigned = this.gen_expression(node.second());
+        args[2] = this.coerce(assigned, parameters.get(2));
+        LLVMBuildCall2(this.builder, setter.function_type, setter.function, args, 3, "");
+        return Value.create(args[2], parameters.get(2));
     }
 
     void* struct_pointer(Node* base) {

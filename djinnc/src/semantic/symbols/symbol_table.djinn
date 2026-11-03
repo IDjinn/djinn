@@ -14,6 +14,8 @@ struct SymbolTable {
     U32Map* namespace_map;
     U32Map* instance_map;
     U32Map* primitive_map;
+    U32Map* alias_map;
+    PointerList* aliases;
     PointerList* primitives;
     U32Map* bindings;
     SemanticAnalyzer* analyzer;
@@ -34,6 +36,8 @@ struct SymbolTable {
         table.namespace_map = U32Map.create(arena, 16);
         table.instance_map = U32Map.create(arena, 16);
         table.primitive_map = U32Map.create(arena, 16);
+        table.alias_map = U32Map.create(arena, 16);
+        table.aliases = PointerList.create();
         table.primitives = PointerList.create();
         NamespaceInfo* root = (NamespaceInfo*)arena.zalloc(sizeof(NamespaceInfo), 8);
         PointerList* namespaces = table.namespaces;
@@ -107,6 +111,16 @@ struct SymbolTable {
                 if (index >= 0) {
                     return index;
                 }
+                NamespaceInfo* scope_info = this.namespace_at(namespace_id);
+                if (scope_info.imports != null) {
+                    IdList* imports = scope_info.imports;
+                    for (mut i32 i = 0; i < imports.length; i = i + 1) {
+                        i64 imported = map.find(SymbolTable.key(imports.get(i), base));
+                        if (imported >= 0) {
+                            return imported;
+                        }
+                    }
+                }
                 if (namespace_id == 0) {
                     return 0 - 1;
                 }
@@ -140,6 +154,27 @@ struct SymbolTable {
         return 0 - 1;
     }
 
+    public bool add_alias(u32 namespace_id, u32 name_atom, TypeRef* target) {
+        U32Map* map = this.alias_map;
+        u32 key = SymbolTable.key(namespace_id, name_atom);
+        if (map.find(key) >= 0) {
+            return false;
+        }
+        PointerList* list = this.aliases;
+        list.push((void*)target);
+        map.put(key, (u32)(list.length - 1));
+        return true;
+    }
+
+    TypeRef* find_alias(u32 full, u32 base, u32 scope) {
+        i64 index = this.lookup(this.alias_map, full, base, scope);
+        if (index < 0) {
+            return null;
+        }
+        PointerList* list = this.aliases;
+        return (TypeRef*)list.get((i32)index);
+    }
+
     public u32 resolve_type(TypeRef* ref, u32 scope) {
         i32 kind = ref.kind;
         if (kind == TypeKind.VOID) {
@@ -170,6 +205,10 @@ struct SymbolTable {
         }
         StructInfo* info = this.find_struct(ref.full_atom, ref.name_atom, scope);
         if (info == null) {
+            TypeRef* alias = this.find_alias(ref.full_atom, ref.name_atom, scope);
+            if (alias != null && ref.args == null) {
+                return this.resolve_type(alias, scope);
+            }
             return 0;
         }
         if (info.is_template) {
@@ -260,6 +299,19 @@ struct SymbolTable {
         map.put(type, (u32)list.length);
         list.push((void*)info);
         return info;
+    }
+
+    public StructInfo* find_core_struct(u32 atom) {
+        StructInfo* root = this.find_struct(atom, atom, 0);
+        if (root != null) {
+            return root;
+        }
+        AtomTable* atoms = Atoms.get();
+        i64 library = this.find_child_namespace(0, atoms.intern_copy("std::types", 10));
+        if (library < 0) {
+            return null;
+        }
+        return this.find_struct(atom, atom, (u32)library);
     }
 
     public StructInfo* struct_at(u32 index) {

@@ -1,0 +1,88 @@
+namespace djinnc;
+
+impl SemanticAnalyzer {
+    void collect_imports(Node* program) {
+        SymbolTable* symbols = this.symbols;
+        PointerList* pending = PointerList.create();
+        mut i8* current_file = null;
+        for (mut i32 i = 0; i < program.count(); i = i + 1) {
+            Node* declaration = program.child(i);
+            if (declaration.kind == NodeKind.IMPORT) {
+                if (current_file == null || !Strings.same(current_file, declaration.file_name())) {
+                    pending.truncate(0);
+                    current_file = declaration.file_name();
+                }
+                pending.push((void*)declaration);
+                continue;
+            }
+            if (declaration.kind != NodeKind.NAMESPACE_DECL) {
+                continue;
+            }
+            u32 target = symbols.enter_namespace(0, declaration.text_atom());
+            if (current_file != null && Strings.same(current_file, declaration.file_name())) {
+                for (mut i32 p = 0; p < pending.length; p = p + 1) {
+                    this.add_import(target, (Node*)pending.get(p));
+                }
+            }
+            pending.truncate(0);
+            for (mut i32 c = 0; c < declaration.count(); c = c + 1) {
+                Node* inner = declaration.child(c);
+                if (inner.kind == NodeKind.IMPORT) {
+                    this.add_import(target, inner);
+                }
+            }
+        }
+        for (mut i32 p = 0; p < pending.length; p = p + 1) {
+            this.add_import(0, (Node*)pending.get(p));
+        }
+        this.link_std_namespaces();
+    }
+
+    bool is_std_namespace(u32 id) {
+        SymbolTable* symbols = this.symbols;
+        i8* name = symbols.namespace_prefix(id);
+        if (name == null) {
+            return false;
+        }
+        i32 length = strlen(name);
+        return Strings.equals(name, length, "std") || Strings.starts_with(name, 0, length, "std::");
+    }
+
+    void link_std_namespaces() {
+        SymbolTable* symbols = this.symbols;
+        PointerList* namespaces = symbols.namespaces;
+        for (mut i32 a = 1; a < namespaces.length; a = a + 1) {
+            if (!this.is_std_namespace((u32)a)) {
+                continue;
+            }
+            for (mut i32 b = 1; b < namespaces.length; b = b + 1) {
+                if (a != b && this.is_std_namespace((u32)b)) {
+                    this.link_namespace((u32)a, (u32)b);
+                }
+            }
+        }
+    }
+
+    void link_namespace(u32 owner, u32 imported) {
+        SymbolTable* symbols = this.symbols;
+        NamespaceInfo* info = symbols.namespace_at(owner);
+        if (info.imports == null) {
+            info.imports = IdList.create();
+        }
+        IdList* imports = info.imports;
+        for (mut i32 i = 0; i < imports.length; i = i + 1) {
+            if (imports.get(i) == imported) {
+                return;
+            }
+        }
+        imports.push(imported);
+    }
+
+    void add_import(u32 owner, Node* declaration) {
+        SymbolTable* symbols = this.symbols;
+        u32 imported = symbols.enter_namespace(0, declaration.text_atom());
+        if (imported != owner) {
+            this.link_namespace(owner, imported);
+        }
+    }
+}

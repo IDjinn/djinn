@@ -1,0 +1,58 @@
+namespace djinnc;
+
+impl SemanticAnalyzer {
+    bool is_core_file(Node* declaration) {
+        i8* name = declaration.file_name();
+        i32 length = strlen(name);
+        return length >= 10 && Strings.equals(name + length - 10, 10, "core.djinn");
+    }
+
+    bool is_overridable_core_name(u32 atom) {
+        AtomTable* atoms = Atoms.get();
+        i8* text = atoms.text(atom);
+        i32 length = (i32)atoms.length(atom);
+        return Strings.equals(text, length, "str") || Strings.equals(text, length, "string") || Strings.equals(text, length, "arr")
+            || Strings.equals(text, length, "TypeInfo") || Strings.equals(text, length, "object");
+    }
+
+    bool std_declares(Node* program, u32 atom) {
+        SymbolTable* symbols = this.symbols;
+        for (mut i32 i = 0; i < program.count(); i = i + 1) {
+            Node* declaration = program.child(i);
+            if (declaration.kind != NodeKind.NAMESPACE_DECL) {
+                continue;
+            }
+            if (!this.is_std_namespace(symbols.enter_namespace(0, declaration.text_atom()))) {
+                continue;
+            }
+            for (mut i32 c = 0; c < declaration.count(); c = c + 1) {
+                Node* inner = declaration.child(c);
+                if (inner.kind == NodeKind.STRUCT_DECL && inner.name() == atom) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    void drop_overridden_core(Node* program) {
+        for (mut i32 i = 0; i < program.count(); i = i + 1) {
+            Node* declaration = program.child(i);
+            if (!this.is_core_file(declaration)) {
+                continue;
+            }
+            mut u32 atom = 0;
+            if (declaration.kind == NodeKind.STRUCT_DECL) {
+                atom = declaration.name();
+            } else if (declaration.kind == NodeKind.IMPL_DECL) {
+                TypeRef* target = declaration.type();
+                if (target != null && target.kind == TypeKind.NAMED) {
+                    atom = target.name_atom;
+                }
+            }
+            if (atom != 0 && this.is_overridable_core_name(atom) && this.std_declares(program, atom)) {
+                declaration.kind = (u16)NodeKind.EMPTY;
+            }
+        }
+    }
+}
