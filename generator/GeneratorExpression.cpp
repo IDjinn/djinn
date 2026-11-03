@@ -7,6 +7,7 @@
 
 llvm::Value* Generator::generate_expression(const Expression& expr)
 {
+    debug_locate(expr.location);
     djinn::GeneratorExpressionVisitor visitor(*this);
     expr.accept(visitor);
     return visitor.result();

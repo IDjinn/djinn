@@ -38,6 +38,17 @@
 #define CLANG_LINK_ARGS "-flto -fuse-ld=lld -lm -lpthread"
 #endif
 
+// LTO drops the CodeView/DWARF of the Djinn module from the final binary, so -g links without it.
+static std::string clang_link_args(const bool debugInfo)
+{
+    std::string args = CLANG_LINK_ARGS;
+    if (debugInfo)
+    {
+        if (const auto pos = args.find("-flto "); pos != std::string::npos) args.erase(pos, 6);
+    }
+    return args;
+}
+
 namespace
 {
     std::string compute_hash(const std::string& data)
@@ -786,6 +797,7 @@ CompilerResult DjinnCompiler::compileFromDirectory(const std::filesystem::path& 
 
         auto generator = Generator(diagnostics, bindResult.globalScope);
         generator.libraryMode = options.libraryMode;
+        generator.debugInfo = options.debugInfo;
         generator.stdDeclOnly = options.stdDeclOnly;
         generator.moduleName = options.outputFileName.empty() ? "djinn_module" : options.outputFileName;
         generator.reflectionMode = options.reflectionMode;
@@ -895,7 +907,8 @@ CompilerResult DjinnCompiler::compileFromDirectory(const std::filesystem::path& 
             }
 
             auto optFlag = "-O" + std::to_string(options.optimizationLevel);
-            auto cmdString = "\"" DJINN_CLANG_PATH "\" " CLANG_LINK_ARGS " " + optFlag + " " + llPath + runtimeArg +
+            if (options.debugInfo) optFlag += " -g";
+            auto cmdString = "\"" DJINN_CLANG_PATH "\" " + clang_link_args(options.debugInfo) + " " + optFlag + " " + llPath + runtimeArg +
                 " -o " + exePath;
             LOG_DEBUG("Executing compilation command: %s", cmdString.c_str());
             const auto compile_result = system(cmdString.c_str());
@@ -1137,6 +1150,7 @@ CompilerResult DjinnCompiler::run(const std::string& source, const CompilerOptio
 
         auto generator = Generator(diagnostics, bindResult.globalScope);
         generator.libraryMode = options.libraryMode;
+        generator.debugInfo = options.debugInfo;
         generator.stdDeclOnly = options.stdDeclOnly;
         generator.moduleName = options.outputFileName.empty() ? "djinn_module" : options.outputFileName;
         generator.reflectionMode = options.reflectionMode;
@@ -1216,7 +1230,8 @@ CompilerResult DjinnCompiler::run(const std::string& source, const CompilerOptio
         }
 
         auto optFlag = "-O" + std::to_string(options.optimizationLevel);
-        const auto cmdString = "\"" DJINN_CLANG_PATH "\" " CLANG_LINK_ARGS " " + optFlag + " " + llPath + runtimeArg +
+        if (options.debugInfo) optFlag += " -g";
+        const auto cmdString = "\"" DJINN_CLANG_PATH "\" " + clang_link_args(options.debugInfo) + " " + optFlag + " " + llPath + runtimeArg +
             " -o " + exePath;
         LOG_DEBUG("Executing compilation command: %s", cmdString.c_str());
         int clangResult = system(cmdString.c_str());

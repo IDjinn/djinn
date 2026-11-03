@@ -47,6 +47,7 @@ struct CompilerOptions
     bool jitExecution = true; // Execute in-process via ORC JIT instead of spawning clang (run() only)
     bool noCache = false;
     bool debugMode = true;
+    bool debugInfo = false;
     bool releaseMode = false;
     bool outputDjLib = false;
     ErrorEnforcement errorEnforcement = ErrorEnforcement::CompileTime;

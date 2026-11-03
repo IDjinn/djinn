@@ -31,6 +31,7 @@ void printUsage(const char* programName)
         << "  --native-lib <lib>  Pass a native library to the final link (can be used multiple times)\n"
         << "  --debug       Set build mode to debug: full runtime error reports (source\n"
         << "                snippets, stack traces, variable history) baked into the binary\n"
+        << "  -g            Emit native debug info (DWARF/CodeView)\n"
         << "  --release     Set build mode to release: minimal runtime error reports\n"
         << "                (file:line + operand values only)\n"
         << "  --reflect-all       Generate TypeInfoExt for all struct types\n"
@@ -234,6 +235,10 @@ int main(int argc, char* argv[])
         {
             options.debugMode = true;
             options.releaseMode = false;
+        }
+        else if (arg == "-g")
+        {
+            options.debugInfo = true;
         }
         else if (arg == "--release")
         {

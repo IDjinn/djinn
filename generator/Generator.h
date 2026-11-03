@@ -11,6 +11,7 @@
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/DIBuilder.h"
 #include <filesystem>
 #include "../parser/AST.h"
 #include "GeneratorScope.h"
@@ -97,8 +98,23 @@ public:
     std::string moduleName;
     std::string reflectionMode = "none";
     RuntimeDiagnostics runtimeDiagnostics = RuntimeDiagnostics::Full;
+    bool debugInfo = false;
 
 private:
+    std::unique_ptr<llvm::DIBuilder> diBuilder;
+    llvm::DICompileUnit* diUnit = nullptr;
+    std::unordered_map<std::string, llvm::DIFile*> diFiles;
+
+    void init_debug_info();
+    llvm::DIFile* debug_file(const std::string& fileId);
+    llvm::DIType* debug_type(const Type& type, llvm::Type* llvmType);
+    std::unordered_map<llvm::Function*, std::string> diPendingNames;
+    void create_subprogram(llvm::Function* function, const std::string& name, const SourceLocation& loc);
+    void debug_begin_function(const std::string& name, const SourceLocation& loc);
+    void debug_locate(const SourceLocation& loc);
+    void debug_declare(llvm::Value* slot, const std::string& name, const Type& type, const SourceLocation& loc);
+    void finalize_debug_info();
+
     DiagnosticEngine& _diagnostics;
     std::unique_ptr<llvm::LLVMContext> context;
     std::unique_ptr<llvm::Module> module;

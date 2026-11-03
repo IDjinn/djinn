@@ -31,9 +31,43 @@ run_case() {
     echo "PASS $name"
 }
 
+run_case_stage0() {
+    local source="$1" line="$2"
+    shift 2
+    local name
+    name="stage0_$(basename "$source" .djinn)_$line"
+    local dir="$out/$name"
+    rm -rf "$dir"
+    mkdir -p "$dir"
+    cp "$root/tests/djinnc/debug/$source" "$dir/$source"
+    if ! (cd "$root" && "$stage0" -g -O0 -out "$dir" -o prog "$dir/$source") >"$out/$name.build.log" 2>&1 && [ ! -f "$dir/prog.exe" ] && [ ! -f "$dir/prog" ]; then
+        echo "FAIL $name (compile)"
+        failed=1
+        return
+    fi
+    local binary="$dir/prog.exe"
+    [ -f "$binary" ] || binary="$dir/prog"
+    (cd "$dir" && timeout 60 lldb -b -o "breakpoint set -f $source -l $line" -o run -o "frame variable" -o "bt" -o quit "$binary") >"$out/$name.lldb.log" 2>&1
+    tr -d '' <"$out/$name.lldb.log" >"$out/$name.lldb.txt"
+    for pattern in "$@"; do
+        if ! grep -q -- "$pattern" "$out/$name.lldb.txt"; then
+            echo "FAIL $name (missing: $pattern)"
+            failed=1
+            return
+        fi
+    done
+    echo "PASS $name"
+}
+
 run_case locals.djinn 8 "locals.djinn:8" "a = 3" "b = 4" "total = 7" "add(a=3, b=4)"
 run_case locals.djinn 14 "r = 7" "x = 3" "y = 4" "main"
 run_case scopes.djinn 11 "inner = 14" "sum = 0" "current = 0x"
 run_case scopes.djinn 20 "value = 5" "value = 7" "next = NULL" "Node"
+
+if [ -n "${STAGE0:-}" ]; then
+    stage0="$STAGE0"
+    run_case_stage0 locals.djinn 8 "a = 3" "b = 4" "total = 7" "add(a=3, b=4)"
+    run_case_stage0 locals.djinn 14 "r = 7"
+fi
 
 exit $failed

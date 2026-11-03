@@ -139,6 +139,7 @@ void Generator::generate()
         module->setModuleIdentifier(moduleName);
         module->setSourceFileName(moduleName);
     }
+    init_debug_info();
 
     // PASS 0: Register short-name aliases for namespaced symbols
     LOG_DEBUG("[generator] PASS 0: registering aliases from %zu symbols", symbols->symbols().size());
@@ -456,6 +457,7 @@ void Generator::generate()
 
     // PASS 8: Verify all symbols were generated
     verify_all_symbols_generated();
+    finalize_debug_info();
 
     // NOTE: Coroutine and optimization passes are run externally via run_passes()
 

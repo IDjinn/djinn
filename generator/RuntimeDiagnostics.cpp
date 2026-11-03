@@ -174,6 +174,7 @@ void Generator::emit_runtime_error_trap_min(const SourceLocation& loc, const cha
 // file strings plus push/pop calls are what make release binaries bloat.
 void Generator::emit_frame_push(const std::string& displayName, const SourceLocation& loc)
 {
+    debug_begin_function(displayName, loc);
     if (runtimeDiagnostics == RuntimeDiagnostics::Minimal) return;
 
     auto* fnType = llvm::FunctionType::get(builder->getVoidTy(),

@@ -72,11 +72,13 @@ namespace djinn
     void GeneratorExpressionVisitor::visit(const VariableDeclaration& expr)
     {
         _result = _generator.generate_variable_declaration(expr);
+        _generator.debug_declare(_result, expr.name.token_name, expr.type, expr.name.location);
     }
 
     void GeneratorExpressionVisitor::visit(const VariableInit& expr)
     {
         _result = _generator.generate_variable_init(expr);
+        _generator.debug_declare(_result, expr.name.token_name, expr.type, expr.name.location);
     }
 
     void GeneratorExpressionVisitor::visit(const Assignment& expr)
