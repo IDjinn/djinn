@@ -109,6 +109,20 @@ private:
     llvm::DIFile* debug_file(const std::string& fileId);
     llvm::DIType* debug_type(const Type& type, llvm::Type* llvmType);
     std::unordered_map<llvm::Function*, std::string> diPendingNames;
+
+    struct DebugBlock
+    {
+        llvm::Function* function = nullptr;
+        SourceLocation location;
+        llvm::DILexicalBlock* block = nullptr;
+        bool isBody = false;
+    };
+
+    std::vector<DebugBlock> diBlocks;
+    std::unordered_map<std::string, llvm::DIType*> diStructTypes;
+    llvm::DIScope* debug_scope(llvm::DISubprogram* subprogram);
+    void debug_enter_block(const SourceLocation& loc);
+    void debug_leave_block();
     void create_subprogram(llvm::Function* function, const std::string& name, const SourceLocation& loc);
     void debug_begin_function(const std::string& name, const SourceLocation& loc);
     void debug_locate(const SourceLocation& loc);

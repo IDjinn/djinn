@@ -34,6 +34,45 @@ llvm::DIFile* Generator::debug_file(const std::string& fileId)
     return file;
 }
 
+llvm::DIScope* Generator::debug_scope(llvm::DISubprogram* subprogram)
+{
+    llvm::DIScope* scope = subprogram;
+    auto* function = builder->GetInsertBlock()->getParent();
+    bool first = true;
+    for (auto& entry : diBlocks)
+    {
+        if (entry.function != function) continue;
+        if (first)
+        {
+            first = false;
+            continue;
+        }
+        if (!entry.block && entry.location.line != 0)
+        {
+            auto* file = debug_file(entry.location.fileId.empty() ? moduleName : entry.location.fileId);
+            entry.block = diBuilder->createLexicalBlock(scope, file, entry.location.line, entry.location.column);
+        }
+        if (entry.block) scope = entry.block;
+    }
+    return scope;
+}
+
+void Generator::debug_enter_block(const SourceLocation& loc)
+{
+    if (!diBuilder || !builder->GetInsertBlock()) return;
+    auto* function = builder->GetInsertBlock()->getParent();
+    DebugBlock entry;
+    entry.function = function;
+    entry.location = loc;
+    diBlocks.push_back(entry);
+}
+
+void Generator::debug_leave_block()
+{
+    if (!diBuilder || diBlocks.empty()) return;
+    diBlocks.pop_back();
+}
+
 llvm::DIType* Generator::debug_type(const Type& type, llvm::Type* llvmType)
 {
     switch (type.kind)
@@ -64,8 +103,38 @@ llvm::DIType* Generator::debug_type(const Type& type, llvm::Type* llvmType)
             uint64_t bits = 64;
             if (llvmType && llvmType->isSized())
                 bits = module->getDataLayout().getTypeAllocSizeInBits(llvmType);
-            return diBuilder->createStructType(diUnit, type.structName, nullptr, 0, bits, 0,
-                                               llvm::DINode::FlagZero, nullptr, llvm::DINodeArray());
+
+            const auto symbol = symbols->lookupStruct(type.structName);
+            auto* structType = llvm::dyn_cast_or_null<llvm::StructType>(llvmType);
+            if (const auto cached = diStructTypes.find(type.structName); cached != diStructTypes.end())
+                return cached->second;
+            if (!symbol || !structType || structType->isOpaque() ||
+                structType->getNumElements() != symbol->fields.size())
+                return diBuilder->createStructType(diUnit, type.structName, nullptr, 0, bits, 0,
+                                                   llvm::DINode::FlagZero, nullptr, llvm::DINodeArray());
+
+            auto* file = debug_file(symbol->location.fileId.empty() ? moduleName : symbol->location.fileId);
+            auto* forward = diBuilder->createReplaceableCompositeType(
+                llvm::dwarf::DW_TAG_structure_type, type.structName, diUnit, file, symbol->location.line, 0, bits, 0);
+            diStructTypes.emplace(type.structName, forward);
+            const auto* layout = module->getDataLayout().getStructLayout(structType);
+            std::vector<llvm::Metadata*> members;
+            for (size_t i = 0; i < symbol->fields.size(); ++i)
+            {
+                const auto& field = symbol->fields[i];
+                auto* fieldType = structType->getElementType(static_cast<unsigned>(i));
+                members.push_back(diBuilder->createMemberType(
+                    diUnit, field.name, file, field.location.line,
+                    module->getDataLayout().getTypeSizeInBits(fieldType), 0,
+                    layout->getElementOffsetInBits(static_cast<unsigned>(i)), llvm::DINode::FlagZero,
+                    debug_type(field.type, fieldType)));
+            }
+            auto* result = diBuilder->createStructType(diUnit, type.structName, file, symbol->location.line, bits, 0,
+                                                       llvm::DINode::FlagZero, nullptr,
+                                                       diBuilder->getOrCreateArray(members));
+            diBuilder->replaceTemporary(llvm::TempDIType(forward), result);
+            diStructTypes[type.structName] = result;
+            return result;
         }
     default:
         return diBuilder->createUnspecifiedType("value");
@@ -110,7 +179,7 @@ void Generator::debug_locate(const SourceLocation& loc)
         diPendingNames.erase(pending);
     }
     auto* subprogram = function->getSubprogram();
-    builder->SetCurrentDebugLocation(llvm::DILocation::get(*context, loc.line, loc.column, subprogram));
+    builder->SetCurrentDebugLocation(llvm::DILocation::get(*context, loc.line, loc.column, debug_scope(subprogram)));
 }
 
 void Generator::debug_declare(llvm::Value* slot, const std::string& name, const Type& type,
@@ -123,10 +192,11 @@ void Generator::debug_declare(llvm::Value* slot, const std::string& name, const 
     if (!alloca || !subprogram) return;
 
     auto* file = debug_file(loc.fileId.empty() ? moduleName : loc.fileId);
-    auto* variable = diBuilder->createAutoVariable(subprogram, name, file, loc.line,
+    auto* scope = debug_scope(subprogram);
+    auto* variable = diBuilder->createAutoVariable(scope, name, file, loc.line,
                                                    debug_type(type, alloca->getAllocatedType()), true);
     diBuilder->insertDeclare(alloca, variable, diBuilder->createExpression(),
-                             llvm::DILocation::get(*context, loc.line, loc.column, subprogram),
+                             llvm::DILocation::get(*context, loc.line, loc.column, scope),
                              builder->GetInsertBlock());
 }
 
@@ -182,6 +252,8 @@ void Generator::finalize_debug_info()
                 type = diBuilder->createBasicType("f64", 64, llvm::dwarf::DW_ATE_float);
             else if (argumentType->isPointerTy())
                 type = diBuilder->createPointerType(nullptr, 64);
+            else if (auto* structType = llvm::dyn_cast<llvm::StructType>(argumentType); structType && structType->hasName())
+                type = debug_type(Type::struct_type(structType->getName().str()), structType);
             else
                 type = diBuilder->createUnspecifiedType("value");
 

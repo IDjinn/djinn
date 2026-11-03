@@ -411,13 +411,13 @@ struct FieldAccess : Expression
     FieldAccess(std::unique_ptr<Expression> obj, SourceIdentifier field)
         : object(std::move(obj)), fieldName(std::move(field))
     {
-        location = field.location;
+        location = fieldName.location;
     }
 
     FieldAccess(std::unique_ptr<Expression> obj, SourceIdentifier field, FieldAccessKind kind)
         : object(std::move(obj)), fieldName(std::move(field)), accessKind(kind)
     {
-        location = field.location;
+        location = fieldName.location;
     }
 
     void accept(djinn::IExpressionVisitor& visitor) const override { visitor.visit(*this); }
@@ -444,7 +444,7 @@ struct FieldAssignment : Expression
     FieldAssignment(std::unique_ptr<Expression> obj, SourceIdentifier field, std::unique_ptr<Expression> val)
         : object(std::move(obj)), fieldName(std::move(field)), value(std::move(val))
     {
-        location = field.location;
+        location = fieldName.location;
     }
 
     void accept(djinn::IExpressionVisitor& visitor) const override { visitor.visit(*this); }

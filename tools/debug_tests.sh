@@ -63,11 +63,14 @@ run_case locals.djinn 8 "locals.djinn:8" "a = 3" "b = 4" "total = 7" "add(a=3, b
 run_case locals.djinn 14 "r = 7" "x = 3" "y = 4" "main"
 run_case scopes.djinn 11 "inner = 14" "sum = 0" "current = 0x"
 run_case scopes.djinn 20 "value = 5" "value = 7" "next = NULL" "Node"
+run_case structs.djinn 8 "x = 3" "y = 4" "result = 12" "Point"
+run_case enums.djinn 12 "base = 11" "result = 33" "level = " "weight"
 
 if [ -n "${STAGE0:-}" ]; then
     stage0="$STAGE0"
     run_case_stage0 locals.djinn 8 "a = 3" "b = 4" "total = 7" "add(a=3, b=4)"
     run_case_stage0 locals.djinn 14 "r = 7"
+    run_case_stage0 structs.djinn 8 "x = 3" "y = 4" "result = 12"
 fi
 
 exit $failed

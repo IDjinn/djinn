@@ -253,6 +253,9 @@ void Generator::generate_block(const Block& block)
         return;
     }
     push_scope();
+    debug_enter_block(block.location.line != 0 || block.statements.empty()
+                          ? block.location
+                          : block.statements.front()->location);
     for (const auto& stmt : block.statements)
     {
         generate_statement(*stmt);
@@ -261,6 +264,7 @@ void Generator::generate_block(const Block& block)
             break;
         }
     }
+    debug_leave_block();
     emit_scope_cleanup();
     pop_scope();
 }
