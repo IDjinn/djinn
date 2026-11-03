@@ -1,0 +1,39 @@
+namespace djinnc;
+
+impl CodeGenerator {
+    public void exclude_dependencies(PointerList* files, bool show_async) {
+        SymbolTable* symbols = this.symbols;
+        PointerList* functions = symbols.functions;
+        for (mut i32 i = 0; i < functions.length; i = i + 1) {
+            FunctionInfo* info = (FunctionInfo*)functions.get(i);
+            if (info.function == null || info.is_extern || info.is_template || info.node == null) {
+                continue;
+            }
+            if (LLVMCountBasicBlocks(info.function) == 0) {
+                continue;
+            }
+            Node* node = info.node;
+            if (files.contains_string(node.file_name())) {
+                LLVMSetLinkage(info.function, LlvmConst.LINKAGE_AVAILABLE_EXTERNALLY);
+            }
+        }
+        if (show_async) {
+            return;
+        }
+        this.demote_named("__djinn_coro_resume");
+        this.demote_named("__djinn_coro_destroy");
+        this.demote_named("__djinn_coro_done");
+        this.demote_named("__djinn_coro_promise");
+        void* user_main = LLVMGetNamedFunction(this.module, "__djinn_sync_main");
+        if (user_main != null) {
+            this.demote_named("main");
+        }
+    }
+
+    void demote_named(i8* name) {
+        void* function = LLVMGetNamedFunction(this.module, name);
+        if (function != null && LLVMCountBasicBlocks(function) != 0) {
+            LLVMSetLinkage(function, LlvmConst.LINKAGE_AVAILABLE_EXTERNALLY);
+        }
+    }
+}

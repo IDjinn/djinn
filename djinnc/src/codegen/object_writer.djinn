@@ -14,11 +14,47 @@ struct ObjectWriter {
         return true;
     }
 
-    public static bool optimize_module(void* module) {
-        return ObjectWriter.run_passes(module, (void*)0, "default<O2>");
+    static bool is_optimized(i8* level) {
+        return !Strings.same(level, "O0");
     }
 
-    public static bool emit(void* module, i8* path, bool optimize, i32 kind) {
+    static i8* pipeline(i8* level, bool drop_dependencies) {
+        ByteBuffer* text = ByteBuffer.create();
+        bool optimized = ObjectWriter.is_optimized(level);
+        if (optimized) {
+            text.append("default<");
+            text.append(level);
+            text.append(">");
+        } else if (!drop_dependencies) {
+            text.append("default<O0>");
+        }
+        if (drop_dependencies) {
+            if (optimized) {
+                text.append(",");
+            }
+            text.append("elim-avail-extern,globaldce");
+        }
+        return text.cstr();
+    }
+
+    static i32 codegen_level(i8* level) {
+        if (Strings.same(level, "O1")) {
+            return LlvmConst.CODEGEN_OPT_LESS;
+        }
+        if (Strings.same(level, "O3")) {
+            return LlvmConst.CODEGEN_OPT_AGGRESSIVE;
+        }
+        if (ObjectWriter.is_optimized(level)) {
+            return LlvmConst.CODEGEN_OPT_DEFAULT;
+        }
+        return LlvmConst.CODEGEN_OPT_NONE;
+    }
+
+    public static bool optimize_module(void* module, i8* level, bool drop_dependencies) {
+        return ObjectWriter.run_passes(module, (void*)0, ObjectWriter.pipeline(level, drop_dependencies));
+    }
+
+    public static bool emit(void* module, i8* path, i8* level, i32 kind, bool drop_dependencies) {
         if (!Target.initialize_backend()) {
             return false;
         }
@@ -31,24 +67,18 @@ struct ObjectWriter {
             return false;
         }
 
-        mut i32 level = LlvmConst.CODEGEN_OPT_NONE;
-        if (optimize) {
-            level = LlvmConst.CODEGEN_OPT_DEFAULT;
-        }
+        i32 codegen = ObjectWriter.codegen_level(level);
         mut i32 relocation = LlvmConst.RELOC_DEFAULT;
         if (!Linker.is_windows()) {
             relocation = LlvmConst.RELOC_PIC;
         }
-        void* machine = LLVMCreateTargetMachine(target, triple, "generic", "", level, relocation, LlvmConst.CODE_MODEL_DEFAULT);
+        void* machine = LLVMCreateTargetMachine(target, triple, "generic", "", codegen, relocation, LlvmConst.CODE_MODEL_DEFAULT);
         if (machine == null) {
             logger_error(Log.get(), "djinnc: cannot create a target machine for '%s'", triple);
             return false;
         }
 
-        mut i8* pipeline = "default<O0>";
-        if (optimize) {
-            pipeline = "default<O2>";
-        }
+        i8* pipeline = ObjectWriter.pipeline(level, drop_dependencies);
         if (!ObjectWriter.run_passes(module, machine, pipeline)) {
             LLVMDisposeTargetMachine(machine);
             return false;

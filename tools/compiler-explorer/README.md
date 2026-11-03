@@ -28,6 +28,12 @@ On Windows PowerShell use `tools\compiler-explorer\setup.ps1` and `run.ps1` (a `
 | `examples/djinn/default.djinn`, `public/logos/djinn.svg` | default example and logo |
 | `apply.mjs` | adds `djinn` to `lib/languages.ts`, `types/languages.interfaces.ts`, `lib/compilers/_all.ts`, `static/modes/_all.ts` |
 
+## What the views show
+
+Assembly, IR and AST contain only the files in the editor. The runtime (`core.djinn`), the std (`--std`) and the C/C++ library bindings are dependencies: their functions are not emitted, only declarations that user code calls. To see std code, paste it into the editor.
+
+The compiler-generated async infrastructure (the entry `main` that starts the runtime and the `__djinn_coro_*` wrappers) is hidden too; add `--show-async` to the compiler options to show it. The AST view is `djinnc --emit-ast`, and clicking a node jumps to its source line. `-O0` to `-O3`, `-Os` and `-Oz` are accepted in the compiler options box.
+
 ## djinnc options used
 
-`--emit-asm` writes assembly to `-o`; `--emit-ir` writes `<-o>.ll` (optimized with `-O2`); `--version` is used for the version label.
+`--emit-asm` writes assembly to `-o`; `--emit-ir` writes `<-o>.ll`; `--emit-ast` prints the AST with `<line:col>`; `--version` is used for the version label.

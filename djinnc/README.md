@@ -12,7 +12,7 @@ environment variable or `--link-arg /libpath:...`; `DJINN_LLD_LINK` overrides th
 On POSIX `--lld` calls `ld.lld` directly with the glibc startup files (`DJINN_LD_LLD`, `DJINN_CRT_DIR` and `DJINN_DYNAMIC_LINKER` override the
 executable, the crt directory and the dynamic loader). The test scripts take the runtime library as an optional third argument and add `--lld`
 when `DJINN_USE_LLD` is set.
-`-O2` runs `default<O2>` through `LLVMRunPasses` and raises the backend codegen level.
+`-O1`/`-O2`/`-O3`/`-Os`/`-Oz` run `default<ON>` through `LLVMRunPasses` and raise the backend codegen level.
 `--std` adds the Djinn standard library (`std/`, optional; see [STD_ROADMAP.md](STD_ROADMAP.md)): `import` makes a namespace visible, `struct size : u32;` is a type alias, and the std's `str`/`string`/`arr`/`object`/`TypeInfo` replace the core's.
 `--run` executes the program in process with ORC LLJIT (the runtime library is loaded as a static archive, libc comes from the djinnc process, `__djinn_call_entry` in the runtime calls `main`).
 `--target <triple>` selects the target (default: the host). It sets the width of `usize`/`isize`; the object writer only has the x86 backend linked in, so other targets stop at `--emit-ir`, and a non-host target is never linked.
