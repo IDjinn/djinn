@@ -456,6 +456,10 @@ struct CodeGenerator {
         if (target == 0 || from == target) {
             return ref;
         }
+        u32 boxed = this.symbols_core_type("object");
+        if (boxed != 0 && target == boxed) {
+            return this.box_value(source);
+        }
         void* destination = this.llvm_type(target);
 
         if (Types.is_integer(from) && Types.is_integer(target)) {
@@ -787,6 +791,9 @@ struct CodeGenerator {
         }
         if (kind == NodeKind.INTERPOLATION) {
             return this.gen_interpolation(node);
+        }
+        if (kind == NodeKind.IS_EXPR) {
+            return this.gen_is(node);
         }
         if (kind == NodeKind.INTRINSIC) {
             return this.gen_sizeof(node);
@@ -1240,9 +1247,7 @@ struct CodeGenerator {
         LLVMBuildCall2(this.builder, constructor.function_type, constructor.function, args, (u32)(node.count() + 1), "");
     }
 
-    Value* gen_new(Node* node) {
-        u32 pointer_type = node.value_type();
-        StructInfo* info = this.struct_of(Types.element(pointer_type));
+    void* allocate_bytes(void* size) {
         void* i64_type = LLVMIntTypeInContext(this.context, 64);
         void* pointer_llvm = LLVMPointerTypeInContext(this.context, 0);
         void** params = CodeGenerator.array_of(1);
@@ -1253,8 +1258,87 @@ struct CodeGenerator {
             allocator = LLVMAddFunction(this.module, "__djinn_malloc", allocator_type);
         }
         void** args = CodeGenerator.array_of(1);
-        args[0] = LLVMSizeOf(info.llvm);
-        void* memory = LLVMBuildCall2(this.builder, allocator_type, allocator, args, 1, "new");
+        args[0] = size;
+        return LLVMBuildCall2(this.builder, allocator_type, allocator, args, 1, "alloc");
+    }
+
+    u64 type_hash(u32 type) {
+        SymbolTable* symbols = this.symbols;
+        ByteBuffer* name = ByteBuffer.create();
+        symbols.describe_type(type, name);
+        mut u64 hash = 2166136261;
+        for (mut i32 i = 0; i < name.length; i = i + 1) {
+            hash = ((hash ^ (u64)(u8)name.data[i]) * 16777619) & 4294967295;
+        }
+        return hash;
+    }
+
+    void* type_info_of(u32 type) {
+        SymbolTable* symbols = this.symbols;
+        ByteBuffer* name = ByteBuffer.create();
+        symbols.describe_type(type, name);
+        ByteBuffer* global_name = ByteBuffer.create();
+        global_name.append("__typeinfo_");
+        global_name.append(name.cstr());
+        void* existing = LLVMGetNamedGlobal(this.module, global_name.cstr());
+        if (existing != null) {
+            return existing;
+        }
+        u32 info_type = this.symbols_core_type("TypeInfo");
+        void* info_llvm = this.llvm_type(info_type);
+        void* i32_type = LLVMIntTypeInContext(this.context, 32);
+        void** values = CodeGenerator.array_of(4);
+        values[0] = LLVMConstInt(i32_type, this.type_hash(type), 0);
+        values[1] = LLVMConstInt(i32_type, LLVMABISizeOfType(this.layout_data, this.llvm_type(type)), 0);
+        values[2] = LLVMBuildGlobalStringPtr(this.builder, name.cstr(), "typeinfo.name");
+        values[3] = LLVMConstInt(LLVMIntTypeInContext(this.context, 8), 0, 0);
+        void* global = LLVMAddGlobal(this.module, info_llvm, global_name.cstr());
+        LLVMSetInitializer(global, LLVMConstNamedStruct(info_llvm, values, 4));
+        LLVMSetGlobalConstant(global, 1);
+        return global;
+    }
+
+    void* box_value(Value* source) {
+        u32 boxed = this.symbols_core_type("object");
+        void* object_llvm = this.llvm_type(boxed);
+        void* memory = this.allocate_bytes(LLVMSizeOf(this.llvm_type(source.type)));
+        LLVMBuildStore(this.builder, source.ref, memory);
+        void* slot = this.create_slot(boxed, "boxed");
+        LLVMBuildStore(this.builder, this.type_info_of(source.type), LLVMBuildStructGEP2(this.builder, object_llvm, slot, 0, "boxed.type"));
+        LLVMBuildStore(this.builder, memory, LLVMBuildStructGEP2(this.builder, object_llvm, slot, 1, "boxed.data"));
+        return LLVMBuildLoad2(this.builder, object_llvm, slot, "boxed.value");
+    }
+
+    Value* gen_is(Node* node) {
+        LocalVariable* variable = (LocalVariable*)node.symbol();
+        Value* operand = this.gen_expression(node.first());
+        u32 info_type = this.symbols_core_type("TypeInfo");
+        void* info_pointer = LLVMBuildExtractValue(this.builder, operand.ref, 0, "is.info");
+        void* i32_type = LLVMIntTypeInContext(this.context, 32);
+        void* id_address = LLVMBuildStructGEP2(this.builder, this.llvm_type(info_type), info_pointer, 0, "is.id.ptr");
+        void* id = LLVMBuildLoad2(this.builder, i32_type, id_address, "is.id");
+        void* expected = LLVMConstInt(i32_type, this.type_hash(variable.type), 0);
+        void* matches = LLVMBuildICmp(this.builder, LlvmConst.INT_EQ, id, expected, "is.match");
+        if (node.flag()) {
+            variable.slot = this.create_slot(variable.type, variable.name);
+            void* bind_block = this.new_block("is.bind");
+            void* end_block = this.new_block("is.end");
+            LLVMBuildCondBr(this.builder, matches, bind_block, end_block);
+            LLVMPositionBuilderAtEnd(this.builder, bind_block);
+            void* data = LLVMBuildExtractValue(this.builder, operand.ref, 1, "is.data");
+            void* loaded = LLVMBuildLoad2(this.builder, this.llvm_type(variable.type), data, "is.value");
+            LLVMBuildStore(this.builder, loaded, variable.slot);
+            LLVMBuildBr(this.builder, end_block);
+            LLVMPositionBuilderAtEnd(this.builder, end_block);
+            this.declare_variable(variable.slot, variable.name, variable.type, node, 0);
+        }
+        return Value.create(matches, Types.bool_type());
+    }
+
+    Value* gen_new(Node* node) {
+        u32 pointer_type = node.value_type();
+        StructInfo* info = this.struct_of(Types.element(pointer_type));
+        void* memory = this.allocate_bytes(LLVMSizeOf(info.llvm));
         this.call_constructor(node, memory, (FunctionInfo*)node.symbol());
         return Value.create(memory, pointer_type);
     }
