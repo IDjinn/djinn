@@ -932,6 +932,16 @@ struct Parser {
             return;
         }
 
+        bool isProperty = this.kind_of(afterType) == TokenKind.IDENTIFIER
+            && (this.kind_of(afterName) == TokenKind.LBRACE || this.kind_of(afterName) == TokenKind.ARROW);
+        if (isProperty) {
+            for (mut i32 i = 0; i < lookahead; i = i + 1) {
+                this.advance();
+            }
+            this.parse_property(owner);
+            return;
+        }
+
         for (mut i32 i = 0; i < lookahead; i = i + 1) {
             this.advance();
         }
@@ -944,6 +954,132 @@ struct Parser {
         field.set_text(this.copy_of(fieldName));
         this.expect(TokenKind.SEMICOLON, "expected ';' after field");
         owner.add(field);
+    }
+
+    Node* property_return(i32 at, Node* value) {
+        Node* body = Node.create_list(NodeKind.BLOCK, at);
+        Node* ret = Node.create(NodeKind.RETURN, at);
+        ret.set_first(value);
+        body.add(ret);
+        return body;
+    }
+
+    Node* backing_access(i32 at, i8* field_name) {
+        Node* self = Node.create(NodeKind.IDENTIFIER, at);
+        self.set_text("this");
+        Node* access = Node.create(NodeKind.FIELD_ACCESS, at);
+        access.set_first(self);
+        access.set_text(field_name);
+        return access;
+    }
+
+    Node* property_method(i32 at, i8* prefix, i8* name, TypeRef* type, bool setter, Node* body) {
+        Node* method = Node.create_list(NodeKind.FUNCTION, at);
+        ByteBuffer* full = ByteBuffer.create();
+        full.append(prefix);
+        full.append(name);
+        method.set_text(full.cstr());
+        if (setter) {
+            method.set_type(TypeRef.create(TypeKind.VOID));
+            Node* parameter = Node.create(NodeKind.PARAMETER, at);
+            parameter.set_type(type);
+            parameter.set_text("value");
+            method.add(parameter);
+        } else {
+            method.set_type(type);
+        }
+        method.set_first(body);
+        return method;
+    }
+
+    void parse_property(Node* owner) {
+        i32 start = this.current();
+        TypeRef* type = this.parse_type();
+        i32 name_token = this.expect(TokenKind.IDENTIFIER, "expected property name");
+        i8* name = this.copy_of(name_token);
+        ByteBuffer* backing = ByteBuffer.create();
+        backing.append("__prop_");
+        backing.append(name);
+        mut Node* getter_body = (Node*)0;
+        mut Node* setter_body = (Node*)0;
+        mut bool auto_get = false;
+        mut bool auto_set = false;
+
+        if (this.match(TokenKind.ARROW)) {
+            getter_body = this.property_return(start, this.parse_expression());
+            this.expect(TokenKind.SEMICOLON, "expected ';' after property expression");
+        } else {
+            this.expect(TokenKind.LBRACE, "expected '{' to open the property");
+            while (!this.check(TokenKind.RBRACE) && !this.at_end() && !this.failed) {
+                while (this.check(TokenKind.PUBLIC) || this.check(TokenKind.PRIVATE)) {
+                    this.advance();
+                }
+                i32 accessor = this.expect(TokenKind.IDENTIFIER, "expected 'get' or 'set'");
+                bool is_get = Strings.equals(this.text_of(accessor), this.length_of(accessor), "get");
+                bool is_set = Strings.equals(this.text_of(accessor), this.length_of(accessor), "set");
+                if (!is_get && !is_set) {
+                    this.fail("expected 'get' or 'set' in a property");
+                    return;
+                }
+                mut Node* body = (Node*)0;
+                mut bool automatic = false;
+                if (this.match(TokenKind.SEMICOLON)) {
+                    automatic = true;
+                } else if (this.match(TokenKind.ARROW)) {
+                    i32 arrow = this.current();
+                    Node* expression = this.parse_expression();
+                    this.expect(TokenKind.SEMICOLON, "expected ';' after accessor expression");
+                    if (is_get) {
+                        body = this.property_return(arrow, expression);
+                    } else {
+                        body = Node.create_list(NodeKind.BLOCK, arrow);
+                        Node* statement = Node.create(NodeKind.EXPR_STMT, arrow);
+                        statement.set_first(expression);
+                        body.add(statement);
+                    }
+                } else {
+                    body = this.parse_block();
+                }
+                if (is_get) {
+                    getter_body = body;
+                    auto_get = automatic;
+                } else {
+                    setter_body = body;
+                    auto_set = automatic;
+                }
+            }
+            this.expect(TokenKind.RBRACE, "expected '}' to close the property");
+        }
+
+        if (auto_get || auto_set) {
+            Node* field = Node.create(NodeKind.FIELD_DECL, start);
+            field.set_flag(true);
+            field.set_type(type);
+            field.set_text(backing.cstr());
+            owner.add(field);
+        }
+        if (auto_get) {
+            getter_body = this.property_return(start, this.backing_access(start, backing.cstr()));
+        }
+        if (auto_set) {
+            Node* assign = Node.create(NodeKind.ASSIGN, start);
+            assign.set_first(this.backing_access(start, backing.cstr()));
+            Node* value = Node.create(NodeKind.IDENTIFIER, start);
+            value.set_text("value");
+            assign.set_second(value);
+            setter_body = Node.create_list(NodeKind.BLOCK, start);
+            Node* statement = Node.create(NodeKind.EXPR_STMT, start);
+            statement.set_first(assign);
+            setter_body.add(statement);
+        }
+        if (getter_body == null) {
+            this.fail("a property needs a getter");
+            return;
+        }
+        owner.add(this.property_method(start, "get:", name, type, false, getter_body));
+        if (setter_body != null) {
+            owner.add(this.property_method(start, "set:", name, type, true, setter_body));
+        }
     }
 
     Node* parse_block() {

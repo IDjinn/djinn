@@ -408,6 +408,16 @@ struct TypeChecker {
         if (kind == NodeKind.IDENTIFIER) {
             LocalVariable* variable = this.find_variable(node.name());
             if (variable == null) {
+                FieldInfo* implicit = this.implicit_field(node);
+                if (implicit != null) {
+                    node.set_symbol(SymbolKind.IMPLICIT_FIELD, (void*)implicit);
+                    return implicit.type;
+                }
+                FunctionInfo* implicit_getter = this.implicit_accessor(node, "get:");
+                if (implicit_getter != null) {
+                    node.set_symbol(SymbolKind.IMPLICIT_GET, (void*)implicit_getter);
+                    return implicit_getter.return_type;
+                }
                 this.error(node, "undefined variable");
                 return Types.i32_type();
             }
@@ -496,11 +506,42 @@ struct TypeChecker {
         SymbolTable* symbols = this.symbols;
         FieldInfo* field = symbols.find_field(info, node.name());
         if (field == null) {
+            FunctionInfo* getter = this.find_accessor(info, "get:", node.text());
+            if (getter != null) {
+                node.set_symbol(SymbolKind.PROPERTY_GET, (void*)getter);
+                return getter.return_type;
+            }
             this.error(node, "struct has no such field");
             return Types.i32_type();
         }
         node.set_symbol(SymbolKind.FIELD, (void*)field);
         return field.type;
+    }
+
+    FunctionInfo* find_accessor(StructInfo* owner, i8* prefix, i8* name) {
+        ByteBuffer* full = ByteBuffer.create();
+        full.append(prefix);
+        full.append(name);
+        SymbolTable* symbols = this.symbols;
+        return symbols.find_method(owner, Ast.intern_base_name(full.cstr(), (i32)strlen(full.cstr())));
+    }
+
+    FunctionInfo* implicit_accessor(Node* node, i8* prefix) {
+        FunctionInfo* current = this.function;
+        if (current == null || !current.is_instance || current.owner == null) {
+            return null;
+        }
+        return this.find_accessor(current.owner, prefix, node.text());
+    }
+
+    FieldInfo* implicit_field(Node* node) {
+        FunctionInfo* current = this.function;
+        if (current == null || !current.is_instance || current.owner == null) {
+            return null;
+        }
+        StructInfo* owner = current.owner;
+        SymbolTable* symbols = this.symbols;
+        return symbols.find_field(owner, node.name());
     }
 
     u32 check_member(Node* node) {
@@ -527,7 +568,11 @@ struct TypeChecker {
         i32 op = node.op();
 
         if (op == TokenKind.AMPERSAND) {
-            return Types.pointer_to(this.check_lvalue(node.first()));
+            u32 addressed = this.check_lvalue(node.first());
+            if (node.first().symbol_kind() == SymbolKind.PROPERTY_GET) {
+                this.error(node, "cannot take the address of a property");
+            }
+            return Types.pointer_to(addressed);
         }
         if (op == TokenKind.STAR) {
             return this.check_lvalue(node);
@@ -666,7 +711,24 @@ struct TypeChecker {
     u32 check_assign(Node* node) {
         Node* target = node.first();
         u32 type = this.check_lvalue(target);
-        if (target.kind == NodeKind.IDENTIFIER && target.symbol() != null) {
+        if (target.kind == NodeKind.FIELD_ACCESS && target.symbol_kind() == SymbolKind.PROPERTY_GET) {
+            FunctionInfo* getter = (FunctionInfo*)target.symbol();
+            FunctionInfo* setter = this.find_accessor(getter.owner, "set:", target.text());
+            if (setter == null) {
+                this.error(target, "property has no setter");
+            } else {
+                target.set_symbol(SymbolKind.PROPERTY_SET, (void*)setter);
+            }
+        }
+        if (target.kind == NodeKind.IDENTIFIER && target.symbol_kind() == SymbolKind.IMPLICIT_GET) {
+            FunctionInfo* implicit_setter = this.implicit_accessor(target, "set:");
+            if (implicit_setter == null) {
+                this.error(target, "property has no setter");
+            } else {
+                target.set_symbol(SymbolKind.IMPLICIT_SET, (void*)implicit_setter);
+            }
+        }
+        if (target.kind == NodeKind.IDENTIFIER && (target.symbol_kind() == SymbolKind.LOCAL || target.symbol_kind() == SymbolKind.GLOBAL)) {
             LocalVariable* variable = (LocalVariable*)target.symbol();
             if (!variable.is_mutable) {
                 this.error(target, "cannot assign to an immutable variable");
