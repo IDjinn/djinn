@@ -10,6 +10,8 @@ tools/compiler-explorer/setup.sh       # clones CE into build/compiler-explorer,
 tools/compiler-explorer/run.sh         # http://localhost:10240
 ```
 
+On Windows PowerShell use `tools\compiler-explorer\setup.ps1` and `run.ps1` (a `.sh` file is not run directly there; they call Git's bash).
+
 `setup.sh` takes the newest `djinnc` from `build/bootstrap*/stage2` and writes `djinn.local.properties` with its path and `--runtime-dir`. Rerun it after moving to a new djinnc. `CE_DIR` and `CE_COMMIT` override the checkout location and revision.
 
 `run.sh` exports `DJINN_STD_DIR`, so `--std` works in the compiler options box. Linking for execution needs `clang` (and on Windows the MSVC and LLVM `bin` directories) in `PATH`, as for `tools/playground.sh`.
