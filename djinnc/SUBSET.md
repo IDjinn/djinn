@@ -126,8 +126,7 @@ a sync `main` can still `await`. `yield` is not a coroutine yield (it is the swi
 ## Attributes
 `[Name]`, `[Name(16)]`, `[Name(key = "text")]` and `[A, B]` before functions, methods, structs, fields and parameters. The builtin names and
 targets are in `ast/attributes/attributes.djinn`: `ForceInline`, `NoInline`, `NoReturn`, `Hot`, `Cold`, `NoSync`, `NoUnwind`, `WillReturn`,
-`NoRecurse` and `Llvm("attr")` become LLVM function attributes; `Align`, `Volatile`, `ReadOnly`, `Restrict`, `NoCapture`, `WriteOnly`,
-`NonNull`, `NoMangle`, `Reflect` and `Deprecated` are validated but have no effect yet. Every function is implicitly `nounwind`.
+`NoRecurse`, `InlineHint`, `OptSize`, `MinSize`, `NoFree`, `NoMerge`, `Speculatable` and `Llvm("attr")` become LLVM function attributes; `Const` and `Pure` become `memory(none)` and `memory(read)`. On parameters, `ReadOnly`, `WriteOnly`, `Restrict` (`noalias`), `NonNull`, `NoCapture` (`captures(none)`) and `Align(n)` become LLVM parameter attributes (the type must be a pointer). `Volatile`, `NoMangle`, `Reflect` and `Deprecated` are validated but have no LLVM effect. Every function is implicitly `nounwind`, instance methods on pointer receivers get a `nonnull` `this`, and `__djinn_malloc` returns `noalias`. `likely(cond)` and `unlikely(cond)` emit `llvm.expect`.
 An unknown name is an error; a wrong target is a warning.
 
 `attribute Name(targets);` and `attribute Name(targets) { fields }` declare attributes (the targets expression is skipped, so declared

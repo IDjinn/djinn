@@ -232,16 +232,54 @@ impl CodeGenerator {
         LLVMBuildRet(this.builder, exit_code);
     }
 
-    void add_function_attribute(void* function, i8* name) {
+    void add_attribute(void* function, u32 index, i8* name, u64 value) {
         u64 length = (u64)strlen(name);
         u32 kind = LLVMGetEnumAttributeKindForName(name, length);
         mut void* attribute = (void*)0;
         if (kind != 0) {
-            attribute = LLVMCreateEnumAttribute(this.context, kind, 0);
+            attribute = LLVMCreateEnumAttribute(this.context, kind, value);
         } else {
             attribute = LLVMCreateStringAttribute(this.context, name, (u32)length, "", 0);
         }
-        LLVMAddAttributeAtIndex(function, 4294967295, attribute);
+        LLVMAddAttributeAtIndex(function, index, attribute);
+    }
+
+    void add_function_attribute(void* function, i8* name) {
+        this.add_attribute(function, 4294967295, name, 0);
+    }
+
+    void mark_allocator(void* function) {
+        this.add_attribute(function, 0, "noalias", 0);
+        this.add_function_attribute(function, "nounwind");
+    }
+
+    void apply_parameter_attributes(FunctionInfo* info) {
+        Node* declaration = info.node;
+        mut u32 slot = 0;
+        IdList* params = info.param_types;
+        if (info.is_instance) {
+            if (Types.is_pointer(params.get(0))) {
+                this.add_attribute(info.function, 1, "nonnull", 0);
+            }
+            slot = 1;
+        }
+        for (mut i32 i = 0; i < declaration.count(); i = i + 1) {
+            Node* parameter = declaration.child(i);
+            if (parameter.kind != NodeKind.PARAMETER) {
+                continue;
+            }
+            if ((i32)slot < params.length) {
+                PointerList* uses = Attributes.of(parameter);
+                for (mut i32 u = 0; u < uses.length; u = u + 1) {
+                    AttributeUse* use = (AttributeUse*)uses.get(u);
+                    i8* mapped = Attributes.parameter_llvm_name(use.name);
+                    if (mapped != null) {
+                        this.add_attribute(info.function, slot + 1, mapped, (u64)use.int_arg);
+                    }
+                }
+            }
+            slot = slot + 1;
+        }
     }
 
     void apply_attributes(FunctionInfo* info) {
@@ -252,9 +290,16 @@ impl CodeGenerator {
             i8* mapped = Attributes.llvm_name(use.name);
             if (mapped != null) {
                 this.add_function_attribute(info.function, mapped);
+            } else if (Strings.equals(use.name, (i32)strlen(use.name), "Const")) {
+                this.add_attribute(info.function, 4294967295, "memory", 0);
+            } else if (Strings.equals(use.name, (i32)strlen(use.name), "Pure")) {
+                this.add_attribute(info.function, 4294967295, "memory", 1365);
             } else if (use.text_arg != null && Strings.equals(use.name, (i32)strlen(use.name), "Llvm")) {
                 this.add_function_attribute(info.function, use.text_arg);
             }
+        }
+        if (info.node != null) {
+            this.apply_parameter_attributes(info);
         }
     }
 }

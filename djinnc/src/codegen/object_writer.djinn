@@ -1,6 +1,34 @@
 namespace djinnc;
 
+unsafe static mut i8* target_cpu = null;
+unsafe static mut i8* target_features = null;
+
 struct ObjectWriter {
+    public static void set_target(i8* cpu, i8* features) {
+        target_cpu = cpu;
+        target_features = features;
+    }
+
+    static i8* cpu_name() {
+        if (target_cpu == null) {
+            return "generic";
+        }
+        if (Strings.same(target_cpu, "native")) {
+            return LLVMGetHostCPUName();
+        }
+        return target_cpu;
+    }
+
+    static i8* feature_list() {
+        if (target_cpu != null && Strings.same(target_cpu, "native") && target_features == null) {
+            return LLVMGetHostCPUFeatures();
+        }
+        if (target_features == null) {
+            return "";
+        }
+        return target_features;
+    }
+
     public static bool run_passes(void* module, void* machine, i8* pipeline) {
         void* options = LLVMCreatePassBuilderOptions();
         void* error = LLVMRunPasses(module, pipeline, machine, options);
@@ -73,7 +101,7 @@ struct ObjectWriter {
         if (!Linker.is_windows()) {
             relocation = LlvmConst.RELOC_PIC;
         }
-        void* machine = LLVMCreateTargetMachine(target, triple, "generic", "", codegen, relocation, LlvmConst.CODE_MODEL_DEFAULT);
+        void* machine = LLVMCreateTargetMachine(target, triple, ObjectWriter.cpu_name(), ObjectWriter.feature_list(), codegen, relocation, LlvmConst.CODE_MODEL_DEFAULT);
         if (machine == null) {
             logger_error(Log.get(), "djinnc: cannot create a target machine for '%s'", triple);
             return false;
