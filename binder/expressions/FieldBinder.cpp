@@ -42,6 +42,21 @@ std::shared_ptr<Symbol> Binder::bindFieldAccess(const FieldAccess& access)
         structName = "arr";
     }
 
+    if (object_symbol->type.kind == TypeKind::STRUCT)
+    {
+        if (const auto enumSym = _current_scope->lookupEnum(structName); enumSym && !enumSym->isGeneric())
+        {
+            for (const auto& enumField : enumSym->fields)
+            {
+                if (enumField.name == access.fieldName.token_name)
+                {
+                    return std::make_shared<Symbol>(SymbolKind::Variable, enumField.name, enumField.type,
+                                                    access.fieldName.location);
+                }
+            }
+        }
+    }
+
     if (!structName.empty())
     {
         const auto object_structure = _current_scope->lookupStruct(structName);

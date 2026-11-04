@@ -49,8 +49,62 @@ PointeeHint Generator::resolve_field_pointee(const std::string& ownerStruct, con
     return hint;
 }
 
+llvm::Value* Generator::read_enum_field(const EnumDef& enumDef, llvm::Value* enumValue, const std::string& fieldName)
+{
+    for (size_t idx = 0; idx < enumDef.fieldNames.size(); ++idx)
+    {
+        if (enumDef.fieldNames[idx] != fieldName)
+        {
+            continue;
+        }
+        if (enumValue->getType()->isPointerTy())
+        {
+            enumValue = builder->CreateLoad(enumDef.llvmType, enumValue, "enum_load");
+        }
+        llvm::Value* tag = extract_enum_tag(enumValue, enumDef);
+        if (idx == 0)
+        {
+            return tag;
+        }
+        llvm::GlobalVariable* table = enumDef.fieldTables[idx];
+        llvm::Value* row = builder->CreateZExt(tag, builder->getInt64Ty(), "enum_row");
+        llvm::Value* slot = builder->CreateInBoundsGEP(table->getValueType(), table,
+                                                       {builder->getInt64(0), row}, "enum_field_ptr");
+        return builder->CreateLoad(enumDef.fieldTypes[idx], slot, fieldName);
+    }
+    return nullptr;
+}
+
+llvm::Value* Generator::generate_enum_field_read(const FieldAccess& expr)
+{
+    const Type* objectType = type_of(*expr.object);
+    if (!objectType || objectType->kind != TypeKind::STRUCT)
+    {
+        return nullptr;
+    }
+    const EnumDef* enumDef = currentScope->lookup_enum(currentScope->resolve_alias(objectType->structName));
+    if (!enumDef || enumDef->isGeneric)
+    {
+        return nullptr;
+    }
+    for (const auto& name : enumDef->fieldNames)
+    {
+        if (name == expr.fieldName.token_name)
+        {
+            llvm::Value* enumValue = generate_expression(*expr.object);
+            return enumValue ? read_enum_field(*enumDef, enumValue, name) : nullptr;
+        }
+    }
+    return nullptr;
+}
+
 llvm::Value* Generator::generate_field_access(const FieldAccess& expr, PointeeHint* pointee)
 {
+    if (llvm::Value* enumField = generate_enum_field_read(expr))
+    {
+        return enumField;
+    }
+
     if (auto* ident = dynamic_cast<const Identifier*>(expr.object.get()))
     {
         LOG_DEBUG("[generator] field access: '%s.%s'", ident->identifier.token_name.c_str(),
@@ -71,6 +125,14 @@ llvm::Value* Generator::generate_field_access(const FieldAccess& expr, PointeeHi
             LOG_DEBUG("[generator]   variable '%s' NOT found in scope", ident->identifier.token_name.c_str());
             throw CompileError(DiagnosticCode::UNDEFINED_VARIABLE,
                                "variável não encontrada: " + ident->identifier.token_name);
+        }
+
+        if (const EnumDef* slotEnum = enum_of_llvm_type(alloca->getAllocatedType()); slotEnum && !slotEnum->isGeneric)
+        {
+            if (llvm::Value* enumField = read_enum_field(*slotEnum, alloca, expr.fieldName.token_name))
+            {
+                return enumField;
+            }
         }
 
         std::string structName;
@@ -286,6 +348,15 @@ llvm::Value* Generator::generate_field_access(const FieldAccess& expr, PointeeHi
     if (auto* call = dynamic_cast<const FunctionCall*>(expr.object.get()))
     {
         llvm::Value* callResult = generate_function_call(*call);
+
+        if (const EnumDef* resultEnum = enum_of_llvm_type(callResult->getType());
+            resultEnum && !resultEnum->isGeneric)
+        {
+            if (llvm::Value* enumField = read_enum_field(*resultEnum, callResult, expr.fieldName.token_name))
+            {
+                return enumField;
+            }
+        }
 
         llvm::StructType* structType = nullptr;
         std::string structName;

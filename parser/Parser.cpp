@@ -2982,9 +2982,22 @@ void Parser::parse_where_clause(GenericParams& params)
 
 std::unique_ptr<EnumDeclaration> Parser::parse_enum()
 {
-    expect("Esperado enum keyword", TokenType::ENUM);
+    const bool isUnion = expect("Esperado enum keyword", TokenType::ENUM).value == "union";
 
     const Token& identifierToken = expect("Esperado identifier", TokenType::IDENTIFIER);
+
+    std::vector<EnumFieldDeclaration> fields;
+    if (match(TokenType::LPAREN))
+    {
+        do
+        {
+            auto fieldType = parse_type();
+            const Token& fieldName = expect("Esperado nome do campo do enum", TokenType::IDENTIFIER);
+            fields.push_back(EnumFieldDeclaration{*fieldType, makeSourceIdentifier(fieldName)});
+        }
+        while (match(TokenType::COMMA));
+        expect("Esperado ')' após os campos do enum", TokenType::RPAREN);
+    }
 
     // Parse generic params: enum Result<T, E> { ... }
     GenericParams genericParams;
@@ -3023,9 +3036,22 @@ std::unique_ptr<EnumDeclaration> Parser::parse_enum()
         {
             const Token& enum_key = expect("Esperado identifier", TokenType::IDENTIFIER);
             std::vector<Type> associated_types;
+            std::vector<std::shared_ptr<Expression>> constants;
 
+            if (!fields.empty())
+            {
+                if (match(TokenType::LPAREN) && !match(TokenType::RPAREN))
+                {
+                    do
+                    {
+                        constants.emplace_back(parse_expression());
+                    }
+                    while (match(TokenType::COMMA));
+                    expect("Esperado ) após os valores da variante", TokenType::RPAREN);
+                }
+            }
             // Parse associated types: Ok(T) or Ok(T, U)
-            if (match(TokenType::LPAREN) && !match(TokenType::RPAREN))
+            else if (match(TokenType::LPAREN) && !match(TokenType::RPAREN))
             {
                 do
                 {
@@ -3037,6 +3063,7 @@ std::unique_ptr<EnumDeclaration> Parser::parse_enum()
             }
 
             values.emplace_back(makeSourceIdentifier(enum_key), associated_types);
+            values.back().constants = std::move(constants);
 
             // Optional comma between variants
             if (!check(TokenType::RBRACE))
@@ -3048,8 +3075,11 @@ std::unique_ptr<EnumDeclaration> Parser::parse_enum()
         expect("Esperado } após declaração de enum", TokenType::RBRACE);
         LOG_DEBUG("[parser] enum declared: '%s' with %zu variants%s", identifierToken.value.c_str(),
                   values.size(), genericParams.empty() ? "" : " (generic)");
-        return std::make_unique<EnumDeclaration>(makeSourceIdentifier(identifierToken), std::move(genericParams),
-                                                 values);
+        auto declaration = std::make_unique<EnumDeclaration>(makeSourceIdentifier(identifierToken),
+                                                             std::move(genericParams), values);
+        declaration->fields = std::move(fields);
+        declaration->isUnion = isUnion;
+        return declaration;
     }
     LOG_DEBUG("[parser] enum declared: '%s' (empty)%s", identifierToken.value.c_str(),
               genericParams.empty() ? "" : " (generic)");

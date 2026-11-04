@@ -679,10 +679,17 @@ struct ExternFunctionDeclaration : Location
     }
 };
 
+struct EnumFieldDeclaration
+{
+    Type type;
+    SourceIdentifier name;
+};
+
 struct EnumValueDeclaration : Location
 {
     SourceIdentifier name;
     std::vector<Type> types;
+    std::vector<std::shared_ptr<Expression>> constants;
 
     EnumValueDeclaration(SourceIdentifier name, std::vector<Type> types) : name(std::move(name)),
                                                                            types(std::move(types))
@@ -706,6 +713,8 @@ struct EnumDeclaration : Location
     SourceIdentifier name;
     GenericParams genericParams;
     std::vector<EnumValueDeclaration> values;
+    std::vector<EnumFieldDeclaration> fields;
+    bool isUnion = false;
 
     explicit EnumDeclaration(SourceIdentifier name, std::vector<EnumValueDeclaration> values)
         : name(std::move(name)), values(std::move(values))

@@ -26,7 +26,7 @@ of them. A construct outside this list is forbidden in `djinnc/src` until the dj
 - local variables (`T name = expr;`, `mut T name = expr;`)
 - `if / else if / else`, `while`, `do-while`, `for`, `break`, `continue`, `return`
 - `switch (integer) { case <const>: ... default: ... }` as a statement: no fallthrough, `break` leaves the switch, `continue` targets the enclosing loop
-- `enum Name { A, B = 5, C }` (variants without a payload need no `()`, neither when declared nor when used: `Name::A`) and tagged enums `enum Msg { Empty(), Number(i32), Pair(i32, i32) }`: `Msg::Pair(1, 2)` builds a value, payload-less enums are `i32` tags with `==`, `!=` and `case Name::A():`. `switch value { Empty -> 1, Number n -> n, Pair a b -> a * b }` is an expression and must cover every variant. A payload can be any type: the enum is a tag plus an inline byte area sized to the largest variant, and a type that contains itself by value (not through a pointer) is an error.
+- `enum Name { A, B = 5, C }` (variants without a payload need no `()`, neither when declared nor when used: `Name::A`) and tagged enums `union Msg { Empty(), Number(i32), Pair(i32, i32) }`: `Msg::Pair(1, 2)` builds a value, payload-less enums are `i32` tags with `==`, `!=` and `case Name::A():`. `switch value { Empty -> 1, Number n -> n, Pair a b -> a * b }` is an expression and must cover every variant. A payload can be any type: the enum is a tag plus an inline byte area sized to the largest variant, and a type that contains itself by value (not through a pointer) is an error.
 - `interface Name { Type field; Ret method(params); }`, `struct X : interface Name` (or `struct X : Name`), `impl X { methods }` and `impl Name for X { methods }`: conformance (fields and method signatures) is checked at compile time; there is no interface-typed value or dynamic dispatch, no generic interface, and `impl` takes a single struct, enum or primitive target (`impl Hashable for u64 { u64 hash() { ... } }`; `this` is the primitive value and `x.hash()` works on any primitive receiver and as a `where K : Hashable` bound). `impl A, B for X` lists several interfaces, `impl Hashable for u8, u16, i32 { ... }` repeats the body for each type, and `impl` on an enum adds methods whose `this` is the enum value (e.g. `switch this { ... }`).
 - assignment to locals, fields and indexed pointers
 
@@ -55,7 +55,7 @@ Each plain enum is its own type: `==`/`!=` only between values of the same enum 
 
 ## Generics
 
-- `struct Pair<K, V> { ... }` and `enum optional<T> { Empty(), Value(T) }`; instances are monomorphized on demand (`Pair<i32, i64>`, nested `Wrapper<Pair<i32, i32>>`) with their methods.
+- `struct Pair<K, V> { ... }` and `union optional<T> { Empty(), Value(T) }`; instances are monomorphized on demand (`Pair<i32, i64>`, nested `Wrapper<Pair<i32, i32>>`) with their methods.
 - `where T : A, B; where U : C` constrains type parameters; a struct or enum type argument must satisfy the interfaces, checked at instantiation. A generic type can also list interfaces (`struct X<T> where T : I : J`).
 - `optional<i32>::Value(1)` builds a generic enum value; the type arguments can be left out when the expected type (`return result::Err(e)` in a `result<i32, E>` function) or the payload arguments (`optional::Some(7)`) determine them; struct initializers and `switch` work on instances.
 - Generic interfaces: `interface Comparable<T> { i32 compare(T other); }`, used as `struct P : Comparable<P>` or in bounds (`where T : Comparable<T>`); interfaces can declare `operator` members.

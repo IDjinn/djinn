@@ -34,6 +34,7 @@ static std::unordered_map<std::string, TokenType> keywords = {
     {"unsafe", TokenType::UNSAFE},
     {"this", TokenType::THIS},
     {"enum", TokenType::ENUM},
+    {"union", TokenType::ENUM},
     {"new", TokenType::NEW},
     {"impl", TokenType::IMPL},
     {"where", TokenType::WHERE},

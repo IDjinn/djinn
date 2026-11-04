@@ -184,6 +184,9 @@ private:
 
     llvm::Value* extract_enum_tag(llvm::Value* enumValue, const EnumDef& enumDef);
     const EnumDef* enum_of_llvm_type(llvm::Type* type);
+    void build_enum_field_tables(const EnumSymbol& enum_symbol, EnumDef& def);
+    llvm::Value* generate_enum_field_read(const FieldAccess& expr);
+    llvm::Value* read_enum_field(const EnumDef& enumDef, llvm::Value* enumValue, const std::string& fieldName);
 
     llvm::Value* extract_enum_payload(llvm::Value* enumValue, const EnumDef& enumDef, size_t variantIdx);
 

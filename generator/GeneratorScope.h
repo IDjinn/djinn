@@ -166,6 +166,10 @@ struct EnumDef
     bool isMonomorphized = false;
     GenericParams genericParams;
 
+    std::vector<std::string> fieldNames;
+    std::vector<llvm::Type*> fieldTypes;
+    std::vector<llvm::GlobalVariable*> fieldTables; // indexed by tag; null for the flag field
+
     EnumDef() = default;
 
     explicit EnumDef(std::string name) : name(std::move(name))

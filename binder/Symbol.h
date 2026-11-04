@@ -607,6 +607,7 @@ struct EnumVariant
     std::string name;
     std::vector<Type> associatedTypes;
     unsigned tag = 0; // discriminant value
+    std::vector<std::shared_ptr<Expression>> constants; // per-variant constants declared in the enum header
 
     EnumVariant() = default;
 
@@ -618,9 +619,17 @@ struct EnumVariant
     [[nodiscard]] bool hasAssociatedTypes() const { return !associatedTypes.empty(); }
 };
 
+struct EnumFieldInfo
+{
+    std::string name;
+    Type type;
+};
+
 struct EnumSymbol : Symbol
 {
     std::vector<EnumVariant> variants;
+    std::vector<EnumFieldInfo> fields;
+    bool isUnion = false;
     std::vector<GenericParamInfo> genericParams;
 
     explicit EnumSymbol(std::string name, const SourceLocation loc = {})
