@@ -16,7 +16,7 @@ diff stage2.ll stage3.ll  == vazio
 |---|---|
 | 0, 1 | Concluídas. |
 | 2 — Memória e dados | Concluída: arena, tokens SoA, interning de átomos (keywords pré-registradas), AST de nós de 16 bytes. |
-| 3 — Multi-arquivo | Concluída: namespaces com escopo, `import` sem efeito, entradas ordenadas, símbolos por `(namespace, atom)`. |
+| 3 — Multi-arquivo | Concluída: namespaces com escopo (aninhados, fundidos por nome, acesso qualificado `a::b`), `import a::b;` ativo (torna os nomes do namespace visíveis no namespace do arquivo, ver `SUBSET.md`), entradas ordenadas, símbolos por `(namespace, atom)`. O próprio fonte do djinnc não usa `import` (tudo em `namespace djinnc`). |
 | 4 — Semântica | Concluída: `TypeTable` (`TypeId` u32 interned), `SemanticAnalyzer` (coleta, layout, assinaturas), `TypeChecker` (tipo e símbolo por nó, loops, imutabilidade); o codegen só consome a AST anotada. Fixpoint stage2 == stage3 verificado. |
 | 5 — Codegen e backend | Concluída no Windows: 5.1 completa e 5.2 com objeto direto, `-O2`, `--runtime-lib` e `--lld` (`lld-link`) validados. `ld.lld` em POSIX validado no Linux (Docker, `Dockerfile`): bootstrap, fixpoint e samples com `--lld`. |
 | 6 — Harness de bootstrap | Concluída: `tools/bootstrap.sh`/`.ps1`, alvo CTest `djinnc_bootstrap`, `tools/bench.reference.json` (com tempo de lex, parse e codegen), samples com `.exit` e `.stdout` opcional comparados nos três estágios. |
@@ -477,13 +477,12 @@ linhas/s; tempo total de `djinnc/` em `-O0` dominado pelo LLVM, não pelo front-
 
 - **Paralelismo:** lex+parse por arquivo em threads (arena `ast` por thread, `AtomTable` com shards ou lock
   por shard); codegen por função em módulos LLVM separados quando o volume justificar.
-- `==` em enums no stage0 e djinnc → `NodeKind`/`TokenKind` viram `enum` reais (`u16` direto no `NodeData.kind`).
-- Enums + `switch`, genéricos (monomorfização com a mesma estrutura de `FnCtx` + scratch arena), `string`/`arr<T>`.
+- Feito: `NodeKind`/`TokenKind` são `enum` reais no fonte (`NodeKinds`/`TokenKinds` guardam `COUNT` e as tabelas como `switch`; o nó guarda `u16 raw_kind` e expõe `kind()`/`set_kind()`). Falta usar genéricos e `string`/`arr<T>` no fonte, imports/namespaces separados e `libs: ['std']`.
 - **Memória no código gerado (lado da linguagem, estilo Jai):** allocators como valor de primeira classe na std
   (`Allocator` interface + `Arena`/`Temp` allocator), contexto implícito de alocação por thread, e o próprio
   djinnc migrando suas arenas para essa API quando ela existir.
 - Compilar `std/` com o djinnc e reativar `libs: ['std']`.
-- Async, exceções, interpolação — na ordem em que o std precisar.
+- Exceções (`try`/`throws`/`ensure`/`require`): ainda não implementadas no djinnc. Async e interpolação já estão feitos.
 - Congelar o stage0: novas features da linguagem entram primeiro no djinnc.
 
 ---
@@ -583,7 +582,7 @@ Medição (Windows, stage2 compilando os 21 arquivos do djinnc, 37 mil tokens, 2
 - [x] Erros do lexer, parser, sema e codegen citam o arquivo certo (um `Diagnostics` por arquivo e `Node.file_name()`). Só o erro "no 'main' function defined" usa o primeiro arquivo, por não ter nó.
 - [ ] Suíte C++ completa: assertion do LLVM (operandos binários com tipos diferentes) sem causa identificada.
 - [ ] Rodar os gtests do stage0 após a mudança de `unsafe`.
-- [ ] Fase 4: camada semântica (`sema/`), enums, genéricos, `switch`, `try`/`throws`, interfaces.
+- [x] Fase 4: camada semântica (`semantic/`), enums, genéricos, `switch` e interfaces. Resta só `try`/`throws` (ver "Sintaxe do self-compiler", item 8).
 
 ## TODO — Sintaxe de ponteiros
 
@@ -639,15 +638,15 @@ Medição (Windows, stage2 compilando os 21 arquivos do djinnc, 37 mil tokens, 2
 O djinnc só compila o subset de `djinnc/SUBSET.md`. Falta, em ordem de dependência (cada item com sample em
 `tests/djinnc/samples` e linha no `SUBSET.md`; o fonte do djinnc só passa a usar a construção depois que o stage1 a compila):
 
-1. [ ] **Enums simples e `==`/`!=` em enums**: `NodeKind`/`TokenKind` viram `enum` reais (`u16`). Destrava o item 2.
-2. [ ] **`switch`** sobre enums e inteiros (statement e expressão), com checagem de exaustividade na sema.
-3. [ ] **Structs por valor**: parâmetros, retornos, atribuição e inicializador `{ campo: valor }` (hoje "não exercitado").
+1. [~] **Enums simples e `==`/`!=` em enums**: feito no djinnc (samples `enums`, `enum_methods`, `enum_is`). `NodeKind`/`TokenKind` já são `enum` no fonte (`ast/node/node_kind.djinn`, `lexer/token_kind.djinn`); cada enum é um tipo próprio (`==` só entre o mesmo enum, o resto via `getValue()`), e `switch` aceita o braço `_` (samples `enum_value`, `enum_switch_wildcard`, erro `enum_cross_compare`).
+2. [x] **`switch`** sobre enums e inteiros (statement e expressão), com checagem de exaustividade (sample `switch`).
+3. [x] **Structs por valor**: parâmetros, retornos, atribuição e inicializador `{ campo: valor }` (samples `struct_values`, `typed_struct_init`).
 4. [~] **`for x in range`** feito (`[a..b]`, `[a..b)`, `a..b`, `a..=b`, lowering no parser); `auto` e início aberto `(a..b]` implementados (sample `range_open_start`, ainda não compilado nem testado). Argumentos nomeados em chamadas e construtores também feitos (`Point(y: 4, x: 3)`).
 5. [x] **`string` e interpolação**: tipo `string` e `operator +` em `runtime/core.djinn`, literais `$"...{expr}..."` (estilo C#, `{{`/`}}` escapam) viram `INTERP_*` no lexer e um builder em Djinn (`__djinn_text_*`) em `runtime/core.djinn`, com limites u32 checados; formatação `{x:-08.2}` (largura, alinhamento, zeros, precisão) implementada (sample `interp_format`, ainda não compilado nem testado); falta `str`/`string` em mais operadores.
-6. [ ] **Genéricos** (monomorfização com `FnCtx` + scratch arena): pré-requisito para `array<T>`, `map<K,V>`, `optional<T>`.
-7. [ ] **`impl`/interfaces** e constraints (`Hashable`, `Comparable`): depende de 6.
-8. [ ] **`try`/`throws`/`ensure`/`require`**, **`async`/`await`**: por último, pois exigem lowering de corrotinas e cleanup.
-9. [ ] Enums tagged (ADT), destructuring, closures, macros, `constexpr`: fora do alvo até o std compilar.
+6. [x] **Genéricos** (structs, enums, funções e métodos, com monomorfização sob demanda e inferência de argumentos; samples `generics`, `generic_*`): base para `array<T>`, `map<K,V>`, `optional<T>`. O fonte do djinnc ainda não usa genéricos.
+7. [x] **`impl`/interfaces** e constraints (`where T : Comparable<T>`, interfaces genéricas, `impl` em primitivos; samples `interfaces`, `generic_interfaces`, `impl_many_types`, `primitive_methods`).
+8. [~] **`async`/`await`/`spawn`** feitos (lowering para corrotinas LLVM, `task<T>`, `async main`; samples `async_basic`, `async_main`). **`try`/`throws`/`ensure`/`require`** não: o parser recusa com "throws and contracts are not supported yet" e `SUBSET.md` os mantém proibidos.
+9. [~] Enums tagged (ADT), macros, `constexpr`/`consteval`, atributos, ownership (move) e reflexão feitos (samples `tagged_enums`, `macros`, `constexpr*`, `attributes`, `ownership`, `reflection`). Destructuring e closures seguem de fora.
 10. [~] Compilar `std/` com o djinnc e reativar `libs: ['std']` (critério de saída da Fase 7): `--std`, `import`, alias de tipo e substituição dos tipos do core implementados; ver `STD_ROADMAP.md` (ainda não compilado nem testado).
 
 ## Status: `var`/`auto`, impl em primitivos e README

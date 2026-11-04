@@ -216,6 +216,22 @@ llvm::Value* Generator::generate_enum_construction(
 // ============================================================================
 // Enum tag extraction - Get the discriminant/tag from an enum value
 // ============================================================================
+const EnumDef* Generator::enum_of_llvm_type(llvm::Type* type)
+{
+    if (!type->isStructTy() || !llvm::cast<llvm::StructType>(type)->hasName())
+    {
+        return nullptr;
+    }
+    std::string name = type->getStructName().str();
+    if (const auto dot = name.rfind('.');
+        dot != std::string::npos && dot + 1 < name.size() &&
+        name.find_first_not_of("0123456789", dot + 1) == std::string::npos)
+    {
+        name.erase(dot);
+    }
+    return currentScope->lookup_enum(name);
+}
+
 llvm::Value* Generator::extract_enum_tag(llvm::Value* enumValue, const EnumDef& enumDef)
 {
     // Allocate space and store the enum value

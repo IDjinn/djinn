@@ -110,6 +110,20 @@ llvm::Value* Generator::generate_binary_expression(const BinaryExpression& expr)
 
     if (!left || !right) return nullptr;
 
+    if ((expr.op == TokenType::EQUAL_EQUAL || expr.op == TokenType::BANG_EQUAL) &&
+        left->getType()->isStructTy() && left->getType() == right->getType())
+    {
+        if (const EnumDef* enumDef = enum_of_llvm_type(left->getType());
+            enumDef && !enumDef->isGeneric)
+        {
+            llvm::Value* leftTag = extract_enum_tag(left, *enumDef);
+            llvm::Value* rightTag = extract_enum_tag(right, *enumDef);
+            return expr.op == TokenType::EQUAL_EQUAL
+                       ? builder->CreateICmpEQ(leftTag, rightTag, "enum_eq")
+                       : builder->CreateICmpNE(leftTag, rightTag, "enum_ne");
+        }
+    }
+
     const auto leftType = left->getType();
     if (const auto rightType = right->getType(); leftType != rightType)
     {

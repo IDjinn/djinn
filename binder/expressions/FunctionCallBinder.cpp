@@ -37,6 +37,24 @@ std::shared_ptr<Symbol> Binder::bindIdentifier(const Identifier& id)
         }
     }
 
+    if (const auto colonPos = id.identifier.token_name.rfind("::"); colonPos != std::string::npos)
+    {
+        const std::string enumName = id.identifier.token_name.substr(0, colonPos);
+        const std::string variantName = id.identifier.token_name.substr(colonPos + 2);
+        if (const auto enumSym = _current_scope->lookupEnum(enumName);
+            enumSym && !enumSym->isGeneric() && enumSym->hasVariant(variantName))
+        {
+            const auto* variant = enumSym->getVariant(variantName);
+            if (variant && variant->associatedTypes.empty())
+            {
+                return std::make_shared<EnumConstructionSymbol>(
+                    enumName, variantName, enumSym->getVariantTag(variantName),
+                    std::vector<std::shared_ptr<Symbol>>{}, id.identifier.location,
+                    Type::struct_type(enumSym->name));
+            }
+        }
+    }
+
     BINDER_ERROR(DiagnosticCode::UNDEFINED_VARIABLE, "undefined variable '" + id.identifier.token_name + "'", id,
                  id.identifier.location);
     return nullptr;

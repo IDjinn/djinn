@@ -171,13 +171,35 @@ void Binder::bindDoWhileStatement(const DoWhileStatement& stmt)
 
 void Binder::bindSwitchStatement(const SwitchStatement& stmt)
 {
-    bindExpression(*stmt.value);
+    const auto subject = bindExpression(*stmt.value);
+    std::shared_ptr<EnumSymbol> subjectEnum;
+    if (subject && subject->type.kind == TypeKind::STRUCT)
+    {
+        subjectEnum = _global_scope->lookupEnum(subject->type.structName);
+        if (subjectEnum && subjectEnum->isGeneric())
+        {
+            subjectEnum = nullptr;
+        }
+    }
 
     ControlFlowContext::SwitchGuard switchGuard(_controlFlow);
 
     for (const auto& caseStmt : stmt.cases)
     {
-        if (caseStmt->expression)
+        if (caseStmt->expression && subjectEnum)
+        {
+            const auto* label = dynamic_cast<const Identifier*>(caseStmt->expression.get());
+            const std::string& labelName = label ? label->identifier.token_name : std::string();
+            const auto sep = labelName.rfind("::");
+            const std::string variantName = sep == std::string::npos ? labelName : labelName.substr(sep + 2);
+            if (!label || !subjectEnum->hasVariant(variantName))
+            {
+                BINDER_ERROR(DiagnosticCode::TYPE_MISMATCH,
+                             "case label must name a variant of enum '" + subjectEnum->name + "'",
+                             *caseStmt->expression, caseStmt->expression->location);
+            }
+        }
+        else if (caseStmt->expression)
         {
             bindExpression(*caseStmt->expression);
         }

@@ -71,74 +71,104 @@ impl TypeChecker {
     }
 
     void check_statement(Node* node) {
-        i32 kind = node.kind;
+        NodeKind kind = node.kind();
         LocalScopes* scopes = this.scopes;
 
-        if (kind == NodeKind.BLOCK) {
-            i32 mark = scopes.mark();
-            for (mut i32 i = 0; i < node.count(); i = i + 1) {
-                this.check_statement(node.child(i));
-            }
-            scopes.reset_to(mark);
-        } else if (kind == NodeKind.VAR_DECL) {
-            this.check_variable(node);
-        } else if (kind == NodeKind.EXPR_STMT) {
-            this.check_expression(node.first(), 0);
-        } else if (kind == NodeKind.SPAWN_STMT) {
-            u32 spawned = this.check_expression(node.first(), 0);
-            if (this.task_result(spawned) == 0) {
-                this.error(node, "'spawn' needs the task returned by an async function");
-            }
-        } else if (kind == NodeKind.RETURN) {
-            this.check_return(node);
-        } else if (kind == NodeKind.IF) {
-            if (node.op() != 0) {
-                this.check_compile_time_if(node);
-            } else {
+        switch (kind) {
+            case BLOCK:
+                i32 mark = scopes.mark();
+                for (mut i32 i = 0; i < node.count(); i = i + 1) {
+                    this.check_statement(node.child(i));
+                }
+                scopes.reset_to(mark);
+            case VAR_DECL:
+                this.check_variable(node);
+            case EXPR_STMT:
+                this.check_expression(node.first(), 0);
+            case SPAWN_STMT:
+                u32 spawned = this.check_expression(node.first(), 0);
+                if (this.task_result(spawned) == 0) {
+                    this.error(node, "'spawn' needs the task returned by an async function");
+                }
+            case RETURN:
+                this.check_return(node);
+            case IF:
+                if (node.op() != 0) {
+                    this.check_compile_time_if(node);
+                } else {
+                    this.check_condition(node.first());
+                    this.check_statement(node.second());
+                    if (node.third() != null) {
+                        this.check_statement(node.third());
+                    }
+                }
+            case WHILE:
                 this.check_condition(node.first());
-                this.check_statement(node.second());
+                this.check_loop_body(node.second());
+            case DO_WHILE:
+                this.check_loop_body(node.second());
+                this.check_condition(node.first());
+            case FOR:
+                i32 mark = scopes.mark();
+                if (node.first() != null) {
+                    this.check_statement(node.first());
+                }
+                if (node.second() != null) {
+                    this.check_condition(node.second());
+                }
                 if (node.third() != null) {
-                    this.check_statement(node.third());
+                    this.check_expression(node.third(), 0);
+                }
+                this.check_loop_body(node.fourth());
+                scopes.reset_to(mark);
+            case BREAK:
+                if (this.loop_depth == 0 && this.switch_depth == 0) {
+                    this.error(node, "'break' outside of a loop or switch");
+                }
+            case CONTINUE:
+                if (this.loop_depth == 0) {
+                    this.error(node, "'continue' outside of a loop");
+                }
+            case SWITCH:
+                this.check_switch(node);
+            default:
+                this.error(node, "statement is not supported yet");
+        }
+    }
+
+    void check_enum_label(Node* arm, StructInfo* enumeration) {
+        mut Node* label = arm.first();
+        if (label.kind() == NodeKind::CALL && label.count() == 0) {
+            label = label.first();
+            arm.set_first(label);
+        }
+        SymbolTable* symbols = this.symbols;
+        mut Node* variant = (Node*)0;
+        if (label.kind() == NodeKind::IDENTIFIER) {
+            i8* text = label.text();
+            mut i32 start = 0;
+            for (mut i32 i = 0; text[i] != 0; i = i + 1) {
+                if (text[i] == 58) {
+                    start = i + 1;
                 }
             }
-        } else if (kind == NodeKind.WHILE) {
-            this.check_condition(node.first());
-            this.check_loop_body(node.second());
-        } else if (kind == NodeKind.DO_WHILE) {
-            this.check_loop_body(node.second());
-            this.check_condition(node.first());
-        } else if (kind == NodeKind.FOR) {
-            i32 mark = scopes.mark();
-            if (node.first() != null) {
-                this.check_statement(node.first());
-            }
-            if (node.second() != null) {
-                this.check_condition(node.second());
-            }
-            if (node.third() != null) {
-                this.check_expression(node.third(), 0);
-            }
-            this.check_loop_body(node.fourth());
-            scopes.reset_to(mark);
-        } else if (kind == NodeKind.BREAK) {
-            if (this.loop_depth == 0 && this.switch_depth == 0) {
-                this.error(node, "'break' outside of a loop or switch");
-            }
-        } else if (kind == NodeKind.CONTINUE) {
-            if (this.loop_depth == 0) {
-                this.error(node, "'continue' outside of a loop");
-            }
-        } else if (kind == NodeKind.SWITCH) {
-            this.check_switch(node);
-        } else {
-            this.error(node, "statement is not supported yet");
+            variant = symbols.find_constant(enumeration, Ast.intern_base_name(text + start, (i32)strlen(text + start)));
         }
+        if (variant == null) {
+            this.error(label, "case label must name a variant of the switched enum");
+            return;
+        }
+        label.set_symbol(SymbolKind.CONSTANT, (void*)variant);
+        label.set_value_type(enumeration.type_id);
     }
 
     void check_switch(Node* node) {
         u32 value_type = this.check_expression(node.first(), 0);
-        if (!Types.is_integer(value_type)) {
-            this.error(node.first(), "switch value must be an integer");
+        SymbolTable* symbols = this.symbols;
+        StructInfo* enumeration = symbols.enum_of_type(value_type);
+        bool over_enum = enumeration != null && !enumeration.has_payload;
+        if (!over_enum && !Types.is_integer(value_type)) {
+            this.error(node.first(), "switch value must be an integer or an enum");
         }
         mut bool has_default = false;
         this.switch_depth = this.switch_depth + 1;
@@ -149,6 +179,8 @@ impl TypeChecker {
                     this.error(arm, "switch has more than one 'default'");
                 }
                 has_default = true;
+            } else if (over_enum) {
+                this.check_enum_label(arm, enumeration);
             } else {
                 u32 label_type = this.check_expression(arm.first(), value_type);
                 if (!Types.is_integer(label_type)) {

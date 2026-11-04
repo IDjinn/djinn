@@ -1,20 +1,28 @@
 namespace djinnc;
 
 struct Node {
-    u16 kind;
+    u16 raw_kind;
     u16 flags;
     i32 token;
     u32 a;
     u32 b;
 
-    public static Node* create(i32 kind, i32 token) {
+    public NodeKind kind() {
+        return (NodeKind)(i32)this.raw_kind;
+    }
+
+    public void set_kind(NodeKind kind) {
+        this.raw_kind = (u16)kind.getValue();
+    }
+
+    public static Node* create(NodeKind kind, i32 token) {
         if (ast_count >= ast_capacity) {
             logger_error(Log.get(), "djinnc: ast node capacity exceeded (%d)", ast_capacity);
             exit(1);
         }
         Node* node = Ast.at(ast_count);
         ast_count = ast_count + 1;
-        node.kind = (u16)kind;
+        node.raw_kind = (u16)kind.getValue();
         node.token = token;
         i32 extra = NodeLayout.extra_size(kind);
         if (extra > 0) {
@@ -37,7 +45,7 @@ struct Node {
         ast_extra_capacity = capacity;
     }
 
-    public static Node* create_list(i32 kind, i32 token) {
+    public static Node* create_list(NodeKind kind, i32 token) {
         Node* node = Node.create(kind, token);
         PointerList* lists = (PointerList*)ast_lists;
         lists.push((void*)IdList.create());
@@ -46,7 +54,7 @@ struct Node {
     }
 
     u32 get_field(i32 field) {
-        i32 slot = NodeLayout.slot((i32)this.kind, field);
+        i32 slot = NodeLayout.slot(this.kind(), field);
         if (slot == Slot.NONE) {
             return 0;
         }
@@ -66,7 +74,7 @@ struct Node {
     }
 
     void set_field(i32 field, u32 value) {
-        i32 slot = NodeLayout.slot((i32)this.kind, field);
+        i32 slot = NodeLayout.slot(this.kind(), field);
         if (slot == Slot.NONE || slot == Slot.TOKEN) {
             return;
         }
@@ -180,13 +188,7 @@ struct Node {
     public void set_text_n(i8* text, i32 length) {
         AtomTable* atoms = Ast.atoms();
         this.set_field(NodeField.TEXT, atoms.intern_copy(text, (u32)length) + 1);
-    }
-
-    public void set_text_atom(u32 atom) {
-        this.set_field(NodeField.TEXT, atom + 1);
-    }
-
-    public u32 text_atom() {
+    }    public u32 text_atom() {
         u32 stored = this.get_field(NodeField.TEXT);
         if (stored == 0) {
             return 0;
@@ -236,9 +238,9 @@ struct Node {
     public static Node* clone(Node* source) {
         mut Node* copy = (Node*)0;
         if (source.has_items()) {
-            copy = Node.create_list((i32)source.kind, source.token);
+            copy = Node.create_list(source.kind(), source.token);
         } else {
-            copy = Node.create((i32)source.kind, source.token);
+            copy = Node.create(source.kind(), source.token);
         }
         copy.flags = source.flags;
         for (mut i32 field = NodeField.FIRST; field <= NodeField.FOURTH; field = field + 1) {
@@ -293,6 +295,14 @@ struct Node {
 
     public void set_op(i32 op) {
         this.flags = (u16)(((u32)this.flags & 3) | ((u32)op << 2));
+    }
+
+    public TokenKind op_kind() {
+        return (TokenKind)this.op();
+    }
+
+    public void set_op_kind(TokenKind op) {
+        this.set_op(op.getValue());
     }
 
     public i64 int_value() {

@@ -183,6 +183,7 @@ private:
                                             const std::vector<std::unique_ptr<Expression>>& args);
 
     llvm::Value* extract_enum_tag(llvm::Value* enumValue, const EnumDef& enumDef);
+    const EnumDef* enum_of_llvm_type(llvm::Type* type);
 
     llvm::Value* extract_enum_payload(llvm::Value* enumValue, const EnumDef& enumDef, size_t variantIdx);
 
@@ -288,7 +289,7 @@ private:
     static bool is_slice_struct(llvm::StructType* st);
     bool is_object_type(llvm::Type* type) const;
 
-    llvm::Value* generate_identifier(const Identifier& expr) const;
+    llvm::Value* generate_identifier(const Identifier& expr);
 
     llvm::Value* generate_variable_declaration(const VariableDeclaration& expr);
 

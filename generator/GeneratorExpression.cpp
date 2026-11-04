@@ -101,7 +101,7 @@ llvm::Value* Generator::generate_switch_expression(const SwitchExpression& expr)
     const EnumDef* enumDef = nullptr;
     if (matchValue->getType()->isStructTy())
     {
-        enumDef = currentScope->lookup_enum(matchValue->getType()->getStructName().str());
+        enumDef = enum_of_llvm_type(matchValue->getType());
     }
 
     struct GeneratedArm

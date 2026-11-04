@@ -69,12 +69,12 @@ impl CodeGenerator {
     }
 
     Value* gen_unary(Node* node) {
-        i32 op = node.op();
+        TokenKind op = node.op_kind();
 
-        if (op == TokenKind.AMPERSAND) {
+        if (op == TokenKind::AMPERSAND) {
             return Value.create(this.gen_address(node.first()), node.value_type());
         }
-        if (op == TokenKind.STAR) {
+        if (op == TokenKind::STAR) {
             return this.load_through(this.gen_address(node), node.value_type());
         }
 
@@ -84,13 +84,13 @@ impl CodeGenerator {
 
         Value* operand = this.gen_expression(node.first());
         u32 type = operand.type;
-        if (op == TokenKind.MINUS) {
+        if (op == TokenKind::MINUS) {
             if (Types.is_float(type)) {
                 return Value.create(LLVMBuildFNeg(this.builder, operand.ref, "neg"), type);
             }
             return Value.create(LLVMBuildNeg(this.builder, operand.ref, "neg"), type);
         }
-        if (op == TokenKind.TILDE) {
+        if (op == TokenKind::TILDE) {
             return Value.create(LLVMBuildNot(this.builder, operand.ref, "not"), type);
         }
         void* condition = this.to_condition(operand);
@@ -99,7 +99,7 @@ impl CodeGenerator {
 
     Value* gen_assign(Node* node) {
         Node* target = node.first();
-        if (target.kind == NodeKind.IDENTIFIER && target.symbol_kind() == SymbolKind.IMPLICIT_SET) {
+        if (target.kind() == NodeKind::IDENTIFIER && target.symbol_kind() == SymbolKind.IMPLICIT_SET) {
             FunctionInfo* implicit_setter = (FunctionInfo*)target.symbol();
             IdList* implicit_parameters = implicit_setter.param_types;
             u32 implicit_held = implicit_parameters.get(1);
@@ -110,7 +110,7 @@ impl CodeGenerator {
             LLVMBuildCall2(this.builder, implicit_setter.function_type, implicit_setter.function, implicit_args, 2, "");
             return Value.create(implicit_args[1], implicit_held);
         }
-        if (target.kind == NodeKind.FIELD_ACCESS && target.symbol_kind() == SymbolKind.PROPERTY_SET) {
+        if (target.kind() == NodeKind::FIELD_ACCESS && target.symbol_kind() == SymbolKind.PROPERTY_SET) {
             FunctionInfo* setter = (FunctionInfo*)target.symbol();
             IdList* parameters = setter.param_types;
             u32 held = parameters.get(1);
@@ -121,7 +121,7 @@ impl CodeGenerator {
             LLVMBuildCall2(this.builder, setter.function_type, setter.function, args, 2, "");
             return Value.create(args[1], held);
         }
-        if (target.kind == NodeKind.INDEX && target.symbol_kind() == SymbolKind.INDEX_SET) {
+        if (target.kind() == NodeKind::INDEX && target.symbol_kind() == SymbolKind.INDEX_SET) {
             return this.gen_index_set(node);
         }
         void* address = this.gen_address(node.first());
@@ -133,7 +133,7 @@ impl CodeGenerator {
     }
 
     Value* gen_logical(Node* node) {
-        bool is_and = node.op() == TokenKind.AND_AND;
+        bool is_and = node.op_kind() == TokenKind::AND_AND;
         u32 flag = Types.bool_type();
         void* left = this.to_condition(this.gen_expression(node.first()));
         void* left_block = LLVMGetInsertBlock(this.builder);
@@ -194,15 +194,15 @@ impl CodeGenerator {
     }
 
     Value* gen_binary(Node* node) {
-        i32 op = node.op();
-        if (op == TokenKind.QUESTION_QUESTION) {
+        TokenKind op = node.op_kind();
+        if (op == TokenKind::QUESTION_QUESTION) {
             return this.gen_coalesce(node);
         }
         i32 symbol = node.symbol_kind();
         if (symbol == SymbolKind.OPERATOR || symbol == SymbolKind.NEGATED_OPERATOR) {
             return this.gen_operator_call(node, symbol == SymbolKind.NEGATED_OPERATOR);
         }
-        if (op == TokenKind.AND_AND || op == TokenKind.OR_OR) {
+        if (op == TokenKind::AND_AND || op == TokenKind::OR_OR) {
             return this.gen_logical(node);
         }
 
@@ -210,7 +210,7 @@ impl CodeGenerator {
         Value* right = this.gen_expression(node.second());
 
         if (Types.is_pointer(left.type) && Types.is_integer(right.type)
-            && (op == TokenKind.PLUS || op == TokenKind.MINUS)) {
+            && (op == TokenKind::PLUS || op == TokenKind::MINUS)) {
             return this.gen_pointer_offset(node, left, right);
         }
 
@@ -226,7 +226,7 @@ impl CodeGenerator {
 
     Value* gen_pointer_offset(Node* node, Value* pointer, Value* offset) {
         mut void* amount = this.coerce(offset, Types.i64_type());
-        if (node.op() == TokenKind.MINUS) {
+        if (node.op_kind() == TokenKind::MINUS) {
             amount = LLVMBuildNeg(this.builder, amount, "negoffset");
         }
         void** indices = CodeGenerator.array_of(1);
@@ -237,68 +237,81 @@ impl CodeGenerator {
     }
 
     Value* gen_comparison(Node* node, u32 common, void* lhs, void* rhs) {
-        i32 op = node.op();
+        TokenKind op = node.op_kind();
         u32 flag = Types.bool_type();
 
         if (Types.is_float(common)) {
             mut i32 real = LlvmConst.REAL_OEQ;
-            if (op == TokenKind.BANG_EQUAL) { real = LlvmConst.REAL_UNE; }
-            if (op == TokenKind.LESS) { real = LlvmConst.REAL_OLT; }
-            if (op == TokenKind.LESS_EQUAL) { real = LlvmConst.REAL_OLE; }
-            if (op == TokenKind.GREATER) { real = LlvmConst.REAL_OGT; }
-            if (op == TokenKind.GREATER_EQUAL) { real = LlvmConst.REAL_OGE; }
+            if (op == TokenKind::BANG_EQUAL) { real = LlvmConst.REAL_UNE; }
+            if (op == TokenKind::LESS) { real = LlvmConst.REAL_OLT; }
+            if (op == TokenKind::LESS_EQUAL) { real = LlvmConst.REAL_OLE; }
+            if (op == TokenKind::GREATER) { real = LlvmConst.REAL_OGT; }
+            if (op == TokenKind::GREATER_EQUAL) { real = LlvmConst.REAL_OGE; }
             return Value.create(LLVMBuildFCmp(this.builder, real, lhs, rhs, "fcmp"), flag);
         }
 
         bool is_signed = Types.is_integer(common) && Types.is_signed(common);
         mut i32 predicate = LlvmConst.INT_EQ;
-        if (op == TokenKind.BANG_EQUAL) { predicate = LlvmConst.INT_NE; }
-        if (op == TokenKind.LESS) { predicate = LlvmConst.INT_ULT; }
-        if (op == TokenKind.LESS_EQUAL) { predicate = LlvmConst.INT_ULE; }
-        if (op == TokenKind.GREATER) { predicate = LlvmConst.INT_UGT; }
-        if (op == TokenKind.GREATER_EQUAL) { predicate = LlvmConst.INT_UGE; }
+        if (op == TokenKind::BANG_EQUAL) { predicate = LlvmConst.INT_NE; }
+        if (op == TokenKind::LESS) { predicate = LlvmConst.INT_ULT; }
+        if (op == TokenKind::LESS_EQUAL) { predicate = LlvmConst.INT_ULE; }
+        if (op == TokenKind::GREATER) { predicate = LlvmConst.INT_UGT; }
+        if (op == TokenKind::GREATER_EQUAL) { predicate = LlvmConst.INT_UGE; }
         if (is_signed) {
-            if (op == TokenKind.LESS) { predicate = LlvmConst.INT_SLT; }
-            if (op == TokenKind.LESS_EQUAL) { predicate = LlvmConst.INT_SLE; }
-            if (op == TokenKind.GREATER) { predicate = LlvmConst.INT_SGT; }
-            if (op == TokenKind.GREATER_EQUAL) { predicate = LlvmConst.INT_SGE; }
+            if (op == TokenKind::LESS) { predicate = LlvmConst.INT_SLT; }
+            if (op == TokenKind::LESS_EQUAL) { predicate = LlvmConst.INT_SLE; }
+            if (op == TokenKind::GREATER) { predicate = LlvmConst.INT_SGT; }
+            if (op == TokenKind::GREATER_EQUAL) { predicate = LlvmConst.INT_SGE; }
         }
         return Value.create(LLVMBuildICmp(this.builder, predicate, lhs, rhs, "icmp"), flag);
     }
 
     Value* gen_arithmetic(Node* node, u32 common, void* lhs, void* rhs) {
-        i32 op = node.op();
+        TokenKind op = node.op_kind();
         void* builder = this.builder;
+        bool is_signed = Types.is_signed(common);
 
         if (Types.is_float(common)) {
-            if (op == TokenKind.PLUS) { return Value.create(LLVMBuildFAdd(builder, lhs, rhs, "fadd"), common); }
-            if (op == TokenKind.MINUS) { return Value.create(LLVMBuildFSub(builder, lhs, rhs, "fsub"), common); }
-            if (op == TokenKind.STAR) { return Value.create(LLVMBuildFMul(builder, lhs, rhs, "fmul"), common); }
-            if (op == TokenKind.SLASH) { return Value.create(LLVMBuildFDiv(builder, lhs, rhs, "fdiv"), common); }
-            return Value.create(LLVMBuildFRem(builder, lhs, rhs, "frem"), common);
+            return switch op {
+                PLUS -> Value.create(LLVMBuildFAdd(builder, lhs, rhs, "fadd"), common),
+                MINUS -> Value.create(LLVMBuildFSub(builder, lhs, rhs, "fsub"), common),
+                STAR -> Value.create(LLVMBuildFMul(builder, lhs, rhs, "fmul"), common),
+                SLASH -> Value.create(LLVMBuildFDiv(builder, lhs, rhs, "fdiv"), common),
+                _ -> Value.create(LLVMBuildFRem(builder, lhs, rhs, "frem"), common)
+            };
         }
 
-        if (op == TokenKind.PLUS) { return Value.create(LLVMBuildAdd(builder, lhs, rhs, "add"), common); }
-        if (op == TokenKind.MINUS) { return Value.create(LLVMBuildSub(builder, lhs, rhs, "sub"), common); }
-        if (op == TokenKind.STAR) { return Value.create(LLVMBuildMul(builder, lhs, rhs, "mul"), common); }
-        if (op == TokenKind.AMPERSAND) { return Value.create(LLVMBuildAnd(builder, lhs, rhs, "and"), common); }
-        if (op == TokenKind.PIPE) { return Value.create(LLVMBuildOr(builder, lhs, rhs, "or"), common); }
-        if (op == TokenKind.CARET) { return Value.create(LLVMBuildXor(builder, lhs, rhs, "xor"), common); }
-        if (op == TokenKind.LESS_LESS) { return Value.create(LLVMBuildShl(builder, lhs, rhs, "shl"), common); }
-        bool is_signed = Types.is_signed(common);
-        if (op == TokenKind.SLASH) {
-            if (is_signed) { return Value.create(LLVMBuildSDiv(builder, lhs, rhs, "sdiv"), common); }
-            return Value.create(LLVMBuildUDiv(builder, lhs, rhs, "udiv"), common);
-        }
-        if (op == TokenKind.PERCENT) {
-            if (is_signed) { return Value.create(LLVMBuildSRem(builder, lhs, rhs, "srem"), common); }
-            return Value.create(LLVMBuildURem(builder, lhs, rhs, "urem"), common);
-        }
-        if (op == TokenKind.GREATER_GREATER) {
-            if (is_signed) { return Value.create(LLVMBuildAShr(builder, lhs, rhs, "ashr"), common); }
-            return Value.create(LLVMBuildLShr(builder, lhs, rhs, "lshr"), common);
-        }
+        return switch op {
+            PLUS -> Value.create(LLVMBuildAdd(builder, lhs, rhs, "add"), common),
+            MINUS -> Value.create(LLVMBuildSub(builder, lhs, rhs, "sub"), common),
+            STAR -> Value.create(LLVMBuildMul(builder, lhs, rhs, "mul"), common),
+            AMPERSAND -> Value.create(LLVMBuildAnd(builder, lhs, rhs, "and"), common),
+            PIPE -> Value.create(LLVMBuildOr(builder, lhs, rhs, "or"), common),
+            CARET -> Value.create(LLVMBuildXor(builder, lhs, rhs, "xor"), common),
+            LESS_LESS -> Value.create(LLVMBuildShl(builder, lhs, rhs, "shl"), common),
+            SLASH -> this.gen_division(is_signed, common, lhs, rhs),
+            PERCENT -> this.gen_remainder(is_signed, common, lhs, rhs),
+            GREATER_GREATER -> this.gen_shift_right(is_signed, common, lhs, rhs),
+            _ -> this.unsupported_arithmetic(node, common, lhs)
+        };
+    }
 
+    Value* gen_division(bool is_signed, u32 common, void* lhs, void* rhs) {
+        if (is_signed) { return Value.create(LLVMBuildSDiv(this.builder, lhs, rhs, "sdiv"), common); }
+        return Value.create(LLVMBuildUDiv(this.builder, lhs, rhs, "udiv"), common);
+    }
+
+    Value* gen_remainder(bool is_signed, u32 common, void* lhs, void* rhs) {
+        if (is_signed) { return Value.create(LLVMBuildSRem(this.builder, lhs, rhs, "srem"), common); }
+        return Value.create(LLVMBuildURem(this.builder, lhs, rhs, "urem"), common);
+    }
+
+    Value* gen_shift_right(bool is_signed, u32 common, void* lhs, void* rhs) {
+        if (is_signed) { return Value.create(LLVMBuildAShr(this.builder, lhs, rhs, "ashr"), common); }
+        return Value.create(LLVMBuildLShr(this.builder, lhs, rhs, "lshr"), common);
+    }
+
+    Value* unsupported_arithmetic(Node* node, u32 common, void* lhs) {
         this.error(node, "binary operator is not supported by code generation yet");
         return Value.create(lhs, common);
     }

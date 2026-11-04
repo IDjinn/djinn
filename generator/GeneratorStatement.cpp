@@ -552,6 +552,15 @@ void Generator::generate_do_while_statement(const DoWhileStatement& stmt)
 void Generator::generate_switch_statement(const SwitchStatement& stmt)
 {
     llvm::Value* switchValue = generate_expression(*stmt.value);
+    const EnumDef* switchEnum = enum_of_llvm_type(switchValue->getType());
+    if (switchEnum && !switchEnum->isGeneric)
+    {
+        switchValue = extract_enum_tag(switchValue, *switchEnum);
+    }
+    else
+    {
+        switchEnum = nullptr;
+    }
 
     llvm::BasicBlock* endBB = llvm::BasicBlock::Create(*context, "switch.end", fn_.function);
     llvm::BasicBlock* defaultBB = endBB;
@@ -579,7 +588,19 @@ void Generator::generate_switch_statement(const SwitchStatement& stmt)
         if (caseStmt->expression)
         {
             caseBB = llvm::BasicBlock::Create(*context, "switch.case", fn_.function);
-            llvm::Value* caseValue = generate_expression(*caseStmt->expression);
+            llvm::Value* caseValue = nullptr;
+            if (switchEnum)
+            {
+                const auto& labelName = static_cast<const Identifier&>(*caseStmt->expression).identifier.token_name;
+                const auto sep = labelName.rfind("::");
+                const EnumVariantDef* variant =
+                    switchEnum->getVariant(sep == std::string::npos ? labelName : labelName.substr(sep + 2));
+                caseValue = llvm::ConstantInt::get(switchValue->getType(), variant->tag);
+            }
+            else
+            {
+                caseValue = generate_expression(*caseStmt->expression);
+            }
 
             // Cast case value to match switch value type
             if (caseValue->getType() != switchValue->getType())

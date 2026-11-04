@@ -45,6 +45,17 @@ namespace djinn::binder
         }
 
         std::shared_ptr<Symbol> methodSym = nullptr;
+        if (call.name.token_name == "getValue" && call.arguments.empty() && receiver->type.kind == TypeKind::STRUCT)
+        {
+            if (const auto enumSym = binder._global_scope->lookupEnum(receiver->type.structName);
+                enumSym && !enumSym->isGeneric())
+            {
+                auto valueCall = std::make_shared<FunctionCallSymbol>(
+                    call.name.token_name, receiver, nullptr, std::move(parameters), call.name.location);
+                valueCall->type = Type::integer(32, true);
+                return valueCall;
+            }
+        }
         if (!structName.empty())
         {
             if (const auto structSym = binder._global_scope->lookupStruct(structName))
