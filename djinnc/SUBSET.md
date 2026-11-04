@@ -14,7 +14,7 @@ of them. A construct outside this list is forbidden in `djinnc/src` until the dj
 
 ## Types
 
-- `usize` / `uptr` and `isize` / `iptr` are the pointer-sized integers: their width comes from the target triple (`--target <triple>`, default the host), 16, 32 or 64 bits, and `sizeof` has the type `isize`. Use them for sizes and for pointer-to-integer casts instead of a fixed `u64`.
+- `usize` and `isize` (and `nint`) are the pointer-sized integers: their width comes from the target triple (`--target <triple>`, default the host), 16, 32 or 64 bits, and `sizeof` has the type `isize`. Use them for sizes instead of a fixed `u64`.
 
 - `i8 i16 i32 i64 u8 u16 u32 u64 f64 bool void`
 - pointers: `T*` for struct pointers; raw pointers are `ptr` (opaque, the old `void*`) and `ptr<T>` (`ptr<u8>`, `ptr<ptr<i8>>`, the old `i8*`, `u8*`, `void**`). Both are plain pointers to stage0 and djinnc for now (no `unsafe` enforcement). `unsafe { ... }` blocks and the `unsafe` function modifier are parsed and ignored. No references, no optionals
