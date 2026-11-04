@@ -116,6 +116,52 @@ impl CodeGenerator {
         return global;
     }
 
+    FunctionInfo* formatter_of(u32 type) {
+        if (!Types.is_struct(type)) {
+            return null;
+        }
+        StructInfo* owner = this.struct_of(type);
+        if (owner.contracts == null) {
+            return null;
+        }
+        PointerList* contracts = owner.contracts;
+        mut bool formattable = false;
+        for (mut i32 i = 0; i < contracts.length; i = i + 1) {
+            InterfaceInfo* contract = (InterfaceInfo*)contracts.get(i);
+            if (Strings.same(contract.name, "IFormatable")) {
+                formattable = true;
+            }
+        }
+        if (!formattable) {
+            return null;
+        }
+        SymbolTable* symbols = this.symbols;
+        FunctionInfo* method = symbols.find_method(owner, Ast.intern_base_name("format", 6));
+        if (method == null || method.return_type != this.symbols_core_type("string")) {
+            return null;
+        }
+        return method;
+    }
+
+    Value* format_for_boxing(Value* source) {
+        FunctionInfo* formatter = this.formatter_of(source.type);
+        if (formatter == null) {
+            return source;
+        }
+        void* receiver = this.create_slot(source.type, "format.receiver");
+        LLVMBuildStore(this.builder, source.ref, receiver);
+        void** args = CodeGenerator.array_of(1);
+        args[0] = receiver;
+        void* text = LLVMBuildCall2(this.builder, formatter.function_type, formatter.function, args, 1, "format");
+        SymbolTable* symbols = this.symbols;
+        StructInfo* helper = symbols.find_core_struct(Ast.intern_base_name("Reflection", 10));
+        FunctionInfo* terminate = symbols.find_method(helper, Ast.intern_base_name("terminated", 10));
+        void** terminate_args = CodeGenerator.array_of(1);
+        terminate_args[0] = text;
+        void* cstring = LLVMBuildCall2(this.builder, terminate.function_type, terminate.function, terminate_args, 1, "format.text");
+        return Value.create(cstring, terminate.return_type);
+    }
+
     void* box_value(Value* source) {
         u32 boxed = this.symbols_core_type("object");
         void* object_llvm = this.llvm_type(boxed);
