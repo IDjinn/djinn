@@ -49,9 +49,11 @@ namespace djinn::binder {
             parameters.emplace_back(binder.bindExpression(*arg));
         }
 
+        // Generic enums keep the untyped result: their instance type comes from the declaration
+        Type valueType = enumSym->isGeneric() ? Type::voided() : Type::struct_type(enumSym->name);
         return std::make_shared<EnumConstructionSymbol>(
             enumName, variantName, enumSym->getVariantTag(variantName),
-            std::move(parameters), call.name.location
+            std::move(parameters), call.name.location, std::move(valueType)
         );
     }
 } // namespace djinn::binder

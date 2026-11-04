@@ -689,6 +689,26 @@ llvm::Value* Generator::generate_method_call_internal(const FunctionCall& call)
         LOG_DEBUG("[generator]   receiver identifier: '%s'", identDbg->identifier.token_name.c_str());
     }
 
+    if (call.name.token_name == "getValue" && call.arguments.empty() && call.receiver)
+    {
+        const Type* receiverType = type_of(*call.receiver);
+        if (receiverType && receiverType->kind == TypeKind::STRUCT)
+        {
+            const EnumDef* enumDef = currentScope->lookup_enum(currentScope->resolve_alias(receiverType->structName));
+            if (enumDef && !enumDef->isGeneric)
+            {
+                llvm::Value* enumValue = generate_expression(*call.receiver);
+                if (!enumValue) return nullptr;
+                if (enumValue->getType()->isPointerTy())
+                {
+                    enumValue = builder->CreateLoad(enumDef->llvmType, enumValue, "enum_load");
+                }
+                llvm::Value* tag = extract_enum_tag(enumValue, *enumDef);
+                return builder->CreateIntCast(tag, builder->getInt32Ty(), false, "enum_value");
+            }
+        }
+    }
+
     std::string structName;
     std::string llvmStructName;
     bool isStaticCall = false;

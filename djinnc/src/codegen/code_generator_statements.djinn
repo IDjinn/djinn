@@ -2,50 +2,51 @@ namespace djinnc;
 
 impl CodeGenerator {
     void gen_statement(Node* node) {
-        i32 kind = node.kind;
+        NodeKind kind = node.kind();
         this.locate(node);
 
-        if (kind == NodeKind.BLOCK) {
-            mut void* outer_scope = (void*)0;
-            if (this.debug != null) {
-                DebugInfo* debug = this.debug;
-                outer_scope = debug.enter_block(node);
-            }
-            for (mut i32 i = 0; i < node.count(); i = i + 1) {
-                this.gen_statement(node.child(i));
-            }
-            if (this.debug != null) {
-                DebugInfo* debug = this.debug;
-                debug.leave_block(outer_scope);
-            }
-        } else if (kind == NodeKind.VAR_DECL) {
-            this.gen_variable(node);
-        } else if (kind == NodeKind.EXPR_STMT) {
-            this.gen_expression(node.first());
-        } else if (kind == NodeKind.SPAWN_STMT) {
-            this.gen_spawn(node);
-        } else if (kind == NodeKind.RETURN) {
-            this.gen_return(node);
-        } else if (kind == NodeKind.IF) {
-            this.gen_if(node);
-        } else if (kind == NodeKind.WHILE) {
-            this.gen_while(node);
-        } else if (kind == NodeKind.DO_WHILE) {
-            this.gen_do_while(node);
-        } else if (kind == NodeKind.FOR) {
-            this.gen_for(node);
-        } else if (kind == NodeKind.SWITCH) {
-            this.gen_switch(node);
-        } else if (kind == NodeKind.BREAK) {
-            FunctionContext* function_context = this.function_context;
-            LLVMBuildBr(this.builder, function_context.break_block());
-            this.start_dead_block();
-        } else if (kind == NodeKind.CONTINUE) {
-            FunctionContext* function_context = this.function_context;
-            LLVMBuildBr(this.builder, function_context.continue_block());
-            this.start_dead_block();
-        } else {
-            this.error(node, "statement is not supported by code generation yet");
+        switch (kind) {
+            case BLOCK:
+                mut void* outer_scope = (void*)0;
+                if (this.debug != null) {
+                    DebugInfo* debug = this.debug;
+                    outer_scope = debug.enter_block(node);
+                }
+                for (mut i32 i = 0; i < node.count(); i = i + 1) {
+                    this.gen_statement(node.child(i));
+                }
+                if (this.debug != null) {
+                    DebugInfo* debug = this.debug;
+                    debug.leave_block(outer_scope);
+                }
+            case VAR_DECL:
+                this.gen_variable(node);
+            case EXPR_STMT:
+                this.gen_expression(node.first());
+            case SPAWN_STMT:
+                this.gen_spawn(node);
+            case RETURN:
+                this.gen_return(node);
+            case IF:
+                this.gen_if(node);
+            case WHILE:
+                this.gen_while(node);
+            case DO_WHILE:
+                this.gen_do_while(node);
+            case FOR:
+                this.gen_for(node);
+            case SWITCH:
+                this.gen_switch(node);
+            case BREAK:
+                FunctionContext* function_context = this.function_context;
+                LLVMBuildBr(this.builder, function_context.break_block());
+                this.start_dead_block();
+            case CONTINUE:
+                FunctionContext* function_context = this.function_context;
+                LLVMBuildBr(this.builder, function_context.continue_block());
+                this.start_dead_block();
+            default:
+                this.error(node, "statement is not supported by code generation yet");
         }
     }
 
@@ -132,7 +133,14 @@ impl CodeGenerator {
                 labels.push(null);
             } else {
                 blocks.push(this.new_block("switch.case"));
-                labels.push(this.coerce(this.gen_expression(arm.first()), subject_type));
+                Node* label = arm.first();
+                if (label.symbol_kind() == SymbolKind.CONSTANT) {
+                    Node* variant = (Node*)label.symbol();
+                    Node* tag_value = variant.first();
+                    labels.push(LLVMConstInt(this.llvm_type(subject_type), (u64)tag_value.int_value(), 0));
+                } else {
+                    labels.push(this.coerce(this.gen_expression(label), subject_type));
+                }
                 case_count = case_count + 1;
             }
         }
@@ -254,9 +262,19 @@ impl CodeGenerator {
         for (mut i32 i = 0; i < node.count(); i = i + 1) {
             blocks.push(this.new_block("match.arm"));
         }
-        void* dispatch = LLVMBuildSwitch(this.builder, tag, blocks.get(node.count() - 1), (u32)node.count());
+        mut i32 fallback = node.count() - 1;
+        for (mut i32 i = 0; i < node.count(); i = i + 1) {
+            Node* wildcard_arm = node.child(i);
+            if (Strings.same(wildcard_arm.text(), "_")) {
+                fallback = i;
+            }
+        }
+        void* dispatch = LLVMBuildSwitch(this.builder, tag, blocks.get(fallback), (u32)node.count());
         for (mut i32 i = 0; i < node.count(); i = i + 1) {
             Node* case_arm = node.child(i);
+            if (i == fallback && Strings.same(case_arm.text(), "_")) {
+                continue;
+            }
             Node* variant = (Node*)case_arm.symbol();
             Node* tag_value = variant.first();
             void* label = LLVMConstInt(LLVMIntTypeInContext(this.context, 32), (u64)tag_value.int_value(), 0);

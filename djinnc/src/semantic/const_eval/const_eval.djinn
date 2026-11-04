@@ -212,32 +212,32 @@ struct ConstEval {
         f64 real = this.rf;
         node.flags = (u16)0;
         if ((shape & ConstEval.TEXT) != 0) {
-            node.kind = (u16)NodeKind.INT_LITERAL;
+            node.set_kind(NodeKind::INT_LITERAL);
             node.set_int_value(whole);
         } else if ((shape & ConstEval.FLOAT) != 0) {
-            node.kind = (u16)NodeKind.FLOAT_CONST;
+            node.set_kind(NodeKind::FLOAT_CONST);
             node.set_int_value(ConstBits.of_float(real));
         } else if ((shape & 255) == 1) {
-            node.kind = (u16)NodeKind.BOOL_LITERAL;
+            node.set_kind(NodeKind::BOOL_LITERAL);
             node.set_int_value(whole);
         } else {
-            node.kind = (u16)NodeKind.INT_LITERAL;
+            node.set_kind(NodeKind::INT_LITERAL);
             node.set_int_value(whole);
         }
         node.set_value_type(type);
     }
 
     bool eval(Node* node) {
-        i32 kind = node.kind;
-        if (kind == NodeKind.INT_LITERAL) {
+        NodeKind kind = node.kind();
+        if (kind == NodeKind::INT_LITERAL) {
             this.ri = node.int_value();
             this.rf = (f64)this.ri;
             return true;
         }
-        if (kind == NodeKind.IDENTIFIER) {
+        if (kind == NodeKind::IDENTIFIER) {
             return this.eval_identifier(node);
         }
-        if (kind == NodeKind.STRING_LITERAL) {
+        if (kind == NodeKind::STRING_LITERAL) {
             if ((this.shape_of(node.value_type()) & ConstEval.TEXT) == 0) {
                 return this.fail(node, "only i8* string literals can be evaluated at compile time");
             }
@@ -245,41 +245,41 @@ struct ConstEval {
             this.rf = 0.0;
             return true;
         }
-        if (kind == NodeKind.INDEX) {
+        if (kind == NodeKind::INDEX) {
             return this.eval_index(node);
         }
-        if (kind == NodeKind.BINARY) {
+        if (kind == NodeKind::BINARY) {
             return this.eval_binary(node);
         }
-        if (kind == NodeKind.CALL) {
+        if (kind == NodeKind::CALL) {
             return this.eval_call(node);
         }
-        if (kind == NodeKind.UNARY) {
+        if (kind == NodeKind::UNARY) {
             return this.eval_unary(node);
         }
-        if (kind == NodeKind.BOOL_LITERAL) {
+        if (kind == NodeKind::BOOL_LITERAL) {
             this.ri = node.int_value();
             this.rf = (f64)this.ri;
             return true;
         }
-        if (kind == NodeKind.FLOAT_LITERAL) {
+        if (kind == NodeKind::FLOAT_LITERAL) {
             this.rf = node.float_value();
             if ((this.shape_of(node.value_type()) & 255) == 32) {
                 this.rf = (f64)(f32)this.rf;
             }
             return true;
         }
-        if (kind == NodeKind.FLOAT_CONST) {
+        if (kind == NodeKind::FLOAT_CONST) {
             this.rf = ConstBits.to_float(node.int_value());
             return true;
         }
-        if (kind == NodeKind.CAST) {
+        if (kind == NodeKind::CAST) {
             return this.eval_cast(node);
         }
-        if (kind == NodeKind.ASSIGN) {
+        if (kind == NodeKind::ASSIGN) {
             return this.eval_assign(node);
         }
-        if (kind == NodeKind.FIELD_ACCESS) {
+        if (kind == NodeKind::FIELD_ACCESS) {
             return this.eval_member(node);
         }
         return this.fail(node, "expression cannot be evaluated at compile time");
@@ -401,9 +401,9 @@ struct ConstEval {
     }
 
     bool eval_unary(Node* node) {
-        i32 op = node.op();
+        TokenKind op = node.op_kind();
         Node* operand = node.first();
-        if (op == TokenKind.STAR) {
+        if (op == TokenKind::STAR) {
             if ((this.shape_of(operand.value_type()) & ConstEval.TEXT) == 0) {
                 return this.fail(node, "only strings can be dereferenced at compile time");
             }
@@ -416,14 +416,14 @@ struct ConstEval {
             this.rf = (f64)this.ri;
             return true;
         }
-        if (op == TokenKind.BANG) {
+        if (op == TokenKind::BANG) {
             if (!this.eval_condition(operand)) {
                 return false;
             }
             this.ri = 1 - this.ri;
             return true;
         }
-        if (op != TokenKind.MINUS && op != TokenKind.TILDE) {
+        if (op != TokenKind::MINUS && op != TokenKind::TILDE) {
             return this.fail(node, "operator cannot be evaluated at compile time");
         }
         if (!this.eval(operand)) {
@@ -433,7 +433,7 @@ struct ConstEval {
         if ((shape & ConstEval.NUMERIC) == 0) {
             return this.fail(node, "operand is not a number");
         }
-        if (op == TokenKind.MINUS) {
+        if (op == TokenKind::MINUS) {
             if ((shape & ConstEval.FLOAT) != 0) {
                 this.rf = 0.0 - this.rf;
             } else {
@@ -449,11 +449,11 @@ struct ConstEval {
     }
 
     bool eval_binary(Node* node) {
-        i32 op = node.op();
+        TokenKind op = node.op_kind();
         Node* left = node.first();
         Node* right = node.second();
 
-        if (op == TokenKind.AND_AND) {
+        if (op == TokenKind::AND_AND) {
             if (!this.eval_condition(left)) {
                 return false;
             }
@@ -462,7 +462,7 @@ struct ConstEval {
             }
             return this.eval_condition(right);
         }
-        if (op == TokenKind.OR_OR) {
+        if (op == TokenKind::OR_OR) {
             if (!this.eval_condition(left)) {
                 return false;
             }
@@ -474,7 +474,7 @@ struct ConstEval {
 
         i32 left_shape = this.shape_of(left.value_type());
         i32 right_shape = this.shape_of(right.value_type());
-        if ((left_shape & ConstEval.TEXT) != 0 && op == TokenKind.PLUS && (right_shape & ConstEval.INTEGER) != 0) {
+        if ((left_shape & ConstEval.TEXT) != 0 && op == TokenKind::PLUS && (right_shape & ConstEval.INTEGER) != 0) {
             if (!this.eval(left)) {
                 return false;
             }
@@ -516,40 +516,40 @@ struct ConstEval {
         return this.int_operation(node, op, a, b, left_shape, right_shape);
     }
 
-    bool float_operation(Node* node, i32 op, f64 a, f64 b) {
-        if (op == TokenKind.EQUAL_EQUAL) {
+    bool float_operation(Node* node, TokenKind op, f64 a, f64 b) {
+        if (op == TokenKind::EQUAL_EQUAL) {
             this.ri = ConstEval.flag(a == b);
             return true;
         }
-        if (op == TokenKind.BANG_EQUAL) {
+        if (op == TokenKind::BANG_EQUAL) {
             this.ri = ConstEval.flag(a != b);
             return true;
         }
-        if (op == TokenKind.LESS) {
+        if (op == TokenKind::LESS) {
             this.ri = ConstEval.flag(a < b);
             return true;
         }
-        if (op == TokenKind.LESS_EQUAL) {
+        if (op == TokenKind::LESS_EQUAL) {
             this.ri = ConstEval.flag(a <= b);
             return true;
         }
-        if (op == TokenKind.GREATER) {
+        if (op == TokenKind::GREATER) {
             this.ri = ConstEval.flag(a > b);
             return true;
         }
-        if (op == TokenKind.GREATER_EQUAL) {
+        if (op == TokenKind::GREATER_EQUAL) {
             this.ri = ConstEval.flag(a >= b);
             return true;
         }
 
         mut f64 value = 0.0;
-        if (op == TokenKind.PLUS) {
+        if (op == TokenKind::PLUS) {
             value = a + b;
-        } else if (op == TokenKind.MINUS) {
+        } else if (op == TokenKind::MINUS) {
             value = a - b;
-        } else if (op == TokenKind.STAR) {
+        } else if (op == TokenKind::STAR) {
             value = a * b;
-        } else if (op == TokenKind.SLASH) {
+        } else if (op == TokenKind::SLASH) {
             if (b == 0.0) {
                 return this.fail(node, "division by zero");
             }
@@ -575,7 +575,7 @@ struct ConstEval {
         return (shape & 255) == 64 && (shape & ConstEval.SIGNED) == 0;
     }
 
-    bool int_operation(Node* node, i32 op, i64 a, i64 b, i32 left_shape, i32 right_shape) {
+    bool int_operation(Node* node, TokenKind op, i64 a, i64 b, i32 left_shape, i32 right_shape) {
         if (TypeChecker.is_comparison(op)) {
             bool unsigned_compare = ConstEval.is_wide_unsigned(left_shape) || ConstEval.is_wide_unsigned(right_shape);
             this.ri = ConstEval.compare(op, a, b, unsigned_compare);
@@ -585,42 +585,42 @@ struct ConstEval {
         i32 shape = this.shape_of(node.value_type());
         bool wide_unsigned = ConstEval.is_wide_unsigned(shape);
         mut i64 value = 0;
-        if (op == TokenKind.PLUS) {
+        if (op == TokenKind::PLUS) {
             value = a + b;
-        } else if (op == TokenKind.MINUS) {
+        } else if (op == TokenKind::MINUS) {
             value = a - b;
-        } else if (op == TokenKind.STAR) {
+        } else if (op == TokenKind::STAR) {
             value = a * b;
-        } else if (op == TokenKind.SLASH || op == TokenKind.PERCENT) {
+        } else if (op == TokenKind::SLASH || op == TokenKind::PERCENT) {
             if (b == 0) {
                 return this.fail(node, "division by zero");
             }
             if (wide_unsigned) {
-                if (op == TokenKind.SLASH) {
+                if (op == TokenKind::SLASH) {
                     value = (i64)((u64)a / (u64)b);
                 } else {
                     value = (i64)((u64)a % (u64)b);
                 }
             } else if (b == 0 - 1) {
-                if (op == TokenKind.SLASH) {
+                if (op == TokenKind::SLASH) {
                     value = 0 - a;
                 }
-            } else if (op == TokenKind.SLASH) {
+            } else if (op == TokenKind::SLASH) {
                 value = a / b;
             } else {
                 value = a % b;
             }
-        } else if (op == TokenKind.AMPERSAND) {
+        } else if (op == TokenKind::AMPERSAND) {
             value = a & b;
-        } else if (op == TokenKind.PIPE) {
+        } else if (op == TokenKind::PIPE) {
             value = a | b;
-        } else if (op == TokenKind.CARET) {
+        } else if (op == TokenKind::CARET) {
             value = a ^ b;
-        } else if (op == TokenKind.LESS_LESS || op == TokenKind.GREATER_GREATER) {
+        } else if (op == TokenKind::LESS_LESS || op == TokenKind::GREATER_GREATER) {
             if (b < 0 || b >= (i64)(shape & 255)) {
                 return this.fail(node, "shift amount is out of range");
             }
-            if (op == TokenKind.LESS_LESS) {
+            if (op == TokenKind::LESS_LESS) {
                 value = a << b;
             } else if (wide_unsigned) {
                 value = (i64)((u64)a >> b);
@@ -634,34 +634,34 @@ struct ConstEval {
         return true;
     }
 
-    static i64 compare(i32 op, i64 a, i64 b, bool unsigned_compare) {
-        if (op == TokenKind.EQUAL_EQUAL) {
+    static i64 compare(TokenKind op, i64 a, i64 b, bool unsigned_compare) {
+        if (op == TokenKind::EQUAL_EQUAL) {
             return ConstEval.flag(a == b);
         }
-        if (op == TokenKind.BANG_EQUAL) {
+        if (op == TokenKind::BANG_EQUAL) {
             return ConstEval.flag(a != b);
         }
         if (unsigned_compare) {
             u64 x = (u64)a;
             u64 y = (u64)b;
-            if (op == TokenKind.LESS) {
+            if (op == TokenKind::LESS) {
                 return ConstEval.flag(x < y);
             }
-            if (op == TokenKind.LESS_EQUAL) {
+            if (op == TokenKind::LESS_EQUAL) {
                 return ConstEval.flag(x <= y);
             }
-            if (op == TokenKind.GREATER) {
+            if (op == TokenKind::GREATER) {
                 return ConstEval.flag(x > y);
             }
             return ConstEval.flag(x >= y);
         }
-        if (op == TokenKind.LESS) {
+        if (op == TokenKind::LESS) {
             return ConstEval.flag(a < b);
         }
-        if (op == TokenKind.LESS_EQUAL) {
+        if (op == TokenKind::LESS_EQUAL) {
             return ConstEval.flag(a <= b);
         }
-        if (op == TokenKind.GREATER) {
+        if (op == TokenKind::GREATER) {
             return ConstEval.flag(a > b);
         }
         return ConstEval.flag(a >= b);
@@ -669,7 +669,7 @@ struct ConstEval {
 
     bool eval_assign(Node* node) {
         Node* target = node.first();
-        if (target.kind != NodeKind.IDENTIFIER || target.symbol_kind() != SymbolKind.LOCAL) {
+        if (target.kind() != NodeKind::IDENTIFIER || target.symbol_kind() != SymbolKind.LOCAL) {
             return this.fail(node, "only local variables can be assigned at compile time");
         }
         LocalVariable* variable = (LocalVariable*)target.symbol();
@@ -712,30 +712,30 @@ struct ConstEval {
     }
 
     void number_locals(Node* node, FunctionInfo* info) {
-        i32 kind = node.kind;
-        if (kind == NodeKind.BLOCK) {
+        NodeKind kind = node.kind();
+        if (kind == NodeKind::BLOCK) {
             for (mut i32 i = 0; i < node.count(); i = i + 1) {
                 this.number_locals(node.child(i), info);
             }
-        } else if (kind == NodeKind.VAR_DECL) {
+        } else if (kind == NodeKind::VAR_DECL) {
             LocalVariable* variable = (LocalVariable*)node.symbol();
             if (variable != null) {
                 info.eval_slots = info.eval_slots + 1;
                 variable.eval_slot = info.eval_slots;
             }
-        } else if (kind == NodeKind.IF) {
+        } else if (kind == NodeKind::IF) {
             this.number_locals(node.second(), info);
             if (node.third() != null) {
                 this.number_locals(node.third(), info);
             }
-        } else if (kind == NodeKind.WHILE || kind == NodeKind.DO_WHILE) {
+        } else if (kind == NodeKind::WHILE || kind == NodeKind::DO_WHILE) {
             this.number_locals(node.second(), info);
-        } else if (kind == NodeKind.FOR) {
+        } else if (kind == NodeKind::FOR) {
             if (node.first() != null) {
                 this.number_locals(node.first(), info);
             }
             this.number_locals(node.fourth(), info);
-        } else if (kind == NodeKind.SWITCH) {
+        } else if (kind == NodeKind::SWITCH) {
             for (mut i32 i = 0; i < node.count(); i = i + 1) {
                 Node* arm = node.child(i);
                 for (mut i32 j = 0; j < arm.count(); j = j + 1) {
@@ -825,54 +825,54 @@ struct ConstEval {
     }
 
     i32 exec(Node* node) {
-        i32 kind = node.kind;
+        return switch node.kind() {
+            BLOCK -> this.exec_block(node),
+            EXPR_STMT -> this.exec_expression_statement(node),
+            RETURN -> this.exec_return(node),
+            VAR_DECL -> this.exec_declaration(node),
+            IF -> this.exec_if(node),
+            WHILE -> this.exec_loop(node),
+            DO_WHILE -> this.exec_loop(node),
+            FOR -> this.exec_loop(node),
+            BREAK -> EvalStatus.BREAK,
+            CONTINUE -> EvalStatus.CONTINUE,
+            SWITCH -> this.exec_switch(node),
+            _ -> this.exec_unsupported(node)
+        };
+    }
 
-        if (kind == NodeKind.BLOCK) {
-            for (mut i32 i = 0; i < node.count(); i = i + 1) {
-                i32 status = this.exec(node.child(i));
-                if (status != EvalStatus.NORMAL) {
-                    return status;
-                }
+    i32 exec_block(Node* node) {
+        for (mut i32 i = 0; i < node.count(); i = i + 1) {
+            i32 status = this.exec(node.child(i));
+            if (status != EvalStatus.NORMAL) {
+                return status;
             }
-            return EvalStatus.NORMAL;
         }
-        if (kind == NodeKind.EXPR_STMT) {
-            if (!this.tick(node)) {
-                return EvalStatus.FAILED;
-            }
-            if (this.eval(node.first())) {
-                return EvalStatus.NORMAL;
-            }
+        return EvalStatus.NORMAL;
+    }
+
+    i32 exec_expression_statement(Node* node) {
+        if (!this.tick(node)) {
             return EvalStatus.FAILED;
         }
-        if (kind == NodeKind.RETURN) {
-            if (node.first() != null) {
-                Node* value = node.first();
-                if (!this.eval(value)) {
-                    return EvalStatus.FAILED;
-                }
-                this.convert(this.shape_of(value.value_type()), this.return_shape);
+        if (this.eval(node.first())) {
+            return EvalStatus.NORMAL;
+        }
+        return EvalStatus.FAILED;
+    }
+
+    i32 exec_return(Node* node) {
+        if (node.first() != null) {
+            Node* value = node.first();
+            if (!this.eval(value)) {
+                return EvalStatus.FAILED;
             }
-            return EvalStatus.RETURN;
+            this.convert(this.shape_of(value.value_type()), this.return_shape);
         }
-        if (kind == NodeKind.VAR_DECL) {
-            return this.exec_declaration(node);
-        }
-        if (kind == NodeKind.IF) {
-            return this.exec_if(node);
-        }
-        if (kind == NodeKind.WHILE || kind == NodeKind.DO_WHILE || kind == NodeKind.FOR) {
-            return this.exec_loop(node);
-        }
-        if (kind == NodeKind.BREAK) {
-            return EvalStatus.BREAK;
-        }
-        if (kind == NodeKind.CONTINUE) {
-            return EvalStatus.CONTINUE;
-        }
-        if (kind == NodeKind.SWITCH) {
-            return this.exec_switch(node);
-        }
+        return EvalStatus.RETURN;
+    }
+
+    i32 exec_unsupported(Node* node) {
         this.fail(node, "statement cannot be evaluated at compile time");
         return EvalStatus.FAILED;
     }
@@ -934,11 +934,11 @@ struct ConstEval {
     }
 
     i32 exec_loop(Node* node) {
-        i32 kind = node.kind;
+        NodeKind kind = node.kind();
         mut Node* condition = node.first();
         mut Node* body = node.second();
         mut Node* step = (Node*)0;
-        if (kind == NodeKind.FOR) {
+        if (kind == NodeKind::FOR) {
             if (node.first() != null) {
                 i32 started = this.exec(node.first());
                 if (started != EvalStatus.NORMAL) {
@@ -950,7 +950,7 @@ struct ConstEval {
             body = node.fourth();
         }
 
-        mut bool first_pass = kind == NodeKind.DO_WHILE;
+        mut bool first_pass = kind == NodeKind::DO_WHILE;
         while (true) {
             if (!this.tick(node)) {
                 return EvalStatus.FAILED;

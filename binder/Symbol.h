@@ -697,8 +697,9 @@ struct EnumConstructionSymbol : Symbol
     std::vector<std::shared_ptr<Symbol>> arguments;
 
     EnumConstructionSymbol(std::string enumName, std::string variantName, unsigned tag,
-                           std::vector<std::shared_ptr<Symbol>> args, const SourceLocation loc = {})
-        : Symbol(SymbolKind::EnumConstruction, enumName + "::" + variantName, Type::voided(), loc),
+                           std::vector<std::shared_ptr<Symbol>> args, const SourceLocation loc = {},
+                           Type type = Type::voided())
+        : Symbol(SymbolKind::EnumConstruction, enumName + "::" + variantName, std::move(type), loc),
           enumName(std::move(enumName)), variantName(std::move(variantName)),
           variantTag(tag), arguments(std::move(args))
     {

@@ -168,6 +168,39 @@ std::shared_ptr<Symbol> Binder::bindBinaryExpression(const BinaryExpression& exp
         }
     }
 
+    // Each enum is its own type: only values of the same enum compare with ==/!= (by tag).
+    // Anything else (other enums, integers, ordering) goes through getValue().
+    const auto plainEnumOf = [this](const Type& type) -> std::shared_ptr<EnumSymbol>
+    {
+        if (type.kind != TypeKind::STRUCT) return nullptr;
+        const auto enumSym = _global_scope->lookupEnum(type.structName);
+        return enumSym && !enumSym->isGeneric() ? enumSym : nullptr;
+    };
+    const auto leftEnum = plainEnumOf(leftResolved);
+    const auto rightEnum = plainEnumOf(rightResolved);
+    bool isEnumEquality = false;
+    if (leftEnum || rightEnum)
+    {
+        const bool equality = expr.op == TokenType::EQUAL_EQUAL || expr.op == TokenType::BANG_EQUAL;
+        if (equality && leftEnum && leftEnum == rightEnum)
+        {
+            isEnumEquality = true;
+        }
+        else
+        {
+            const auto& shown = leftEnum ? leftEnum : rightEnum;
+            BINDER_ERROR(
+                DiagnosticCode::TYPE_MISMATCH,
+                "invalid types for binary expression: enum '" + shown->name + "' only supports == and != "
+                "with a value of the same enum; compare other values with getValue()"
+                "\n\tleft: " + left->type.toHumanString() +
+                "\n\tright: " + right->type.toHumanString(),
+                left,
+                location
+            );
+        }
+    }
+
     // Check if either side involves a generic type (including pointers to generics)
     auto involvesGeneric = [&isGenericParam](const Type& type) -> bool // TODO: VALID FUNCTION FOR TYPE GENERIC CHECK
     {
@@ -199,7 +232,7 @@ std::shared_ptr<Symbol> Binder::bindBinaryExpression(const BinaryExpression& exp
 
     // Type mismatch check (allow integer width differences - generator handles widening)
     // Skip for generic types (validated at monomorphization)
-    if (leftResolved != rightResolved && !hasGeneric && !hasOperatorOverride && !isPointerEquality)
+    if (leftResolved != rightResolved && !hasGeneric && !hasOperatorOverride && !isPointerEquality && !isEnumEquality)
     {
         const bool bothIntegers = leftResolved.kind == TypeKind::INTEGER && rightResolved.kind == TypeKind::INTEGER;
         const bool bothFloats =

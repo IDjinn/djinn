@@ -2,9 +2,9 @@ namespace djinnc;
 
 impl TypeChecker {
     u32 check_unary(Node* node, u32 expected) {
-        i32 op = node.op();
+        TokenKind op = node.op_kind();
 
-        if (op == TokenKind.AMPERSAND) {
+        if (op == TokenKind::AMPERSAND) {
             u32 addressed = this.check_lvalue(node.first());
             Node* operand = node.first();
             if (operand.symbol_kind() == SymbolKind.PROPERTY_GET || operand.symbol_kind() == SymbolKind.INDEX_GET) {
@@ -12,27 +12,27 @@ impl TypeChecker {
             }
             return Types.pointer_to(addressed);
         }
-        if (op == TokenKind.STAR) {
+        if (op == TokenKind::STAR) {
             return this.check_lvalue(node);
         }
 
         u32 operand = this.check_expression(node.first(), expected);
-        if (Types.is_struct(operand) && (op == TokenKind.MINUS || op == TokenKind.TILDE || op == TokenKind.BANG)) {
+        if (Types.is_struct(operand) && (op == TokenKind::MINUS || op == TokenKind::TILDE || op == TokenKind::BANG)) {
             return this.check_unary_operator(node, op, operand);
         }
-        if (op == TokenKind.MINUS) {
+        if (op == TokenKind::MINUS) {
             if (!Types.is_integer(operand) && !Types.is_float(operand)) {
                 this.error(node, "operator is not valid for this operand");
             }
             return operand;
         }
-        if (op == TokenKind.TILDE) {
+        if (op == TokenKind::TILDE) {
             if (!Types.is_integer(operand)) {
                 this.error(node, "operator is not valid for this operand");
             }
             return operand;
         }
-        if (op == TokenKind.BANG) {
+        if (op == TokenKind::BANG) {
             return Types.bool_type();
         }
 
@@ -41,21 +41,31 @@ impl TypeChecker {
     }
 
     bool is_untyped_literal(Node* node) {
-        if (node.kind == NodeKind.INT_LITERAL) {
+        if (node.kind() == NodeKind::INT_LITERAL) {
             return true;
         }
-        return node.kind == NodeKind.UNARY && node.op() == TokenKind.MINUS && node.first().kind == NodeKind.INT_LITERAL;
+        if (node.kind() != NodeKind::UNARY || node.op_kind() != TokenKind::MINUS) {
+            return false;
+        }
+        Node* operand = node.first();
+        return operand.kind() == NodeKind::INT_LITERAL;
     }
 
-    public static bool is_comparison(i32 op) {
-        return op == TokenKind.EQUAL_EQUAL || op == TokenKind.BANG_EQUAL || op == TokenKind.LESS
-            || op == TokenKind.LESS_EQUAL || op == TokenKind.GREATER || op == TokenKind.GREATER_EQUAL;
+    bool is_plain_enum(u32 type) {
+        SymbolTable* symbols = this.symbols;
+        StructInfo* enumeration = symbols.enum_of_type(type);
+        return enumeration != null && !enumeration.has_payload;
     }
 
-    FunctionInfo* find_operator(StructInfo* owner, i32 op) {
+    public static bool is_comparison(TokenKind op) {
+        return op == TokenKind::EQUAL_EQUAL || op == TokenKind::BANG_EQUAL || op == TokenKind::LESS
+            || op == TokenKind::LESS_EQUAL || op == TokenKind::GREATER || op == TokenKind::GREATER_EQUAL;
+    }
+
+    FunctionInfo* find_operator(StructInfo* owner, TokenKind op) {
         ByteBuffer* name = ByteBuffer.create();
         name.append("operator");
-        name.append(TokenKind.text(op));
+        name.append(TokenKinds.text(op));
         return this.find_operator_named(owner, name.cstr());
     }
 
@@ -64,7 +74,7 @@ impl TypeChecker {
         return symbols.find_method(owner, Ast.intern_base_name(name, (i32)strlen(name)));
     }
 
-    u32 check_unary_operator(Node* node, i32 op, u32 operand) {
+    u32 check_unary_operator(Node* node, TokenKind op, u32 operand) {
         SymbolTable* symbols = this.symbols;
         StructInfo* owner = symbols.struct_at(Types.struct_index(operand));
         mut FunctionInfo* walk = this.find_operator(owner, op);
@@ -135,13 +145,13 @@ impl TypeChecker {
         this.error(target, "struct does not define a matching operator set[]");
     }
 
-    u32 check_operator(Node* node, i32 op, u32 left, u32 right) {
+    u32 check_operator(Node* node, TokenKind op, u32 left, u32 right) {
         SymbolTable* symbols = this.symbols;
         StructInfo* owner = symbols.struct_at(Types.struct_index(left));
         mut FunctionInfo* method = this.find_operator(owner, op);
         mut i32 kind = SymbolKind.OPERATOR;
-        if (method == null && op == TokenKind.BANG_EQUAL) {
-            method = this.find_operator(owner, TokenKind.EQUAL_EQUAL);
+        if (method == null && op == TokenKind::BANG_EQUAL) {
+            method = this.find_operator(owner, TokenKind::EQUAL_EQUAL);
             kind = SymbolKind.NEGATED_OPERATOR;
         }
         if (method == null) {
@@ -168,8 +178,8 @@ impl TypeChecker {
     }
 
     u32 check_binary(Node* node, u32 expected) {
-        i32 op = node.op();
-        if (op == TokenKind.AND_AND || op == TokenKind.OR_OR) {
+        TokenKind op = node.op_kind();
+        if (op == TokenKind::AND_AND || op == TokenKind::OR_OR) {
             u32 first = this.check_expression(node.first(), 0);
             if (Types.is_struct(first)) {
                 u32 second = this.check_expression(node.second(), first);
@@ -181,7 +191,7 @@ impl TypeChecker {
             return Types.bool_type();
         }
 
-        if (op == TokenKind.QUESTION_QUESTION) {
+        if (op == TokenKind::QUESTION_QUESTION) {
             u32 pointer = this.check_expression(node.first(), expected);
             if (!Types.is_pointer(pointer)) {
                 this.error(node, "the left operand of ?? must be a pointer");
@@ -206,8 +216,16 @@ impl TypeChecker {
             right = this.check_expression(node.second(), left);
         }
 
-        if (Types.is_pointer(left) && Types.is_integer(right) && (op == TokenKind.PLUS || op == TokenKind.MINUS)) {
+        if (Types.is_pointer(left) && Types.is_integer(right) && (op == TokenKind::PLUS || op == TokenKind::MINUS)) {
             return left;
+        }
+
+        if (this.is_plain_enum(left) || this.is_plain_enum(right)) {
+            bool equality = op == TokenKind::EQUAL_EQUAL || op == TokenKind::BANG_EQUAL;
+            if (!equality || left != right) {
+                this.error(node, "an enum is its own type: it only supports == and != with a value of the same enum, compare other values with getValue()");
+            }
+            return Types.bool_type();
         }
 
         if (Types.is_struct(left)) {
@@ -219,8 +237,8 @@ impl TypeChecker {
             return Types.bool_type();
         }
         if (Types.is_float(common)) {
-            bool valid = op == TokenKind.PLUS || op == TokenKind.MINUS || op == TokenKind.STAR
-                || op == TokenKind.SLASH || op == TokenKind.PERCENT;
+            bool valid = op == TokenKind::PLUS || op == TokenKind::MINUS || op == TokenKind::STAR
+                || op == TokenKind::SLASH || op == TokenKind::PERCENT;
             if (!valid) {
                 this.error(node, "operator is not valid for floating point operands");
             }
@@ -235,7 +253,7 @@ impl TypeChecker {
         this.assign_target = target;
         u32 type = this.check_lvalue(target);
         this.assign_target = null;
-        if (target.kind == NodeKind.FIELD_ACCESS && target.symbol_kind() == SymbolKind.PROPERTY_GET) {
+        if (target.kind() == NodeKind::FIELD_ACCESS && target.symbol_kind() == SymbolKind.PROPERTY_GET) {
             FunctionInfo* getter = (FunctionInfo*)target.symbol();
             FunctionInfo* setter = this.find_accessor(getter.owner, "set:", target.text());
             if (setter == null) {
@@ -244,10 +262,10 @@ impl TypeChecker {
                 target.set_symbol(SymbolKind.PROPERTY_SET, (void*)setter);
             }
         }
-        if (target.kind == NodeKind.INDEX && target.symbol_kind() == SymbolKind.INDEX_GET) {
+        if (target.kind() == NodeKind::INDEX && target.symbol_kind() == SymbolKind.INDEX_GET) {
             this.bind_index_setter(target);
         }
-        if (target.kind == NodeKind.IDENTIFIER && target.symbol_kind() == SymbolKind.IMPLICIT_GET) {
+        if (target.kind() == NodeKind::IDENTIFIER && target.symbol_kind() == SymbolKind.IMPLICIT_GET) {
             FunctionInfo* implicit_setter = this.implicit_accessor(target, "set:");
             if (implicit_setter == null) {
                 this.error(target, "property has no setter");
@@ -255,17 +273,17 @@ impl TypeChecker {
                 target.set_symbol(SymbolKind.IMPLICIT_SET, (void*)implicit_setter);
             }
         }
-        if (target.kind == NodeKind.IDENTIFIER && (target.symbol_kind() == SymbolKind.LOCAL || target.symbol_kind() == SymbolKind.GLOBAL)) {
+        if (target.kind() == NodeKind::IDENTIFIER && (target.symbol_kind() == SymbolKind.LOCAL || target.symbol_kind() == SymbolKind.GLOBAL)) {
             LocalVariable* variable = (LocalVariable*)target.symbol();
             if (!variable.is_mutable) {
                 this.error(target, "cannot assign to an immutable variable");
             }
         }
         this.check_expression(node.second(), type);
-        if (target.kind == NodeKind.IDENTIFIER) {
+        if (target.kind() == NodeKind::IDENTIFIER) {
             this.move_from(node.second(), target);
         }
-        if (target.kind == NodeKind.IDENTIFIER && (target.symbol_kind() == SymbolKind.LOCAL || target.symbol_kind() == SymbolKind.GLOBAL)) {
+        if (target.kind() == NodeKind::IDENTIFIER && (target.symbol_kind() == SymbolKind.LOCAL || target.symbol_kind() == SymbolKind.GLOBAL)) {
             LocalVariable* reinitialized = (LocalVariable*)target.symbol();
             reinitialized.moved = false;
         }
@@ -277,10 +295,10 @@ impl TypeChecker {
     }
 
     void move_from(Node* source, Node* destination) {
-        if (source.kind != NodeKind.IDENTIFIER || source.symbol_kind() != SymbolKind.LOCAL) {
+        if (source.kind() != NodeKind::IDENTIFIER || source.symbol_kind() != SymbolKind.LOCAL) {
             return;
         }
-        if (destination != null && destination.kind == NodeKind.IDENTIFIER && destination.symbol() == source.symbol()) {
+        if (destination != null && destination.kind() == NodeKind::IDENTIFIER && destination.symbol() == source.symbol()) {
             return;
         }
         LocalVariable* variable = (LocalVariable*)source.symbol();

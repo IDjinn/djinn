@@ -263,10 +263,25 @@ impl TypeChecker {
 
         PointerList* constants = owner.constants;
         mut i32 covered = 0;
+        mut bool wildcard = false;
         mut u32 result = expected;
         LocalScopes* scopes = this.scopes;
         for (mut i32 i = 0; i < node.count(); i = i + 1) {
             Node* arm = node.child(i);
+            if (Strings.same(arm.text(), "_")) {
+                if (wildcard) {
+                    this.error(arm, "the wildcard arm appears more than once");
+                }
+                wildcard = true;
+                if (arm.count() != 0) {
+                    this.error(arm, "the wildcard arm cannot bind a value");
+                }
+                u32 wildcard_type = this.check_expression(arm.first(), result);
+                if (result == 0) {
+                    result = wildcard_type;
+                }
+                continue;
+            }
             Node* variant = symbols.find_constant(owner, arm.name());
             if (variant == null) {
                 this.error(arm, "enum has no such variant");
@@ -302,7 +317,7 @@ impl TypeChecker {
             }
             scopes.reset_to(mark);
         }
-        if (covered < constants.length) {
+        if (covered < constants.length && !wildcard) {
             this.error(node, "switch expression does not cover every variant");
         }
         if (result == 0) {

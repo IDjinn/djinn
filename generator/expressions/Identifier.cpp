@@ -4,7 +4,7 @@
 
 #include "../Generator.h"
 
-llvm::Value* Generator::generate_identifier(const Identifier& expr) const
+llvm::Value* Generator::generate_identifier(const Identifier& expr)
 {
     if (llvm::AllocaInst* alloca = currentScope->lookup_variable(expr.identifier.token_name))
     {
@@ -55,6 +55,20 @@ llvm::Value* Generator::generate_identifier(const Identifier& expr) const
     if (auto* gv = module->getGlobalVariable(expr.identifier.token_name, true))
     {
         return builder->CreateLoad(gv->getValueType(), gv, expr.identifier.token_name);
+    }
+
+    if (const auto colonPos = expr.identifier.token_name.rfind("::"); colonPos != std::string::npos)
+    {
+        const std::string enumName = currentScope->resolve_alias(expr.identifier.token_name.substr(0, colonPos));
+        const std::string variantName = expr.identifier.token_name.substr(colonPos + 2);
+        if (const EnumDef* enumDef = currentScope->lookup_enum(enumName); enumDef && !enumDef->isGeneric)
+        {
+            if (const EnumVariantDef* variant = enumDef->getVariant(variantName);
+                variant && variant->associatedTypes.empty())
+            {
+                return generate_enum_construction(*enumDef, *variant, {});
+            }
+        }
     }
 
     throw CompileError(DiagnosticCode::UNDEFINED_VARIABLE, "variável não encontrada: " + expr.identifier.token_name);
