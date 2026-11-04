@@ -601,7 +601,7 @@ Medição (Windows, stage2 compilando os 21 arquivos do djinnc, 37 mil tokens, 2
         `unsafe` quando a assinatura usa ponteiros.
       - Indexação segura é de `arr<T>` e dos tipos com bounds check (`get_unchecked` só em `unsafe`).
       - Async: manter ou usar `T*`/`ptr` vivo através de um suspend é erro de compilação até existir acesso atômico.
-      - Fases: (1) `unsafe` como contexto, `ptr<T>` e restrição de aritmética; (2) nicho de `optional<T*>` [feito no djinnc: união com duas variantes, uma vazia e outra com um único ponteiro, vira 8 bytes sem tag e `None` é o nulo; `T?` é açúcar para `optional<T>` (e `T*?` para `optional<T*>`, com nicho) resolvido pelo djinnc quando existe um `optional` genérico no escopo; falta a reflexão em tempo de execução de uniões nicho, que ainda lê a tag no offset 0]; (3) borrow checker.
+      - Fases: (1) `unsafe` como contexto, `ptr<T>` e restrição de aritmética; (2) nicho de `optional<T*>` [feito no djinnc: união com duas variantes, uma vazia e outra com um único ponteiro, vira 8 bytes sem tag e `None` é o nulo; `T?` é açúcar para `optional<T>` (e `T*?` para `optional<T*>`, com nicho) resolvido pelo djinnc quando existe um `optional` genérico no escopo; a reflexão de uniões nicho ainda descreve o layout com tag (valores e offsets de payload das variantes); nenhum leitor de valores em runtime existe hoje, mas o `EnumInfo` precisa de um marcador de nicho antes de haver um]; (3) borrow checker.
       O stage0 só parseia a sintaxe nova; o djinnc impõe as regras.
 - [ ] Aritmética de ponteiros definida na linguagem, só em `unsafe`: `p + n` em unidades do elemento, `p - q` entre ponteiros do
       mesmo tipo devolvendo `isize` (hoje não compila: "invalid types for binary expression"), `offset_of`/`align_of`.
