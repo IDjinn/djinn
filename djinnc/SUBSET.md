@@ -17,7 +17,7 @@ of them. A construct outside this list is forbidden in `djinnc/src` until the dj
 - `isize` (signed) and `usize` (for values that cannot be negative) are always 32 bits, on every target; `sizeof` has the type `isize`. `nint` is the integer with the width of the target pointer (`--target <triple>`, default the host), 16, 32 or 64 bits, and `ptr` is the address type.
 
 - `i8 i16 i32 i64 u8 u16 u32 u64 f64 bool void`
-- pointers: `T*` for struct pointers; raw pointers are `ptr` (opaque, the old `void*`) and `ptr<T>` (`ptr<u8>`, `ptr<ptr<i8>>`, the old `i8*`, `u8*`, `void**`). Both are plain pointers to stage0 and djinnc for now (no `unsafe` enforcement). `unsafe { ... }` blocks and the `unsafe` function modifier are parsed and ignored. No references, no optionals
+- pointers: `T*` for struct pointers; raw pointers are `ptr` (opaque, the old `void*`) and `ptr<T>` (`ptr<u8>`, `ptr<ptr<i8>>`, the old `i8*`, `u8*`, `void**`). Stage0 treats both as plain pointers and ignores `unsafe`. djinnc keeps `ptr`/`ptr<T>` as a distinct raw pointer type and requires an `unsafe { ... }` block or an `unsafe` function for: dereferencing, indexing or doing arithmetic on a raw pointer, casting an integer (other than the constant `0`) to a pointer, and casting a raw pointer to a typed pointer (`T*`). Casting `T*` to `ptr<T>` and a pointer to an integer stays safe. `T*` itself is not restricted yet. No references, no optionals
 - `sizeof(T)`, casts `(T)expr` between integers, floats and pointers
 - pointer arithmetic `p + n`, indexing `p[i]`, field access through pointer `p.field`
 

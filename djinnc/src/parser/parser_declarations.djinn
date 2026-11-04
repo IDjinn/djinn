@@ -55,7 +55,7 @@ impl Parser {
         return declaration;
     }
 
-    bool has_attribute(PointerList* found, ptr<i8> name) {
+    unsafe bool has_attribute(PointerList* found, ptr<i8> name) {
         for (mut i32 i = 0; i < found.length; i = i + 1) {
             AttributeUse* use = (AttributeUse*)found.get(i);
             if (Strings.same(use.name, name)) {
@@ -342,6 +342,7 @@ impl Parser {
     Node* parse_function(bool allowConstructor) {
         mut bool is_static = false;
         mut bool is_async = false;
+        mut bool is_unsafe = false;
         mut i32 compile_time = 0;
         while (this.check(TokenKind::PUBLIC) || this.check(TokenKind::PRIVATE) || this.check(TokenKind::STATIC) || this.check(TokenKind::ASYNC) || this.check(TokenKind::UNSAFE)
             || this.check(TokenKind::CONSTEXPR) || this.check(TokenKind::CONSTEVAL)) {
@@ -351,6 +352,9 @@ impl Parser {
             }
             if (this.kind_of(modifier) == TokenKind::ASYNC) {
                 is_async = true;
+            }
+            if (this.kind_of(modifier) == TokenKind::UNSAFE) {
+                is_unsafe = true;
             }
             if (this.kind_of(modifier) == TokenKind::CONSTEXPR) {
                 compile_time = 2;
@@ -368,10 +372,15 @@ impl Parser {
         i32 start = this.current();
         Node* function = Node.create_list(NodeKind::FUNCTION, start);
         function.set_flag(is_static);
+        mut i32 modifiers = compile_time;
         if (is_async) {
-            function.set_op(1);
-        } else if (compile_time != 0) {
-            function.set_op(compile_time);
+            modifiers = 1;
+        }
+        if (is_unsafe) {
+            modifiers = modifiers | 8;
+        }
+        if (modifiers != 0) {
+            function.set_op(modifiers);
         }
         function.set_type(this.parse_type());
         i32 name = this.expect(TokenKind::IDENTIFIER, "expected function name");
@@ -416,7 +425,7 @@ impl Parser {
             return function;
         }
 
-        function.set_first(this.parse_body(function.generics() == null && function.op() == 0));
+        function.set_first(this.parse_body(function.generics() == null && (function.op() & 7) == 0));
         return function;
     }
 
