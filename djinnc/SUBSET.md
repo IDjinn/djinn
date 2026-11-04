@@ -126,7 +126,7 @@ a sync `main` can still `await`. `yield` is not a coroutine yield (it is the swi
 ## Attributes
 `[Name]`, `[Name(16)]`, `[Name(key = "text")]` and `[A, B]` before functions, methods, structs, fields and parameters. The builtin names and
 targets are in `ast/attributes/attributes.djinn`: `ForceInline`, `NoInline`, `NoReturn`, `Hot`, `Cold`, `NoSync`, `NoUnwind`, `WillReturn`,
-`NoRecurse`, `InlineHint`, `OptSize`, `MinSize`, `NoFree`, `NoMerge`, `Speculatable` and `Llvm("attr")` become LLVM function attributes; `Const` and `Pure` become `memory(none)` and `memory(read)`. On parameters, `ReadOnly`, `WriteOnly`, `Restrict` (`noalias`), `NonNull`, `NoCapture` (`captures(none)`) and `Align(n)` become LLVM parameter attributes (the type must be a pointer). `Volatile`, `NoMangle`, `Reflect` and `Deprecated` are validated but have no LLVM effect. Only attributes that cannot introduce undefined behavior are implicit: every defined function is `nounwind` and `__djinn_malloc` returns `noalias`; everything else is opt-in, and a wrong promise is undefined behavior. `likely(cond)` and `unlikely(cond)` emit `llvm.expect`.
+`NoRecurse`, `InlineHint`, `OptSize`, `MinSize`, `NoFree`, `NoMerge`, `Speculatable` and `Llvm("attr")` become LLVM function attributes; `Const` and `Pure` become `memory(none)` and `memory(read)`. On parameters, `ReadOnly`, `WriteOnly`, `Restrict` (`noalias`), `NonNull`, `NoCapture` (`captures(none)`) and `Align(n)` become LLVM parameter attributes (the type must be a pointer). `Volatile`, `NoMangle` and `Deprecated` are validated but have no LLVM effect; `Reflect` (structs, enums, unions, interfaces) drives reflection, see below. Only attributes that cannot introduce undefined behavior are implicit: every defined function is `nounwind` and `__djinn_malloc` returns `noalias`; everything else is opt-in, and a wrong promise is undefined behavior. `likely(cond)` and `unlikely(cond)` emit `llvm.expect`.
 An unknown name is an error; a wrong target is a warning.
 
 `attribute Name(targets);` and `attribute Name(targets) { fields }` declare attributes (the targets expression is skipped, so declared
@@ -166,12 +166,27 @@ is written back into the AST node as a literal (`IntLiteral`, `BoolLiteral`, `Fl
 variables become literals too. Compile-time `if` keeps only the taken branch.
 
 ## Reflection
-`typeof(Type)` returns a `TypeInfo*` (`kind`: 0 signed int, 1 float, 2 pointer, 3 struct/enum/`object`, 4 unsigned int and `bool`, 5 `str`, 6 `string`; a string literal is `i8*`, so kind 2). Boxing to `object`
-and `is` use the same lazily generated constant. A struct marked `[Reflect]` (or every struct with `--reflect-all`; `--reflect-none` disables it,
-`--reflect-annotated` is the default) gets a `TypeInfoExt` global with `FieldInfo` (name, type id, offset, `mut` flag, attributes), `MethodInfo`
-(name, function pointer, return type id, parameter count, static/async flags, attributes) and `AttributeInfo` (values flattened to text), so
-`(TypeInfoExt*)typeof(T)` or `(TypeInfoExt*)obj.type` works. Nothing is generated for types that are neither boxed, `typeof`'d nor reflected.
-The core declares these structs too; `std` overrides them.
+`typeof(Type)` returns a `TypeInfo*` (`kind`: 0 signed int, 1 float, 2 pointer, 3 struct/`object`, 4 unsigned int and `bool`, 5 `str`, 6 `string`, 7 enum, 8 union,
+9 interface; a string literal is `i8*`, so kind 2). `flags` bit 0 says the value is the head of a `TypeInfoExt`. Boxing to `object` and `is` use the same lazily generated constant.
+Two more forms of `typeof` exist when the name is not a type: `typeof(function)` returns a `MethodInfo*` for a non-generic, non-overloaded function (always complete,
+whatever the reflection mode), and `typeof(Interface)` returns a `TypeInfo*` of kind 9 that is also a `TypeInfoExt`.
+
+A struct, enum, union or interface marked `[Reflect]` (or every struct, enum and union with `--reflect-all`; `--reflect-none` disables it, `--reflect-annotated` is the default)
+gets a `TypeInfoExt` global: `FieldInfo` (name, type id, offset, `mut` flag, attributes), `MethodInfo` (name, function pointer, return type id, parameter count, flags
+2 static / 4 async / 8 variadic / 16 extern, attributes, `ParamInfo` table with name, type id, flags and attributes), `AttributeInfo` (values flattened to text), the
+names of the implemented interfaces (`interfaces`, `interfaceCount`) and a `detail` pointer. `(TypeInfoExt*)typeof(T)` or `(TypeInfoExt*)obj.type` works; the
+`Reflection` struct of the core does the checking: `Reflection.ext(info)` (null when the type is not reflected), `Reflection.field`, `Reflection.method`,
+`Reflection.implements(ext, "Name")`.
+
+For an enum or union `detail` is an `EnumInfo`, reached through `Reflection.enumeration(info)`: `variants` (`VariantInfo`: name, tag `value`, `payloadCount`,
+`payloadTypeIds`, `payloadOffsets`) and, for an enum with header fields, `headers` (`HeaderInfo`: name, type id, byte `size`, `rowCount` and the per-variant `table`
+indexed by the tag, the same read-only table the compiler uses for `Kind::WHILE.name`). `Reflection.variant(info, tag)`, `Reflection.variant_named`, `Reflection.header(info, "name")`,
+`Reflection.header_integer(header, tag)` and `Reflection.header_text(header, tag)` read them; the first header (the flag) is the tag itself. Methods of enums and unions
+are listed in `methods`. An interface lists its fields and method signatures (null function pointers) in `fields` and `methods`; a struct, enum or union lists the interfaces it
+implements. `[Reflect]` is accepted on structs, enums, unions and interfaces; it is a warning (not silent) on a type alias, on a generic type that is never instantiated and
+under `--reflect-none`. The attributes of a generic instance are those of its template; attributes of the methods of an instance are not carried. Nothing is generated for types that
+are neither boxed, `typeof`'d nor reflected. The core declares these structs and `Reflection`; `std` overrides `TypeInfo`, `AttributeInfo`, `FieldInfo`, `ParamInfo`, `MethodInfo`
+and `TypeInfoExt` (the stage0 emits the same layout, so keep both in sync).
 
 ## Variadic parameters, stack arrays and coroutine primitives
 - `T... name` (last parameter) receives the extra arguments as `arr<T>`; for `object... name` each argument is boxed. In `std`, `...name`

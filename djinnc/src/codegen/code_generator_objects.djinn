@@ -17,18 +17,30 @@ impl CodeGenerator {
         return LLVMBuildCall2(this.builder, allocator_type, allocator, args, 1, "alloc");
     }
 
-    u64 type_hash(u32 type) {
-        SymbolTable* symbols = this.symbols;
-        ByteBuffer* name = ByteBuffer.create();
-        symbols.describe_type(type, name);
+    u64 name_hash(i8* text) {
         mut u64 hash = 2166136261;
-        for (mut i32 i = 0; i < name.length; i = i + 1) {
-            hash = ((hash ^ (u64)(u8)name.data[i]) * 16777619) & 4294967295;
+        for (mut i32 i = 0; text[i] != 0; i = i + 1) {
+            hash = ((hash ^ (u64)(u8)text[i]) * 16777619) & 4294967295;
         }
         return hash;
     }
 
+    u64 type_hash(u32 type) {
+        SymbolTable* symbols = this.symbols;
+        ByteBuffer* name = ByteBuffer.create();
+        symbols.describe_type(type, name);
+        return this.name_hash(name.cstr());
+    }
+
     i32 type_kind(u32 type) {
+        SymbolTable* kinds = this.symbols;
+        StructInfo* enumeration = kinds.enum_of_type(type);
+        if (enumeration != null) {
+            if (enumeration.has_payload) {
+                return 8;
+            }
+            return 7;
+        }
         if (Types.is_pointer(type)) {
             return 2;
         }
@@ -54,16 +66,21 @@ impl CodeGenerator {
         return 3;
     }
 
-    void* base_type_info(u32 type, i8* name) {
+    void* base_type_info(u32 type, i8* name, bool reflected) {
         u32 info_type = this.symbols_core_type("TypeInfo");
         void* info_llvm = this.llvm_type(info_type);
         void* i32_type = LLVMIntTypeInContext(this.context, 32);
-        void** values = CodeGenerator.array_of(4);
+        mut u64 flags = 0;
+        if (reflected) {
+            flags = 1;
+        }
+        void** values = CodeGenerator.array_of(5);
         values[0] = LLVMConstInt(i32_type, this.type_hash(type), 0);
         values[1] = LLVMConstInt(i32_type, LLVMABISizeOfType(this.layout_data, this.llvm_type(type)), 0);
         values[2] = LLVMBuildGlobalStringPtr(this.builder, name, "typeinfo.name");
         values[3] = LLVMConstInt(LLVMIntTypeInContext(this.context, 8), (u64)this.type_kind(type), 0);
-        return LLVMConstNamedStruct(info_llvm, values, 4);
+        values[4] = LLVMConstInt(LLVMIntTypeInContext(this.context, 8), flags, 0);
+        return LLVMConstNamedStruct(info_llvm, values, 5);
     }
 
     void* type_info_of(u32 type) {
@@ -77,8 +94,9 @@ impl CodeGenerator {
         if (existing != null) {
             return existing;
         }
-        mut void* initializer = this.base_type_info(type, name.cstr());
-        if (this.is_reflected(type)) {
+        bool reflected = this.is_reflected(type);
+        mut void* initializer = this.base_type_info(type, name.cstr(), reflected);
+        if (reflected) {
             initializer = this.extended_type_info(type, initializer);
         }
         void* global = LLVMAddGlobal(this.module, LLVMTypeOf(initializer), global_name.cstr());

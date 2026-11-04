@@ -114,7 +114,8 @@ constexpr i32 BUFFER = 64 * 1024;
 - **Intrinsics**: `sizeof`, `alignof`, `typeof`, `likely`, `unlikely`, `expect`
 - **Libraries**: `--lib` mode, `.djlib` binary format, project file (`djinn.proj`), cross-module generic dedup via
   `LinkOnceODR` + COMDAT
-- **RTTI / Reflection**: `TypeInfo` (16 B) cross-module, opt-in `TypeInfoExt` (fields, methods, attributes)
+- **RTTI / Reflection**: `TypeInfo` cross-module, opt-in `TypeInfoExt` (fields, methods, parameters, attributes,
+  implemented interfaces; enum/union variants and header tables; interface signatures; `typeof(function)`)
   via `[Reflect]` or `reflection-mode: all` — zero-cost when unused
 - **Tooling**: LSP server, `--inspect` library introspection, diagnostics with suggestions
 

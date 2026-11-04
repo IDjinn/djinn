@@ -230,7 +230,31 @@ impl TypeChecker {
             return Types.pointer_to(element);
         }
         if (id == Intrinsic.TYPEOF) {
-            u32 measured = this.resolve_type(node.type(), node);
+            TypeRef* reference = node.type();
+            SymbolTable* known = this.symbols;
+            known.blame = node;
+            mut u32 measured = known.resolve_type(reference, this.scope);
+            if (measured == 0 && reference.kind == TypeKind.NAMED && reference.args == null) {
+                InterfaceInfo* contract = known.find_interface(reference.full_atom, reference.name_atom, this.scope);
+                if (contract != null) {
+                    node.set_symbol(SymbolKind.INTERFACE_NAME, (void*)contract);
+                    return Types.pointer_to(this.core_type("TypeInfo"));
+                }
+                FunctionInfo* function = known.find_function(reference.full_atom, reference.name_atom, this.scope);
+                if (function != null) {
+                    if (function.is_template) {
+                        this.error(node, "typeof needs a concrete function: instantiate the generic function first");
+                    } else if (function.overload != null) {
+                        this.error(node, "typeof is ambiguous on an overloaded function");
+                    }
+                    node.set_symbol(SymbolKind.FUNCTION, (void*)function);
+                    return Types.pointer_to(this.core_type("MethodInfo"));
+                }
+            }
+            if (measured == 0) {
+                this.error(node, "unknown type");
+                measured = Types.i32_type();
+            }
             if (Types.is_void(measured) || measured == Types.auto_type()) {
                 this.error(node, "typeof needs a concrete type");
             }
