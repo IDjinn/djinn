@@ -1,5 +1,7 @@
 namespace djinnc;
 
+unsafe static mut void* active_generator = null;
+
 struct CodeGenerator {
     void* context;
 
@@ -23,6 +25,8 @@ struct CodeGenerator {
 
     bool library_mode;
 
+    i32 module_taken;
+
     public static CodeGenerator* create(Diagnostics* diagnostics, i8* module_name) {
         CodeGenerator* gen = (CodeGenerator*)Memory.zalloc(sizeof(CodeGenerator));
         gen.context = LLVMContextCreate();
@@ -34,7 +38,37 @@ struct CodeGenerator {
         gen.function_context = FunctionContext.create();
         gen.layout_data = LLVMCreateTargetData("e-p:64:64-i64:64-i128:128-f64:64-n8:16:32:64");
         LLVMSetTarget(gen.module, Target.triple());
+        active_generator = (void*)gen;
         return gen;
+    }
+
+    public void release_builders() {
+        if (this.debug != null) {
+            DebugInfo* debug = this.debug;
+            debug.release();
+            this.debug = (DebugInfo*)0;
+        }
+        if (this.builder != null) {
+            LLVMDisposeBuilder(this.builder);
+            LLVMDisposeBuilder(this.alloca_builder);
+            LLVMDisposeTargetData(this.layout_data);
+            this.builder = (void*)0;
+            this.alloca_builder = (void*)0;
+            this.layout_data = (void*)0;
+        }
+    }
+
+    public static void release() {
+        if (active_generator == null) {
+            return;
+        }
+        CodeGenerator* gen = (CodeGenerator*)active_generator;
+        active_generator = (void*)0;
+        gen.release_builders();
+        if (gen.module_taken == 0) {
+            LLVMDisposeModule(gen.module);
+            LLVMContextDispose(gen.context);
+        }
     }
 
     public void enable_debug(i8* first_file, bool optimized, bool dwarf) {
@@ -146,6 +180,9 @@ struct CodeGenerator {
         u32 type = node.value_type();
 
         if (kind == NodeKind.INT_LITERAL) {
+            if (type == Types.byte_pointer()) {
+                return Value.create(this.string_constant((i8*)node.int_value()), type);
+            }
             if (Types.is_float(type)) {
                 return Value.create(LLVMConstReal(this.llvm_type(type), (f64)node.int_value()), type);
             }
@@ -158,7 +195,7 @@ struct CodeGenerator {
             return Value.create(LLVMConstReal(this.llvm_type(type), ConstBits.to_float(node.int_value())), type);
         }
         if (kind == NodeKind.STRING_LITERAL) {
-            void* text = LLVMBuildGlobalStringPtr(this.builder, node.text(), "str");
+            void* text = this.string_constant(node.text());
             if (Types.is_struct(type)) {
                 return this.gen_text_value(node, text, type);
             }
