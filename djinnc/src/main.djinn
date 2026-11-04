@@ -49,21 +49,25 @@ i32 run_compiler() {
         diagnostics_list.push((void*)Diagnostics.create(path));
         total_bytes = total_bytes + length;
     }
-    ByteBuffer* core_path = ByteBuffer.create();
-    core_path.append(options.runtime_dir);
-    core_path.append("/core.djinn");
-    i8* core = Files.read_all(core_path.cstr());
-    if (core == null) {
-        logger_error(Log.get(), "djinnc: cannot read the core library '%s' (see --runtime-dir)", core_path.cstr());
+    PointerList* core_files = CoreLibrary.files(options);
+    if (core_files == null || core_files.length == 0) {
         return 1;
     }
     PointerList* dependencies = options.dependencies;
-    dependencies.push((void*)core_path.cstr());
-    i32 core_length = strlen(core);
-    Sources.add(core_path.cstr(), core, (u32)core_length);
-    diagnostics_list.push((void*)Diagnostics.create(core_path.cstr()));
-    total_bytes = total_bytes + core_length;
-    i32 source_count = inputs.length + 1;
+    for (mut i32 i = 0; i < core_files.length; i = i + 1) {
+        i8* core_path = (i8*)core_files.get(i);
+        i8* core = Files.read_all(core_path);
+        if (core == null) {
+            logger_error(Log.get(), "djinnc: cannot read the core library file '%s'", core_path);
+            return 1;
+        }
+        dependencies.push((void*)core_path);
+        i32 core_length = strlen(core);
+        Sources.add(core_path, core, (u32)core_length);
+        diagnostics_list.push((void*)Diagnostics.create(core_path));
+        total_bytes = total_bytes + core_length;
+    }
+    i32 source_count = inputs.length + core_files.length;
 
     if (options.library_view) {
         options.library = true;
@@ -141,6 +145,8 @@ i32 run_compiler() {
 
     CodeGenerator* gen = CodeGenerator.create(diagnostics, options.input);
     gen.reflect_mode = options.reflect_mode;
+    SymbolTable* inspect_symbols = gen.symbols;
+    inspect_symbols.generate_disabled = options.no_generate;
     gen.library_mode = options.library;
     if (options.debug) {
         gen.enable_debug((i8*)inputs.get(0), options.optimize, options.emit_asm || options.emit_ir);

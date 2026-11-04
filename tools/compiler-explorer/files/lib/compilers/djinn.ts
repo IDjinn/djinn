@@ -32,8 +32,7 @@ export class DjinnCompiler extends BaseCompiler {
             return super.processAsm(result, filters, options);
         }
         const lines = String(result.asm ?? '')
-            .split('
-')
+            .split(/\r?\n/)
             .map((text: string) => ({text, source: null}));
         return {asm: lines};
     }

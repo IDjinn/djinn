@@ -70,14 +70,15 @@ llvm::GlobalVariable* Generator::get_or_create_typeinfo(const std::string& typeN
     // Compute kind
     const uint8_t kind = compute_type_kind(llvmType, typeName);
 
-    // Create constant struct: { i32 id, i32 size, i8* name, u8 kind }
+    // Create constant struct: { i32 id, i32 size, i8* name, u8 kind, u8 flags }
     auto* constStruct = llvm::ConstantStruct::get(
         typeInfoDef->llvmType,
         {
             builder->getInt32(static_cast<uint32_t>(id)),
             builder->getInt32(static_cast<uint32_t>(size)),
             nameStr,
-            builder->getInt8(kind)
+            builder->getInt8(kind),
+            builder->getInt8(0)
         }
     );
 
@@ -398,7 +399,9 @@ void Generator::generate_reflection_data()
                                                              builder->getInt8(paramCount),
                                                              builder->getInt8(flags),
                                                              builder->getInt8(mAttrCount),
-                                                             mAttrsPtr
+                                                             mAttrsPtr,
+                                                             llvm::ConstantPointerNull::get(
+                                                                 llvm::PointerType::get(*context, 0))
                                                          });
             methodConstants.push_back(methodConst);
         }
@@ -429,7 +432,15 @@ void Generator::generate_reflection_data()
 
         // Create TypeInfo base
         auto* typeInfoGlobal = get_or_create_typeinfo(structSym.name, def->llvmType);
-        auto* typeInfoConst = typeInfoGlobal->getInitializer();
+        auto* baseInit = llvm::cast<llvm::ConstantStruct>(typeInfoGlobal->getInitializer());
+        auto* typeInfoConst = llvm::ConstantStruct::get(typeInfoType->llvmType, {
+                                                            baseInit->getOperand(0),
+                                                            baseInit->getOperand(1),
+                                                            baseInit->getOperand(2),
+                                                            baseInit->getOperand(3),
+                                                            builder->getInt8(1)
+                                                        });
+        auto* nullPointer = llvm::ConstantPointerNull::get(llvm::PointerType::get(*context, 0));
 
         // Create TypeInfoExt constant
         auto* extConst = llvm::ConstantStruct::get(typeInfoExtType->llvmType, {
@@ -441,7 +452,10 @@ void Generator::generate_reflection_data()
                                                        builder->getInt8(structAttrCount),
                                                        fieldsPtr,
                                                        methodsPtr,
-                                                       structAttrsPtr
+                                                       structAttrsPtr,
+                                                       nullPointer,
+                                                       nullPointer,
+                                                       llvm::ConstantInt::get(llvm::Type::getInt16Ty(*context), 0)
                                                    });
 
         const std::string extName = "__typeinfo_ext_" + structSym.name;

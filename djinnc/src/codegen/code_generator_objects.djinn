@@ -17,57 +17,78 @@ impl CodeGenerator {
         return LLVMBuildCall2(this.builder, allocator_type, allocator, args, 1, "alloc");
     }
 
-    u64 type_hash(u32 type) {
-        SymbolTable* symbols = this.symbols;
-        ByteBuffer* name = ByteBuffer.create();
-        symbols.describe_type(type, name);
+    u64 name_hash(i8* text) {
         mut u64 hash = 2166136261;
-        for (mut i32 i = 0; i < name.length; i = i + 1) {
-            hash = ((hash ^ (u64)(u8)name.data[i]) * 16777619) & 4294967295;
+        for (mut i32 i = 0; text[i] != 0; i = i + 1) {
+            hash = ((hash ^ (u64)(u8)text[i]) * 16777619) & 4294967295;
         }
         return hash;
     }
 
+    u64 type_hash(u32 type) {
+        SymbolTable* symbols = this.symbols;
+        ByteBuffer* name = ByteBuffer.create();
+        symbols.describe_type(type, name);
+        return this.name_hash(name.cstr());
+    }
+
     i32 type_kind(u32 type) {
+        SymbolTable* kinds = this.symbols;
+        StructInfo* enumeration = kinds.enum_of_type(type);
+        if (enumeration != null) {
+            if (enumeration.has_payload) {
+                return ReflectionKind.UNION;
+            }
+            return ReflectionKind.ENUM;
+        }
         if (Types.is_pointer(type)) {
-            return 2;
+            return ReflectionKind.POINTER;
         }
         if (Types.is_float(type)) {
-            return 1;
+            return ReflectionKind.FLOAT;
         }
         if (Types.is_integer(type)) {
             if (Types.is_signed(type)) {
-                return 0;
+                return ReflectionKind.SIGNED;
             }
-            return 4;
+            return ReflectionKind.UNSIGNED;
         }
         if (Types.is_struct(type)) {
             SymbolTable* symbols = this.symbols;
             StructInfo* info = symbols.struct_at(Types.struct_index(type));
             if (Strings.same(info.name, "str")) {
-                return 5;
+                return ReflectionKind.STR;
             }
             if (Strings.same(info.name, "string")) {
-                return 6;
+                return ReflectionKind.STRING;
             }
         }
-        return 3;
+        return ReflectionKind.STRUCT;
     }
 
-    void* base_type_info(u32 type, i8* name) {
+    void* base_type_info(u32 type, i8* name, bool reflected) {
         u32 info_type = this.symbols_core_type("TypeInfo");
         void* info_llvm = this.llvm_type(info_type);
         void* i32_type = LLVMIntTypeInContext(this.context, 32);
-        void** values = CodeGenerator.array_of(4);
+        mut u64 flags = 0;
+        if (reflected) {
+            flags = (u64)ReflectionKind.TYPE_REFLECTED;
+        }
+        void** values = CodeGenerator.array_of(5);
         values[0] = LLVMConstInt(i32_type, this.type_hash(type), 0);
         values[1] = LLVMConstInt(i32_type, LLVMABISizeOfType(this.layout_data, this.llvm_type(type)), 0);
         values[2] = LLVMBuildGlobalStringPtr(this.builder, name, "typeinfo.name");
         values[3] = LLVMConstInt(LLVMIntTypeInContext(this.context, 8), (u64)this.type_kind(type), 0);
-        return LLVMConstNamedStruct(info_llvm, values, 4);
+        values[4] = LLVMConstInt(LLVMIntTypeInContext(this.context, 8), flags, 0);
+        return LLVMConstNamedStruct(info_llvm, values, 5);
     }
 
     void* type_info_of(u32 type) {
         SymbolTable* symbols = this.symbols;
+        StructInfo* declared = this.reflectable_info(type);
+        if (declared != null && declared.type_info != null) {
+            return declared.type_info;
+        }
         ByteBuffer* name = ByteBuffer.create();
         symbols.describe_type(type, name);
         ByteBuffer* global_name = ByteBuffer.create();
@@ -75,17 +96,70 @@ impl CodeGenerator {
         global_name.append(name.cstr());
         void* existing = LLVMGetNamedGlobal(this.module, global_name.cstr());
         if (existing != null) {
+            if (declared != null) {
+                declared.type_info = existing;
+            }
             return existing;
         }
-        mut void* initializer = this.base_type_info(type, name.cstr());
-        if (this.is_reflected(type)) {
+        bool reflected = this.is_reflected(type);
+        mut void* initializer = this.base_type_info(type, name.cstr(), reflected);
+        if (reflected) {
             initializer = this.extended_type_info(type, initializer);
         }
         void* global = LLVMAddGlobal(this.module, LLVMTypeOf(initializer), global_name.cstr());
         LLVMSetInitializer(global, initializer);
         LLVMSetGlobalConstant(global, 1);
         this.make_linkonce(global, global_name.cstr());
+        if (declared != null) {
+            declared.type_info = global;
+        }
         return global;
+    }
+
+    FunctionInfo* formatter_of(u32 type) {
+        if (!Types.is_struct(type)) {
+            return null;
+        }
+        StructInfo* owner = this.struct_of(type);
+        if (owner.contracts == null) {
+            return null;
+        }
+        PointerList* contracts = owner.contracts;
+        mut bool formattable = false;
+        for (mut i32 i = 0; i < contracts.length; i = i + 1) {
+            InterfaceInfo* contract = (InterfaceInfo*)contracts.get(i);
+            if (Strings.same(contract.name, "IFormatable")) {
+                formattable = true;
+            }
+        }
+        if (!formattable) {
+            return null;
+        }
+        SymbolTable* symbols = this.symbols;
+        FunctionInfo* method = symbols.find_method(owner, Ast.intern_base_name("format", 6));
+        if (method == null || method.return_type != this.symbols_core_type("string")) {
+            return null;
+        }
+        return method;
+    }
+
+    Value* format_for_boxing(Value* source) {
+        FunctionInfo* formatter = this.formatter_of(source.type);
+        if (formatter == null) {
+            return source;
+        }
+        void* receiver = this.create_slot(source.type, "format.receiver");
+        LLVMBuildStore(this.builder, source.ref, receiver);
+        void** args = CodeGenerator.array_of(1);
+        args[0] = receiver;
+        void* text = LLVMBuildCall2(this.builder, formatter.function_type, formatter.function, args, 1, "format");
+        SymbolTable* symbols = this.symbols;
+        StructInfo* helper = symbols.find_core_struct(Ast.intern_base_name("Reflection", 10));
+        FunctionInfo* terminate = symbols.find_method(helper, Ast.intern_base_name("terminated", 10));
+        void** terminate_args = CodeGenerator.array_of(1);
+        terminate_args[0] = text;
+        void* cstring = LLVMBuildCall2(this.builder, terminate.function_type, terminate.function, terminate_args, 1, "format.text");
+        return Value.create(cstring, terminate.return_type);
     }
 
     void* box_value(Value* source) {

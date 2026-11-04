@@ -1,7 +1,7 @@
 # Roadmap: std em Djinn compilada pelo djinnc
 
 Objetivo: o djinnc compila `std/` por inteiro (hoje 3,9 mil linhas, sem exceções) e a std continua **opcional**: sem
-`--std` / `libs: ['std']` só o core da linguagem (`runtime/core.djinn`) entra na build. A std é a base do framework
+`--std` / `libs: ['std']` só o core da linguagem (`runtime/core/`) entra na build. A std é a base do framework
 futuro, então as mesmas fontes servem ao stage0 e ao djinnc.
 
 ## Como a std entra na build
@@ -9,7 +9,7 @@ futuro, então as mesmas fontes servem ao stage0 e ao djinnc.
 - `--std` (ou `libs: ['std']` no `djinn.proj`) adiciona os `.djinn` de `std/`; `--std-dir <dir>` / `DJINN_STD_DIR` escolhe a pasta (padrão: `<runtime-dir>/../std`).
 - `import a::b;` torna os nomes do namespace `a::b` visíveis no namespace declarado no mesmo arquivo. Dentro da std todos os namespaces `std*` enxergam uns aos outros (prelúdio), como no stage0.
 - `struct size : u32;` (base primitiva ou ponteiro, sem corpo) é um alias de tipo.
-- Quando a std declara `str`, `string`, `arr`, `TypeInfo` ou `object`, as declarações iguais de `core.djinn` (e seus `impl`) são descartadas e os ganchos do compilador (interpolação, literais, boxing) usam as da std (`std::types`). Sem std, o core continua com as suas.
+- Quando a std declara `str`, `string`, `arr`, `TypeInfo` ou `object`, as declarações iguais de `runtime/core/` (e seus `impl`) são descartadas e os ganchos do compilador (interpolação, literais, boxing) usam as da std (`std::types`). Sem std, o core continua com as suas.
 - `Debug.assert(cond, msg)` mínimo vive no core até `[Location]` existir.
 
 ## Arquivos da std

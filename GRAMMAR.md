@@ -68,7 +68,10 @@ setter               = "set" ( ";" | "=>" expression ";" | block ) ;
 method               = [ modifiers ] type IDENTIFIER [ generic_params ] "(" [ param_list ] ")" ( ";" | "=>" expression ";" | block ) ;
 
 modifiers            = { "public" | "private" | "static" } ;
-attributes           = { "[" IDENTIFIER [ "(" attr_args ")" ] "]" } ;
+attributes           = { "[" IDENTIFIER [ "(" attr_args ")" ] "]" } ;   (* [Reflect] is valid on struct, enum, union and interface *)
+member_query         = type_name "#" ( "fields" | "methods" | "properties" | "attributes" | "constructors" | "interfaces" ) ;
+inspect_decl         = "$" "inspect" qualified_name "{" { "generate" "{" { member } "}" } "}" ;
+typeof_expr          = "typeof" "(" ( type | function_name | interface_name ) ")" ;   (* type -> TypeInfo*, function -> MethodInfo*, interface -> TypeInfo* *)
 attr_args            = attr_arg { "," attr_arg } ;
 attr_arg             = [ IDENTIFIER "=" ] ( INTEGER_LITERAL | FLOAT_LITERAL | STRING_LITERAL | "true" | "false" | qualified_name ) ;
 ```

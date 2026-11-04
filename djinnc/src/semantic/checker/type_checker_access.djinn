@@ -229,8 +229,54 @@ impl TypeChecker {
             this.check_expression(node.first(), Types.i64_type());
             return Types.pointer_to(element);
         }
+        if (id >= Intrinsic.FIELDS && id <= Intrinsic.INTERFACES) {
+            SymbolTable* queried = this.symbols;
+            queried.blame = node;
+            u32 subject = queried.resolve_type(node.type(), this.scope);
+            mut StructInfo* owner = (StructInfo*)0;
+            if (subject != 0) {
+                owner = queried.enum_of_type(subject);
+                if (owner == null && Types.is_struct(subject)) {
+                    owner = queried.struct_at(Types.struct_index(subject));
+                }
+            }
+            if (owner == null || owner.is_primitive || owner.is_template) {
+                this.error(node, "a reflection query needs a concrete struct, enum or union");
+                return Types.i32_type();
+            }
+            node.set_symbol(SymbolKind.TYPE, (void*)(u64)subject);
+            if (id == Intrinsic.FIELDS) { return this.core_type("FieldList"); }
+            if (id == Intrinsic.METHODS || id == Intrinsic.CONSTRUCTORS) { return this.core_type("MethodList"); }
+            if (id == Intrinsic.PROPERTIES) { return this.core_type("PropertyList"); }
+            if (id == Intrinsic.ATTRIBUTES) { return this.core_type("AttributeList"); }
+            return this.core_type("NameList");
+        }
         if (id == Intrinsic.TYPEOF) {
-            u32 measured = this.resolve_type(node.type(), node);
+            TypeRef* reference = node.type();
+            SymbolTable* known = this.symbols;
+            known.blame = node;
+            mut u32 measured = known.resolve_type(reference, this.scope);
+            if (measured == 0 && reference.kind == TypeKind.NAMED && reference.args == null) {
+                InterfaceInfo* contract = known.find_interface(reference.full_atom, reference.name_atom, this.scope);
+                if (contract != null) {
+                    node.set_symbol(SymbolKind.INTERFACE_NAME, (void*)contract);
+                    return Types.pointer_to(this.core_type("TypeInfo"));
+                }
+                FunctionInfo* function = known.find_function(reference.full_atom, reference.name_atom, this.scope);
+                if (function != null) {
+                    if (function.is_template) {
+                        this.error(node, "typeof needs a concrete function: instantiate the generic function first");
+                    } else if (function.overload != null) {
+                        this.error(node, "typeof is ambiguous on an overloaded function");
+                    }
+                    node.set_symbol(SymbolKind.FUNCTION, (void*)function);
+                    return Types.pointer_to(this.core_type("MethodInfo"));
+                }
+            }
+            if (measured == 0) {
+                this.error(node, "unknown type");
+                measured = Types.i32_type();
+            }
             if (Types.is_void(measured) || measured == Types.auto_type()) {
                 this.error(node, "typeof needs a concrete type");
             }

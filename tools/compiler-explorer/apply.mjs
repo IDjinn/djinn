@@ -50,4 +50,16 @@ patch(
 patch('types/languages.interfaces.ts', "'djinn'", "    | 'zig';", "    | 'djinn'\n");
 patch('lib/compilers/_all.ts', 'DjinnCompiler', "export {ZigCompiler}", "export {DjinnCompiler} from './djinn.js';\n");
 patch('static/modes/_all.ts', 'djinn-mode', "import './zig-mode';", "import './djinn-mode';\n");
+const astView = path.join(ceDir, 'static/panes/ast-view.ts');
+const astText = fs.readFileSync(astView, 'utf8');
+const astAnchor = "const lang = compiler.lang === 'c++' ? 'clang-ast' : compiler.lang;";
+if (astText.includes(astAnchor)) {
+    fs.writeFileSync(
+        astView,
+        astText.replace(
+            astAnchor,
+            "const lang = compiler.lang === 'c++' ? 'clang-ast' : compiler.lang === 'djinn' ? 'plaintext' : compiler.lang;",
+        ),
+    );
+}
 console.log('compiler explorer patched for djinn');

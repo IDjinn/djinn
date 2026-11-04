@@ -1,22 +1,38 @@
 namespace djinnc;
 
 impl CodeGenerator {
-    bool is_reflected(u32 type) {
-        if (this.reflect_mode == 2 || !Types.is_struct(type)) {
-            return false;
-        }
+    StructInfo* reflectable_info(u32 type) {
         SymbolTable* symbols = this.symbols;
-        if (symbols.enum_of_type(type) != null) {
+        StructInfo* named = symbols.enum_of_type(type);
+        if (named != null) {
+            return named;
+        }
+        if (!Types.is_struct(type)) {
+            return null;
+        }
+        return symbols.struct_at(Types.struct_index(type));
+    }
+
+    Node* reflection_node(StructInfo* info) {
+        if (info.origin != null) {
+            StructInfo* origin = info.origin;
+            return origin.node;
+        }
+        return info.node;
+    }
+
+    bool is_reflected(u32 type) {
+        if (this.reflect_mode == ReflectionMode.NONE) {
             return false;
         }
-        StructInfo* info = symbols.struct_at(Types.struct_index(type));
-        if (info.is_template || info.is_primitive || info.node == null) {
+        StructInfo* info = this.reflectable_info(type);
+        if (info == null || info.is_template || info.is_primitive || info.node == null) {
             return false;
         }
-        if (this.reflect_mode == 1) {
+        if (this.reflect_mode == ReflectionMode.ALL) {
             return true;
         }
-        return Attributes.has(info.node, "Reflect");
+        return Attributes.has(this.reflection_node(info), "Reflect");
     }
 
     void* null_pointer() {
@@ -30,6 +46,14 @@ impl CodeGenerator {
         LLVMSetGlobalConstant(global, 1);
         LLVMSetLinkage(global, LlvmConst.LINKAGE_INTERNAL);
         return global;
+    }
+
+    i8* table_name(i8* prefix, i8* middle, i8* suffix) {
+        ByteBuffer* name = ByteBuffer.create();
+        name.append(prefix);
+        name.append(middle);
+        name.append(suffix);
+        return name.cstr();
     }
 
     i8* attribute_text(AttributeUse* use) {
@@ -63,7 +87,7 @@ impl CodeGenerator {
     }
 
     Node* field_declaration(StructInfo* info, FieldInfo* field) {
-        Node* declaration = info.node;
+        Node* declaration = this.reflection_node(info);
         for (mut i32 i = 0; i < declaration.count(); i = i + 1) {
             Node* member = declaration.child(i);
             if (member.kind() == NodeKind::FIELD_DECL && member.first() == null && member.name() == field.name_atom) {
@@ -93,16 +117,11 @@ impl CodeGenerator {
             mut void* attributes = this.null_pointer();
             if (declaration != null) {
                 if (declaration.flag()) {
-                    flags = 1;
+                    flags = (u64)ReflectionKind.FIELD_MUTABLE;
                 }
                 PointerList* uses = Attributes.of(declaration);
                 attribute_count = uses.length;
-                ByteBuffer* table_name = ByteBuffer.create();
-                table_name.append(prefix);
-                table_name.append(".");
-                table_name.append(field.name);
-                table_name.append(".attrs");
-                attributes = this.attribute_table(declaration, table_name.cstr());
+                attributes = this.attribute_table(declaration, this.table_name(prefix, field.name, ".attrs"));
             }
             void** values = CodeGenerator.array_of(6);
             values[0] = LLVMBuildGlobalStringPtr(this.builder, field.name, "field.name");
@@ -113,10 +132,80 @@ impl CodeGenerator {
             values[5] = attributes;
             entries[i] = LLVMConstNamedStruct(field_llvm, values, 6);
         }
-        ByteBuffer* table_name = ByteBuffer.create();
-        table_name.append(prefix);
-        table_name.append(".fields");
-        return this.constant_array(field_llvm, entries, fields.length, table_name.cstr());
+        return this.constant_array(field_llvm, entries, fields.length, this.table_name(prefix, "", ".fields"));
+    }
+
+    void* param_table(Node* declaration, IdList* types, i32 offset, i8* prefix) {
+        i32 count = declaration.count();
+        if (count == 0) {
+            return this.null_pointer();
+        }
+        void* param_llvm = this.llvm_type(this.symbols_core_type("ParamInfo"));
+        void* i32_type = LLVMIntTypeInContext(this.context, 32);
+        void* i8_type = LLVMIntTypeInContext(this.context, 8);
+        void** entries = CodeGenerator.array_of(count);
+        for (mut i32 p = 0; p < count; p = p + 1) {
+            Node* parameter = declaration.child(p);
+            mut u32 type = parameter.value_type();
+            if (types != null) {
+                type = types.get(p + offset);
+            }
+            mut u64 flags = 0;
+            if (parameter.op() == 2) {
+                flags = (u64)ReflectionKind.PARAM_PACK;
+            }
+            PointerList* uses = Attributes.of(parameter);
+            void** values = CodeGenerator.array_of(5);
+            values[0] = LLVMBuildGlobalStringPtr(this.builder, parameter.text(), "param.name");
+            values[1] = LLVMConstInt(i32_type, this.type_hash(type), 0);
+            values[2] = LLVMConstInt(i8_type, flags, 0);
+            values[3] = LLVMConstInt(i8_type, (u64)uses.length, 0);
+            values[4] = this.attribute_table(parameter, this.table_name(prefix, ".param.", parameter.text()));
+            entries[p] = LLVMConstNamedStruct(param_llvm, values, 5);
+        }
+        return this.constant_array(param_llvm, entries, count, this.table_name(prefix, "", ".params"));
+    }
+
+    void* method_entry(i8* name, void* pointer, u32 return_type, Node* declaration, IdList* types, i32 offset, u64 flags, i8* prefix) {
+        void* method_llvm = this.llvm_type(this.symbols_core_type("MethodInfo"));
+        void* i32_type = LLVMIntTypeInContext(this.context, 32);
+        void* i8_type = LLVMIntTypeInContext(this.context, 8);
+        PointerList* uses = Attributes.of(declaration);
+        void** values = CodeGenerator.array_of(8);
+        values[0] = LLVMBuildGlobalStringPtr(this.builder, name, "method.name");
+        values[1] = pointer;
+        values[2] = LLVMConstInt(i32_type, this.type_hash(return_type), 0);
+        values[3] = LLVMConstInt(i8_type, (u64)declaration.count(), 0);
+        values[4] = LLVMConstInt(i8_type, flags, 0);
+        values[5] = LLVMConstInt(i8_type, (u64)uses.length, 0);
+        values[6] = this.attribute_table(declaration, this.table_name(prefix, "", ".attrs"));
+        values[7] = this.param_table(declaration, types, offset, prefix);
+        return LLVMConstNamedStruct(method_llvm, values, 8);
+    }
+
+    void* function_entry(FunctionInfo* function, i8* prefix) {
+        IdList* types = function.param_types;
+        mut i32 offset = 0;
+        mut u64 flags = 0;
+        if (function.is_instance) {
+            offset = 1;
+        } else {
+            flags = flags | (u64)ReflectionKind.METHOD_STATIC;
+        }
+        if (function.is_async) {
+            flags = flags | (u64)ReflectionKind.METHOD_ASYNC;
+        }
+        if (function.is_variadic) {
+            flags = flags | (u64)ReflectionKind.METHOD_VARIADIC;
+        }
+        if (function.is_extern) {
+            flags = flags | (u64)ReflectionKind.METHOD_EXTERN;
+        }
+        mut void* pointer = this.null_pointer();
+        if (function.function != null) {
+            pointer = function.function;
+        }
+        return this.method_entry(function.name, pointer, function.return_type, function.node, types, offset, flags, prefix);
     }
 
     bool is_reflected_method(FunctionInfo* method, StructInfo* info) {
@@ -126,13 +215,18 @@ impl CodeGenerator {
         return method.name[0] != 46;
     }
 
-    void* method_table(StructInfo* info, i8* prefix, i32* count) {
+    i32 member_kind(FunctionInfo* method) {
+        Node* declaration = method.node;
+        return MemberKinds.classify(declaration.text());
+    }
+
+    void* method_table(StructInfo* info, i8* prefix, i32* count, i32 want) {
         SymbolTable* symbols = this.symbols;
         PointerList* functions = symbols.functions;
         mut i32 total = 0;
         for (mut i32 i = 0; i < functions.length; i = i + 1) {
             FunctionInfo* method = (FunctionInfo*)functions.get(i);
-            if (this.is_reflected_method(method, info)) {
+            if (this.is_reflected_method(method, info) && (want == MemberKinds.ANY || this.member_kind(method) == want)) {
                 total = total + 1;
             }
         }
@@ -140,58 +234,162 @@ impl CodeGenerator {
         if (total == 0) {
             return this.null_pointer();
         }
-        u32 method_info_type = this.symbols_core_type("MethodInfo");
-        void* method_llvm = this.llvm_type(method_info_type);
-        void* i32_type = LLVMIntTypeInContext(this.context, 32);
-        void* i8_type = LLVMIntTypeInContext(this.context, 8);
+        void* method_llvm = this.llvm_type(this.symbols_core_type("MethodInfo"));
         void** entries = CodeGenerator.array_of(total);
         mut i32 next = 0;
         for (mut i32 i = 0; i < functions.length; i = i + 1) {
             FunctionInfo* method = (FunctionInfo*)functions.get(i);
-            if (!this.is_reflected_method(method, info)) {
+            if (!this.is_reflected_method(method, info) || (want != MemberKinds.ANY && this.member_kind(method) != want)) {
                 continue;
             }
-            IdList* params = method.param_types;
-            mut i32 parameter_count = params.length;
-            mut u64 flags = 0;
-            if (method.is_instance) {
-                parameter_count = parameter_count - 1;
-            } else {
-                flags = flags | 2;
-            }
-            if (method.is_async) {
-                flags = flags | 4;
-            }
-            ByteBuffer* table_name = ByteBuffer.create();
-            table_name.append(prefix);
-            table_name.append(".");
-            table_name.append(method.name);
-            table_name.append(".attrs");
-            PointerList* uses = Attributes.of(method.node);
-            mut void* pointer = this.null_pointer();
-            if (method.function != null) {
-                pointer = method.function;
-            }
-            void** values = CodeGenerator.array_of(7);
-            values[0] = LLVMBuildGlobalStringPtr(this.builder, method.name, "method.name");
-            values[1] = pointer;
-            values[2] = LLVMConstInt(i32_type, this.type_hash(method.return_type), 0);
-            values[3] = LLVMConstInt(i8_type, (u64)parameter_count, 0);
-            values[4] = LLVMConstInt(i8_type, flags, 0);
-            values[5] = LLVMConstInt(i8_type, (u64)uses.length, 0);
-            values[6] = this.attribute_table(method.node, table_name.cstr());
-            entries[next] = LLVMConstNamedStruct(method_llvm, values, 7);
+            entries[next] = this.function_entry(method, this.table_name(prefix, ".", method.name));
             next = next + 1;
         }
-        ByteBuffer* table_name = ByteBuffer.create();
-        table_name.append(prefix);
-        table_name.append(".methods");
-        return this.constant_array(method_llvm, entries, total, table_name.cstr());
+        return this.constant_array(method_llvm, entries, total, this.table_name(prefix, "", ".methods"));
+    }
+
+    void* interface_table(StructInfo* info, i8* prefix, i32* count) {
+        count[0] = 0;
+        if (info.contracts == null) {
+            return this.null_pointer();
+        }
+        PointerList* contracts = info.contracts;
+        count[0] = contracts.length;
+        void* pointer_llvm = LLVMPointerTypeInContext(this.context, 0);
+        void** entries = CodeGenerator.array_of(contracts.length);
+        for (mut i32 i = 0; i < contracts.length; i = i + 1) {
+            InterfaceInfo* contract = (InterfaceInfo*)contracts.get(i);
+            entries[i] = LLVMBuildGlobalStringPtr(this.builder, contract.name, "interface.name");
+        }
+        return this.constant_array(pointer_llvm, entries, contracts.length, this.table_name(prefix, "", ".interfaces"));
+    }
+
+    void* variant_table(StructInfo* info, i8* prefix, i32* variant_count) {
+        Node* declaration = info.node;
+        mut i32 total = 0;
+        for (mut i32 i = 0; i < declaration.count(); i = i + 1) {
+            Node* member = declaration.child(i);
+            if (member.kind() == NodeKind::FIELD_DECL && member.first() != null) {
+                total = total + 1;
+            }
+        }
+        variant_count[0] = total;
+        if (total == 0) {
+            return this.null_pointer();
+        }
+        void* variant_llvm = this.llvm_type(this.symbols_core_type("VariantInfo"));
+        void* i64_type = LLVMIntTypeInContext(this.context, 64);
+        void* i32_type = LLVMIntTypeInContext(this.context, 32);
+        void* i16_type = LLVMIntTypeInContext(this.context, 16);
+        void* i8_type = LLVMIntTypeInContext(this.context, 8);
+        void** entries = CodeGenerator.array_of(total);
+        mut i32 next = 0;
+        for (mut i32 i = 0; i < declaration.count(); i = i + 1) {
+            Node* variant = declaration.child(i);
+            if (variant.kind() != NodeKind::FIELD_DECL || variant.first() == null) {
+                continue;
+            }
+            Node* tag = variant.first();
+            i32 payload_count = variant.payload_count();
+            ByteBuffer* variant_prefix = ByteBuffer.create();
+            variant_prefix.append(prefix);
+            variant_prefix.append(".");
+            variant_prefix.append(variant.text());
+            mut void* type_ids = this.null_pointer();
+            mut void* offsets = this.null_pointer();
+            if (payload_count > 0) {
+                void** id_values = CodeGenerator.array_of(payload_count);
+                void** offset_values = CodeGenerator.array_of(payload_count);
+                for (mut i32 p = 0; p < payload_count; p = p + 1) {
+                    Node* payload = variant.child(p);
+                    id_values[p] = LLVMConstInt(i32_type, this.type_hash(payload.value_type()), 0);
+                    offset_values[p] = LLVMConstInt(i16_type, this.payload_offset(variant, p), 0);
+                }
+                type_ids = this.constant_array(i32_type, id_values, payload_count, this.table_name(variant_prefix.cstr(), "", ".types"));
+                offsets = this.constant_array(i16_type, offset_values, payload_count, this.table_name(variant_prefix.cstr(), "", ".offsets"));
+            }
+            void** values = CodeGenerator.array_of(7);
+            values[0] = LLVMBuildGlobalStringPtr(this.builder, variant.text(), "variant.name");
+            values[1] = LLVMConstInt(i64_type, (u64)tag.int_value(), 1);
+            values[2] = LLVMConstInt(i16_type, (u64)payload_count, 0);
+            values[3] = LLVMConstInt(i8_type, 0, 0);
+            values[4] = this.null_pointer();
+            values[5] = type_ids;
+            values[6] = offsets;
+            entries[next] = LLVMConstNamedStruct(variant_llvm, values, 7);
+            next = next + 1;
+        }
+        return this.constant_array(variant_llvm, entries, total, this.table_name(prefix, "", ".variants"));
+    }
+
+    i32 enum_row_count(StructInfo* info) {
+        Node* declaration = info.node;
+        mut i64 highest = 0;
+        for (mut i32 i = 0; i < declaration.count(); i = i + 1) {
+            Node* variant = declaration.child(i);
+            if (variant.kind() == NodeKind::FIELD_DECL && variant.first() != null) {
+                Node* tag = variant.first();
+                if (tag.int_value() > highest) {
+                    highest = tag.int_value();
+                }
+            }
+        }
+        return (i32)highest + 1;
+    }
+
+    void* header_table(StructInfo* info, i8* prefix, i32 rows) {
+        if (info.header_count == 0) {
+            return this.null_pointer();
+        }
+        Node* declaration = info.node;
+        void* header_llvm = this.llvm_type(this.symbols_core_type("HeaderInfo"));
+        void* i32_type = LLVMIntTypeInContext(this.context, 32);
+        void** entries = CodeGenerator.array_of(info.header_count);
+        for (mut i32 k = 0; k < info.header_count; k = k + 1) {
+            Node* header = declaration.child(k);
+            u32 header_type = header.value_type();
+            mut void* table = this.null_pointer();
+            mut u64 row_total = (u64)rows;
+            if (k > 0) {
+                table = this.enum_field_table(info, k, header_type);
+                void** known = (void**)info.field_rows;
+                row_total = (u64)known[k];
+            }
+            void** values = CodeGenerator.array_of(5);
+            values[0] = LLVMBuildGlobalStringPtr(this.builder, header.text(), "header.name");
+            values[1] = LLVMConstInt(i32_type, this.type_hash(header_type), 0);
+            values[2] = LLVMConstInt(i32_type, LLVMABISizeOfType(this.layout_data, this.llvm_type(header_type)), 0);
+            values[3] = LLVMConstInt(i32_type, row_total, 0);
+            values[4] = table;
+            entries[k] = LLVMConstNamedStruct(header_llvm, values, 5);
+        }
+        return this.constant_array(header_llvm, entries, info.header_count, this.table_name(prefix, "", ".headers"));
+    }
+
+    void* enum_detail(StructInfo* info, i8* prefix) {
+        void* enum_llvm = this.llvm_type(this.symbols_core_type("EnumInfo"));
+        void* i32_type = LLVMIntTypeInContext(this.context, 32);
+        void* i16_type = LLVMIntTypeInContext(this.context, 16);
+        i32* variant_count = (i32*)Memory.zalloc(8);
+        i32 rows = this.enum_row_count(info);
+        void* variants = this.variant_table(info, prefix, variant_count);
+        void* headers = this.header_table(info, prefix, rows);
+        void** values = CodeGenerator.array_of(5);
+        values[0] = LLVMConstInt(i16_type, (u64)variant_count[0], 0);
+        values[1] = LLVMConstInt(i16_type, (u64)info.header_count, 0);
+        values[2] = LLVMConstInt(i32_type, (u64)rows, 0);
+        values[3] = variants;
+        values[4] = headers;
+        void* constant = LLVMConstNamedStruct(enum_llvm, values, 5);
+        void* global = LLVMAddGlobal(this.module, LLVMTypeOf(constant), this.table_name(prefix, "", ".enum"));
+        LLVMSetInitializer(global, constant);
+        LLVMSetGlobalConstant(global, 1);
+        LLVMSetLinkage(global, LlvmConst.LINKAGE_INTERNAL);
+        return global;
     }
 
     void* extended_type_info(u32 type, void* base) {
-        SymbolTable* symbols = this.symbols;
-        StructInfo* info = symbols.struct_at(Types.struct_index(type));
+        StructInfo* info = this.reflectable_info(type);
         ByteBuffer* prefix = ByteBuffer.create();
         prefix.append("__typeinfo_");
         prefix.append(info.name);
@@ -200,14 +398,20 @@ impl CodeGenerator {
         void* i8_type = LLVMIntTypeInContext(this.context, 8);
         PointerList* fields = info.fields;
         i32* method_count = (i32*)Memory.zalloc(8);
-        void* field_pointer = this.field_table(info, type, prefix.cstr());
-        void* method_pointer = this.method_table(info, prefix.cstr(), method_count);
-        PointerList* uses = Attributes.of(info.node);
-        ByteBuffer* attrs_name = ByteBuffer.create();
-        attrs_name.append(prefix.cstr());
-        attrs_name.append(".attrs");
-        void* attribute_pointer = this.attribute_table(info.node, attrs_name.cstr());
-        void** values = CodeGenerator.array_of(7);
+        i32* interface_count = (i32*)Memory.zalloc(8);
+        mut void* field_pointer = this.null_pointer();
+        mut void* detail = this.null_pointer();
+        if (info.is_enum) {
+            detail = this.enum_detail(info, prefix.cstr());
+        } else {
+            field_pointer = this.field_table(info, type, prefix.cstr());
+        }
+        void* method_pointer = this.method_table(info, prefix.cstr(), method_count, MemberKinds.ANY);
+        void* interface_pointer = this.interface_table(info, prefix.cstr(), interface_count);
+        Node* declaration = this.reflection_node(info);
+        PointerList* uses = Attributes.of(declaration);
+        void* attribute_pointer = this.attribute_table(declaration, this.table_name(prefix.cstr(), "", ".attrs"));
+        void** values = CodeGenerator.array_of(10);
         values[0] = base;
         values[1] = LLVMConstInt(i16_type, (u64)fields.length, 0);
         values[2] = LLVMConstInt(i16_type, (u64)method_count[0], 0);
@@ -215,6 +419,245 @@ impl CodeGenerator {
         values[4] = field_pointer;
         values[5] = method_pointer;
         values[6] = attribute_pointer;
-        return LLVMConstNamedStruct(ext_llvm, values, 7);
+        values[7] = detail;
+        values[8] = interface_pointer;
+        values[9] = LLVMConstInt(i16_type, (u64)interface_count[0], 0);
+        return LLVMConstNamedStruct(ext_llvm, values, 10);
+    }
+
+    void* contract_field_table(Node* declaration, i8* prefix, i32* count) {
+        mut i32 total = 0;
+        for (mut i32 i = 0; i < declaration.count(); i = i + 1) {
+            Node* member = declaration.child(i);
+            if (member.kind() == NodeKind::FIELD_DECL) {
+                total = total + 1;
+            }
+        }
+        count[0] = total;
+        if (total == 0) {
+            return this.null_pointer();
+        }
+        void* field_llvm = this.llvm_type(this.symbols_core_type("FieldInfo"));
+        void* i32_type = LLVMIntTypeInContext(this.context, 32);
+        void* i16_type = LLVMIntTypeInContext(this.context, 16);
+        void* i8_type = LLVMIntTypeInContext(this.context, 8);
+        void** entries = CodeGenerator.array_of(total);
+        mut i32 next = 0;
+        for (mut i32 i = 0; i < declaration.count(); i = i + 1) {
+            Node* member = declaration.child(i);
+            if (member.kind() != NodeKind::FIELD_DECL) {
+                continue;
+            }
+            PointerList* uses = Attributes.of(member);
+            void** values = CodeGenerator.array_of(6);
+            values[0] = LLVMBuildGlobalStringPtr(this.builder, member.text(), "field.name");
+            values[1] = LLVMConstInt(i32_type, this.type_hash(member.value_type()), 0);
+            values[2] = LLVMConstInt(i16_type, 0, 0);
+            values[3] = LLVMConstInt(i8_type, 0, 0);
+            values[4] = LLVMConstInt(i8_type, (u64)uses.length, 0);
+            values[5] = this.attribute_table(member, this.table_name(prefix, ".", member.text()));
+            entries[next] = LLVMConstNamedStruct(field_llvm, values, 6);
+            next = next + 1;
+        }
+        return this.constant_array(field_llvm, entries, total, this.table_name(prefix, "", ".fields"));
+    }
+
+    void* contract_method_table(Node* declaration, i8* prefix, i32* count) {
+        mut i32 total = 0;
+        for (mut i32 i = 0; i < declaration.count(); i = i + 1) {
+            Node* member = declaration.child(i);
+            if (member.kind() == NodeKind::FUNCTION) {
+                total = total + 1;
+            }
+        }
+        count[0] = total;
+        if (total == 0) {
+            return this.null_pointer();
+        }
+        void* method_llvm = this.llvm_type(this.symbols_core_type("MethodInfo"));
+        void** entries = CodeGenerator.array_of(total);
+        mut i32 next = 0;
+        for (mut i32 i = 0; i < declaration.count(); i = i + 1) {
+            Node* signature = declaration.child(i);
+            if (signature.kind() != NodeKind::FUNCTION) {
+                continue;
+            }
+            mut u64 flags = 0;
+            if (signature.flag()) {
+                flags = (u64)ReflectionKind.METHOD_STATIC;
+            }
+            entries[next] = this.method_entry(signature.text(), this.null_pointer(), signature.value_type(), signature, (IdList*)0, 0, flags, this.table_name(prefix, ".", signature.text()));
+            next = next + 1;
+        }
+        return this.constant_array(method_llvm, entries, total, this.table_name(prefix, "", ".methods"));
+    }
+
+    void* interface_info_of(InterfaceInfo* contract) {
+        if (contract.type_info != null) {
+            return contract.type_info;
+        }
+        ByteBuffer* global_name = ByteBuffer.create();
+        global_name.append("__typeinfo_");
+        global_name.append(contract.name);
+        Node* declaration = contract.node;
+        void* ext_llvm = this.llvm_type(this.symbols_core_type("TypeInfoExt"));
+        void* info_llvm = this.llvm_type(this.symbols_core_type("TypeInfo"));
+        void* i32_type = LLVMIntTypeInContext(this.context, 32);
+        void* i16_type = LLVMIntTypeInContext(this.context, 16);
+        void* i8_type = LLVMIntTypeInContext(this.context, 8);
+        i32* method_count = (i32*)Memory.zalloc(8);
+        i32* field_count = (i32*)Memory.zalloc(8);
+        void* field_pointer = this.contract_field_table(declaration, global_name.cstr(), field_count);
+        void* method_pointer = this.contract_method_table(declaration, global_name.cstr(), method_count);
+        PointerList* uses = Attributes.of(declaration);
+        void* attribute_pointer = this.attribute_table(declaration, this.table_name(global_name.cstr(), "", ".attrs"));
+        void** base_values = CodeGenerator.array_of(5);
+        base_values[0] = LLVMConstInt(i32_type, this.name_hash(contract.name), 0);
+        base_values[1] = LLVMConstInt(i32_type, 0, 0);
+        base_values[2] = LLVMBuildGlobalStringPtr(this.builder, contract.name, "typeinfo.name");
+        base_values[3] = LLVMConstInt(i8_type, (u64)ReflectionKind.INTERFACE, 0);
+        base_values[4] = LLVMConstInt(i8_type, (u64)ReflectionKind.TYPE_REFLECTED, 0);
+        void** values = CodeGenerator.array_of(10);
+        values[0] = LLVMConstNamedStruct(info_llvm, base_values, 5);
+        values[1] = LLVMConstInt(i16_type, (u64)field_count[0], 0);
+        values[2] = LLVMConstInt(i16_type, (u64)method_count[0], 0);
+        values[3] = LLVMConstInt(i8_type, (u64)uses.length, 0);
+        values[4] = field_pointer;
+        values[5] = method_pointer;
+        values[6] = attribute_pointer;
+        values[7] = this.null_pointer();
+        values[8] = this.null_pointer();
+        values[9] = LLVMConstInt(i16_type, 0, 0);
+        void* initializer = LLVMConstNamedStruct(ext_llvm, values, 10);
+        void* global = LLVMAddGlobal(this.module, LLVMTypeOf(initializer), global_name.cstr());
+        LLVMSetInitializer(global, initializer);
+        LLVMSetGlobalConstant(global, 1);
+        this.make_linkonce(global, global_name.cstr());
+        contract.type_info = global;
+        return global;
+    }
+
+    void* function_info_of(FunctionInfo* function) {
+        if (function.reflection != null) {
+            return function.reflection;
+        }
+        ByteBuffer* global_name = ByteBuffer.create();
+        global_name.append("__fninfo_");
+        global_name.append(function.name);
+        void* initializer = this.function_entry(function, global_name.cstr());
+        void* global = LLVMAddGlobal(this.module, LLVMTypeOf(initializer), global_name.cstr());
+        LLVMSetInitializer(global, initializer);
+        LLVMSetGlobalConstant(global, 1);
+        LLVMSetLinkage(global, LlvmConst.LINKAGE_INTERNAL);
+        function.reflection = global;
+        return global;
+    }
+
+    void* member_list(i8* core_name, void* items, i32 count) {
+        void* list_llvm = this.llvm_type(this.symbols_core_type(core_name));
+        void** values = CodeGenerator.array_of(2);
+        values[0] = items;
+        values[1] = LLVMConstInt(LLVMIntTypeInContext(this.context, 32), (u64)count, 0);
+        return LLVMConstNamedStruct(list_llvm, values, 2);
+    }
+
+    void* accessor_entry(FunctionInfo* accessor, i8* prefix) {
+        if (accessor == null) {
+            return this.null_pointer();
+        }
+        void* initializer = this.function_entry(accessor, prefix);
+        void* global = LLVMAddGlobal(this.module, LLVMTypeOf(initializer), prefix);
+        LLVMSetInitializer(global, initializer);
+        LLVMSetGlobalConstant(global, 1);
+        LLVMSetLinkage(global, LlvmConst.LINKAGE_INTERNAL);
+        return global;
+    }
+
+    FunctionInfo* paired_accessor(StructInfo* info, FunctionInfo* getter) {
+        SymbolTable* symbols = this.symbols;
+        PointerList* functions = symbols.functions;
+        Node* getter_node = getter.node;
+        i8* property = MemberKinds.property_name(getter_node.text());
+        for (mut i32 i = 0; i < functions.length; i = i + 1) {
+            FunctionInfo* candidate = (FunctionInfo*)functions.get(i);
+            if (this.is_reflected_method(candidate, info) && this.member_kind(candidate) == MemberKinds.SETTER) {
+                Node* candidate_node = candidate.node;
+                if (Strings.same(MemberKinds.property_name(candidate_node.text()), property)) {
+                    return candidate;
+                }
+            }
+        }
+        return null;
+    }
+
+    void* property_list(StructInfo* info, i8* prefix) {
+        SymbolTable* symbols = this.symbols;
+        PointerList* functions = symbols.functions;
+        mut i32 total = 0;
+        for (mut i32 i = 0; i < functions.length; i = i + 1) {
+            FunctionInfo* method = (FunctionInfo*)functions.get(i);
+            if (this.is_reflected_method(method, info) && this.member_kind(method) == MemberKinds.GETTER) {
+                total = total + 1;
+            }
+        }
+        if (total == 0) {
+            return this.member_list("PropertyList", this.null_pointer(), 0);
+        }
+        void* property_llvm = this.llvm_type(this.symbols_core_type("PropertyInfo"));
+        void* i32_type = LLVMIntTypeInContext(this.context, 32);
+        void** entries = CodeGenerator.array_of(total);
+        mut i32 next = 0;
+        for (mut i32 i = 0; i < functions.length; i = i + 1) {
+            FunctionInfo* getter = (FunctionInfo*)functions.get(i);
+            if (!this.is_reflected_method(getter, info) || this.member_kind(getter) != MemberKinds.GETTER) {
+                continue;
+            }
+            Node* getter_node = getter.node;
+            i8* property = MemberKinds.property_name(getter_node.text());
+            void** values = CodeGenerator.array_of(4);
+            values[0] = LLVMBuildGlobalStringPtr(this.builder, property, "property.name");
+            values[1] = LLVMConstInt(i32_type, this.type_hash(getter.return_type), 0);
+            values[2] = this.accessor_entry(getter, this.table_name(prefix, ".get.", property));
+            values[3] = this.accessor_entry(this.paired_accessor(info, getter), this.table_name(prefix, ".set.", property));
+            entries[next] = LLVMConstNamedStruct(property_llvm, values, 4);
+            next = next + 1;
+        }
+        return this.member_list("PropertyList", this.constant_array(property_llvm, entries, total, this.table_name(prefix, "", ".properties")), total);
+    }
+
+    Value* gen_member_query(i32 id, u32 type, u32 result_type) {
+        StructInfo* info = this.reflectable_info(type);
+        ByteBuffer* prefix = ByteBuffer.create();
+        prefix.append("__members_");
+        prefix.append(info.name);
+        i32* count = (i32*)Memory.zalloc(8);
+        mut void* produced = (void*)0;
+        if (id == Intrinsic.FIELDS) {
+            mut void* table = this.null_pointer();
+            PointerList* fields = info.fields;
+            mut i32 total = 0;
+            if (!info.is_enum) {
+                table = this.field_table(info, type, prefix.cstr());
+                total = fields.length;
+            }
+            produced = this.member_list("FieldList", table, total);
+        } else if (id == Intrinsic.METHODS || id == Intrinsic.CONSTRUCTORS) {
+            mut i32 want = MemberKinds.METHOD;
+            if (id == Intrinsic.CONSTRUCTORS) {
+                want = MemberKinds.CONSTRUCTOR;
+            }
+            void* table = this.method_table(info, prefix.cstr(), count, want);
+            produced = this.member_list("MethodList", table, count[0]);
+        } else if (id == Intrinsic.PROPERTIES) {
+            produced = this.property_list(info, prefix.cstr());
+        } else if (id == Intrinsic.ATTRIBUTES) {
+            Node* declaration = this.reflection_node(info);
+            PointerList* uses = Attributes.of(declaration);
+            produced = this.member_list("AttributeList", this.attribute_table(declaration, this.table_name(prefix.cstr(), "", ".attrs")), uses.length);
+        } else {
+            void* table = this.interface_table(info, prefix.cstr(), count);
+            produced = this.member_list("NameList", table, count[0]);
+        }
+        return Value.create(produced, result_type);
     }
 }

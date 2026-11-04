@@ -6,7 +6,7 @@ function definition(): monaco.languages.IMonarchLanguage {
         keywords: [
             'void', 'return', 'auto', 'extern', 'struct', 'namespace', 'import', 'mut', 'if', 'else', 'for',
             'while', 'do', 'switch', 'case', 'default', 'break', 'continue', 'interface', 'public', 'private',
-            'static', 'unsafe', 'this', 'enum', 'new', 'impl', 'where', 'async', 'await', 'yield', 'spawn',
+            'static', 'unsafe', 'this', 'enum', 'union', 'new', 'impl', 'where', 'async', 'await', 'yield', 'spawn',
             'in', 'true', 'false', 'operator', 'const', 'constexpr', 'consteval', 'macro', 'is', 'null',
             'throw', 'throws', 'try', 'require', 'ensure',
         ],
