@@ -71,6 +71,11 @@ inline std::optional<IntegerTypeName> parse_integer_type_name(const std::string&
             return IntegerTypeName{native_int_bits, true, *mode, true};
     }
 
+    if (name == "isize")
+        return IntegerTypeName{32, true, OverflowMode::None, false};
+    if (name == "usize")
+        return IntegerTypeName{32, false, OverflowMode::None, false};
+
     if (name.length() < 2) return std::nullopt;
     const char prefix = name[0];
     if (prefix != 'i' && prefix != 'u') return std::nullopt;

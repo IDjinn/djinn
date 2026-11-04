@@ -589,7 +589,7 @@ Medição (Windows, stage2 compilando os 21 arquivos do djinnc, 37 mil tokens, 2
 - [ ] Hoje `i8*` serve ao mesmo tempo como "ponteiro para byte", "endereço bruto" e "string C" (ex.: `Ast.id_of`,
       `Ast.at`, `Arena.alloc` fazem `(i8*)node`, `base + id * sizeof(Node)` e `(i64)address - (i64)base`). Isso não
       expressa a intenção e assume ponteiros de 64 bits, então não é portável para 32 bits.
-- [~] Tipos inteiros por tamanho e por arquitetura: `isize` (com sinal) e `usize` (valores que não podem ser negativos) têm sempre 32 bits, em qualquer alvo, e `sizeof` é `isize`. `nint` tem a largura do ponteiro do alvo (`--target <triple>`, `Target` em `codegen/target/target.djinn`) e `ptr` é o tipo de endereço; `iptr` e `uptr` foram removidos. Sample `pointer_sized`. Objeto só para x86 (o LLVM linkado só tem esse backend); outros alvos geram IR com `--emit-ir`. `isize`/`usize` ainda não existem no stage0.
+- [~] Tipos inteiros por tamanho e por arquitetura: `isize` (com sinal) e `usize` (valores que não podem ser negativos) têm sempre 32 bits, em qualquer alvo, e `sizeof` é `isize`. `nint` tem a largura do ponteiro do alvo (`--target <triple>`, `Target` em `codegen/target/target.djinn`) e `ptr` é o tipo de endereço; `iptr` e `uptr` foram removidos. Sample `pointer_sized`. Objeto só para x86 (o LLVM linkado só tem esse backend); outros alvos geram IR com `--emit-ir`. O stage0 também aceita `isize` e `usize` (32 bits).
 - [~] Modelo de ponteiros (decidido; fase 1 parcial: `ptr`, `ptr<T>`, `unsafe` em bloco e função são parseados pelo stage0 e pelo djinnc e todo raw pointer do djinnc já usa a sintaxe, sem imposição de regras ainda):
       - `T*` é o ponteiro seguro: nunca nulo, tipado, sem aritmética nem indexação, e com o borrow checker futuro vale como
         referência com tempo de vida (o compilador poderá emitir `nonnull`, `align`, `dereferenceable`, `readonly` e `noalias`).
@@ -601,7 +601,7 @@ Medição (Windows, stage2 compilando os 21 arquivos do djinnc, 37 mil tokens, 2
         `unsafe` quando a assinatura usa ponteiros.
       - Indexação segura é de `arr<T>` e dos tipos com bounds check (`get_unchecked` só em `unsafe`).
       - Async: manter ou usar `T*`/`ptr` vivo através de um suspend é erro de compilação até existir acesso atômico.
-      - Fases: (1) `unsafe` como contexto, `ptr<T>` e restrição de aritmética; (2) nicho de `optional<T*>` [feito no djinnc: união com duas variantes, uma vazia e outra com um único ponteiro, vira 8 bytes sem tag e `None` é o nulo; falta o açúcar `T?`/`T*?` e a reflexão em tempo de execução de uniões nicho, que ainda lê a tag no offset 0]; (3) borrow checker.
+      - Fases: (1) `unsafe` como contexto, `ptr<T>` e restrição de aritmética; (2) nicho de `optional<T*>` [feito no djinnc: união com duas variantes, uma vazia e outra com um único ponteiro, vira 8 bytes sem tag e `None` é o nulo; `T?` é açúcar para `optional<T>` (e `T*?` para `optional<T*>`, com nicho) resolvido pelo djinnc quando existe um `optional` genérico no escopo; falta a reflexão em tempo de execução de uniões nicho, que ainda lê a tag no offset 0]; (3) borrow checker.
       O stage0 só parseia a sintaxe nova; o djinnc impõe as regras.
 - [ ] Aritmética de ponteiros definida na linguagem, só em `unsafe`: `p + n` em unidades do elemento, `p - q` entre ponteiros do
       mesmo tipo devolvendo `isize` (hoje não compila: "invalid types for binary expression"), `offset_of`/`align_of`.

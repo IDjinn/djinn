@@ -55,6 +55,8 @@ Each plain enum is its own type: `==`/`!=` only between values of the same enum 
 
 A tagged enum with exactly two variants, one without payload and one with a single pointer payload (`union optional<T> { Some(T), None() }` instantiated with a pointer), uses the pointer niche: the value is 8 bytes with no tag, `None` is the null pointer and a `Some` holding null reads as `None`.
 
+`T?` is sugar for `optional<T>` for any `T` (and `T*?` for `optional<T*>`, which uses the pointer niche): an `optional<T>` union must be in scope.
+
 ## Generics
 
 - `struct Pair<K, V> { ... }` and `union optional<T> { Empty(), Value(T) }`; instances are monomorphized on demand (`Pair<i32, i64>`, nested `Wrapper<Pair<i32, i32>>`) with their methods.
