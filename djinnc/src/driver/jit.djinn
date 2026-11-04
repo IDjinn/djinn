@@ -1,17 +1,17 @@
 namespace djinnc;
 
 struct Jit {
-    static bool check(void* error, i8* what) {
+    static bool check(ptr error, ptr<i8> what) {
         if (error == null) {
             return true;
         }
-        i8* message = LLVMGetErrorMessage(error);
+        ptr<i8> message = LLVMGetErrorMessage(error);
         logger_error(Log.get(), "djinnc: jit: %s: %s", what, message);
         LLVMDisposeErrorMessage(message);
         return false;
     }
 
-    public static i32 run(CodeGenerator* gen, Options* options) {
+    public static unsafe i32 run(CodeGenerator* gen, Options* options) {
         if (!Target.is_native()) {
             logger_error(Log.get(), "djinnc: --run needs the host target, but the target is '%s'", Target.triple());
             return 1;
@@ -24,24 +24,24 @@ struct Jit {
             return 1;
         }
 
-        i8* pipeline = ObjectWriter.pipeline(options.opt_level, false, true);
+        ptr<i8> pipeline = ObjectWriter.pipeline(options.opt_level, false, true);
         if (!ObjectWriter.run_passes(gen.module, null, pipeline)) {
             return 1;
         }
 
-        void* jit = (void*)0;
+        ptr jit = (ptr)0;
         if (!Jit.check(LLVMOrcCreateLLJIT(&jit, null), "cannot create the JIT")) {
             return 1;
         }
-        void* dylib = LLVMOrcLLJITGetMainJITDylib(jit);
+        ptr dylib = LLVMOrcLLJITGetMainJITDylib(jit);
 
-        void* runtime = (void*)0;
+        ptr runtime = (ptr)0;
         if (!Jit.check(LLVMOrcCreateStaticLibrarySearchGeneratorForPath(&runtime, LLVMOrcLLJITGetObjLinkingLayer(jit), options.runtime_lib), "cannot load the runtime library")) {
             return 1;
         }
         LLVMOrcJITDylibAddGenerator(dylib, runtime);
 
-        void* process = (void*)0;
+        ptr process = (ptr)0;
         if (!Jit.check(LLVMOrcCreateDynamicLibrarySearchGeneratorForProcess(&process, LLVMOrcLLJITGetGlobalPrefix(jit), null, null), "cannot expose the process symbols")) {
             return 1;
         }
@@ -49,8 +49,8 @@ struct Jit {
 
         gen.release_builders();
         gen.module_taken = 1;
-        void* shared_context = LLVMOrcCreateNewThreadSafeContextFromLLVMContext(gen.context);
-        void* shared_module = LLVMOrcCreateNewThreadSafeModule(gen.module, shared_context);
+        ptr shared_context = LLVMOrcCreateNewThreadSafeContextFromLLVMContext(gen.context);
+        ptr shared_module = LLVMOrcCreateNewThreadSafeModule(gen.module, shared_context);
         LLVMOrcDisposeThreadSafeContext(shared_context);
         if (!Jit.check(LLVMOrcLLJITAddLLVMIRModule(jit, dylib, shared_module), "cannot add the module")) {
             return 1;
@@ -62,6 +62,6 @@ struct Jit {
         }
         logger_info(Log.get(), "djinnc: running 'main' in process");
         fflush(null);
-        return __djinn_call_entry((void*)entry);
+        return __djinn_call_entry((ptr)entry);
     }
 }

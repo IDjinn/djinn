@@ -37,17 +37,17 @@ impl TypeChecker {
             if (variable == null) {
                 FieldInfo* implicit = this.implicit_field(node);
                 if (implicit != null) {
-                    node.set_symbol(SymbolKind.IMPLICIT_FIELD, (void*)implicit);
+                    node.set_symbol(SymbolKind.IMPLICIT_FIELD, (ptr)implicit);
                     return implicit.type;
                 }
                 FunctionInfo* implicit_getter = this.implicit_accessor(node, "get:");
                 if (implicit_getter != null) {
-                    node.set_symbol(SymbolKind.IMPLICIT_GET, (void*)implicit_getter);
+                    node.set_symbol(SymbolKind.IMPLICIT_GET, (ptr)implicit_getter);
                     return implicit_getter.return_type;
                 }
                 Node* sibling = this.implicit_constant(node);
                 if (sibling != null) {
-                    node.set_symbol(SymbolKind.CONSTANT, (void*)sibling);
+                    node.set_symbol(SymbolKind.CONSTANT, (ptr)sibling);
                     return sibling.value_type();
                 }
                 this.error(node, "undefined variable");
@@ -58,9 +58,9 @@ impl TypeChecker {
                 this.error(node, "use of moved value");
             }
             if (scopes.find(node.name()) != null) {
-                node.set_symbol(SymbolKind.LOCAL, (void*)variable);
+                node.set_symbol(SymbolKind.LOCAL, (ptr)variable);
             } else {
-                node.set_symbol(SymbolKind.GLOBAL, (void*)variable);
+                node.set_symbol(SymbolKind.GLOBAL, (ptr)variable);
             }
             return variable.type;
         }
@@ -72,6 +72,9 @@ impl TypeChecker {
         if (kind == NodeKind::INDEX) {
             u32 base = this.check_expression(node.first(), 0);
             u32 held = this.array_element(base);
+            if (held == 0 && Types.is_raw_pointer(base)) {
+                this.require_unsafe(node, "indexing a raw pointer");
+            }
             if (held == 0 && Types.is_struct(base)) {
                 return this.check_index_operator(node, base);
             }
@@ -91,6 +94,9 @@ impl TypeChecker {
             if (!Types.is_sized_pointer(pointer)) {
                 this.error(node, "cannot dereference this value");
                 return Types.i32_type();
+            }
+            if (Types.is_raw_pointer(pointer)) {
+                this.require_unsafe(node, "dereferencing a raw pointer");
             }
             return Types.element(pointer);
         }
@@ -130,7 +136,7 @@ impl TypeChecker {
         return symbols.struct_at(Types.struct_index(target));
     }
 
-    u32 check_field(Node* node) {
+    unsafe u32 check_field(Node* node) {
         Node* base = node.first();
         if (this.is_struct_name(base)) {
             this.error(node, "a struct constant cannot be used as a variable");
@@ -145,7 +151,7 @@ impl TypeChecker {
             for (mut i32 k = 0; k < info.header_count; k = k + 1) {
                 Node* header = declaration.child(k);
                 if (Strings.same(header.text(), node.text())) {
-                    node.set_symbol(SymbolKind.ENUM_FIELD, (void*)(u64)k);
+                    node.set_symbol(SymbolKind.ENUM_FIELD, (ptr)(u64)k);
                     return this.resolve_type(header.type(), header);
                 }
             }
@@ -155,17 +161,17 @@ impl TypeChecker {
         if (field == null) {
             FunctionInfo* getter = this.find_accessor(info, "get:", node.text());
             if (getter != null) {
-                node.set_symbol(SymbolKind.PROPERTY_GET, (void*)getter);
+                node.set_symbol(SymbolKind.PROPERTY_GET, (ptr)getter);
                 return getter.return_type;
             }
             this.error(node, "struct has no such field");
             return Types.i32_type();
         }
-        node.set_symbol(SymbolKind.FIELD, (void*)field);
+        node.set_symbol(SymbolKind.FIELD, (ptr)field);
         return field.type;
     }
 
-    FunctionInfo* find_accessor(StructInfo* owner, i8* prefix, i8* name) {
+    FunctionInfo* find_accessor(StructInfo* owner, ptr<i8> prefix, ptr<i8> name) {
         ByteBuffer* full = ByteBuffer.create();
         full.append(prefix);
         full.append(name);
@@ -173,7 +179,7 @@ impl TypeChecker {
         return symbols.find_method(owner, Ast.intern_base_name(full.cstr(), (i32)strlen(full.cstr())));
     }
 
-    FunctionInfo* implicit_accessor(Node* node, i8* prefix) {
+    FunctionInfo* implicit_accessor(Node* node, ptr<i8> prefix) {
         FunctionInfo* current = this.function;
         if (current == null || !current.is_instance || current.owner == null) {
             return null;
@@ -205,7 +211,7 @@ impl TypeChecker {
         if (this.is_struct_name(base)) {
             SymbolTable* symbols = this.symbols;
             StructInfo* info = symbols.find_struct(base.text_atom(), base.name(), this.scope);
-            base.set_symbol(SymbolKind.STRUCT_NAME, (void*)info);
+            base.set_symbol(SymbolKind.STRUCT_NAME, (ptr)info);
             Node* constant = symbols.find_constant(info, node.name());
             if (constant == null) {
                 this.error(node, "struct has no such constant");
@@ -214,7 +220,7 @@ impl TypeChecker {
             if (info.has_payload) {
                 this.error(node, "a payload enum is built with Enum::Variant(...)");
             }
-            node.set_symbol(SymbolKind.CONSTANT, (void*)constant);
+            node.set_symbol(SymbolKind.CONSTANT, (ptr)constant);
             return constant.value_type();
         }
         return this.check_field(node);
@@ -222,7 +228,7 @@ impl TypeChecker {
 }
 
 impl TypeChecker {
-    u32 check_intrinsic(Node* node) {
+    unsafe u32 check_intrinsic(Node* node) {
         i32 id = node.op();
         if (id == Intrinsic.ALLOCA) {
             u32 element = this.resolve_type(node.type(), node);
@@ -244,7 +250,7 @@ impl TypeChecker {
                 this.error(node, "a reflection query needs a concrete struct, enum or union");
                 return Types.i32_type();
             }
-            node.set_symbol(SymbolKind.TYPE, (void*)(u64)subject);
+            node.set_symbol(SymbolKind.TYPE, (ptr)(u64)subject);
             if (id == Intrinsic.FIELDS) { return this.core_type("FieldList"); }
             if (id == Intrinsic.METHODS || id == Intrinsic.CONSTRUCTORS) { return this.core_type("MethodList"); }
             if (id == Intrinsic.PROPERTIES) { return this.core_type("PropertyList"); }
@@ -259,7 +265,7 @@ impl TypeChecker {
             if (measured == 0 && reference.kind == TypeKind.NAMED && reference.args == null) {
                 InterfaceInfo* contract = known.find_interface(reference.full_atom, reference.name_atom, this.scope);
                 if (contract != null) {
-                    node.set_symbol(SymbolKind.INTERFACE_NAME, (void*)contract);
+                    node.set_symbol(SymbolKind.INTERFACE_NAME, (ptr)contract);
                     return Types.pointer_to(this.core_type("TypeInfo"));
                 }
                 FunctionInfo* function = known.find_function(reference.full_atom, reference.name_atom, this.scope);
@@ -269,7 +275,7 @@ impl TypeChecker {
                     } else if (function.overload != null) {
                         this.error(node, "typeof is ambiguous on an overloaded function");
                     }
-                    node.set_symbol(SymbolKind.FUNCTION, (void*)function);
+                    node.set_symbol(SymbolKind.FUNCTION, (ptr)function);
                     return Types.pointer_to(this.core_type("MethodInfo"));
                 }
             }
@@ -280,7 +286,7 @@ impl TypeChecker {
             if (Types.is_void(measured) || measured == Types.auto_type()) {
                 this.error(node, "typeof needs a concrete type");
             }
-            node.set_symbol(SymbolKind.TYPE, (void*)(u64)measured);
+            node.set_symbol(SymbolKind.TYPE, (ptr)(u64)measured);
             return Types.pointer_to(this.core_type("TypeInfo"));
         }
         if (id == Intrinsic.UNLIKELY || id == Intrinsic.LIKELY || id == Intrinsic.ASSUME) {

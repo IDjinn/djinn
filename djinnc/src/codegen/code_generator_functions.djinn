@@ -1,7 +1,7 @@
 namespace djinnc;
 
 impl CodeGenerator {
-    void declare_functions() {
+    unsafe void declare_functions() {
         SymbolTable* symbols = this.symbols;
         PointerList* functions = symbols.functions;
         for (mut i32 i = 0; i < functions.length; i = i + 1) {
@@ -11,12 +11,12 @@ impl CodeGenerator {
             }
             IdList* param_types = info.param_types;
             i32 count = param_types.length;
-            void** params = CodeGenerator.array_of(count);
+            ptr<ptr> params = CodeGenerator.array_of(count);
             for (mut i32 p = 0; p < count; p = p + 1) {
                 params[p] = this.llvm_type(param_types.get(p));
             }
 
-            mut void* return_type = this.llvm_type(info.return_type);
+            mut ptr return_type = this.llvm_type(info.return_type);
             if (info.is_async) {
                 return_type = LLVMPointerTypeInContext(this.context, 0);
             }
@@ -26,11 +26,11 @@ impl CodeGenerator {
             }
             info.function_type = LLVMFunctionType(return_type, params, (u32)count, variadic);
 
-            mut i8* symbol = info.name;
+            mut ptr<i8> symbol = info.name;
             if (!info.is_extern && info.owner == null && info.name_atom == Atoms.MAIN_ATOM) {
                 symbol = "__djinn_sync_main";
             }
-            mut void* existing = (void*)0;
+            mut ptr existing = (ptr)0;
             if (info.is_extern) {
                 existing = LLVMGetNamedFunction(this.module, symbol);
             }
@@ -46,14 +46,14 @@ impl CodeGenerator {
         }
     }
 
-    void declare_globals() {
+    unsafe void declare_globals() {
         SymbolTable* symbols = this.symbols;
         PointerList* globals = symbols.globals;
         for (mut i32 i = 0; i < globals.length; i = i + 1) {
             LocalVariable* variable = (LocalVariable*)globals.get(i);
             Node* declaration = variable.node;
             u32 type = variable.type;
-            void* global = LLVMAddGlobal(this.module, this.llvm_type(type), variable.name);
+            ptr global = LLVMAddGlobal(this.module, this.llvm_type(type), variable.name);
             if (!declaration.is_header()) {
                 Value* initial = this.gen_expression(declaration.first());
                 LLVMSetInitializer(global, this.coerce(initial, type));
@@ -69,7 +69,7 @@ impl CodeGenerator {
         }
     }
 
-    void define_all() {
+    unsafe void define_all() {
         SymbolTable* symbols = this.symbols;
         PointerList* functions = symbols.functions;
         for (mut i32 i = 0; i < functions.length; i = i + 1) {
@@ -80,7 +80,7 @@ impl CodeGenerator {
         }
     }
 
-    void define_function(Node* declaration, FunctionInfo* info) {
+    unsafe void define_function(Node* declaration, FunctionInfo* info) {
         FunctionContext* function_context = this.function_context;
         function_context.begin(info);
         if (this.debug != null) {
@@ -88,12 +88,12 @@ impl CodeGenerator {
             debug.begin_function(info, declaration, this);
         }
 
-        void* entry = LLVMAppendBasicBlockInContext(this.context, info.function, "entry");
-        void* body = LLVMAppendBasicBlockInContext(this.context, info.function, "body");
+        ptr entry = LLVMAppendBasicBlockInContext(this.context, info.function, "entry");
+        ptr body = LLVMAppendBasicBlockInContext(this.context, info.function, "body");
         LLVMPositionBuilderAtEnd(this.builder, entry);
-        mut void* jump = (void*)0;
+        mut ptr jump = (ptr)0;
         if (info.is_async) {
-            void* prologue = LLVMAppendBasicBlockInContext(this.context, info.function, "coro.prologue");
+            ptr prologue = LLVMAppendBasicBlockInContext(this.context, info.function, "coro.prologue");
             jump = LLVMBuildBr(this.builder, prologue);
             LLVMPositionBuilderBefore(this.alloca_builder, jump);
             this.begin_coroutine(info, prologue, body);
@@ -139,7 +139,7 @@ impl CodeGenerator {
         }
     }
 
-    void* create_slot(u32 type, i8* name) {
+    ptr create_slot(u32 type, ptr<i8> name) {
         return LLVMBuildAlloca(this.alloca_builder, this.llvm_type(type), name);
     }
 
@@ -149,26 +149,26 @@ impl CodeGenerator {
     }
 
     bool is_terminated() {
-        void* block = LLVMGetInsertBlock(this.builder);
+        ptr block = LLVMGetInsertBlock(this.builder);
         return LLVMGetBasicBlockTerminator(block) != null;
     }
 
-    void* new_block(i8* name) {
+    ptr new_block(ptr<i8> name) {
         return LLVMAppendBasicBlockInContext(this.context, this.current_function().function, name);
     }
 
-    void branch_if_open(void* target) {
+    void branch_if_open(ptr target) {
         if (!this.is_terminated()) {
             LLVMBuildBr(this.builder, target);
         }
     }
 
     void start_dead_block() {
-        void* dead = this.new_block("dead");
+        ptr dead = this.new_block("dead");
         LLVMPositionBuilderAtEnd(this.builder, dead);
     }
 
-    void emit_entry_point() {
+    unsafe void emit_entry_point() {
         if (this.library_mode) {
             return;
         }
@@ -188,30 +188,30 @@ impl CodeGenerator {
             return;
         }
 
-        void* i32_type = LLVMIntTypeInContext(this.context, 32);
-        void* void_type = LLVMVoidTypeInContext(this.context);
-        void** init_params = CodeGenerator.array_of(1);
+        ptr i32_type = LLVMIntTypeInContext(this.context, 32);
+        ptr void_type = LLVMVoidTypeInContext(this.context);
+        ptr<ptr> init_params = CodeGenerator.array_of(1);
         init_params[0] = i32_type;
-        void* init_type = LLVMFunctionType(void_type, init_params, 1, 0);
-        void* init_fn = LLVMAddFunction(this.module, "__djinn_runtime_init", init_type);
-        void* shutdown_type = LLVMFunctionType(void_type, CodeGenerator.array_of(0), 0, 0);
-        void* shutdown_fn = LLVMAddFunction(this.module, "__djinn_runtime_shutdown", shutdown_type);
+        ptr init_type = LLVMFunctionType(void_type, init_params, 1, 0);
+        ptr init_fn = LLVMAddFunction(this.module, "__djinn_runtime_init", init_type);
+        ptr shutdown_type = LLVMFunctionType(void_type, CodeGenerator.array_of(0), 0, 0);
+        ptr shutdown_fn = LLVMAddFunction(this.module, "__djinn_runtime_shutdown", shutdown_type);
 
-        void* main_type = LLVMFunctionType(i32_type, CodeGenerator.array_of(0), 0, 0);
-        void* main_fn = LLVMAddFunction(this.module, "main", main_type);
-        void* entry = LLVMAppendBasicBlockInContext(this.context, main_fn, "entry");
+        ptr main_type = LLVMFunctionType(i32_type, CodeGenerator.array_of(0), 0, 0);
+        ptr main_fn = LLVMAddFunction(this.module, "main", main_type);
+        ptr entry = LLVMAppendBasicBlockInContext(this.context, main_fn, "entry");
         LLVMPositionBuilderAtEnd(this.builder, entry);
 
-        void** init_args = CodeGenerator.array_of(1);
+        ptr<ptr> init_args = CodeGenerator.array_of(1);
         init_args[0] = LLVMConstInt(i32_type, 4, 0);
         LLVMBuildCall2(this.builder, init_type, init_fn, init_args, 1, "");
 
-        mut void* exit_code = LLVMConstInt(i32_type, 0, 0);
+        mut ptr exit_code = LLVMConstInt(i32_type, 0, 0);
         if (user.is_async) {
-            void* pointer_llvm = LLVMPointerTypeInContext(this.context, 0);
-            void* handle = LLVMBuildCall2(this.builder, user.function_type, user.function, CodeGenerator.array_of(0), 0, "main.handle");
-            void** loop_params = CodeGenerator.array_of(1);
-            void** loop_args = CodeGenerator.array_of(1);
+            ptr pointer_llvm = LLVMPointerTypeInContext(this.context, 0);
+            ptr handle = LLVMBuildCall2(this.builder, user.function_type, user.function, CodeGenerator.array_of(0), 0, "main.handle");
+            ptr<ptr> loop_params = CodeGenerator.array_of(1);
+            ptr<ptr> loop_args = CodeGenerator.array_of(1);
             loop_params[0] = pointer_llvm;
             loop_args[0] = handle;
             if (Types.is_void(user.return_type)) {
@@ -223,7 +223,7 @@ impl CodeGenerator {
         } else if (Types.is_void(user.return_type)) {
             LLVMBuildCall2(this.builder, user.function_type, user.function, CodeGenerator.array_of(0), 0, "");
         } else {
-            void* returned = LLVMBuildCall2(this.builder, user.function_type, user.function, CodeGenerator.array_of(0), 0, "exit");
+            ptr returned = LLVMBuildCall2(this.builder, user.function_type, user.function, CodeGenerator.array_of(0), 0, "exit");
             Value* wrapped = Value.create(returned, user.return_type);
             exit_code = this.coerce(wrapped, Types.i32_type());
         }
@@ -232,10 +232,10 @@ impl CodeGenerator {
         LLVMBuildRet(this.builder, exit_code);
     }
 
-    void add_attribute(void* function, u32 index, i8* name, u64 value) {
+    void add_attribute(ptr function, u32 index, ptr<i8> name, u64 value) {
         u64 length = (u64)strlen(name);
         u32 kind = LLVMGetEnumAttributeKindForName(name, length);
-        mut void* attribute = (void*)0;
+        mut ptr attribute = (ptr)0;
         if (kind != 0) {
             attribute = LLVMCreateEnumAttribute(this.context, kind, value);
         } else {
@@ -244,16 +244,16 @@ impl CodeGenerator {
         LLVMAddAttributeAtIndex(function, index, attribute);
     }
 
-    void add_function_attribute(void* function, i8* name) {
+    void add_function_attribute(ptr function, ptr<i8> name) {
         this.add_attribute(function, 4294967295, name, 0);
     }
 
-    void mark_allocator(void* function) {
+    void mark_allocator(ptr function) {
         this.add_attribute(function, 0, "noalias", 0);
         this.add_function_attribute(function, "nounwind");
     }
 
-    void apply_parameter_attributes(FunctionInfo* info) {
+    unsafe void apply_parameter_attributes(FunctionInfo* info) {
         Node* declaration = info.node;
         mut u32 slot = 0;
         IdList* params = info.param_types;
@@ -269,7 +269,7 @@ impl CodeGenerator {
                 PointerList* uses = Attributes.of(parameter);
                 for (mut i32 u = 0; u < uses.length; u = u + 1) {
                     AttributeUse* use = (AttributeUse*)uses.get(u);
-                    i8* mapped = Attributes.parameter_llvm_name(use.name);
+                    ptr<i8> mapped = Attributes.parameter_llvm_name(use.name);
                     if (mapped != null) {
                         this.add_attribute(info.function, slot + 1, mapped, (u64)use.int_arg);
                     }
@@ -279,7 +279,7 @@ impl CodeGenerator {
         }
     }
 
-    void apply_attributes(FunctionInfo* info) {
+    unsafe void apply_attributes(FunctionInfo* info) {
         if (info.node == null) {
             return;
         }
@@ -289,7 +289,7 @@ impl CodeGenerator {
         PointerList* uses = Attributes.of(info.node);
         for (mut i32 i = 0; i < uses.length; i = i + 1) {
             AttributeUse* use = (AttributeUse*)uses.get(i);
-            i8* mapped = Attributes.llvm_name(use.name);
+            ptr<i8> mapped = Attributes.llvm_name(use.name);
             if (mapped != null) {
                 this.add_function_attribute(info.function, mapped);
             } else if (Strings.equals(use.name, (i32)strlen(use.name), "Const")) {

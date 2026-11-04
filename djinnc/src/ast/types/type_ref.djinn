@@ -1,7 +1,7 @@
 namespace djinnc;
 
-unsafe static mut void* primitive_map = null;
-unsafe static mut void* primitive_list = null;
+unsafe static mut ptr primitive_map = null;
+unsafe static mut ptr primitive_list = null;
 
 struct TypeRef {
     i32 kind;
@@ -10,11 +10,11 @@ struct TypeRef {
     bool nullable;
     TypeRef* element;
     PointerList* args;
-    i8* name;
+    ptr<i8> name;
     u32 name_atom;
     u32 full_atom;
 
-    public static TypeRef* create(i32 kind) {
+    public static unsafe TypeRef* create(i32 kind) {
         TypeRef* type = (TypeRef*)Memory.zalloc(sizeof(TypeRef));
         type.kind = kind;
         return type;
@@ -40,17 +40,23 @@ struct TypeRef {
         return type;
     }
 
-    public static TypeRef* named(i8* name) {
+    public static TypeRef* raw_pointer_to(TypeRef* element) {
+        TypeRef* type = TypeRef.pointer_to(element);
+        type.is_signed = true;
+        return type;
+    }
+
+    public static unsafe TypeRef* named(ptr<i8> name) {
         TypeRef* type = TypeRef.create(TypeKind.NAMED);
         type.name = name;
         AtomTable* atoms = Atoms.get();
         type.full_atom = atoms.intern_copy(name, (u32)strlen(name));
         type.name_atom = atoms.base_of(type.full_atom);
         return type;
-    }    public static TypeRef* from_primitive_atom(u32 atom) {
+    }    public static unsafe TypeRef* from_primitive_atom(u32 atom) {
         if (primitive_map == null) {
-            primitive_map = (void*)U32Map.create(Memory.arena(), 256);
-            primitive_list = (void*)PointerList.create();
+            primitive_map = (ptr)U32Map.create(Memory.arena(), 256);
+            primitive_list = (ptr)PointerList.create();
         }
         U32Map* map = (U32Map*)primitive_map;
         PointerList* list = (PointerList*)primitive_list;
@@ -62,7 +68,7 @@ struct TypeRef {
                 map.put(atom, 0);
                 return null;
             }
-            list.push((void*)parsed);
+            list.push((ptr)parsed);
             map.put(atom, (u32)list.length);
             found = (i64)list.length;
         }
@@ -76,7 +82,7 @@ struct TypeRef {
         return copy;
     }
 
-    public static TypeRef* from_primitive_name(i8* text, i32 length) {
+    public static unsafe TypeRef* from_primitive_name(ptr<i8> text, i32 length) {
         if (Strings.equals(text, length, "void")) {
             return TypeRef.create(TypeKind.VOID);
         }
@@ -86,11 +92,14 @@ struct TypeRef {
         if (Strings.equals(text, length, "bool")) {
             return TypeRef.integer(1, false);
         }
-        if (Strings.equals(text, length, "nint") || Strings.equals(text, length, "isize") || Strings.equals(text, length, "iptr")) {
+        if (Strings.equals(text, length, "nint")) {
             return TypeRef.integer((i32)Target.pointer_bits(), true);
         }
-        if (Strings.equals(text, length, "usize") || Strings.equals(text, length, "uptr")) {
-            return TypeRef.integer((i32)Target.pointer_bits(), false);
+        if (Strings.equals(text, length, "isize")) {
+            return TypeRef.integer(32, true);
+        }
+        if (Strings.equals(text, length, "usize")) {
+            return TypeRef.integer(32, false);
         }
         if (Strings.equals(text, length, "nfloat") || Strings.equals(text, length, "ndouble")) {
             return TypeRef.floating(64);
@@ -146,7 +155,7 @@ struct TypeRef {
         return this.kind == TypeKind.POINTER;
     }
 
-    public void describe(ByteBuffer* out) {
+    public unsafe void describe(ByteBuffer* out) {
         if (this.kind == TypeKind.VOID) {
             out.append("void");
         } else if (this.kind == TypeKind.AUTO) {

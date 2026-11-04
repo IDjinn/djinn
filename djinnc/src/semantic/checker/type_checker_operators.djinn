@@ -69,7 +69,7 @@ impl TypeChecker {
         return this.find_operator_named(owner, name.cstr());
     }
 
-    FunctionInfo* find_operator_named(StructInfo* owner, i8* name) {
+    FunctionInfo* find_operator_named(StructInfo* owner, ptr<i8> name) {
         SymbolTable* symbols = this.symbols;
         return symbols.find_method(owner, Ast.intern_base_name(name, (i32)strlen(name)));
     }
@@ -85,7 +85,7 @@ impl TypeChecker {
         while (walk != null) {
             IdList* candidate_params = walk.param_types;
             if (candidate_params.length == 1 && candidate_params.get(0) == operand) {
-                node.set_symbol(SymbolKind.OPERATOR, (void*)walk);
+                node.set_symbol(SymbolKind.OPERATOR, (ptr)walk);
                 return walk.return_type;
             }
             walk = walk.overload;
@@ -121,11 +121,11 @@ impl TypeChecker {
         }
         IdList* chosen_params = exact.param_types;
         this.check_expression(node.second(), chosen_params.get(1));
-        node.set_symbol(SymbolKind.INDEX_GET, (void*)exact);
+        node.set_symbol(SymbolKind.INDEX_GET, (ptr)exact);
         return exact.return_type;
     }
 
-    void bind_index_setter(Node* target) {
+    unsafe void bind_index_setter(Node* target) {
         Node* collection = target.first();
         u32 base = collection.value_type();
         SymbolTable* symbols = this.symbols;
@@ -137,7 +137,7 @@ impl TypeChecker {
             IdList* candidate_params = walk.param_types;
             bool takes_collection = candidate_params.length == 3 && (candidate_params.get(0) == base || candidate_params.get(0) == Types.pointer_to(base));
             if (takes_collection && candidate_params.get(1) == getter_params.get(1)) {
-                target.set_symbol(SymbolKind.INDEX_SET, (void*)walk);
+                target.set_symbol(SymbolKind.INDEX_SET, (ptr)walk);
                 return;
             }
             walk = walk.overload;
@@ -173,7 +173,7 @@ impl TypeChecker {
             return method.return_type;
         }
         method = exact;
-        node.set_symbol(kind, (void*)method);
+        node.set_symbol(kind, (ptr)method);
         return method.return_type;
     }
 
@@ -217,6 +217,9 @@ impl TypeChecker {
         }
 
         if (Types.is_pointer(left) && Types.is_integer(right) && (op == TokenKind::PLUS || op == TokenKind::MINUS)) {
+            if (Types.is_raw_pointer(left)) {
+                this.require_unsafe(node, "pointer arithmetic on a raw pointer");
+            }
             return left;
         }
 
@@ -248,7 +251,7 @@ impl TypeChecker {
         return common;
     }
 
-    u32 check_assign(Node* node) {
+    unsafe u32 check_assign(Node* node) {
         Node* target = node.first();
         this.assign_target = target;
         u32 type = this.check_lvalue(target);
@@ -259,7 +262,7 @@ impl TypeChecker {
             if (setter == null) {
                 this.error(target, "property has no setter");
             } else {
-                target.set_symbol(SymbolKind.PROPERTY_SET, (void*)setter);
+                target.set_symbol(SymbolKind.PROPERTY_SET, (ptr)setter);
             }
         }
         if (target.kind() == NodeKind::INDEX && target.symbol_kind() == SymbolKind.INDEX_GET) {
@@ -270,7 +273,7 @@ impl TypeChecker {
             if (implicit_setter == null) {
                 this.error(target, "property has no setter");
             } else {
-                target.set_symbol(SymbolKind.IMPLICIT_SET, (void*)implicit_setter);
+                target.set_symbol(SymbolKind.IMPLICIT_SET, (ptr)implicit_setter);
             }
         }
         if (target.kind() == NodeKind::IDENTIFIER && (target.symbol_kind() == SymbolKind.LOCAL || target.symbol_kind() == SymbolKind.GLOBAL)) {
@@ -294,7 +297,7 @@ impl TypeChecker {
         return !Types.is_struct(type);
     }
 
-    void move_from(Node* source, Node* destination) {
+    unsafe void move_from(Node* source, Node* destination) {
         if (source.kind() != NodeKind::IDENTIFIER || source.symbol_kind() != SymbolKind.LOCAL) {
             return;
         }

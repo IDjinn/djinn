@@ -1,23 +1,23 @@
 namespace djinnc;
 
 impl CodeGenerator {
-    void* allocate_bytes(void* size) {
-        void* i64_type = LLVMIntTypeInContext(this.context, 64);
-        void* pointer_llvm = LLVMPointerTypeInContext(this.context, 0);
-        void** params = CodeGenerator.array_of(1);
+    unsafe ptr allocate_bytes(ptr size) {
+        ptr i64_type = LLVMIntTypeInContext(this.context, 64);
+        ptr pointer_llvm = LLVMPointerTypeInContext(this.context, 0);
+        ptr<ptr> params = CodeGenerator.array_of(1);
         params[0] = i64_type;
-        void* allocator_type = LLVMFunctionType(pointer_llvm, params, 1, 0);
-        mut void* allocator = LLVMGetNamedFunction(this.module, "__djinn_malloc");
+        ptr allocator_type = LLVMFunctionType(pointer_llvm, params, 1, 0);
+        mut ptr allocator = LLVMGetNamedFunction(this.module, "__djinn_malloc");
         if (allocator == null) {
             allocator = LLVMAddFunction(this.module, "__djinn_malloc", allocator_type);
             this.mark_allocator(allocator);
         }
-        void** args = CodeGenerator.array_of(1);
+        ptr<ptr> args = CodeGenerator.array_of(1);
         args[0] = size;
         return LLVMBuildCall2(this.builder, allocator_type, allocator, args, 1, "alloc");
     }
 
-    u64 name_hash(i8* text) {
+    unsafe u64 name_hash(ptr<i8> text) {
         mut u64 hash = 2166136261;
         for (mut i32 i = 0; text[i] != 0; i = i + 1) {
             hash = ((hash ^ (u64)(u8)text[i]) * 16777619) & 4294967295;
@@ -66,15 +66,15 @@ impl CodeGenerator {
         return ReflectionKind.STRUCT;
     }
 
-    void* base_type_info(u32 type, i8* name, bool reflected) {
+    unsafe ptr base_type_info(u32 type, ptr<i8> name, bool reflected) {
         u32 info_type = this.symbols_core_type("TypeInfo");
-        void* info_llvm = this.llvm_type(info_type);
-        void* i32_type = LLVMIntTypeInContext(this.context, 32);
+        ptr info_llvm = this.llvm_type(info_type);
+        ptr i32_type = LLVMIntTypeInContext(this.context, 32);
         mut u64 flags = 0;
         if (reflected) {
             flags = (u64)ReflectionKind.TYPE_REFLECTED;
         }
-        void** values = CodeGenerator.array_of(5);
+        ptr<ptr> values = CodeGenerator.array_of(5);
         values[0] = LLVMConstInt(i32_type, this.type_hash(type), 0);
         values[1] = LLVMConstInt(i32_type, LLVMABISizeOfType(this.layout_data, this.llvm_type(type)), 0);
         values[2] = LLVMBuildGlobalStringPtr(this.builder, name, "typeinfo.name");
@@ -83,7 +83,7 @@ impl CodeGenerator {
         return LLVMConstNamedStruct(info_llvm, values, 5);
     }
 
-    void* type_info_of(u32 type) {
+    ptr type_info_of(u32 type) {
         SymbolTable* symbols = this.symbols;
         StructInfo* declared = this.reflectable_info(type);
         if (declared != null && declared.type_info != null) {
@@ -94,7 +94,7 @@ impl CodeGenerator {
         ByteBuffer* global_name = ByteBuffer.create();
         global_name.append("__typeinfo_");
         global_name.append(name.cstr());
-        void* existing = LLVMGetNamedGlobal(this.module, global_name.cstr());
+        ptr existing = LLVMGetNamedGlobal(this.module, global_name.cstr());
         if (existing != null) {
             if (declared != null) {
                 declared.type_info = existing;
@@ -102,11 +102,11 @@ impl CodeGenerator {
             return existing;
         }
         bool reflected = this.is_reflected(type);
-        mut void* initializer = this.base_type_info(type, name.cstr(), reflected);
+        mut ptr initializer = this.base_type_info(type, name.cstr(), reflected);
         if (reflected) {
             initializer = this.extended_type_info(type, initializer);
         }
-        void* global = LLVMAddGlobal(this.module, LLVMTypeOf(initializer), global_name.cstr());
+        ptr global = LLVMAddGlobal(this.module, LLVMTypeOf(initializer), global_name.cstr());
         LLVMSetInitializer(global, initializer);
         LLVMSetGlobalConstant(global, 1);
         this.make_linkonce(global, global_name.cstr());
@@ -116,7 +116,7 @@ impl CodeGenerator {
         return global;
     }
 
-    FunctionInfo* formatter_of(u32 type) {
+    unsafe FunctionInfo* formatter_of(u32 type) {
         if (!Types.is_struct(type)) {
             return null;
         }
@@ -143,65 +143,64 @@ impl CodeGenerator {
         return method;
     }
 
-    Value* format_for_boxing(Value* source) {
+    unsafe Value* format_for_boxing(Value* source) {
         FunctionInfo* formatter = this.formatter_of(source.type);
         if (formatter == null) {
             return source;
         }
-        void* receiver = this.create_slot(source.type, "format.receiver");
+        ptr receiver = this.create_slot(source.type, "format.receiver");
         LLVMBuildStore(this.builder, source.ref, receiver);
-        void** args = CodeGenerator.array_of(1);
+        ptr<ptr> args = CodeGenerator.array_of(1);
         args[0] = receiver;
-        void* text = LLVMBuildCall2(this.builder, formatter.function_type, formatter.function, args, 1, "format");
+        ptr text = LLVMBuildCall2(this.builder, formatter.function_type, formatter.function, args, 1, "format");
         SymbolTable* symbols = this.symbols;
         StructInfo* helper = symbols.find_core_struct(Ast.intern_base_name("Reflection", 10));
         FunctionInfo* terminate = symbols.find_method(helper, Ast.intern_base_name("terminated", 10));
-        void** terminate_args = CodeGenerator.array_of(1);
+        ptr<ptr> terminate_args = CodeGenerator.array_of(1);
         terminate_args[0] = text;
-        void* cstring = LLVMBuildCall2(this.builder, terminate.function_type, terminate.function, terminate_args, 1, "format.text");
+        ptr cstring = LLVMBuildCall2(this.builder, terminate.function_type, terminate.function, terminate_args, 1, "format.text");
         return Value.create(cstring, terminate.return_type);
     }
 
-    void* box_value(Value* source) {
+    ptr box_value(Value* source) {
         u32 boxed = this.symbols_core_type("object");
-        void* object_llvm = this.llvm_type(boxed);
-        void* memory = this.allocate_bytes(LLVMSizeOf(this.llvm_type(source.type)));
+        ptr object_llvm = this.llvm_type(boxed);
+        ptr memory = this.allocate_bytes(LLVMSizeOf(this.llvm_type(source.type)));
         LLVMBuildStore(this.builder, source.ref, memory);
-        void* slot = this.create_slot(boxed, "boxed");
+        ptr slot = this.create_slot(boxed, "boxed");
         LLVMBuildStore(this.builder, this.type_info_of(source.type), LLVMBuildStructGEP2(this.builder, object_llvm, slot, 0, "boxed.type"));
         LLVMBuildStore(this.builder, memory, LLVMBuildStructGEP2(this.builder, object_llvm, slot, 1, "boxed.data"));
         return LLVMBuildLoad2(this.builder, object_llvm, slot, "boxed.value");
     }
 
-    Value* gen_is_variant(Node* node) {
+    unsafe Value* gen_is_variant(Node* node) {
         IsPattern* pattern = (IsPattern*)node.symbol();
         Node* variant = pattern.variant;
         Value* subject = this.gen_expression(node.first());
         u32 subject_type = subject.type;
-        void* enum_llvm = this.llvm_type(subject_type);
-        mut void* tag = subject.ref;
-        mut void* spill = (void*)0;
-        void* i32_type = LLVMIntTypeInContext(this.context, 32);
+        ptr enum_llvm = this.llvm_type(subject_type);
+        mut ptr tag = subject.ref;
+        mut ptr spill = (ptr)0;
+        ptr i32_type = LLVMIntTypeInContext(this.context, 32);
         if (Types.is_struct(subject_type)) {
             spill = this.create_slot(subject_type, "is.subject");
             LLVMBuildStore(this.builder, subject.ref, spill);
-            void* tag_address = LLVMBuildStructGEP2(this.builder, enum_llvm, spill, 0, "is.tag.ptr");
-            tag = LLVMBuildLoad2(this.builder, i32_type, tag_address, "is.tag");
+            tag = this.load_tag(subject_type, enum_llvm, spill, "is.tag");
         }
         Node* tag_value = variant.first();
-        void* expected = LLVMConstInt(i32_type, (u64)tag_value.int_value(), 0);
-        void* matches = LLVMBuildICmp(this.builder, LlvmConst.INT_EQ, tag, expected, "is.match");
+        ptr expected = LLVMConstInt(i32_type, (u64)tag_value.int_value(), 0);
+        ptr matches = LLVMBuildICmp(this.builder, LlvmConst.INT_EQ, tag, expected, "is.match");
         PointerList* bindings = pattern.bindings;
         if (bindings.length > 0) {
-            void* bind_block = this.new_block("is.bind");
-            void* end_block = this.new_block("is.end");
+            ptr bind_block = this.new_block("is.bind");
+            ptr end_block = this.new_block("is.end");
             LLVMBuildCondBr(this.builder, matches, bind_block, end_block);
             LLVMPositionBuilderAtEnd(this.builder, bind_block);
             for (mut i32 b = 0; b < bindings.length; b = b + 1) {
                 LocalVariable* variable = (LocalVariable*)bindings.get(b);
                 variable.slot = this.create_slot(variable.type, variable.name);
-                void* address = this.payload_address(enum_llvm, spill, variant, b);
-                void* loaded = LLVMBuildLoad2(this.builder, this.llvm_type(variable.type), address, "is.bound");
+                ptr address = this.payload_address(subject_type, enum_llvm, spill, variant, b);
+                ptr loaded = LLVMBuildLoad2(this.builder, this.llvm_type(variable.type), address, "is.bound");
                 LLVMBuildStore(this.builder, loaded, variable.slot);
                 this.declare_variable(variable.slot, variable.name, variable.type, node, 0);
             }
@@ -211,27 +210,27 @@ impl CodeGenerator {
         return Value.create(matches, Types.bool_type());
     }
 
-    Value* gen_is(Node* node) {
+    unsafe Value* gen_is(Node* node) {
         if (node.symbol_kind() == SymbolKind.CONSTANT) {
             return this.gen_is_variant(node);
         }
         LocalVariable* variable = (LocalVariable*)node.symbol();
         Value* operand = this.gen_expression(node.first());
         u32 info_type = this.symbols_core_type("TypeInfo");
-        void* info_pointer = LLVMBuildExtractValue(this.builder, operand.ref, 0, "is.info");
-        void* i32_type = LLVMIntTypeInContext(this.context, 32);
-        void* id_address = LLVMBuildStructGEP2(this.builder, this.llvm_type(info_type), info_pointer, 0, "is.id.ptr");
-        void* id = LLVMBuildLoad2(this.builder, i32_type, id_address, "is.id");
-        void* expected = LLVMConstInt(i32_type, this.type_hash(variable.type), 0);
-        void* matches = LLVMBuildICmp(this.builder, LlvmConst.INT_EQ, id, expected, "is.match");
+        ptr info_pointer = LLVMBuildExtractValue(this.builder, operand.ref, 0, "is.info");
+        ptr i32_type = LLVMIntTypeInContext(this.context, 32);
+        ptr id_address = LLVMBuildStructGEP2(this.builder, this.llvm_type(info_type), info_pointer, 0, "is.id.ptr");
+        ptr id = LLVMBuildLoad2(this.builder, i32_type, id_address, "is.id");
+        ptr expected = LLVMConstInt(i32_type, this.type_hash(variable.type), 0);
+        ptr matches = LLVMBuildICmp(this.builder, LlvmConst.INT_EQ, id, expected, "is.match");
         if (node.flag()) {
             variable.slot = this.create_slot(variable.type, variable.name);
-            void* bind_block = this.new_block("is.bind");
-            void* end_block = this.new_block("is.end");
+            ptr bind_block = this.new_block("is.bind");
+            ptr end_block = this.new_block("is.end");
             LLVMBuildCondBr(this.builder, matches, bind_block, end_block);
             LLVMPositionBuilderAtEnd(this.builder, bind_block);
-            void* data = LLVMBuildExtractValue(this.builder, operand.ref, 1, "is.data");
-            void* loaded = LLVMBuildLoad2(this.builder, this.llvm_type(variable.type), data, "is.value");
+            ptr data = LLVMBuildExtractValue(this.builder, operand.ref, 1, "is.data");
+            ptr loaded = LLVMBuildLoad2(this.builder, this.llvm_type(variable.type), data, "is.value");
             LLVMBuildStore(this.builder, loaded, variable.slot);
             LLVMBuildBr(this.builder, end_block);
             LLVMPositionBuilderAtEnd(this.builder, end_block);

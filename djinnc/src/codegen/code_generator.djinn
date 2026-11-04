@@ -1,15 +1,15 @@
 namespace djinnc;
 
-unsafe static mut void* active_generator = null;
+unsafe static mut ptr active_generator = null;
 
 struct CodeGenerator {
-    void* context;
+    ptr context;
 
-    void* module;
+    ptr module;
 
-    void* builder;
+    ptr builder;
 
-    void* alloca_builder;
+    ptr alloca_builder;
 
     Diagnostics* diagnostics;
 
@@ -19,7 +19,7 @@ struct CodeGenerator {
 
     DebugInfo* debug;
 
-    void* layout_data;
+    ptr layout_data;
 
     i32 reflect_mode;
 
@@ -27,7 +27,7 @@ struct CodeGenerator {
 
     i32 module_taken;
 
-    public static CodeGenerator* create(Diagnostics* diagnostics, i8* module_name) {
+    public static unsafe CodeGenerator* create(Diagnostics* diagnostics, ptr<i8> module_name) {
         CodeGenerator* gen = (CodeGenerator*)Memory.zalloc(sizeof(CodeGenerator));
         gen.context = LLVMContextCreate();
         gen.module = LLVMModuleCreateWithNameInContext(module_name, gen.context);
@@ -38,7 +38,7 @@ struct CodeGenerator {
         gen.function_context = FunctionContext.create();
         gen.layout_data = LLVMCreateTargetData("e-p:64:64-i64:64-i128:128-f64:64-n8:16:32:64");
         LLVMSetTarget(gen.module, Target.triple());
-        active_generator = (void*)gen;
+        active_generator = (ptr)gen;
         return gen;
     }
 
@@ -52,18 +52,18 @@ struct CodeGenerator {
             LLVMDisposeBuilder(this.builder);
             LLVMDisposeBuilder(this.alloca_builder);
             LLVMDisposeTargetData(this.layout_data);
-            this.builder = (void*)0;
-            this.alloca_builder = (void*)0;
-            this.layout_data = (void*)0;
+            this.builder = (ptr)0;
+            this.alloca_builder = (ptr)0;
+            this.layout_data = (ptr)0;
         }
     }
 
-    public static void release() {
+    public static unsafe void release() {
         if (active_generator == null) {
             return;
         }
         CodeGenerator* gen = (CodeGenerator*)active_generator;
-        active_generator = (void*)0;
+        active_generator = (ptr)0;
         gen.release_builders();
         if (gen.module_taken == 0) {
             LLVMDisposeModule(gen.module);
@@ -71,7 +71,7 @@ struct CodeGenerator {
         }
     }
 
-    public void enable_debug(i8* first_file, bool optimized, bool dwarf) {
+    public void enable_debug(ptr<i8> first_file, bool optimized, bool dwarf) {
         this.debug = DebugInfo.create(this.context, this.module, this.builder, first_file, optimized, dwarf);
     }
 
@@ -82,7 +82,7 @@ struct CodeGenerator {
         }
     }
 
-    void declare_variable(void* slot, i8* name, u32 type, Node* at, i32 argument) {
+    void declare_variable(ptr slot, ptr<i8> name, u32 type, Node* at, i32 argument) {
         if (this.debug != null) {
             DebugInfo* debug = this.debug;
             debug.declare(slot, name, type, at, argument, LLVMGetInsertBlock(this.builder), this);
@@ -120,7 +120,7 @@ struct CodeGenerator {
             return false;
         }
 
-        i8* message = (i8*)0;
+        ptr<i8> message = (ptr<i8>)0;
         i32 invalid = LLVMVerifyModule(this.module, LlvmConst.VERIFY_RETURN_STATUS, &message);
         if (invalid != 0) {
             logger_error(Log.get(), "djinnc: LLVM module verification failed: %s", message);
@@ -129,8 +129,8 @@ struct CodeGenerator {
         return true;
     }
 
-    public bool write_ir(i8* path) {
-        i8* message = (i8*)0;
+    public bool write_ir(ptr<i8> path) {
+        ptr<i8> message = (ptr<i8>)0;
         i32 failed = LLVMPrintModuleToFile(this.module, path, &message);
         if (failed != 0) {
             logger_error(Log.get(), "djinnc: cannot write '%s': %s", path, message);
@@ -139,28 +139,28 @@ struct CodeGenerator {
         return true;
     }
 
-    public bool write_object(i8* path, i8* level) {
+    public bool write_object(ptr<i8> path, ptr<i8> level) {
         return ObjectWriter.emit(this.module, path, level, LlvmConst.CODEGEN_OBJECT_FILE, false);
     }
 
-    public bool write_assembly(i8* path, i8* level, bool drop_dependencies) {
+    public bool write_assembly(ptr<i8> path, ptr<i8> level, bool drop_dependencies) {
         return ObjectWriter.emit(this.module, path, level, LlvmConst.CODEGEN_ASSEMBLY_FILE, drop_dependencies);
     }
 
-    public bool optimize_ir(i8* level, bool drop_dependencies) {
+    public bool optimize_ir(ptr<i8> level, bool drop_dependencies) {
         return ObjectWriter.optimize_module(this.module, level, drop_dependencies);
     }
 
-    void error(Node* at, i8* message) {
+    void error(Node* at, ptr<i8> message) {
         Diagnostics* diagnostics = this.diagnostics;
         diagnostics.error_in(at.file_name(), at.line(), at.column(), message);
     }
 
-    static void** array_of(i32 count) {
-        return (void**)Memory.zalloc(((i64)count + 1) * 8);
+    static ptr<ptr> array_of(i32 count) {
+        return (ptr<ptr>)Memory.zalloc(((i64)count + 1) * 8);
     }
 
-    static i8* base_name(i8* qualified) {
+    static unsafe ptr<i8> base_name(ptr<i8> qualified) {
         i32 length = strlen(qualified);
         mut i32 last = 0;
         for (mut i32 i = 0; i + 1 < length; i = i + 1) {
@@ -175,14 +175,14 @@ struct CodeGenerator {
         return Value.create(LLVMConstInt(LLVMIntTypeInContext(this.context, 32), 0, 0), Types.i32_type());
     }
 
-    Value* gen_expression(Node* node) {
+    unsafe Value* gen_expression(Node* node) {
         NodeKind kind = node.kind();
         this.locate(node);
         u32 type = node.value_type();
 
         if (kind == NodeKind::INT_LITERAL) {
             if (type == Types.byte_pointer()) {
-                return Value.create(this.string_constant((i8*)node.int_value()), type);
+                return Value.create(this.string_constant((ptr<i8>)node.int_value()), type);
             }
             if (Types.is_float(type)) {
                 return Value.create(LLVMConstReal(this.llvm_type(type), (f64)node.int_value()), type);
@@ -196,7 +196,7 @@ struct CodeGenerator {
             return Value.create(LLVMConstReal(this.llvm_type(type), ConstBits.to_float(node.int_value())), type);
         }
         if (kind == NodeKind::STRING_LITERAL) {
-            void* text = this.string_constant(node.text());
+            ptr text = this.string_constant(node.text());
             if (Types.is_struct(type)) {
                 return this.gen_text_value(node, text, type);
             }

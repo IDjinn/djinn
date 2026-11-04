@@ -1,15 +1,15 @@
 namespace djinnc;
 
-unsafe static mut i8* target_cpu = null;
-unsafe static mut i8* target_features = null;
+unsafe static mut ptr<i8> target_cpu = null;
+unsafe static mut ptr<i8> target_features = null;
 
 struct ObjectWriter {
-    public static void set_target(i8* cpu, i8* features) {
+    public static void set_target(ptr<i8> cpu, ptr<i8> features) {
         target_cpu = cpu;
         target_features = features;
     }
 
-    static i8* cpu_name() {
+    static ptr<i8> cpu_name() {
         if (target_cpu == null) {
             return "generic";
         }
@@ -19,7 +19,7 @@ struct ObjectWriter {
         return target_cpu;
     }
 
-    static i8* feature_list() {
+    static ptr<i8> feature_list() {
         if (target_cpu != null && Strings.same(target_cpu, "native") && target_features == null) {
             return LLVMGetHostCPUFeatures();
         }
@@ -29,12 +29,12 @@ struct ObjectWriter {
         return target_features;
     }
 
-    public static bool run_passes(void* module, void* machine, i8* pipeline) {
-        void* options = LLVMCreatePassBuilderOptions();
-        void* error = LLVMRunPasses(module, pipeline, machine, options);
+    public static bool run_passes(ptr module, ptr machine, ptr<i8> pipeline) {
+        ptr options = LLVMCreatePassBuilderOptions();
+        ptr error = LLVMRunPasses(module, pipeline, machine, options);
         LLVMDisposePassBuilderOptions(options);
         if (error != null) {
-            i8* message = LLVMGetErrorMessage(error);
+            ptr<i8> message = LLVMGetErrorMessage(error);
             logger_error(Log.get(), "djinnc: optimization failed: %s", message);
             LLVMDisposeErrorMessage(message);
             return false;
@@ -42,11 +42,11 @@ struct ObjectWriter {
         return true;
     }
 
-    static bool is_optimized(i8* level) {
+    static bool is_optimized(ptr<i8> level) {
         return !Strings.same(level, "O0");
     }
 
-    static i8* pipeline(i8* level, bool drop_dependencies, bool lower) {
+    static ptr<i8> pipeline(ptr<i8> level, bool drop_dependencies, bool lower) {
         ByteBuffer* text = ByteBuffer.create();
         bool optimized = ObjectWriter.is_optimized(level);
         bool has_base = optimized || lower;
@@ -66,7 +66,7 @@ struct ObjectWriter {
         return text.cstr();
     }
 
-    static i32 codegen_level(i8* level) {
+    static i32 codegen_level(ptr<i8> level) {
         if (Strings.same(level, "O1")) {
             return LlvmConst.CODEGEN_OPT_LESS;
         }
@@ -79,18 +79,18 @@ struct ObjectWriter {
         return LlvmConst.CODEGEN_OPT_NONE;
     }
 
-    public static bool optimize_module(void* module, i8* level, bool drop_dependencies) {
-        return ObjectWriter.run_passes(module, (void*)0, ObjectWriter.pipeline(level, drop_dependencies, false));
+    public static bool optimize_module(ptr module, ptr<i8> level, bool drop_dependencies) {
+        return ObjectWriter.run_passes(module, (ptr)0, ObjectWriter.pipeline(level, drop_dependencies, false));
     }
 
-    public static bool emit(void* module, i8* path, i8* level, i32 kind, bool drop_dependencies) {
+    public static bool emit(ptr module, ptr<i8> path, ptr<i8> level, i32 kind, bool drop_dependencies) {
         if (!Target.initialize_backend()) {
             return false;
         }
 
-        i8* triple = Target.triple();
-        void* target = (void*)0;
-        i8* message = (i8*)0;
+        ptr<i8> triple = Target.triple();
+        ptr target = (ptr)0;
+        ptr<i8> message = (ptr<i8>)0;
         if (LLVMGetTargetFromTriple(triple, &target, &message) != 0) {
             logger_error(Log.get(), "djinnc: no LLVM target for '%s': %s", triple, message);
             return false;
@@ -101,13 +101,13 @@ struct ObjectWriter {
         if (!Linker.is_windows()) {
             relocation = LlvmConst.RELOC_PIC;
         }
-        void* machine = LLVMCreateTargetMachine(target, triple, ObjectWriter.cpu_name(), ObjectWriter.feature_list(), codegen, relocation, LlvmConst.CODE_MODEL_DEFAULT);
+        ptr machine = LLVMCreateTargetMachine(target, triple, ObjectWriter.cpu_name(), ObjectWriter.feature_list(), codegen, relocation, LlvmConst.CODE_MODEL_DEFAULT);
         if (machine == null) {
             logger_error(Log.get(), "djinnc: cannot create a target machine for '%s'", triple);
             return false;
         }
 
-        i8* pipeline = ObjectWriter.pipeline(level, drop_dependencies, true);
+        ptr<i8> pipeline = ObjectWriter.pipeline(level, drop_dependencies, true);
         if (!ObjectWriter.run_passes(module, machine, pipeline)) {
             LLVMDisposeTargetMachine(machine);
             return false;

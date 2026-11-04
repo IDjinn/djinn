@@ -1,23 +1,23 @@
 namespace djinnc;
 
 struct DebugInfo {
-    void* context;
-    void* module;
-    void* builder;
-    void* ir_builder;
+    ptr context;
+    ptr module;
+    ptr builder;
+    ptr ir_builder;
     i32 optimized;
     i32 finalized;
-    void* target_data;
-    void* unit;
-    void* scope;
-    void* file;
-    i8* file_name;
+    ptr target_data;
+    ptr unit;
+    ptr scope;
+    ptr file;
+    ptr<i8> file_name;
     PointerList* file_names;
     PointerList* files;
     PointerList* type_list;
     U32Map* types;
 
-    public static DebugInfo* create(void* context, void* module, void* ir_builder, i8* first_file, bool optimized, bool dwarf) {
+    public static unsafe DebugInfo* create(ptr context, ptr module, ptr ir_builder, ptr<i8> first_file, bool optimized, bool dwarf) {
         DebugInfo* debug = (DebugInfo*)Memory.zalloc(sizeof(DebugInfo));
         debug.context = context;
         debug.module = module;
@@ -33,12 +33,12 @@ struct DebugInfo {
         debug.type_list = PointerList.create();
         debug.types = U32Map.create(Memory.arena(), 64);
 
-        void* file = debug.file_for(first_file);
-        i8* producer = "djinnc";
+        ptr file = debug.file_for(first_file);
+        ptr<i8> producer = "djinnc";
         debug.unit = LLVMDIBuilderCreateCompileUnit(debug.builder, 11, file, producer, (u64)strlen(producer), debug.optimized, "", 0, 0, "", 0, 1, 0, 0, 0, "", 0, "", 0);
 
-        void* i32_type = LLVMIntTypeInContext(context, 32);
-        void* version = LLVMValueAsMetadata(LLVMConstInt(i32_type, 3, 0));
+        ptr i32_type = LLVMIntTypeInContext(context, 32);
+        ptr version = LLVMValueAsMetadata(LLVMConstInt(i32_type, 3, 0));
         LLVMAddModuleFlag(module, 1, "Debug Info Version", 18, version);
         if (Linker.is_windows() && !dwarf) {
             LLVMAddModuleFlag(module, 1, "CodeView", 8, LLVMValueAsMetadata(LLVMConstInt(i32_type, 1, 0)));
@@ -48,21 +48,21 @@ struct DebugInfo {
         return debug;
     }
 
-    void* file_for(i8* name) {
+    ptr file_for(ptr<i8> name) {
         PointerList* names = this.file_names;
         PointerList* files = this.files;
         for (mut i32 i = 0; i < names.length; i = i + 1) {
-            if (Strings.same((i8*)names.get(i), name)) {
+            if (Strings.same((ptr<i8>)names.get(i), name)) {
                 return files.get(i);
             }
         }
-        void* file = LLVMDIBuilderCreateFile(this.builder, name, (u64)strlen(name), "", 0);
-        names.push((void*)name);
+        ptr file = LLVMDIBuilderCreateFile(this.builder, name, (u64)strlen(name), "", 0);
+        names.push((ptr)name);
         files.push(file);
         return file;
     }
 
-    public void* type_of(u32 type, CodeGenerator* gen) {
+    public ptr type_of(u32 type, CodeGenerator* gen) {
         if (Types.is_void(type)) {
             return null;
         }
@@ -72,7 +72,7 @@ struct DebugInfo {
         if (cached >= 0) {
             return list.get((i32)cached);
         }
-        mut void* result = (void*)0;
+        mut ptr result = (ptr)0;
         i32 kind = Types.kind(type);
         SymbolTable* symbols = gen.symbols;
         StructInfo* enumeration = symbols.enum_of_type(type);
@@ -94,7 +94,7 @@ struct DebugInfo {
             Types.describe(type, name);
             result = LLVMDIBuilderCreateBasicType(this.builder, name.cstr(), (u64)strlen(name.cstr()), (u64)Types.bits(type), 4, 0);
         } else if (kind == TypeKind.POINTER) {
-            void* pointee = this.type_of(Types.element(type), gen);
+            ptr pointee = this.type_of(Types.element(type), gen);
             result = LLVMDIBuilderCreatePointerType(this.builder, pointee, 64, 0, 0, "", 0);
         } else {
             return this.struct_type(type, gen);
@@ -104,8 +104,8 @@ struct DebugInfo {
         return result;
     }
 
-    void* enumeration_type(StructInfo* info, CodeGenerator* gen) {
-        mut void* file = this.file_for(this.file_name);
+    unsafe ptr enumeration_type(StructInfo* info, CodeGenerator* gen) {
+        mut ptr file = this.file_for(this.file_name);
         mut u32 line = 0;
         if (info.node != null) {
             Node* declaration = info.node;
@@ -113,73 +113,73 @@ struct DebugInfo {
             line = (u32)declaration.line();
         }
         PointerList* constants = info.constants;
-        void** entries = CodeGenerator.array_of(constants.length);
+        ptr<ptr> entries = CodeGenerator.array_of(constants.length);
         for (mut i32 i = 0; i < constants.length; i = i + 1) {
             Node* member = (Node*)constants.get(i);
             Node* tag = member.first();
             AtomTable* atoms = Ast.atoms();
-            i8* label = atoms.text(member.name());
+            ptr<i8> label = atoms.text(member.name());
             entries[i] = LLVMDIBuilderCreateEnumerator(this.builder, label, (u64)strlen(label), tag.int_value(), 0);
         }
-        void* underlying = this.type_of(Types.integer(32, true), gen);
+        ptr underlying = this.type_of(Types.integer(32, true), gen);
         return LLVMDIBuilderCreateEnumerationType(this.builder, this.unit, info.name, (u64)strlen(info.name), file, line, 32, 0, entries, (u32)constants.length, underlying);
     }
 
-    void* struct_type(u32 type, CodeGenerator* gen) {
+    unsafe ptr struct_type(u32 type, CodeGenerator* gen) {
         U32Map* cache = this.types;
         PointerList* list = this.type_list;
         StructInfo* info = gen.struct_of(type);
-        mut void* file = this.file_for(this.file_name);
+        mut ptr file = this.file_for(this.file_name);
         mut u32 line = 0;
         if (info.node != null) {
             Node* declaration = info.node;
             file = this.file_for(declaration.file_name());
             line = (u32)declaration.line();
         }
-        void* placeholder = LLVMTemporaryMDNode(this.context, null, 0);
+        ptr placeholder = LLVMTemporaryMDNode(this.context, null, 0);
         u32 slot = (u32)list.length;
         cache.put(type, slot);
         list.push(placeholder);
 
         PointerList* members = PointerList.create();
         if (info.is_enum) {
-            void* tag_type = this.type_of(Types.integer(32, true), gen);
+            ptr tag_type = this.type_of(Types.integer(32, true), gen);
             members.push(LLVMDIBuilderCreateMemberType(this.builder, this.unit, "tag", 3, file, line, 32, 0, 0, 0, tag_type));
         } else {
             PointerList* fields = info.fields;
             for (mut i32 i = 0; i < fields.length; i = i + 1) {
                 FieldInfo* field = (FieldInfo*)fields.get(i);
-                void* field_type = this.type_of(field.type, gen);
+                ptr field_type = this.type_of(field.type, gen);
                 u64 field_bits = LLVMABISizeOfType(this.target_data, gen.llvm_type(field.type)) * 8;
                 u64 offset = LLVMOffsetOfElement(this.target_data, info.llvm, (u32)field.index) * 8;
                 members.push(LLVMDIBuilderCreateMemberType(this.builder, this.unit, field.name, (u64)strlen(field.name), file, 0, field_bits, 0, offset, 0, field_type));
             }
         }
-        void** entries = CodeGenerator.array_of(members.length);
+        ptr<ptr> entries = CodeGenerator.array_of(members.length);
         for (mut i32 i = 0; i < members.length; i = i + 1) {
             entries[i] = members.get(i);
         }
         u64 size = LLVMABISizeOfType(this.target_data, info.llvm) * 8;
-        void* result = LLVMDIBuilderCreateStructType(this.builder, this.unit, info.name, (u64)strlen(info.name), file, line, size, 0, 0, null, entries, (u32)members.length, 0, null, "", 0);
+        ptr result = LLVMDIBuilderCreateStructType(this.builder, this.unit, info.name, (u64)strlen(info.name), file, line, size, 0, 0, null, entries, (u32)members.length, 0, null, "", 0);
         LLVMMetadataReplaceAllUsesWith(placeholder, result);
-        void** raw = list.data;
+        ptr<ptr> raw = list.data;
         raw[slot] = result;
         return result;
     }
 
-    public void* enter_block(Node* node) {
-        void* outer = this.scope;
+    public ptr enter_block(Node* node) {
+        ptr outer = this.scope;
         if (outer != null) {
             this.scope = LLVMDIBuilderCreateLexicalBlock(this.builder, outer, this.file, (u32)node.line(), (u32)node.column());
         }
         return outer;
     }
 
-    public void leave_block(void* outer) {
+    public void leave_block(ptr outer) {
         this.scope = outer;
     }
 
-    public void begin_function(FunctionInfo* info, Node* declaration, CodeGenerator* gen) {
+    public unsafe void begin_function(FunctionInfo* info, Node* declaration, CodeGenerator* gen) {
         this.file_name = declaration.file_name();
         this.file = this.file_for(this.file_name);
         PointerList* signature = PointerList.create();
@@ -188,11 +188,11 @@ struct DebugInfo {
         for (mut i32 i = 0; i < params.length; i = i + 1) {
             signature.push(this.type_of(params.get(i), gen));
         }
-        void** entries = CodeGenerator.array_of(signature.length);
+        ptr<ptr> entries = CodeGenerator.array_of(signature.length);
         for (mut i32 i = 0; i < signature.length; i = i + 1) {
             entries[i] = signature.get(i);
         }
-        void* subroutine = LLVMDIBuilderCreateSubroutineType(this.builder, this.file, entries, (u32)signature.length, 0);
+        ptr subroutine = LLVMDIBuilderCreateSubroutineType(this.builder, this.file, entries, (u32)signature.length, 0);
         u32 line = (u32)declaration.line();
         mut i32 display_length = strlen(info.name);
         for (mut i32 i = 0; i < display_length; i = i + 1) {
@@ -215,29 +215,29 @@ struct DebugInfo {
         if (this.scope == null) {
             return;
         }
-        void* location = LLVMDIBuilderCreateDebugLocation(this.context, (u32)node.line(), (u32)node.column(), this.scope, null);
+        ptr location = LLVMDIBuilderCreateDebugLocation(this.context, (u32)node.line(), (u32)node.column(), this.scope, null);
         LLVMSetCurrentDebugLocation2(this.ir_builder, location);
     }
 
-    public void declare(void* slot, i8* name, u32 type, Node* at, i32 argument, void* block, CodeGenerator* gen) {
-        void* di_type = this.type_of(type, gen);
+    public void declare(ptr slot, ptr<i8> name, u32 type, Node* at, i32 argument, ptr block, CodeGenerator* gen) {
+        ptr di_type = this.type_of(type, gen);
         u32 line = (u32)at.line();
-        mut void* variable = (void*)0;
+        mut ptr variable = (ptr)0;
         if (argument > 0) {
             variable = LLVMDIBuilderCreateParameterVariable(this.builder, this.scope, name, (u64)strlen(name), (u32)argument, this.file, line, di_type, 1, 0);
         } else {
             variable = LLVMDIBuilderCreateAutoVariable(this.builder, this.scope, name, (u64)strlen(name), this.file, line, di_type, 1, 0, 0);
         }
-        void* expression = LLVMDIBuilderCreateExpression(this.builder, null, 0);
-        void* location = LLVMDIBuilderCreateDebugLocation(this.context, line, (u32)at.column(), this.scope, null);
+        ptr expression = LLVMDIBuilderCreateExpression(this.builder, null, 0);
+        ptr location = LLVMDIBuilderCreateDebugLocation(this.context, line, (u32)at.column(), this.scope, null);
         LLVMDIBuilderInsertDeclareRecordAtEnd(this.builder, slot, variable, expression, location, block);
     }
 
-    public void declare_global(void* global, i8* name, u32 type, Node* at, CodeGenerator* gen) {
-        void* file = this.file_for(at.file_name());
-        void* di_type = this.type_of(type, gen);
-        void* expression = LLVMDIBuilderCreateExpression(this.builder, null, 0);
-        void* variable = LLVMDIBuilderCreateGlobalVariableExpression(this.builder, this.unit, name, (u64)strlen(name), name, (u64)strlen(name), file, (u32)at.line(), di_type, 0, expression, null, 0);
+    public void declare_global(ptr global, ptr<i8> name, u32 type, Node* at, CodeGenerator* gen) {
+        ptr file = this.file_for(at.file_name());
+        ptr di_type = this.type_of(type, gen);
+        ptr expression = LLVMDIBuilderCreateExpression(this.builder, null, 0);
+        ptr variable = LLVMDIBuilderCreateGlobalVariableExpression(this.builder, this.unit, name, (u64)strlen(name), name, (u64)strlen(name), file, (u32)at.line(), di_type, 0, expression, null, 0);
         LLVMGlobalSetMetadata(global, 0, variable);
     }
 
@@ -252,7 +252,7 @@ struct DebugInfo {
         this.finalize();
         LLVMDisposeDIBuilder(this.builder);
         LLVMDisposeTargetData(this.target_data);
-        this.builder = (void*)0;
-        this.target_data = (void*)0;
+        this.builder = (ptr)0;
+        this.target_data = (ptr)0;
     }
 }

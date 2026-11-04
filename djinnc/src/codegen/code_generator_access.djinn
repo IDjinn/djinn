@@ -3,13 +3,10 @@ namespace djinnc;
 impl CodeGenerator {
     Value* gen_sizeof(Node* node) {
         u32 measured = (u32)(u64)node.symbol();
-        u32 result = Types.integer(Target.pointer_bits(), true);
+        u32 result = Types.integer(32, true);
         if (Types.is_struct(measured)) {
             StructInfo* info = this.struct_of(measured);
-            mut void* size = LLVMSizeOf(info.llvm);
-            if (Target.pointer_bits() != 64) {
-                size = LLVMBuildIntCast2(this.builder, size, this.llvm_type(result), 0, "sizeof");
-            }
+            ptr size = LLVMBuildIntCast2(this.builder, LLVMSizeOf(info.llvm), this.llvm_type(result), 0, "sizeof");
             return Value.create(size, result);
         }
         mut i64 bytes = 8;
@@ -39,28 +36,28 @@ impl CodeGenerator {
         return kind == NodeKind::UNARY && node.op_kind() == TokenKind::STAR;
     }
 
-    void* index_collection(Node* base, u32 parameter) {
+    ptr index_collection(Node* base, u32 parameter) {
         if (Types.is_pointer(parameter)) {
             return this.struct_pointer(base);
         }
         return this.coerce(this.gen_expression(base), parameter);
     }
 
-    Value* gen_index_get(Node* node) {
+    unsafe Value* gen_index_get(Node* node) {
         FunctionInfo* getter = (FunctionInfo*)node.symbol();
         IdList* parameters = getter.param_types;
-        void** args = CodeGenerator.array_of(2);
+        ptr<ptr> args = CodeGenerator.array_of(2);
         args[0] = this.index_collection(node.first(), parameters.get(0));
         args[1] = this.coerce(this.gen_expression(node.second()), parameters.get(1));
-        void* result = LLVMBuildCall2(this.builder, getter.function_type, getter.function, args, 2, "index.get");
+        ptr result = LLVMBuildCall2(this.builder, getter.function_type, getter.function, args, 2, "index.get");
         return Value.create(result, getter.return_type);
     }
 
-    Value* gen_index_set(Node* node) {
+    unsafe Value* gen_index_set(Node* node) {
         Node* target = node.first();
         FunctionInfo* setter = (FunctionInfo*)target.symbol();
         IdList* parameters = setter.param_types;
-        void** args = CodeGenerator.array_of(3);
+        ptr<ptr> args = CodeGenerator.array_of(3);
         args[0] = this.index_collection(target.first(), parameters.get(0));
         args[1] = this.coerce(this.gen_expression(target.second()), parameters.get(1));
         Value* assigned = this.gen_expression(node.second());
@@ -69,9 +66,9 @@ impl CodeGenerator {
         return Value.create(args[2], parameters.get(2));
     }
 
-    void* struct_pointer(Node* base) {
+    ptr struct_pointer(Node* base) {
         if (this.is_addressable(base)) {
-            void* address = this.gen_address(base);
+            ptr address = this.gen_address(base);
             u32 base_type = base.value_type();
             if (Types.is_pointer(base_type)) {
                 return LLVMBuildLoad2(this.builder, this.llvm_type(base_type), address, "load");
@@ -80,22 +77,22 @@ impl CodeGenerator {
         }
         Value* value = this.gen_expression(base);
         if (!Types.is_pointer(value.type)) {
-            void* spill = this.create_slot(value.type, "receiver");
+            ptr spill = this.create_slot(value.type, "receiver");
             LLVMBuildStore(this.builder, value.ref, spill);
             return spill;
         }
         return value.ref;
     }
 
-    void* field_address(Node* node) {
+    unsafe ptr field_address(Node* node) {
         Node* base = node.first();
-        void* pointer = this.struct_pointer(base);
+        ptr pointer = this.struct_pointer(base);
         StructInfo* info = this.struct_behind(base.value_type());
         FieldInfo* field = (FieldInfo*)node.symbol();
         return LLVMBuildStructGEP2(this.builder, info.llvm, pointer, (u32)field.index, node.text());
     }
 
-    Value* gen_member(Node* node) {
+    unsafe Value* gen_member(Node* node) {
         Node* base = node.first();
         if (this.is_struct_name(base)) {
             Node* constant = (Node*)node.symbol();
@@ -105,9 +102,9 @@ impl CodeGenerator {
         }
         if (node.symbol_kind() == SymbolKind.PROPERTY_GET) {
             FunctionInfo* getter = (FunctionInfo*)node.symbol();
-            void** args = CodeGenerator.array_of(1);
+            ptr<ptr> args = CodeGenerator.array_of(1);
             args[0] = this.method_receiver(getter.owner, base);
-            void* result = LLVMBuildCall2(this.builder, getter.function_type, getter.function, args, 1, "property.get");
+            ptr result = LLVMBuildCall2(this.builder, getter.function_type, getter.function, args, 1, "property.get");
             return Value.create(result, getter.return_type);
         }
         if (node.symbol_kind() == SymbolKind.ENUM_FIELD) {
@@ -116,39 +113,39 @@ impl CodeGenerator {
         return this.load_through(this.field_address(node), node.value_type());
     }
 
-    Value* gen_enum_field(Node* node) {
+    unsafe Value* gen_enum_field(Node* node) {
         Node* base = node.first();
         u32 enum_type = base.value_type();
         SymbolTable* symbols = this.symbols;
         StructInfo* info = symbols.enum_of_type(enum_type);
         Value* value = this.gen_expression(base);
-        mut void* tag = value.ref;
+        mut ptr tag = value.ref;
         if (Types.is_pointer(value.type)) {
             tag = LLVMBuildLoad2(this.builder, this.llvm_type(enum_type), value.ref, "enum.tag");
         }
         i32 index = (i32)(u64)node.symbol();
         u32 field_type = node.value_type();
-        void* element = this.llvm_type(field_type);
+        ptr element = this.llvm_type(field_type);
         if (index == 0) {
             return Value.create(LLVMBuildIntCast2(this.builder, tag, element, 0, "enum.flag"), field_type);
         }
-        void* table = this.enum_field_table(info, index, field_type);
-        void** rows = (void**)info.field_rows;
-        void* array_type = LLVMArrayType2(element, (u64)rows[index]);
-        void** indices = CodeGenerator.array_of(2);
+        ptr table = this.enum_field_table(info, index, field_type);
+        ptr<ptr> rows = (ptr<ptr>)info.field_rows;
+        ptr array_type = LLVMArrayType2(element, (u64)rows[index]);
+        ptr<ptr> indices = CodeGenerator.array_of(2);
         indices[0] = LLVMConstInt(LLVMIntTypeInContext(this.context, 64), 0, 0);
         indices[1] = LLVMBuildIntCast2(this.builder, tag, LLVMIntTypeInContext(this.context, 64), 0, "enum.row");
-        void* address = LLVMBuildGEP2(this.builder, array_type, table, indices, 2, "enum.field.ptr");
+        ptr address = LLVMBuildGEP2(this.builder, array_type, table, indices, 2, "enum.field.ptr");
         return Value.create(LLVMBuildLoad2(this.builder, element, address, "enum.field"), field_type);
     }
 
-    void* enum_field_table(StructInfo* info, i32 index, u32 field_type) {
+    unsafe ptr enum_field_table(StructInfo* info, i32 index, u32 field_type) {
         if (info.field_tables == null) {
-            info.field_tables = (void*)CodeGenerator.array_of(info.header_count);
-            info.field_rows = (void*)CodeGenerator.array_of(info.header_count);
+            info.field_tables = (ptr)CodeGenerator.array_of(info.header_count);
+            info.field_rows = (ptr)CodeGenerator.array_of(info.header_count);
         }
-        void** tables = (void**)info.field_tables;
-        void** rows = (void**)info.field_rows;
+        ptr<ptr> tables = (ptr<ptr>)info.field_tables;
+        ptr<ptr> rows = (ptr<ptr>)info.field_rows;
         if (tables[index] != null) {
             return tables[index];
         }
@@ -162,8 +159,8 @@ impl CodeGenerator {
             }
         }
         i32 row_count = (i32)highest + 1;
-        void* element = this.llvm_type(field_type);
-        void** values = CodeGenerator.array_of(row_count);
+        ptr element = this.llvm_type(field_type);
+        ptr<ptr> values = CodeGenerator.array_of(row_count);
         for (mut i32 r = 0; r < row_count; r = r + 1) {
             values[r] = LLVMConstNull(element);
         }
@@ -175,19 +172,19 @@ impl CodeGenerator {
                 values[(i32)flag.int_value()] = this.coerce(produced, field_type);
             }
         }
-        void* global = LLVMAddGlobal(this.module, LLVMArrayType2(element, (u64)row_count), "enum.table");
+        ptr global = LLVMAddGlobal(this.module, LLVMArrayType2(element, (u64)row_count), "enum.table");
         LLVMSetInitializer(global, LLVMConstArray2(element, values, (u64)row_count));
         LLVMSetGlobalConstant(global, 1);
         LLVMSetLinkage(global, 9);
         tables[index] = global;
-        rows[index] = (void*)(u64)row_count;
+        rows[index] = (ptr)(u64)row_count;
         return global;
     }
 
-    void* method_receiver(StructInfo* owner, Node* base) {
+    ptr method_receiver(StructInfo* owner, Node* base) {
         if (owner.is_enum || owner.is_primitive) {
             Value* value = this.gen_expression(base);
-            mut void* receiver = value.ref;
+            mut ptr receiver = value.ref;
             if (Types.is_pointer(value.type)) {
                 receiver = LLVMBuildLoad2(this.builder, this.llvm_type(owner.type_id), value.ref, "enum.load");
             }
@@ -196,29 +193,29 @@ impl CodeGenerator {
         return this.struct_pointer(base);
     }
 
-    void* implicit_field_address(Node* node) {
+    unsafe ptr implicit_field_address(Node* node) {
         FunctionContext* context = this.function_context;
         FunctionInfo* current = context.function;
         LocalVariable* self = current.this_variable;
         StructInfo* owner = current.owner;
-        void* pointer = LLVMBuildLoad2(this.builder, this.llvm_type(self.type), self.slot, "this");
+        ptr pointer = LLVMBuildLoad2(this.builder, this.llvm_type(self.type), self.slot, "this");
         FieldInfo* field = (FieldInfo*)node.symbol();
         return LLVMBuildStructGEP2(this.builder, owner.llvm, pointer, (u32)field.index, node.text());
     }
 
-    void* implicit_receiver() {
+    ptr implicit_receiver() {
         FunctionContext* context = this.function_context;
         FunctionInfo* current = context.function;
         LocalVariable* self = current.this_variable;
         return LLVMBuildLoad2(this.builder, this.llvm_type(self.type), self.slot, "this");
     }
 
-    Value* gen_identifier(Node* node) {
+    unsafe Value* gen_identifier(Node* node) {
         if (node.symbol_kind() == SymbolKind.IMPLICIT_GET) {
             FunctionInfo* getter = (FunctionInfo*)node.symbol();
-            void** args = CodeGenerator.array_of(1);
+            ptr<ptr> args = CodeGenerator.array_of(1);
             args[0] = this.implicit_receiver();
-            void* result = LLVMBuildCall2(this.builder, getter.function_type, getter.function, args, 1, "property.get");
+            ptr result = LLVMBuildCall2(this.builder, getter.function_type, getter.function, args, 1, "property.get");
             return Value.create(result, getter.return_type);
         }
         if (node.symbol_kind() == SymbolKind.IMPLICIT_FIELD) {
@@ -229,16 +226,16 @@ impl CodeGenerator {
             return Value.create(this.coerce(this.gen_expression(sibling.first()), sibling.value_type()), sibling.value_type());
         }
         LocalVariable* variable = (LocalVariable*)node.symbol();
-        void* loaded = LLVMBuildLoad2(this.builder, this.llvm_type(variable.type), variable.slot, node.text());
+        ptr loaded = LLVMBuildLoad2(this.builder, this.llvm_type(variable.type), variable.slot, node.text());
         return Value.create(loaded, variable.type);
     }
 
-    Value* load_through(void* address, u32 type) {
-        void* loaded = LLVMBuildLoad2(this.builder, this.llvm_type(type), address, "load");
+    Value* load_through(ptr address, u32 type) {
+        ptr loaded = LLVMBuildLoad2(this.builder, this.llvm_type(type), address, "load");
         return Value.create(loaded, type);
     }
 
-    void* gen_address(Node* node) {
+    unsafe ptr gen_address(Node* node) {
         NodeKind kind = node.kind();
 
         if (kind == NodeKind::IDENTIFIER) {
@@ -259,9 +256,9 @@ impl CodeGenerator {
             if (Types.is_struct(base.type)) {
                 base = Value.create(LLVMBuildExtractValue(this.builder, base.ref, 0, "array.data"), Types.pointer_to(node.value_type()));
             }
-            void** indices = CodeGenerator.array_of(1);
+            ptr<ptr> indices = CodeGenerator.array_of(1);
             indices[0] = this.coerce(index, Types.i64_type());
-            void* element_type = this.llvm_type(node.value_type());
+            ptr element_type = this.llvm_type(node.value_type());
             return LLVMBuildGEP2(this.builder, element_type, base.ref, indices, 1, "index");
         }
 

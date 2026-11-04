@@ -22,7 +22,7 @@ struct SymbolTable {
     Node* blame;
     bool generate_disabled;
 
-    public static SymbolTable* create(Arena* arena) {
+    public static unsafe SymbolTable* create(Arena* arena) {
         SymbolTable* table = (SymbolTable*)arena.zalloc(sizeof(SymbolTable), 8);
         table.arena = arena;
         table.structs = PointerList.create();
@@ -42,7 +42,7 @@ struct SymbolTable {
         table.primitives = PointerList.create();
         NamespaceInfo* root = (NamespaceInfo*)arena.zalloc(sizeof(NamespaceInfo), 8);
         PointerList* namespaces = table.namespaces;
-        namespaces.push((void*)root);
+        namespaces.push((ptr)root);
         return table;
     }
 
@@ -54,7 +54,7 @@ struct SymbolTable {
         return (namespace_id << 20) | atom;
     }
 
-    NamespaceInfo* namespace_at(u32 id) {
+    unsafe NamespaceInfo* namespace_at(u32 id) {
         PointerList* namespaces = this.namespaces;
         return (NamespaceInfo*)namespaces.get((i32)id);
     }
@@ -72,7 +72,7 @@ struct SymbolTable {
         return atoms.intern_copy(joined.data, (u32)joined.length);
     }
 
-    public u32 enter_namespace(u32 parent, u32 name_atom) {
+    public unsafe u32 enter_namespace(u32 parent, u32 name_atom) {
         u32 qualified = this.join_atom(parent, name_atom);
         U32Map* map = this.namespace_map;
         i64 found = map.find(qualified);
@@ -85,12 +85,12 @@ struct SymbolTable {
         info.id = (u32)namespaces.length;
         info.parent = parent;
         info.qualified_atom = qualified;
-        namespaces.push((void*)info);
+        namespaces.push((ptr)info);
         map.put(qualified, info.id);
         return info.id;
     }
 
-    public i8* namespace_prefix(u32 namespace_id) {
+    public ptr<i8> namespace_prefix(u32 namespace_id) {
         if (namespace_id == 0) {
             return null;
         }
@@ -104,7 +104,7 @@ struct SymbolTable {
         return map.find(this.join_atom(scope, prefix_atom));
     }
 
-    i64 lookup(U32Map* map, u32 full, u32 base, u32 scope) {
+    unsafe i64 lookup(U32Map* map, u32 full, u32 base, u32 scope) {
         if (full == base) {
             mut u32 namespace_id = scope;
             while (true) {
@@ -132,7 +132,7 @@ struct SymbolTable {
 
         AtomTable* atoms = Atoms.get();
         i32 length = (i32)atoms.length(full);
-        i8* text = atoms.text(full);
+        ptr<i8> text = atoms.text(full);
         mut i32 last = 0;
         for (mut i32 i = 0; i + 1 < length; i = i + 1) {
             if (text[i] == 58 && text[i + 1] == 58) {
@@ -162,12 +162,12 @@ struct SymbolTable {
             return false;
         }
         PointerList* list = this.aliases;
-        list.push((void*)target);
+        list.push((ptr)target);
         map.put(key, (u32)(list.length - 1));
         return true;
     }
 
-    TypeRef* find_alias(u32 full, u32 base, u32 scope) {
+    unsafe TypeRef* find_alias(u32 full, u32 base, u32 scope) {
         i64 index = this.lookup(this.alias_map, full, base, scope);
         if (index < 0) {
             return null;
@@ -176,8 +176,32 @@ struct SymbolTable {
         return (TypeRef*)list.get((i32)index);
     }
 
-    public u32 resolve_type(TypeRef* ref, u32 scope) {
+    public unsafe u32 resolve_type(TypeRef* ref, u32 scope) {
         i32 kind = ref.kind;
+        if (ref.nullable && kind != TypeKind.VOID && kind != TypeKind.AUTO) {
+            AtomTable* atoms = Atoms.get();
+            u32 optional_atom = atoms.intern_copy("optional", 8);
+            StructInfo* optional_info = this.find_struct(optional_atom, optional_atom, scope);
+            if (optional_info == null || !optional_info.is_template) {
+                return 0;
+            }
+            TypeRef* inner = TypeRef.create(kind);
+            inner.bits = ref.bits;
+            inner.is_signed = ref.is_signed;
+            inner.element = ref.element;
+            inner.args = ref.args;
+            inner.name = ref.name;
+            inner.name_atom = ref.name_atom;
+            inner.full_atom = ref.full_atom;
+            u32 payload = this.resolve_type(inner, scope);
+            if (payload == 0) {
+                return 0;
+            }
+            IdList* optional_args = IdList.create();
+            optional_args.push(payload);
+            SemanticAnalyzer* optional_generator = this.analyzer;
+            return optional_generator.instantiate(optional_info, optional_args);
+        }
         if (kind == TypeKind.VOID) {
             return Types.void_type();
         }
@@ -194,6 +218,9 @@ struct SymbolTable {
             u32 element = this.resolve_type(ref.element, scope);
             if (element == 0) {
                 return 0;
+            }
+            if (ref.is_signed) {
+                return Types.raw_pointer_to(element);
             }
             return Types.pointer_to(element);
         }
@@ -255,12 +282,12 @@ struct SymbolTable {
 
     public void add_function_instance(FunctionInfo* info) {
         PointerList* list = this.functions;
-        list.push((void*)info);
+        list.push((ptr)info);
     }
 
     public void add_instance(StructInfo* info) {
         PointerList* list = this.structs;
-        list.push((void*)info);
+        list.push((ptr)info);
     }
 
     public StructInfo* enum_of_type(u32 type) {
@@ -278,7 +305,7 @@ struct SymbolTable {
         return this.struct_at((u32)index);
     }
 
-    public StructInfo* primitive_owner(u32 type) {
+    public unsafe StructInfo* primitive_owner(u32 type) {
         U32Map* map = this.primitive_map;
         PointerList* list = this.primitives;
         i64 found = map.find(type);
@@ -298,7 +325,7 @@ struct SymbolTable {
         info.constant_map = U32Map.create(arena, 8);
         info.method_map = U32Map.create(arena, 8);
         map.put(type, (u32)list.length);
-        list.push((void*)info);
+        list.push((ptr)info);
         return info;
     }
 
@@ -321,7 +348,7 @@ struct SymbolTable {
         return this.find_struct(atom, atom, (u32)library);
     }
 
-    public StructInfo* struct_at(u32 index) {
+    public unsafe StructInfo* struct_at(u32 index) {
         PointerList* list = this.structs;
         return (StructInfo*)list.get((i32)index);
     }
@@ -334,7 +361,7 @@ struct SymbolTable {
         }
         PointerList* list = this.structs;
         map.put(key, (u32)list.length);
-        list.push((void*)info);
+        list.push((ptr)info);
         return true;
     }
 
@@ -346,11 +373,11 @@ struct SymbolTable {
         }
         PointerList* list = this.interfaces;
         map.put(key, (u32)list.length);
-        list.push((void*)info);
+        list.push((ptr)info);
         return true;
     }
 
-    public InterfaceInfo* find_interface(u32 full, u32 base, u32 scope) {
+    public unsafe InterfaceInfo* find_interface(u32 full, u32 base, u32 scope) {
         i64 index = this.lookup(this.interface_map, full, base, scope);
         if (index < 0) {
             return null;
@@ -359,7 +386,7 @@ struct SymbolTable {
         return (InterfaceInfo*)list.get((i32)index);
     }
 
-    public StructInfo* find_struct(u32 full, u32 base, u32 scope) {
+    public unsafe StructInfo* find_struct(u32 full, u32 base, u32 scope) {
         i64 index = this.lookup(this.struct_map, full, base, scope);
         if (index < 0) {
             return null;
@@ -385,7 +412,7 @@ struct SymbolTable {
         return true;
     }
 
-    public bool add_function(FunctionInfo* info) {
+    public unsafe bool add_function(FunctionInfo* info) {
         mut U32Map* map = this.function_map;
         mut u32 key = SymbolTable.key(info.namespace_id, info.name_atom);
         if (info.owner != null) {
@@ -397,7 +424,7 @@ struct SymbolTable {
         i64 found = map.find(key);
         if (found < 0) {
             map.put(key, (u32)list.length);
-            list.push((void*)info);
+            list.push((ptr)info);
             return true;
         }
         mut FunctionInfo* tail = (FunctionInfo*)list.get((i32)found);
@@ -421,11 +448,11 @@ struct SymbolTable {
             mangled.append_int((i64)ordinal);
             info.name = mangled.cstr();
         }
-        list.push((void*)info);
+        list.push((ptr)info);
         return true;
     }
 
-    public FunctionInfo* find_function(u32 full, u32 base, u32 scope) {
+    public unsafe FunctionInfo* find_function(u32 full, u32 base, u32 scope) {
         i64 index = this.lookup(this.function_map, full, base, scope);
         if (index < 0) {
             return null;
@@ -434,7 +461,7 @@ struct SymbolTable {
         return (FunctionInfo*)list.get((i32)index);
     }
 
-    public FunctionInfo* find_method(StructInfo* owner, u32 name) {
+    public unsafe FunctionInfo* find_method(StructInfo* owner, u32 name) {
         U32Map* map = owner.method_map;
         i64 index = map.find(name);
         if (index < 0) {
@@ -452,11 +479,11 @@ struct SymbolTable {
         }
         PointerList* list = this.globals;
         map.put(key, (u32)list.length);
-        list.push((void*)variable);
+        list.push((ptr)variable);
         return true;
     }
 
-    public LocalVariable* find_global(u32 full, u32 base, u32 scope) {
+    public unsafe LocalVariable* find_global(u32 full, u32 base, u32 scope) {
         i64 index = this.lookup(this.global_map, full, base, scope);
         if (index < 0) {
             return null;
@@ -465,7 +492,7 @@ struct SymbolTable {
         return (LocalVariable*)list.get((i32)index);
     }
 
-    public FieldInfo* find_field(StructInfo* info, u32 name) {
+    public unsafe FieldInfo* find_field(StructInfo* info, u32 name) {
         U32Map* map = info.field_map;
         i64 index = map.find(name);
         if (index < 0) {
@@ -475,7 +502,7 @@ struct SymbolTable {
         return (FieldInfo*)list.get((i32)index);
     }
 
-    public Node* find_constant(StructInfo* info, u32 name) {
+    public unsafe Node* find_constant(StructInfo* info, u32 name) {
         U32Map* map = info.constant_map;
         i64 index = map.find(name);
         if (index < 0) {
