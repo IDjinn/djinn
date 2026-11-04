@@ -80,7 +80,7 @@ Each plain enum is its own type: `==`/`!=` only between values of the same enum 
 
 ## Core types: `str` and `arr<T>`
 
-The core library (`runtime/core.djinn`, read from `--runtime-dir`) is compiled with every program and declares `str { i8* data; u32 length; }` and `arr<T> { T* data; u32 length; }`, both with `is_empty()` and `ptr()`.
+The core library (`runtime/core/*.djinn`, read from `--runtime-dir`) is compiled with every program and declares `str { i8* data; u32 length; }` and `arr<T> { T* data; u32 length; }`, both with `is_empty()` and `ptr()`.
 
 - `T[]` is `arr<T>`; `[a, b, c]` is an array literal, allocated with `__djinn_malloc`. The element type comes from the context or the first element; an empty literal needs a context.
 - A string literal is `i8*` unless the expected type is `str`, which gives `{ data, length }`.

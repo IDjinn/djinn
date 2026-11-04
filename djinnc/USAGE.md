@@ -74,7 +74,7 @@ directory).
 | `--emit-ast` | Print the AST (with `<line:col>`) to stdout and stop. |
 | `--version` | Print the compiler version. |
 
-`--emit-ir`, `--emit-asm` and `--emit-ast` are view modes: they show only the files given as inputs. The runtime (`core.djinn`) and the std loaded by `--std` are dependencies, so their functions are not emitted (only declarations when referenced) and their declarations are not dumped; pass a std file as an input to see it. `--keep-ir`, `--no-link` and linked builds keep everything.
+`--emit-ir`, `--emit-asm` and `--emit-ast` are view modes: they show only the files given as inputs. The runtime (`runtime/core/`) and the std loaded by `--std` are dependencies, so their functions are not emitted (only declarations when referenced) and their declarations are not dumped; pass a std file as an input to see it. `--keep-ir`, `--no-link` and linked builds keep everything.
 | `--emit-tokens` / `--emit-ast` | Dump the token list or the AST and exit. |
 | `--stats` | Print files, tokens, AST nodes and arena usage, plus a `PerformanceMonitor` lap per phase (lex, parse, codegen, write-ir, object, link) and the total, in ms. |
 | `--selftest` | Run the built-in unit checks (arena, atoms, maps, ...). |
