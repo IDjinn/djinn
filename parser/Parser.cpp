@@ -178,6 +178,8 @@ bool Parser::isType(const Token& token) const
 
     if (token.type != TokenType::IDENTIFIER) return false;
 
+    if (token.value == "ptr") return true;
+
     // Native-width types (nint, nfloat, ndouble — nint also takes w/t/c/s suffixes)
     if (token.value == "nfloat" || token.value == "ndouble")
     {
@@ -313,6 +315,19 @@ std::unique_ptr<Type> Parser::parse_type()
         baseType->overflowMode = intName->mode;
         baseType->nonZero = intName->nonZero;
     }
+    else if (identifier.type == TokenType::IDENTIFIER && identifier.value == "ptr")
+    {
+        if (match(TokenType::LESS))
+        {
+            auto pointee = parse_type();
+            expect("Esperado '>' após o tipo de ptr<T>", TokenType::GREATER);
+            baseType = std::make_unique<Type>(Type::pointer(std::move(*pointee)));
+        }
+        else
+        {
+            baseType = std::make_unique<Type>(Type::pointer(Type::voided()));
+        }
+    }
     else if (identifier.value == "void" || identifier.type == TokenType::VOID)
     {
         baseType = std::make_unique<Type>(Type::voided());
@@ -377,6 +392,9 @@ std::vector<VisibilityModifier> Parser::parse_modifiers()
         else if (match(TokenType::STATIC))
         {
             modifiers.push_back(VisibilityModifier::STATIC);
+        }
+        else if (match(TokenType::UNSAFE))
+        {
         }
         else
         {
@@ -664,7 +682,8 @@ std::unique_ptr<StructDeclaration> Parser::parse_struct()
             }
 
             // Check for modifiers — could be a method OR a const field
-            if (check(TokenType::PUBLIC) || check(TokenType::PRIVATE) || check(TokenType::STATIC))
+            if (check(TokenType::PUBLIC) || check(TokenType::PRIVATE) || check(TokenType::STATIC) ||
+                check(TokenType::UNSAFE))
             {
                 // Peek ahead: if modifiers are followed by CONST, it's a const field
                 const size_t modSaved = current;
@@ -1069,6 +1088,14 @@ void Parser::parse_top_level_declarations(Program* program)
         {
             program->attributeDecls.push_back(parse_attribute_declaration());
         }
+        else if (check(TokenType::STATIC) || (check(TokenType::UNSAFE) && current + 1 < tokens.size() &&
+            tokens[current + 1].type == TokenType::STATIC))
+            program->staticVars.push_back(parse_static_var());
+        else if (check(TokenType::UNSAFE))
+        {
+            advance();
+            program->functions.push_back(parse_function());
+        }
         else if (check(TokenType::ASYNC))
         {
             advance();
@@ -1247,9 +1274,15 @@ std::unique_ptr<Program> Parser::parse(const std::string& program_name)
                 _macros[macroDecl->name.token_name] = macroDecl.get();
                 program->macros.push_back(std::move(macroDecl));
             }
-            else if (check(TokenType::STATIC) || check(TokenType::UNSAFE))
+            else if (check(TokenType::STATIC) || (check(TokenType::UNSAFE) && current + 1 < tokens.size() &&
+                tokens[current + 1].type == TokenType::STATIC))
             {
                 program->staticVars.push_back(parse_static_var());
+            }
+            else if (check(TokenType::UNSAFE))
+            {
+                advance();
+                program->functions.push_back(parse_function());
             }
             else if (checkContextual("attribute"))
             {
@@ -1533,7 +1566,12 @@ std::unique_ptr<Statement> Parser::parse_statement()
         return stmt;
     }
 
-    // Bare block: { ... }
+    // Bare block: { ... }, optionally marked 'unsafe'
+    if (check(TokenType::UNSAFE) && current + 1 < tokens.size() && tokens[current + 1].type == TokenType::LBRACE)
+    {
+        advance();
+        return parse_block();
+    }
     if (check(TokenType::LBRACE))
     {
         return parse_block();
@@ -2393,6 +2431,28 @@ std::unique_ptr<Expression> Parser::parse_primary()
         // Step 1: Consume modifiers (auto, mut)
         const auto isAuto = match(TokenType::AUTO);
         auto isMutable = match(TokenType::MUT);
+
+        if (!isAuto && check(TokenType::IDENTIFIER) && peek().value == "ptr" &&
+            !currentScope->lookup_variable("ptr") && current + 1 < tokens.size() &&
+            (tokens[current + 1].type == TokenType::LESS || tokens[current + 1].type == TokenType::IDENTIFIER))
+        {
+            auto pointerType = parse_type();
+            if (!isMutable && match(TokenType::MUT))
+            {
+                isMutable = true;
+            }
+            const Token& pointerNameToken = expect("Esperado nome da variável", TokenType::IDENTIFIER);
+            SourceIdentifier pointerName = makeSourceIdentifier(pointerNameToken);
+            Type pointerVarType = std::move(*pointerType);
+            currentScope->define_variable(pointerName.token_name, pointerVarType);
+            if (match(TokenType::EQUAL))
+            {
+                auto pointerInit = parse_expression();
+                return std::make_unique<VariableInit>(
+                    std::move(pointerVarType), std::move(pointerName), std::move(pointerInit), isMutable);
+            }
+            return std::make_unique<VariableDeclaration>(std::move(pointerVarType), std::move(pointerName), isMutable);
+        }
 
         // Step 2: Consume the identifier and classify it
         const Token& firstToken = advance();

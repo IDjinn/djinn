@@ -6,6 +6,10 @@ impl Parser {
         return names.contains(this.atom_of(token));
     }
 
+    bool is_ptr_keyword(i32 token) {
+        return this.kind_of(token) == TokenKind::IDENTIFIER && Strings.equals(this.text_of(token), this.length_of(token), "ptr");
+    }
+
     bool is_type_start(i32 token) {
         TokenKind kind = this.kind_of(token);
         if (kind == TokenKind::VOID || kind == TokenKind::AUTO) {
@@ -13,6 +17,9 @@ impl Parser {
         }
         if (kind != TokenKind::IDENTIFIER) {
             return false;
+        }
+        if (this.is_ptr_keyword(token)) {
+            return true;
         }
         TypeRef* primitive = TypeRef.from_primitive_atom(this.atom_of(token));
         if (primitive != null) {
@@ -115,7 +122,7 @@ impl Parser {
         return this.kind_of(after) == TokenKind::IDENTIFIER || this.kind_of(after) == TokenKind::MUT;
     }
 
-    i8* qualified_name() {
+    ptr<i8> qualified_name() {
         i32 first = this.expect(TokenKind::IDENTIFIER, "expected identifier");
         ByteBuffer* name = ByteBuffer.create();
         name.append_slice(this.text_of(first), this.length_of(first));
@@ -132,7 +139,7 @@ impl Parser {
         this.expect(TokenKind::LESS, "expected '<'");
         PointerList* args = PointerList.create();
         while (!this.failed) {
-            args.push((void*)this.parse_type());
+            args.push((ptr)this.parse_type());
             if (this.half_greater) {
                 this.half_greater = false;
                 return args;
@@ -194,6 +201,14 @@ impl Parser {
         if (this.kind_of(token) == TokenKind::VOID || this.kind_of(token) == TokenKind::AUTO) {
             this.advance();
             base = TypeRef.from_primitive_atom(this.atom_of(token));
+        } else if (this.is_ptr_keyword(token)) {
+            this.advance();
+            if (this.check(TokenKind::LESS)) {
+                PointerList* pointee = this.parse_type_arguments();
+                base = TypeRef.pointer_to((TypeRef*)pointee.get(0));
+            } else {
+                base = TypeRef.pointer_to(TypeRef.create(TypeKind.VOID));
+            }
         } else if (this.kind_of(token) == TokenKind::IDENTIFIER) {
             TypeRef* primitive = TypeRef.from_primitive_atom(this.atom_of(token));
             if (primitive != null) {
@@ -220,7 +235,7 @@ impl Parser {
             this.advance();
             TypeRef* array = TypeRef.named("arr");
             PointerList* element = PointerList.create();
-            element.push((void*)base);
+            element.push((ptr)base);
             array.args = element;
             base = array;
         }

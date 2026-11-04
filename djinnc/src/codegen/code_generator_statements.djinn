@@ -7,7 +7,7 @@ impl CodeGenerator {
 
         switch (kind) {
             case BLOCK:
-                mut void* outer_scope = (void*)0;
+                mut ptr outer_scope = (ptr)0;
                 if (this.debug != null) {
                     DebugInfo* debug = this.debug;
                     outer_scope = debug.enter_block(node);
@@ -95,10 +95,10 @@ impl CodeGenerator {
             }
             return;
         }
-        void* condition = this.to_condition(this.gen_expression(node.first()));
-        void* then_block = this.new_block("if.then");
-        void* end_block = this.new_block("if.end");
-        mut void* else_block = end_block;
+        ptr condition = this.to_condition(this.gen_expression(node.first()));
+        ptr then_block = this.new_block("if.then");
+        ptr end_block = this.new_block("if.end");
+        mut ptr else_block = end_block;
         if (node.third() != null) {
             else_block = this.new_block("if.else");
         }
@@ -119,8 +119,8 @@ impl CodeGenerator {
     void gen_switch(Node* node) {
         Value* subject = this.gen_expression(node.first());
         u32 subject_type = subject.type;
-        void* end_block = this.new_block("switch.end");
-        mut void* default_block = end_block;
+        ptr end_block = this.new_block("switch.end");
+        mut ptr default_block = end_block;
         PointerList* blocks = PointerList.create();
         PointerList* labels = PointerList.create();
         mut u32 case_count = 0;
@@ -145,7 +145,7 @@ impl CodeGenerator {
             }
         }
 
-        void* dispatch = LLVMBuildSwitch(this.builder, subject.ref, default_block, case_count);
+        ptr dispatch = LLVMBuildSwitch(this.builder, subject.ref, default_block, case_count);
         for (mut i32 i = 0; i < node.count(); i = i + 1) {
             if (labels.get(i) != null) {
                 LLVMAddCase(dispatch, labels.get(i), blocks.get(i));
@@ -153,7 +153,7 @@ impl CodeGenerator {
         }
 
         FunctionContext* function_context = this.function_context;
-        mut void* continue_target = (void*)0;
+        mut ptr continue_target = (ptr)0;
         if (function_context.in_loop()) {
             continue_target = function_context.continue_block();
         }
@@ -171,13 +171,13 @@ impl CodeGenerator {
     }
 
     void gen_while(Node* node) {
-        void* condition_block = this.new_block("while.cond");
-        void* body_block = this.new_block("while.body");
-        void* end_block = this.new_block("while.end");
+        ptr condition_block = this.new_block("while.cond");
+        ptr body_block = this.new_block("while.body");
+        ptr end_block = this.new_block("while.end");
 
         this.branch_if_open(condition_block);
         LLVMPositionBuilderAtEnd(this.builder, condition_block);
-        void* condition = this.to_condition(this.gen_expression(node.first()));
+        ptr condition = this.to_condition(this.gen_expression(node.first()));
         LLVMBuildCondBr(this.builder, condition, body_block, end_block);
 
         this.run_loop_body(node.second(), body_block, end_block, condition_block);
@@ -186,16 +186,16 @@ impl CodeGenerator {
     }
 
     void gen_do_while(Node* node) {
-        void* body_block = this.new_block("do.body");
-        void* condition_block = this.new_block("do.cond");
-        void* end_block = this.new_block("do.end");
+        ptr body_block = this.new_block("do.body");
+        ptr condition_block = this.new_block("do.cond");
+        ptr end_block = this.new_block("do.end");
 
         this.branch_if_open(body_block);
         this.run_loop_body(node.second(), body_block, end_block, condition_block);
         this.branch_if_open(condition_block);
 
         LLVMPositionBuilderAtEnd(this.builder, condition_block);
-        void* condition = this.to_condition(this.gen_expression(node.first()));
+        ptr condition = this.to_condition(this.gen_expression(node.first()));
         LLVMBuildCondBr(this.builder, condition, body_block, end_block);
         LLVMPositionBuilderAtEnd(this.builder, end_block);
     }
@@ -205,15 +205,15 @@ impl CodeGenerator {
             this.gen_statement(node.first());
         }
 
-        void* condition_block = this.new_block("for.cond");
-        void* body_block = this.new_block("for.body");
-        void* step_block = this.new_block("for.step");
-        void* end_block = this.new_block("for.end");
+        ptr condition_block = this.new_block("for.cond");
+        ptr body_block = this.new_block("for.body");
+        ptr step_block = this.new_block("for.step");
+        ptr end_block = this.new_block("for.end");
 
         this.branch_if_open(condition_block);
         LLVMPositionBuilderAtEnd(this.builder, condition_block);
         if (node.second() != null) {
-            void* condition = this.to_condition(this.gen_expression(node.second()));
+            ptr condition = this.to_condition(this.gen_expression(node.second()));
             LLVMBuildCondBr(this.builder, condition, body_block, end_block);
         } else {
             LLVMBuildBr(this.builder, body_block);
@@ -230,7 +230,7 @@ impl CodeGenerator {
         LLVMPositionBuilderAtEnd(this.builder, end_block);
     }
 
-    void run_loop_body(Node* body, void* body_block, void* break_block, void* continue_block) {
+    void run_loop_body(Node* body, ptr body_block, ptr break_block, ptr continue_block) {
         FunctionContext* function_context = this.function_context;
         function_context.enter_loop(break_block, continue_block);
         LLVMPositionBuilderAtEnd(this.builder, body_block);
@@ -246,18 +246,18 @@ impl CodeGenerator {
         StructInfo* owner = symbols.enum_of_type(subject_type);
         u32 result_type = node.value_type();
 
-        mut void* tag = subject.ref;
-        mut void* spill = (void*)0;
-        void* enum_llvm = this.llvm_type(subject_type);
+        mut ptr tag = subject.ref;
+        mut ptr spill = (ptr)0;
+        ptr enum_llvm = this.llvm_type(subject_type);
         if (Types.is_struct(subject_type)) {
             spill = this.create_slot(subject_type, "match.subject");
             LLVMBuildStore(this.builder, subject.ref, spill);
-            void* tag_address = LLVMBuildStructGEP2(this.builder, enum_llvm, spill, 0, "match.tag.ptr");
+            ptr tag_address = LLVMBuildStructGEP2(this.builder, enum_llvm, spill, 0, "match.tag.ptr");
             tag = LLVMBuildLoad2(this.builder, LLVMIntTypeInContext(this.context, 32), tag_address, "match.tag");
         }
 
-        void* result_slot = this.create_slot(result_type, "match.result");
-        void* end_block = this.new_block("match.end");
+        ptr result_slot = this.create_slot(result_type, "match.result");
+        ptr end_block = this.new_block("match.end");
         PointerList* blocks = PointerList.create();
         for (mut i32 i = 0; i < node.count(); i = i + 1) {
             blocks.push(this.new_block("match.arm"));
@@ -269,7 +269,7 @@ impl CodeGenerator {
                 fallback = i;
             }
         }
-        void* dispatch = LLVMBuildSwitch(this.builder, tag, blocks.get(fallback), (u32)node.count());
+        ptr dispatch = LLVMBuildSwitch(this.builder, tag, blocks.get(fallback), (u32)node.count());
         for (mut i32 i = 0; i < node.count(); i = i + 1) {
             Node* case_arm = node.child(i);
             if (i == fallback && Strings.same(case_arm.text(), "_")) {
@@ -277,7 +277,7 @@ impl CodeGenerator {
             }
             Node* variant = (Node*)case_arm.symbol();
             Node* tag_value = variant.first();
-            void* label = LLVMConstInt(LLVMIntTypeInContext(this.context, 32), (u64)tag_value.int_value(), 0);
+            ptr label = LLVMConstInt(LLVMIntTypeInContext(this.context, 32), (u64)tag_value.int_value(), 0);
             LLVMAddCase(dispatch, label, blocks.get(i));
         }
 
@@ -289,8 +289,8 @@ impl CodeGenerator {
                 Node* binding = arm.child(b);
                 LocalVariable* variable = (LocalVariable*)binding.symbol();
                 variable.slot = this.create_slot(variable.type, variable.name);
-                void* address = this.payload_address(enum_llvm, spill, arm_variant, b);
-                void* loaded = LLVMBuildLoad2(this.builder, this.llvm_type(variable.type), address, "match.bound");
+                ptr address = this.payload_address(enum_llvm, spill, arm_variant, b);
+                ptr loaded = LLVMBuildLoad2(this.builder, this.llvm_type(variable.type), address, "match.bound");
                 LLVMBuildStore(this.builder, loaded, variable.slot);
                 this.declare_variable(variable.slot, variable.name, variable.type, binding, 0);
             }

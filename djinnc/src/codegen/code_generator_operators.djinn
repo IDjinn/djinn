@@ -1,9 +1,9 @@
 namespace djinnc;
 
 impl CodeGenerator {
-    void* coerce(Value* source, u32 target) {
+    ptr coerce(Value* source, u32 target) {
         u32 from = source.type;
-        void* ref = source.ref;
+        ptr ref = source.ref;
         if (target == 0 || from == target) {
             return ref;
         }
@@ -11,7 +11,7 @@ impl CodeGenerator {
         if (boxed != 0 && target == boxed) {
             return this.box_value(source);
         }
-        void* destination = this.llvm_type(target);
+        ptr destination = this.llvm_type(target);
 
         if (Types.is_integer(from) && Types.is_integer(target)) {
             if (Types.bits(from) == Types.bits(target)) {
@@ -55,13 +55,13 @@ impl CodeGenerator {
         return ref;
     }
 
-    void* to_condition(Value* source) {
+    ptr to_condition(Value* source) {
         u32 type = source.type;
-        void* ref = source.ref;
+        ptr ref = source.ref;
         if (Types.is_integer(type) && Types.bits(type) == 1) {
             return ref;
         }
-        void* zero = LLVMConstNull(LLVMTypeOf(ref));
+        ptr zero = LLVMConstNull(LLVMTypeOf(ref));
         if (Types.is_float(type)) {
             return LLVMBuildFCmp(this.builder, LlvmConst.REAL_UNE, ref, zero, "tobool");
         }
@@ -93,7 +93,7 @@ impl CodeGenerator {
         if (op == TokenKind::TILDE) {
             return Value.create(LLVMBuildNot(this.builder, operand.ref, "not"), type);
         }
-        void* condition = this.to_condition(operand);
+        ptr condition = this.to_condition(operand);
         return Value.create(LLVMBuildNot(this.builder, condition, "lnot"), Types.bool_type());
     }
 
@@ -103,7 +103,7 @@ impl CodeGenerator {
             FunctionInfo* implicit_setter = (FunctionInfo*)target.symbol();
             IdList* implicit_parameters = implicit_setter.param_types;
             u32 implicit_held = implicit_parameters.get(1);
-            void** implicit_args = CodeGenerator.array_of(2);
+            ptr<ptr> implicit_args = CodeGenerator.array_of(2);
             implicit_args[0] = this.implicit_receiver();
             Value* implicit_assigned = this.gen_expression(node.second());
             implicit_args[1] = this.coerce(implicit_assigned, implicit_held);
@@ -114,7 +114,7 @@ impl CodeGenerator {
             FunctionInfo* setter = (FunctionInfo*)target.symbol();
             IdList* parameters = setter.param_types;
             u32 held = parameters.get(1);
-            void** args = CodeGenerator.array_of(2);
+            ptr<ptr> args = CodeGenerator.array_of(2);
             args[0] = this.method_receiver(setter.owner, target.first());
             Value* assigned = this.gen_expression(node.second());
             args[1] = this.coerce(assigned, held);
@@ -124,10 +124,10 @@ impl CodeGenerator {
         if (target.kind() == NodeKind::INDEX && target.symbol_kind() == SymbolKind.INDEX_SET) {
             return this.gen_index_set(node);
         }
-        void* address = this.gen_address(node.first());
+        ptr address = this.gen_address(node.first());
         u32 element = node.value_type();
         Value* value = this.gen_expression(node.second());
-        void* stored = this.coerce(value, element);
+        ptr stored = this.coerce(value, element);
         LLVMBuildStore(this.builder, stored, address);
         return Value.create(stored, element);
     }
@@ -135,10 +135,10 @@ impl CodeGenerator {
     Value* gen_logical(Node* node) {
         bool is_and = node.op_kind() == TokenKind::AND_AND;
         u32 flag = Types.bool_type();
-        void* left = this.to_condition(this.gen_expression(node.first()));
-        void* left_block = LLVMGetInsertBlock(this.builder);
-        void* right_block = this.new_block("logic.rhs");
-        void* end_block = this.new_block("logic.end");
+        ptr left = this.to_condition(this.gen_expression(node.first()));
+        ptr left_block = LLVMGetInsertBlock(this.builder);
+        ptr right_block = this.new_block("logic.rhs");
+        ptr end_block = this.new_block("logic.end");
 
         if (is_and) {
             LLVMBuildCondBr(this.builder, left, right_block, end_block);
@@ -147,14 +147,14 @@ impl CodeGenerator {
         }
 
         LLVMPositionBuilderAtEnd(this.builder, right_block);
-        void* right = this.to_condition(this.gen_expression(node.second()));
-        void* right_end = LLVMGetInsertBlock(this.builder);
+        ptr right = this.to_condition(this.gen_expression(node.second()));
+        ptr right_end = LLVMGetInsertBlock(this.builder);
         LLVMBuildBr(this.builder, end_block);
 
         LLVMPositionBuilderAtEnd(this.builder, end_block);
-        void* merged = LLVMBuildPhi(this.builder, this.llvm_type(flag), "logic");
-        void** values = CodeGenerator.array_of(2);
-        void** blocks = CodeGenerator.array_of(2);
+        ptr merged = LLVMBuildPhi(this.builder, this.llvm_type(flag), "logic");
+        ptr<ptr> values = CodeGenerator.array_of(2);
+        ptr<ptr> blocks = CodeGenerator.array_of(2);
         mut u64 shortcut = 1;
         if (is_and) {
             shortcut = 0;
@@ -170,21 +170,21 @@ impl CodeGenerator {
     Value* gen_coalesce(Node* node) {
         Value* left = this.gen_expression(node.first());
         u32 type = left.type;
-        void* present = LLVMBuildICmp(this.builder, LlvmConst.INT_NE, left.ref, LLVMConstNull(LLVMTypeOf(left.ref)), "present");
-        void* left_block = LLVMGetInsertBlock(this.builder);
-        void* right_block = this.new_block("coalesce.rhs");
-        void* end_block = this.new_block("coalesce.end");
+        ptr present = LLVMBuildICmp(this.builder, LlvmConst.INT_NE, left.ref, LLVMConstNull(LLVMTypeOf(left.ref)), "present");
+        ptr left_block = LLVMGetInsertBlock(this.builder);
+        ptr right_block = this.new_block("coalesce.rhs");
+        ptr end_block = this.new_block("coalesce.end");
         LLVMBuildCondBr(this.builder, present, end_block, right_block);
 
         LLVMPositionBuilderAtEnd(this.builder, right_block);
-        void* right = this.coerce(this.gen_expression(node.second()), type);
-        void* right_end = LLVMGetInsertBlock(this.builder);
+        ptr right = this.coerce(this.gen_expression(node.second()), type);
+        ptr right_end = LLVMGetInsertBlock(this.builder);
         LLVMBuildBr(this.builder, end_block);
 
         LLVMPositionBuilderAtEnd(this.builder, end_block);
-        void* merged = LLVMBuildPhi(this.builder, this.llvm_type(type), "coalesce");
-        void** values = CodeGenerator.array_of(2);
-        void** blocks = CodeGenerator.array_of(2);
+        ptr merged = LLVMBuildPhi(this.builder, this.llvm_type(type), "coalesce");
+        ptr<ptr> values = CodeGenerator.array_of(2);
+        ptr<ptr> blocks = CodeGenerator.array_of(2);
         values[0] = left.ref;
         blocks[0] = left_block;
         values[1] = right;
@@ -215,8 +215,8 @@ impl CodeGenerator {
         }
 
         u32 common = Types.common(left.type, right.type);
-        void* lhs = this.coerce(left, common);
-        void* rhs = this.coerce(right, common);
+        ptr lhs = this.coerce(left, common);
+        ptr rhs = this.coerce(right, common);
 
         if (TypeChecker.is_comparison(op)) {
             return this.gen_comparison(node, common, lhs, rhs);
@@ -225,18 +225,18 @@ impl CodeGenerator {
     }
 
     Value* gen_pointer_offset(Node* node, Value* pointer, Value* offset) {
-        mut void* amount = this.coerce(offset, Types.i64_type());
+        mut ptr amount = this.coerce(offset, Types.i64_type());
         if (node.op_kind() == TokenKind::MINUS) {
             amount = LLVMBuildNeg(this.builder, amount, "negoffset");
         }
-        void** indices = CodeGenerator.array_of(1);
+        ptr<ptr> indices = CodeGenerator.array_of(1);
         indices[0] = amount;
-        void* byte_type = LLVMIntTypeInContext(this.context, 8);
-        void* moved = LLVMBuildGEP2(this.builder, byte_type, pointer.ref, indices, 1, "ptradd");
+        ptr byte_type = LLVMIntTypeInContext(this.context, 8);
+        ptr moved = LLVMBuildGEP2(this.builder, byte_type, pointer.ref, indices, 1, "ptradd");
         return Value.create(moved, pointer.type);
     }
 
-    Value* gen_comparison(Node* node, u32 common, void* lhs, void* rhs) {
+    Value* gen_comparison(Node* node, u32 common, ptr lhs, ptr rhs) {
         TokenKind op = node.op_kind();
         u32 flag = Types.bool_type();
 
@@ -266,9 +266,9 @@ impl CodeGenerator {
         return Value.create(LLVMBuildICmp(this.builder, predicate, lhs, rhs, "icmp"), flag);
     }
 
-    Value* gen_arithmetic(Node* node, u32 common, void* lhs, void* rhs) {
+    Value* gen_arithmetic(Node* node, u32 common, ptr lhs, ptr rhs) {
         TokenKind op = node.op_kind();
-        void* builder = this.builder;
+        ptr builder = this.builder;
         bool is_signed = Types.is_signed(common);
 
         if (Types.is_float(common)) {
@@ -296,22 +296,22 @@ impl CodeGenerator {
         };
     }
 
-    Value* gen_division(bool is_signed, u32 common, void* lhs, void* rhs) {
+    Value* gen_division(bool is_signed, u32 common, ptr lhs, ptr rhs) {
         if (is_signed) { return Value.create(LLVMBuildSDiv(this.builder, lhs, rhs, "sdiv"), common); }
         return Value.create(LLVMBuildUDiv(this.builder, lhs, rhs, "udiv"), common);
     }
 
-    Value* gen_remainder(bool is_signed, u32 common, void* lhs, void* rhs) {
+    Value* gen_remainder(bool is_signed, u32 common, ptr lhs, ptr rhs) {
         if (is_signed) { return Value.create(LLVMBuildSRem(this.builder, lhs, rhs, "srem"), common); }
         return Value.create(LLVMBuildURem(this.builder, lhs, rhs, "urem"), common);
     }
 
-    Value* gen_shift_right(bool is_signed, u32 common, void* lhs, void* rhs) {
+    Value* gen_shift_right(bool is_signed, u32 common, ptr lhs, ptr rhs) {
         if (is_signed) { return Value.create(LLVMBuildAShr(this.builder, lhs, rhs, "ashr"), common); }
         return Value.create(LLVMBuildLShr(this.builder, lhs, rhs, "lshr"), common);
     }
 
-    Value* unsupported_arithmetic(Node* node, u32 common, void* lhs) {
+    Value* unsupported_arithmetic(Node* node, u32 common, ptr lhs) {
         this.error(node, "binary operator is not supported by code generation yet");
         return Value.create(lhs, common);
     }

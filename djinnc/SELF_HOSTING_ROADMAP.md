@@ -591,7 +591,7 @@ Medição (Windows, stage2 compilando os 21 arquivos do djinnc, 37 mil tokens, 2
       expressa a intenção e assume ponteiros de 64 bits, então não é portável para 32 bits.
 - [~] Tipos inteiros do tamanho do ponteiro: `usize` / `isize` e `uptr` / `iptr` existem no djinnc com a largura do alvo (`--target <triple>`, `Target` em `codegen/target/target.djinn`; `sizeof` é `isize`), sample `pointer_sized`, ainda não compilado nem testado. Objeto só para x86 (o LLVM linkado só tem esse backend); outros alvos geram IR com `--emit-ir`. Falta no stage0. Original: `usize` / `isize` (e `uptr` / `iptr` para casts ponteiro<->inteiro),
       com a largura vinda do alvo (`LLVMPointerSize`), no lugar de `i64`/`u64` fixos.
-- [ ] Modelo de ponteiros (decidido, ainda não implementado):
+- [~] Modelo de ponteiros (decidido; fase 1 parcial: `ptr`, `ptr<T>`, `unsafe` em bloco e função são parseados pelo stage0 e pelo djinnc e todo raw pointer do djinnc já usa a sintaxe, sem imposição de regras ainda):
       - `T*` é o ponteiro seguro: nunca nulo, tipado, sem aritmética nem indexação, e com o borrow checker futuro vale como
         referência com tempo de vida (o compilador poderá emitir `nonnull`, `align`, `dereferenceable`, `readonly` e `noalias`).
       - `T?` é açúcar para `optional<T>` com qualquer T; `T*?` é o ponteiro nullable e usa o nulo como nicho (8 bytes, sem tag).
@@ -606,7 +606,8 @@ Medição (Windows, stage2 compilando os 21 arquivos do djinnc, 37 mil tokens, 2
       O stage0 só parseia a sintaxe nova; o djinnc impõe as regras.
 - [ ] Aritmética de ponteiros definida na linguagem, só em `unsafe`: `p + n` em unidades do elemento, `p - q` entre ponteiros do
       mesmo tipo devolvendo `isize` (hoje não compila: "invalid types for binary expression"), `offset_of`/`align_of`.
-- [ ] Remover os `(i8*)` e `(i64)` de endereço do djinnc (`ast/node.djinn`, `support/arena.djinn`, `support/atoms.djinn`)
+- [ ] Mutabilidade do apontado: hoje `mut` só vale para a variável (`mut ptr<i8> p` pode ser reatribuída) e escrever em `*p` ou `p[i]` é sempre permitido. Decidir `ptr<mut T>` (apontado imutável por padrão, `mut` opt-in, coerente com o resto da linguagem) para o `T*` seguro, junto do `readonly`/`noalias` e do borrow checker; o `ptr<T>` cru continua escrevível dentro de `unsafe` (FFI, `malloc`). Os parsers ainda não aceitam `mut` dentro de `<...>`.
+- [~] Remover os `(i8*)` e `(i64)` de endereço do djinnc (os `(i8*)` já viraram `ptr<i8>`; faltam os `(i64)` de endereço em `ast/node/ast.djinn`, que dependem de `iptr` no stage0) (`ast/node.djinn`, `support/arena.djinn`, `support/atoms.djinn`)
       quando a sintaxe existir; registrar a mudança no `SUBSET.md`.
 
 ## TODO — Framework de testes nativo
