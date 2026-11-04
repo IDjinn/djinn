@@ -37,33 +37,33 @@ impl CodeGenerator {
         StructInfo* enumeration = kinds.enum_of_type(type);
         if (enumeration != null) {
             if (enumeration.has_payload) {
-                return 8;
+                return ReflectionKind.UNION;
             }
-            return 7;
+            return ReflectionKind.ENUM;
         }
         if (Types.is_pointer(type)) {
-            return 2;
+            return ReflectionKind.POINTER;
         }
         if (Types.is_float(type)) {
-            return 1;
+            return ReflectionKind.FLOAT;
         }
         if (Types.is_integer(type)) {
             if (Types.is_signed(type)) {
-                return 0;
+                return ReflectionKind.SIGNED;
             }
-            return 4;
+            return ReflectionKind.UNSIGNED;
         }
         if (Types.is_struct(type)) {
             SymbolTable* symbols = this.symbols;
             StructInfo* info = symbols.struct_at(Types.struct_index(type));
             if (Strings.same(info.name, "str")) {
-                return 5;
+                return ReflectionKind.STR;
             }
             if (Strings.same(info.name, "string")) {
-                return 6;
+                return ReflectionKind.STRING;
             }
         }
-        return 3;
+        return ReflectionKind.STRUCT;
     }
 
     void* base_type_info(u32 type, i8* name, bool reflected) {
@@ -72,7 +72,7 @@ impl CodeGenerator {
         void* i32_type = LLVMIntTypeInContext(this.context, 32);
         mut u64 flags = 0;
         if (reflected) {
-            flags = 1;
+            flags = (u64)ReflectionKind.TYPE_REFLECTED;
         }
         void** values = CodeGenerator.array_of(5);
         values[0] = LLVMConstInt(i32_type, this.type_hash(type), 0);
@@ -85,6 +85,10 @@ impl CodeGenerator {
 
     void* type_info_of(u32 type) {
         SymbolTable* symbols = this.symbols;
+        StructInfo* declared = this.reflectable_info(type);
+        if (declared != null && declared.type_info != null) {
+            return declared.type_info;
+        }
         ByteBuffer* name = ByteBuffer.create();
         symbols.describe_type(type, name);
         ByteBuffer* global_name = ByteBuffer.create();
@@ -92,6 +96,9 @@ impl CodeGenerator {
         global_name.append(name.cstr());
         void* existing = LLVMGetNamedGlobal(this.module, global_name.cstr());
         if (existing != null) {
+            if (declared != null) {
+                declared.type_info = existing;
+            }
             return existing;
         }
         bool reflected = this.is_reflected(type);
@@ -103,6 +110,9 @@ impl CodeGenerator {
         LLVMSetInitializer(global, initializer);
         LLVMSetGlobalConstant(global, 1);
         this.make_linkonce(global, global_name.cstr());
+        if (declared != null) {
+            declared.type_info = global;
+        }
         return global;
     }
 

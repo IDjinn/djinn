@@ -76,6 +76,10 @@ impl Parser {
             return import_node;
         }
 
+        if (this.kind_of(token) == TokenKind::DOLLAR && this.is_inspect_start()) {
+            return this.parse_inspect();
+        }
+
         if (this.kind_of(token) == TokenKind::NAMESPACE) {
             return this.parse_namespace();
         }
@@ -124,6 +128,37 @@ impl Parser {
         }
 
         return this.parse_function(false);
+    }
+
+    bool is_inspect_start() {
+        TokenList* list = this.tokens;
+        i32 word = this.peek_token(1);
+        return this.kind_of(word) == TokenKind::IDENTIFIER && Strings.equals(list.text(word), list.text_length(word), "inspect");
+    }
+
+    Node* parse_inspect() {
+        i32 start = this.advance();
+        this.advance();
+        Node* node = Node.create_list(NodeKind::INSPECT_DECL, start);
+        node.set_text(this.qualified_name());
+        this.expect(TokenKind::LBRACE, "expected '{' to open the $inspect body");
+        TokenList* list = this.tokens;
+        while (!this.check(TokenKind::RBRACE) && !this.at_end()) {
+            i32 word = this.current();
+            if (this.kind_of(word) == TokenKind::IDENTIFIER && Strings.equals(list.text(word), list.text_length(word), "generate")) {
+                this.advance();
+                this.expect(TokenKind::LBRACE, "expected '{' to open the generate block");
+                while (!this.check(TokenKind::RBRACE) && !this.at_end()) {
+                    this.parse_member(node);
+                }
+                this.expect(TokenKind::RBRACE, "expected '}' to close the generate block");
+            } else {
+                this.fail("expected 'generate' inside $inspect");
+                this.advance();
+            }
+        }
+        this.expect(TokenKind::RBRACE, "expected '}' to close the $inspect body");
+        return node;
     }
 
     bool is_attribute_declaration() {

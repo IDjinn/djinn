@@ -188,6 +188,17 @@ under `--reflect-none`. The attributes of a generic instance are those of its te
 are neither boxed, `typeof`'d nor reflected. The core declares these structs and `Reflection`; `std` overrides `TypeInfo`, `AttributeInfo`, `FieldInfo`, `ParamInfo`, `MethodInfo`
 and `TypeInfoExt` (the stage0 emits the same layout, so keep both in sync).
 
+### Member queries and `$inspect`
+`Type#fields`, `#methods`, `#properties`, `#attributes`, `#constructors` and `#interfaces` are compile-time queries, always available (whatever the reflection mode) and
+resolved by the compiler into read-only tables: they produce `FieldList`, `MethodList`, `PropertyList` (`PropertyInfo`: name, type id, getter, setter), `AttributeList` and
+`NameList` values (`items`, `length`). `#methods` leaves out constructors and property accessors; an enum has no `#fields`. Every list implements `IFormatable<string>`
+(`format()` joins the names); `IFormatable<T>` (`T format()`) is declared in the core. The queries and the `MemberKinds` classification are shared by the
+reflection tables, so a future compile-time macro stage can call the same functions. `Console.write*` does not use `IFormatable` yet.
+
+`$inspect Type { generate { members } }` (the name is `$`-prefixed so it cannot collide with user code) runs once per declaration before the types are collected and
+appends the generated members to the target struct/enum/union (`$inspect Person { generate { public i32 extra; } }`). `--no-generate`, or `generate: false` in `djinn.proj`,
+keeps the block for diagnostics but injects nothing. A target that is not declared in the program is an error.
+
 ## Variadic parameters, stack arrays and coroutine primitives
 - `T... name` (last parameter) receives the extra arguments as `arr<T>`; for `object... name` each argument is boxed. In `std`, `...name`
   with no type means `object... name`. `...` without a name stays a C variadic (externs).

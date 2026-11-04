@@ -263,3 +263,56 @@ impl SemanticAnalyzer {
         return true;
     }
 }
+
+impl SemanticAnalyzer {
+    i8* last_segment(i8* name) {
+        mut i8* segment = name;
+        for (mut i32 i = 0; name[i] != 0; i = i + 1) {
+            if (name[i] == 58 && name[i + 1] == 58) {
+                segment = name + i + 2;
+            }
+        }
+        return segment;
+    }
+
+    Node* find_struct_node(Node* container, i8* name) {
+        for (mut i32 i = 0; i < container.count(); i = i + 1) {
+            Node* declaration = container.child(i);
+            if (declaration.kind() == NodeKind::NAMESPACE_DECL) {
+                Node* nested = this.find_struct_node(declaration, name);
+                if (nested != null) {
+                    return nested;
+                }
+            } else if (declaration.kind() == NodeKind::STRUCT_DECL && Strings.same(declaration.text(), name)) {
+                return declaration;
+            }
+        }
+        return null;
+    }
+
+    void apply_inspections(Node* program) {
+        this.apply_inspections_in(program, program);
+    }
+
+    void apply_inspections_in(Node* root, Node* container) {
+        SymbolTable* symbols = this.symbols;
+        for (mut i32 i = 0; i < container.count(); i = i + 1) {
+            Node* declaration = container.child(i);
+            if (declaration.kind() == NodeKind::NAMESPACE_DECL) {
+                this.apply_inspections_in(root, declaration);
+            } else if (declaration.kind() == NodeKind::INSPECT_DECL) {
+                Node* target = this.find_struct_node(root, this.last_segment(declaration.text()));
+                if (target == null) {
+                    this.error(declaration, "$inspect target is not a struct, enum or union declared in this program");
+                    continue;
+                }
+                if (symbols.generate_disabled) {
+                    continue;
+                }
+                for (mut i32 m = 0; m < declaration.count(); m = m + 1) {
+                    target.add(declaration.child(m));
+                }
+            }
+        }
+    }
+}
