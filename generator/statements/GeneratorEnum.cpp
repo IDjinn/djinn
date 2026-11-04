@@ -20,6 +20,7 @@ void Generator::generate_enum(const EnumSymbol& enum_symbol)
     for (const auto& variant : enum_symbol.variants)
     {
         def.addVariant(variant.name, variant.associatedTypes);
+        def.variants.back().tag = variant.tag;
     }
 
     if (enum_symbol.isGeneric())
@@ -32,7 +33,11 @@ void Generator::generate_enum(const EnumSymbol& enum_symbol)
     // Non-generic enum: create the LLVM type now
     const auto variantCount = enum_symbol.variants.size();
     llvm::Type* tagType;
-    if (variantCount <= 256)
+    if (!enum_symbol.fields.empty())
+    {
+        tagType = generate_type(enum_symbol.fields.front().type);
+    }
+    else if (variantCount <= 256)
     {
         tagType = builder->getInt8Ty();
     }
@@ -74,7 +79,74 @@ void Generator::generate_enum(const EnumSymbol& enum_symbol)
 
     def.llvmType = llvm::StructType::create(*context, enumFields, enum_symbol.name);
     declaredTypes.push_back(def.llvmType);
+    build_enum_field_tables(enum_symbol, def);
     currentScope->define_enum(enum_symbol.name, std::move(def));
+}
+
+void Generator::build_enum_field_tables(const EnumSymbol& enum_symbol, EnumDef& def)
+{
+    unsigned maxTag = 0;
+    for (const auto& variant : enum_symbol.variants)
+    {
+        maxTag = std::max(maxTag, variant.tag);
+    }
+    if (enum_symbol.fields.empty())
+    {
+        return;
+    }
+    if (maxTag >= 65536)
+    {
+        throw CompileError(DiagnosticCode::TYPE_MISMATCH,
+                           "enum '" + enum_symbol.name + "' flag values must be below 65536");
+    }
+
+    const auto constantOf = [this, &enum_symbol](const Expression& expr, llvm::Type* type) -> llvm::Constant*
+    {
+        if (const auto* text = dynamic_cast<const StringLiteral*>(&expr); text && type->isPointerTy())
+        {
+            auto* data = llvm::ConstantDataArray::getString(*context, text->value, true);
+            return new llvm::GlobalVariable(*module, data->getType(), true, llvm::GlobalValue::PrivateLinkage, data,
+                                            ".enum.str");
+        }
+        bool negative = false;
+        const Expression* number = &expr;
+        if (const auto* unary = dynamic_cast<const UnaryExpression*>(number);
+            unary && unary->op == TokenType::MINUS)
+        {
+            negative = true;
+            number = unary->operand.get();
+        }
+        if (const auto* integer = dynamic_cast<const IntegerLiteral*>(number); integer && type->isIntegerTy())
+        {
+            const long long value = (negative ? -1 : 1) * std::stoll(integer->value, nullptr, 0);
+            return llvm::ConstantInt::get(type, static_cast<uint64_t>(value), true);
+        }
+        throw CompileError(DiagnosticCode::TYPE_MISMATCH,
+                           "enum '" + enum_symbol.name + "' constants must be string or integer literals");
+    };
+
+    for (size_t fieldIdx = 0; fieldIdx < enum_symbol.fields.size(); ++fieldIdx)
+    {
+        const auto& field = enum_symbol.fields[fieldIdx];
+        llvm::Type* fieldType = generate_type(field.type);
+        def.fieldNames.push_back(field.name);
+        def.fieldTypes.push_back(fieldType);
+        if (fieldIdx == 0)
+        {
+            def.fieldTables.push_back(nullptr);
+            continue;
+        }
+
+        std::vector<llvm::Constant*> rows(maxTag + 1, llvm::Constant::getNullValue(fieldType));
+        for (const auto& variant : enum_symbol.variants)
+        {
+            rows[variant.tag] = constantOf(*variant.constants[fieldIdx], fieldType);
+        }
+        auto* arrayType = llvm::ArrayType::get(fieldType, rows.size());
+        def.fieldTables.push_back(new llvm::GlobalVariable(
+            *module, arrayType, true, llvm::GlobalValue::PrivateLinkage, llvm::ConstantArray::get(arrayType, rows),
+            enum_symbol.name + "." + field.name));
+    }
 }
 
 void Generator::resolve_enum_body(const EnumSymbol&)

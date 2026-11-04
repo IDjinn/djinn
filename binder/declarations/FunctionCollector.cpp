@@ -17,8 +17,10 @@ void Binder::collectExternFunction(const ExternFunctionDeclaration& decl, const 
 
     if (!_global_scope->defineExternFunction(funcSym))
     {
-        BINDER_ERROR(DiagnosticCode::DUPLICATE_DEFINITION,
-                     "extern function '" + decl.name.token_name + "' is already defined", decl, decl.name.location);
+        BINDER_WARNING(DiagnosticCode::DUPLICATE_DEFINITION,
+                       "extern function '" + decl.name.token_name + "' is declared more than once",
+                       decl.name.location);
+        return;
     }
 
     // Register qualified name alias for import resolution

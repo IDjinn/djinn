@@ -110,7 +110,78 @@ impl CodeGenerator {
             void* result = LLVMBuildCall2(this.builder, getter.function_type, getter.function, args, 1, "property.get");
             return Value.create(result, getter.return_type);
         }
+        if (node.symbol_kind() == SymbolKind.ENUM_FIELD) {
+            return this.gen_enum_field(node);
+        }
         return this.load_through(this.field_address(node), node.value_type());
+    }
+
+    Value* gen_enum_field(Node* node) {
+        Node* base = node.first();
+        u32 enum_type = base.value_type();
+        SymbolTable* symbols = this.symbols;
+        StructInfo* info = symbols.enum_of_type(enum_type);
+        Value* value = this.gen_expression(base);
+        mut void* tag = value.ref;
+        if (Types.is_pointer(value.type)) {
+            tag = LLVMBuildLoad2(this.builder, this.llvm_type(enum_type), value.ref, "enum.tag");
+        }
+        i32 index = (i32)(u64)node.symbol();
+        u32 field_type = node.value_type();
+        void* element = this.llvm_type(field_type);
+        if (index == 0) {
+            return Value.create(LLVMBuildIntCast2(this.builder, tag, element, 0, "enum.flag"), field_type);
+        }
+        void* table = this.enum_field_table(info, index, field_type);
+        void** rows = (void**)info.field_rows;
+        void* array_type = LLVMArrayType2(element, (u64)rows[index]);
+        void** indices = CodeGenerator.array_of(2);
+        indices[0] = LLVMConstInt(LLVMIntTypeInContext(this.context, 64), 0, 0);
+        indices[1] = LLVMBuildIntCast2(this.builder, tag, LLVMIntTypeInContext(this.context, 64), 0, "enum.row");
+        void* address = LLVMBuildGEP2(this.builder, array_type, table, indices, 2, "enum.field.ptr");
+        return Value.create(LLVMBuildLoad2(this.builder, element, address, "enum.field"), field_type);
+    }
+
+    void* enum_field_table(StructInfo* info, i32 index, u32 field_type) {
+        if (info.field_tables == null) {
+            info.field_tables = (void*)CodeGenerator.array_of(info.header_count);
+            info.field_rows = (void*)CodeGenerator.array_of(info.header_count);
+        }
+        void** tables = (void**)info.field_tables;
+        void** rows = (void**)info.field_rows;
+        if (tables[index] != null) {
+            return tables[index];
+        }
+        PointerList* constants = info.constants;
+        mut i64 highest = 0;
+        for (mut i32 c = 0; c < constants.length; c = c + 1) {
+            Node* variant = (Node*)constants.get(c);
+            Node* flag = variant.first();
+            if (flag.int_value() > highest) {
+                highest = flag.int_value();
+            }
+        }
+        i32 row_count = (i32)highest + 1;
+        void* element = this.llvm_type(field_type);
+        void** values = CodeGenerator.array_of(row_count);
+        for (mut i32 r = 0; r < row_count; r = r + 1) {
+            values[r] = LLVMConstNull(element);
+        }
+        for (mut i32 c = 0; c < constants.length; c = c + 1) {
+            Node* variant = (Node*)constants.get(c);
+            Node* flag = variant.first();
+            if (flag.int_value() >= 0) {
+                Value* produced = this.gen_expression(variant.child(index));
+                values[(i32)flag.int_value()] = this.coerce(produced, field_type);
+            }
+        }
+        void* global = LLVMAddGlobal(this.module, LLVMArrayType2(element, (u64)row_count), "enum.table");
+        LLVMSetInitializer(global, LLVMConstArray2(element, values, (u64)row_count));
+        LLVMSetGlobalConstant(global, 1);
+        LLVMSetLinkage(global, 9);
+        tables[index] = global;
+        rows[index] = (void*)(u64)row_count;
+        return global;
     }
 
     void* method_receiver(StructInfo* owner, Node* base) {

@@ -55,7 +55,7 @@ TEST(Enum, VariantConstruction)
 TEST(Enum, VariantWithPayload)
 {
     const auto source = R"(
-        enum Result {
+        union Result {
             Ok(i32),
             Error(i32)
         }
@@ -75,7 +75,7 @@ TEST(Enum, VariantWithPayload)
 TEST(Enum, MultiplePayloadTypes)
 {
     const auto source = R"(
-        enum Message {
+        union Message {
             Empty(),
             Text(i8*),
             Number(i64),
@@ -98,7 +98,7 @@ TEST(Enum, MultiplePayloadTypes)
 TEST(Enum, VariantWithMultipleFields)
 {
     const auto source = R"(
-        enum Event {
+        union Event {
             Click(i32, i32),
             KeyPress(i32),
             Resize(i32, i32, i32, i32)
@@ -124,7 +124,7 @@ TEST(Enum, VariantWithMultipleFields)
 TEST(Enum, GenericOptional)
 {
     const auto source = R"(
-        enum optional<T> {
+        union optional<T> {
             Empty(),
             Value(T)
         }
@@ -145,7 +145,7 @@ TEST(Enum, GenericOptional)
 TEST(Enum, GenericResult)
 {
     const auto source = R"(
-        enum result<T, E> {
+        union result<T, E> {
             Ok(T),
             Error(E)
         }
@@ -166,7 +166,7 @@ TEST(Enum, GenericResult)
 TEST(Enum, GenericWithPointerType)
 {
     const auto source = R"(
-        enum opt<T> {
+        union opt<T> {
             Empty(),
             Value(T)
         }
@@ -185,7 +185,7 @@ TEST(Enum, GenericWithPointerType)
 TEST(Enum, GenericWithFloatType)
 {
     const auto source = R"(
-        enum optional<T> {
+        union optional<T> {
             Empty(),
             Value(T)
         }
@@ -205,7 +205,7 @@ TEST(Enum, GenericWithFloatType)
 TEST(Enum, GenericMultipleInstantiations)
 {
     const auto source = R"(
-        enum optional<T> {
+        union optional<T> {
             Empty(),
             Value(T)
         }
@@ -232,7 +232,7 @@ TEST(Enum, GenericMultipleInstantiations)
 TEST(Enum, PatternMatchBasic)
 {
     const auto source = R"(
-        enum optional<T> {
+        union optional<T> {
             Empty(),
             Value(T)
         }
@@ -258,7 +258,7 @@ TEST(Enum, PatternMatchBasic)
 TEST(Enum, PatternMatchEmpty)
 {
     const auto source = R"(
-        enum optional<T> {
+        union optional<T> {
             Empty(),
             Value(T)
         }
@@ -284,7 +284,7 @@ TEST(Enum, PatternMatchEmpty)
 TEST(Enum, PatternMatchResult)
 {
     const auto source = R"(
-        enum result<T, E> {
+        union result<T, E> {
             Ok(T),
             Error(E)
         }
@@ -310,7 +310,7 @@ TEST(Enum, PatternMatchResult)
 TEST(Enum, PatternMatchResultError)
 {
     const auto source = R"(
-        enum result<T, E> {
+        union result<T, E> {
             Ok(T),
             Error(E)
         }
@@ -336,7 +336,7 @@ TEST(Enum, PatternMatchResultError)
 TEST(Enum, PatternMatchWithComputation)
 {
     const auto source = R"(
-        enum optional<T> {
+        union optional<T> {
             Empty(),
             Value(T)
         }
@@ -390,7 +390,7 @@ TEST(Enum, PatternMatchNoPayload)
 TEST(Enum, PatternMatchInFunction)
 {
     const auto source = R"(
-        enum optional<T> {
+        union optional<T> {
             Empty(),
             Value(T)
         }
@@ -423,7 +423,7 @@ TEST(Enum, PatternMatchWildcardArm)
 {
     // _ matches any variant without binding a payload
     const auto source = R"(
-        enum optional<T> {
+        union optional<T> {
             Empty(),
             Value(T)
         }

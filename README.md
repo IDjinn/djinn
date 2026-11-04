@@ -29,7 +29,7 @@ void main() {
 Generics, enums, and pattern matching:
 
 ```djinn
-enum optional<T> {
+union optional<T> {
     Some(T),
     None()
 }

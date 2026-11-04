@@ -39,8 +39,11 @@ namespace            = "namespace" qualified_name ( ";" | "{" { struct | functio
 ### Enum (Tagged Unions / ADT)
 
 ```ebnf
-enum                 = "enum" IDENTIFIER [ generic_params ] "{" enum_variant { "," enum_variant } "}" ;
-enum_variant         = IDENTIFIER "(" [ type { "," type } ] ")" ;
+enum                 = "enum" IDENTIFIER [ enum_header ] "{" enum_variant { "," enum_variant } "}"
+                     | "union" IDENTIFIER [ generic_params ] "{" union_variant { "," union_variant } "}" ;
+enum_header          = "(" integer_type IDENTIFIER { "," type IDENTIFIER } ")" ;
+enum_variant         = IDENTIFIER [ "(" expression { "," expression } ")" ] ;
+union_variant        = IDENTIFIER [ "(" [ type { "," type } ] ")" ] ;
 ```
 
 ### Interface

@@ -2,11 +2,32 @@ namespace djinnc;
 
 impl Parser {
     Node* parse_enum() {
+        bool is_union = this.is_union_keyword(this.current());
         i32 start = this.advance();
         Node* node = Node.create_list(NodeKind::STRUCT_DECL, start);
         node.set_flag(true);
+        if (is_union) {
+            node.set_op(1);
+        }
         i32 name = this.expect(TokenKind::IDENTIFIER, "expected enum name");
         node.set_text(this.copy_of(name));
+
+        mut i32 header_count = 0;
+        if (this.match(TokenKind::LPAREN)) {
+            while (!this.check(TokenKind::RPAREN) && !this.at_end()) {
+                i32 field_token = this.current();
+                Node* header_field = Node.create(NodeKind::PARAMETER, field_token);
+                header_field.set_type(this.parse_type());
+                i32 field_name = this.expect(TokenKind::IDENTIFIER, "expected an enum field name");
+                header_field.set_text(this.copy_of(field_name));
+                node.add(header_field);
+                header_count = header_count + 1;
+                if (!this.match(TokenKind::COMMA)) {
+                    break;
+                }
+            }
+            this.expect(TokenKind::RPAREN, "expected ')' after the enum fields");
+        }
 
         if (this.check(TokenKind::LESS)) {
             node.set_generics(this.parse_generic_params());
@@ -22,6 +43,29 @@ impl Parser {
                 next_value = Strings.parse_integer(this.text_of(literal_token), this.length_of(literal_token));
             }
             Node* constant = Node.create_list(NodeKind::FIELD_DECL, variant);
+            if (header_count > 0) {
+                constant.set_op(header_count);
+                if (this.match(TokenKind::LPAREN)) {
+                    while (!this.check(TokenKind::RPAREN) && !this.at_end()) {
+                        constant.add(this.parse_expression());
+                        if (!this.match(TokenKind::COMMA)) {
+                            break;
+                        }
+                    }
+                    this.expect(TokenKind::RPAREN, "expected ')' after the enum variant values");
+                }
+                if (constant.count() > 0) {
+                    Node* flag = constant.child(0);
+                    if (flag.kind() == NodeKind::INT_LITERAL) {
+                        next_value = flag.int_value();
+                    } else if (flag.kind() == NodeKind::UNARY && flag.op_kind() == TokenKind::MINUS) {
+                        Node* magnitude = flag.first();
+                        if (magnitude.kind() == NodeKind::INT_LITERAL) {
+                            next_value = 0 - magnitude.int_value();
+                        }
+                    }
+                }
+            }
             constant.set_flag(true);
             constant.set_type(TypeRef.integer(32, true));
             constant.set_text(this.copy_of(variant));
@@ -29,7 +73,7 @@ impl Parser {
             value.set_int_value(next_value);
             constant.set_first(value);
 
-            if (this.match(TokenKind::LPAREN)) {
+            if (header_count == 0 && this.match(TokenKind::LPAREN)) {
                 while (!this.check(TokenKind::RPAREN) && !this.at_end()) {
                     i32 payload_token = this.current();
                     Node* payload = Node.create(NodeKind::PARAMETER, payload_token);
