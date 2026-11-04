@@ -90,10 +90,16 @@ impl CodeGenerator {
                     largest = size;
                 }
             }
-            ptr<ptr> layout = CodeGenerator.array_of(2);
-            layout[0] = LLVMIntTypeInContext(this.context, 32);
-            layout[1] = LLVMArrayType2(LLVMIntTypeInContext(this.context, 64), (largest + 7) / 8);
-            LLVMStructSetBody(info.llvm, layout, 2, 0);
+            if (this.detect_niche(info)) {
+                ptr<ptr> niche_layout = CodeGenerator.array_of(1);
+                niche_layout[0] = LLVMPointerTypeInContext(this.context, 0);
+                LLVMStructSetBody(info.llvm, niche_layout, 1, 0);
+            } else {
+                ptr<ptr> layout = CodeGenerator.array_of(2);
+                layout[0] = LLVMIntTypeInContext(this.context, 32);
+                layout[1] = LLVMArrayType2(LLVMIntTypeInContext(this.context, 64), (largest + 7) / 8);
+                LLVMStructSetBody(info.llvm, layout, 2, 0);
+            }
         } else {
             PointerList* fields = info.fields;
             for (mut i32 f = 0; f < fields.length; f = f + 1) {
@@ -124,7 +130,55 @@ impl CodeGenerator {
         return offset;
     }
 
-    ptr payload_address(ptr enum_llvm, ptr slot, Node* variant, i32 index) {
+    bool detect_niche(StructInfo* info) {
+        Node* declaration = info.node;
+        if (declaration.count() != 2) {
+            return false;
+        }
+        Node* first = declaration.child(0);
+        Node* second = declaration.child(1);
+        mut Node* with_pointer = first;
+        mut Node* empty = second;
+        if (first.count() == 0) {
+            with_pointer = second;
+            empty = first;
+        }
+        if (empty.count() != 0 || with_pointer.count() != 1) {
+            return false;
+        }
+        Node* payload = with_pointer.child(0);
+        if (!Types.is_pointer(payload.value_type())) {
+            return false;
+        }
+        Node* some_tag = with_pointer.first();
+        Node* none_tag = empty.first();
+        info.is_niche = true;
+        info.niche_some_tag = (i32)some_tag.int_value();
+        info.niche_none_tag = (i32)none_tag.int_value();
+        return true;
+    }
+
+    ptr load_tag(u32 enum_type, ptr enum_llvm, ptr slot, ptr<i8> name) {
+        ptr i32_type = LLVMIntTypeInContext(this.context, 32);
+        StructInfo* info = this.struct_of(enum_type);
+        if (info.is_niche) {
+            ptr pointer_type = LLVMPointerTypeInContext(this.context, 0);
+            ptr field = LLVMBuildStructGEP2(this.builder, enum_llvm, slot, 0, "niche.ptr");
+            ptr pointer = LLVMBuildLoad2(this.builder, pointer_type, field, "niche.value");
+            ptr present = LLVMBuildICmp(this.builder, LlvmConst.INT_NE, pointer, LLVMConstPointerNull(pointer_type), "niche.present");
+            ptr some_tag = LLVMConstInt(i32_type, (u64)info.niche_some_tag, 0);
+            ptr none_tag = LLVMConstInt(i32_type, (u64)info.niche_none_tag, 0);
+            return LLVMBuildSelect(this.builder, present, some_tag, none_tag, name);
+        }
+        ptr tag_address = LLVMBuildStructGEP2(this.builder, enum_llvm, slot, 0, "enum.tag.ptr");
+        return LLVMBuildLoad2(this.builder, i32_type, tag_address, name);
+    }
+
+    ptr payload_address(u32 enum_type, ptr enum_llvm, ptr slot, Node* variant, i32 index) {
+        StructInfo* info = this.struct_of(enum_type);
+        if (info.is_niche) {
+            return LLVMBuildStructGEP2(this.builder, enum_llvm, slot, 0, "niche.payload");
+        }
         ptr area = LLVMBuildStructGEP2(this.builder, enum_llvm, slot, 1, "enum.area");
         ptr<ptr> offsets = CodeGenerator.array_of(1);
         offsets[0] = LLVMConstInt(LLVMIntTypeInContext(this.context, 64), this.payload_offset(variant, index), 0);

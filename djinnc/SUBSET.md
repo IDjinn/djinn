@@ -53,6 +53,8 @@ of them. A construct outside this list is forbidden in `djinnc/src` until the dj
 
 Each plain enum is its own type: `==`/`!=` only between values of the same enum (compared by tag); ordering, arithmetic and comparisons with integers or other enums are errors, so go through `getValue()` (returns the `i32` tag; a cast `(Kind)(i32)value` rebuilds the enum). `switch value { A -> 1, _ -> 0 }` accepts a `_` catch-all arm in place of the missing variants. `NodeKind` and `TokenKind` in the compiler source are real enums (their name/text/precedence tables are `switch` expressions); other enum-like `i32` constants in `static` structs remain.
 
+A tagged enum with exactly two variants, one without payload and one with a single pointer payload (`union optional<T> { Some(T), None() }` instantiated with a pointer), uses the pointer niche: the value is 8 bytes with no tag, `None` is the null pointer and a `Some` holding null reads as `None`.
+
 ## Generics
 
 - `struct Pair<K, V> { ... }` and `union optional<T> { Empty(), Value(T) }`; instances are monomorphized on demand (`Pair<i32, i64>`, nested `Wrapper<Pair<i32, i32>>`) with their methods.

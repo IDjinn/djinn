@@ -21,14 +21,20 @@ impl CodeGenerator {
     Value* gen_enum_construct(Node* node, Node* variant, u32 enum_type) {
         ptr llvm = this.llvm_type(enum_type);
         ptr slot = this.create_slot(enum_type, "enum.value");
-        ptr tag_address = LLVMBuildStructGEP2(this.builder, llvm, slot, 0, "enum.tag");
-        Node* tag_value = variant.first();
-        ptr tag = LLVMConstInt(LLVMIntTypeInContext(this.context, 32), (u64)tag_value.int_value(), 0);
-        LLVMBuildStore(this.builder, tag, tag_address);
+        StructInfo* info = this.struct_of(enum_type);
+        if (info.is_niche) {
+            ptr pointer_slot = LLVMBuildStructGEP2(this.builder, llvm, slot, 0, "niche.slot");
+            LLVMBuildStore(this.builder, LLVMConstPointerNull(LLVMPointerTypeInContext(this.context, 0)), pointer_slot);
+        } else {
+            ptr tag_address = LLVMBuildStructGEP2(this.builder, llvm, slot, 0, "enum.tag");
+            Node* tag_value = variant.first();
+            ptr tag = LLVMConstInt(LLVMIntTypeInContext(this.context, 32), (u64)tag_value.int_value(), 0);
+            LLVMBuildStore(this.builder, tag, tag_address);
+        }
         for (mut i32 i = 0; i < node.count(); i = i + 1) {
             Node* payload = variant.child(i);
             Value* argument = this.gen_expression(node.child(i));
-            ptr address = this.payload_address(llvm, slot, variant, i);
+            ptr address = this.payload_address(enum_type, llvm, slot, variant, i);
             LLVMBuildStore(this.builder, this.coerce(argument, payload.value_type()), address);
         }
         return Value.create(LLVMBuildLoad2(this.builder, llvm, slot, "enum.loaded"), enum_type);
