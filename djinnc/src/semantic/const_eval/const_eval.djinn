@@ -423,6 +423,9 @@ struct ConstEval {
             this.ri = 1 - this.ri;
             return true;
         }
+        if (op == TokenKind::PLUS_PLUS || op == TokenKind::MINUS_MINUS) {
+            return this.eval_count(node);
+        }
         if (op != TokenKind::MINUS && op != TokenKind::TILDE) {
             return this.fail(node, "operator cannot be evaluated at compile time");
         }
@@ -665,6 +668,42 @@ struct ConstEval {
             return ConstEval.flag(a > b);
         }
         return ConstEval.flag(a >= b);
+    }
+
+    unsafe bool eval_count(Node* node) {
+        Node* target = node.first();
+        if (target.kind() != NodeKind::IDENTIFIER || target.symbol_kind() != SymbolKind.LOCAL) {
+            return this.fail(node, "only local variables can be changed at compile time");
+        }
+        LocalVariable* variable = (LocalVariable*)target.symbol();
+        if (!this.in_frame || variable.eval_slot == 0 || variable.const_state == 2) {
+            return this.fail(node, "variable cannot be assigned at compile time");
+        }
+        i32 shape = this.shape_of(variable.type);
+        if ((shape & ConstEval.NUMERIC) == 0) {
+            return this.fail(node, "operand is not a number");
+        }
+        i32 index = this.base + variable.eval_slot - 1;
+        i64 old_int = this.ints[index];
+        f64 old_float = this.floats[index];
+        mut i64 delta = 1;
+        if (node.op_kind() == TokenKind::MINUS_MINUS) {
+            delta = 0 - 1;
+        }
+        if ((shape & ConstEval.FLOAT) != 0) {
+            this.floats[index] = old_float + (f64)delta;
+        } else {
+            this.ints[index] = ConstEval.wrap(old_int + delta, shape);
+            this.floats[index] = (f64)this.ints[index];
+        }
+        if (node.flag()) {
+            this.ri = old_int;
+            this.rf = old_float;
+        } else {
+            this.ri = this.ints[index];
+            this.rf = this.floats[index];
+        }
+        return true;
     }
 
     unsafe bool eval_assign(Node* node) {

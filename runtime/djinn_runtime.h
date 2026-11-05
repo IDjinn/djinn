@@ -69,10 +69,12 @@ do {                                                              \
 #define DJINN_ATTR_NONNULL_1
 #define DJINN_ATTR_REALLOC
 #define DJINN_ATTR_MALLOC
+#define DJINN_ATTR_MALLOC_ALIGNED
 #else
 #define DJINN_ATTR_NONNULL_1 __attribute__((nonnull(1)))
 #define DJINN_ATTR_REALLOC   __attribute__((alloc_size(2), warn_unused_result))
 #define DJINN_ATTR_MALLOC    __attribute__((malloc, alloc_size(1), returns_nonnull))
+#define DJINN_ATTR_MALLOC_ALIGNED __attribute__((malloc, alloc_size(1), alloc_align(2), returns_nonnull))
 #endif
 
 uint64_t __djinn_hash_string(const char* data, uint32_t length);
@@ -91,6 +93,10 @@ void* __djinn_realloc(void* pointer, size_t new_size);
 void __djinn_free(void* pointer);
 
 void* __djinn_malloc(size_t size);
+
+void* __djinn_malloc_aligned(size_t size, size_t alignment);
+
+void __djinn_free_aligned(void* pointer);
 
 #define DJINN_IO_FILE_READ   0
 #define DJINN_IO_FILE_WRITE  1

@@ -61,6 +61,7 @@ impl CodeGenerator {
                     LLVMSetGlobalConstant(global, 1);
                 }
             }
+            this.align_slot(global, type);
             variable.slot = global;
             if (this.debug != null) {
                 DebugInfo* debug = this.debug;
@@ -140,7 +141,41 @@ impl CodeGenerator {
     }
 
     ptr create_slot(u32 type, ptr<i8> name) {
-        return LLVMBuildAlloca(this.alloca_builder, this.llvm_type(type), name);
+        ptr slot = LLVMBuildAlloca(this.alloca_builder, this.llvm_type(type), name);
+        this.align_slot(slot, type);
+        return slot;
+    }
+
+    unsafe void align_slot(ptr slot, u32 type) {
+        if (!Types.is_struct(type)) {
+            return;
+        }
+        StructInfo* info = this.struct_of(type);
+        if (info != null && info.align > 0) {
+            LLVMSetAlignment(slot, info.align);
+        }
+    }
+
+    unsafe bool is_volatile(Node* target) {
+        NodeKind kind = target.kind();
+        i32 symbol_kind = target.symbol_kind();
+        if (kind == NodeKind::IDENTIFIER && (symbol_kind == SymbolKind.LOCAL || symbol_kind == SymbolKind.GLOBAL)) {
+            LocalVariable* variable = (LocalVariable*)target.symbol();
+            return variable.is_volatile;
+        }
+        bool is_field = (kind == NodeKind::IDENTIFIER && symbol_kind == SymbolKind.IMPLICIT_FIELD)
+            || (kind == NodeKind::FIELD_ACCESS && symbol_kind == SymbolKind.FIELD);
+        if (is_field) {
+            FieldInfo* field = (FieldInfo*)target.symbol();
+            return field.is_volatile;
+        }
+        return false;
+    }
+
+    void mark_volatile(ptr instruction, Node* target) {
+        if (this.is_volatile(target)) {
+            LLVMSetVolatile(instruction, 1);
+        }
     }
 
     FunctionInfo* current_function() {
@@ -279,6 +314,20 @@ impl CodeGenerator {
         }
     }
 
+    void warn_attribute(AttributeUse* use, ptr<i8> message) {
+        Diagnostics* diagnostics = this.diagnostics;
+        diagnostics.warning(use.line, use.column, message);
+    }
+
+    void align_function(FunctionInfo* info, AttributeUse* use) {
+        i64 requested = use.int_arg;
+        if (requested <= 0 || (requested & (requested - 1)) != 0) {
+            this.warn_attribute(use, "'Align' needs a power of two");
+            return;
+        }
+        LLVMSetAlignment(info.function, (u32)requested);
+    }
+
     unsafe void apply_attributes(FunctionInfo* info) {
         if (info.node == null) {
             return;
@@ -298,6 +347,14 @@ impl CodeGenerator {
                 this.add_attribute(info.function, 4294967295, "memory", 1365);
             } else if (use.text_arg != null && Strings.equals(use.name, (i32)strlen(use.name), "Llvm")) {
                 this.add_function_attribute(info.function, use.text_arg);
+            } else if (Strings.same(use.name, "NonNull")) {
+                if (Types.is_pointer(info.return_type) && !info.is_async) {
+                    this.add_attribute(info.function, 0, "nonnull", 0);
+                } else {
+                    this.warn_attribute(use, "'NonNull' on a function needs a pointer return type");
+                }
+            } else if (Strings.same(use.name, "Align")) {
+                this.align_function(info, use);
             }
         }
         if (info.node != null) {

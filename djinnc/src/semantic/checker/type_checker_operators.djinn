@@ -15,6 +15,9 @@ impl TypeChecker {
         if (op == TokenKind::STAR) {
             return this.check_lvalue(node);
         }
+        if (op == TokenKind::PLUS_PLUS || op == TokenKind::MINUS_MINUS) {
+            return this.check_count(node);
+        }
 
         u32 operand = this.check_expression(node.first(), expected);
         if (Types.is_struct(operand) && (op == TokenKind::MINUS || op == TokenKind::TILDE || op == TokenKind::BANG)) {
@@ -38,6 +41,36 @@ impl TypeChecker {
 
         this.error(node, "unary operator is not supported yet");
         return Types.i32_type();
+    }
+
+    unsafe u32 check_count(Node* node) {
+        Node* target = node.first();
+        if (!this.is_addressable(target)) {
+            this.error(node, "the operand of ++ and -- must be a variable, a field or an element");
+            return Types.i32_type();
+        }
+        u32 type = this.check_lvalue(target);
+        if (target.symbol_kind() == SymbolKind.PROPERTY_GET || target.symbol_kind() == SymbolKind.INDEX_GET
+            || target.symbol_kind() == SymbolKind.IMPLICIT_GET) {
+            this.error(node, "++ and -- cannot be applied to a property or an indexer");
+            return type;
+        }
+        if (target.kind() == NodeKind::IDENTIFIER && (target.symbol_kind() == SymbolKind.LOCAL || target.symbol_kind() == SymbolKind.GLOBAL)) {
+            LocalVariable* variable = (LocalVariable*)target.symbol();
+            if (!variable.is_mutable) {
+                this.error(target, "cannot assign to an immutable variable");
+            }
+        }
+        if (Types.is_pointer(type)) {
+            if (Types.is_raw_pointer(type)) {
+                this.require_unsafe(node, "pointer arithmetic on a raw pointer");
+            }
+            return type;
+        }
+        if (!Types.is_integer(type) && !Types.is_float(type)) {
+            this.error(node, "++ and -- need an integer, a float or a pointer");
+        }
+        return type;
     }
 
     bool is_untyped_literal(Node* node) {

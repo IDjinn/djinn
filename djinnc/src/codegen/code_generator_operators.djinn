@@ -78,6 +78,10 @@ impl CodeGenerator {
             return this.load_through(this.gen_address(node), node.value_type());
         }
 
+        if (op == TokenKind::PLUS_PLUS || op == TokenKind::MINUS_MINUS) {
+            return this.gen_count(node);
+        }
+
         if (node.symbol_kind() == SymbolKind.OPERATOR) {
             return this.gen_operator_call(node, false);
         }
@@ -95,6 +99,45 @@ impl CodeGenerator {
         }
         ptr condition = this.to_condition(operand);
         return Value.create(LLVMBuildNot(this.builder, condition, "lnot"), Types.bool_type());
+    }
+
+    unsafe Value* gen_count(Node* node) {
+        bool increment = node.op_kind() == TokenKind::PLUS_PLUS;
+        u32 type = node.value_type();
+        ptr llvm = this.llvm_type(type);
+        ptr address = this.gen_address(node.first());
+        ptr before = LLVMBuildLoad2(this.builder, llvm, address, "count.old");
+        this.mark_volatile(before, node.first());
+        mut ptr after = (ptr)0;
+        if (Types.is_pointer(type)) {
+            mut i64 step = 1;
+            if (!increment) {
+                step = 0 - 1;
+            }
+            ptr<ptr> indices = CodeGenerator.array_of(1);
+            indices[0] = LLVMConstInt(LLVMIntTypeInContext(this.context, 64), (u64)step, 1);
+            after = LLVMBuildGEP2(this.builder, LLVMIntTypeInContext(this.context, 8), before, indices, 1, "count.ptr");
+        } else if (Types.is_float(type)) {
+            ptr one = LLVMConstReal(llvm, 1.0);
+            if (increment) {
+                after = LLVMBuildFAdd(this.builder, before, one, "count.new");
+            } else {
+                after = LLVMBuildFSub(this.builder, before, one, "count.new");
+            }
+        } else {
+            ptr one = LLVMConstInt(llvm, 1, 0);
+            if (increment) {
+                after = LLVMBuildAdd(this.builder, before, one, "count.new");
+            } else {
+                after = LLVMBuildSub(this.builder, before, one, "count.new");
+            }
+        }
+        ptr count_store = LLVMBuildStore(this.builder, after, address);
+        this.mark_volatile(count_store, node.first());
+        if (node.flag()) {
+            return Value.create(before, type);
+        }
+        return Value.create(after, type);
     }
 
     unsafe Value* gen_assign(Node* node) {
@@ -128,7 +171,8 @@ impl CodeGenerator {
         u32 element = node.value_type();
         Value* value = this.gen_expression(node.second());
         ptr stored = this.coerce(value, element);
-        LLVMBuildStore(this.builder, stored, address);
+        ptr store = LLVMBuildStore(this.builder, stored, address);
+        this.mark_volatile(store, node.first());
         return Value.create(stored, element);
     }
 
