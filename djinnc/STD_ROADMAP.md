@@ -12,24 +12,32 @@ futuro, então as mesmas fontes servem ao stage0 e ao djinnc.
 - Quando a std declara `str`, `string`, `arr`, `TypeInfo` ou `object`, as declarações iguais de `runtime/core/` (e seus `impl`) são descartadas e os ganchos do compilador (interpolação, literais, boxing) usam as da std (`std::types`). Sem std, o core continua com as suas.
 - `Debug.assert(cond, msg)` mínimo vive no core até `[Location]` existir.
 
-## Arquivos da std
+## Estado
 
-| Arquivo | Estado | O que falta |
-|---|---|---|
-| `types/types.djinn`, `types/constraints.djinn` | na build (`--std`) | `impl` genérico de `arr<T>`, `i128`/`u128`, `f32* p = &this`, literais de 64 bits sem sinal, `where` com `;` |
-| `collections/array.djinn`, `map.djinn`, `range.djinn` | na build | `void*` → `T*` implícito (`malloc` em `array()`), `where Key : A, B;` seguido de `{`, aritmética `size` com literais `u` |
-| `sys/libc.djinn`, `io.djinn`, `math.djinn`, `process.djinn`, `logger.djinn`, `test.djinn` | na build | `i8*?` já parseia; externs duplicados com o core (nomes iguais em namespaces diferentes) |
-| `sys/debug.djinn`, `sys/intrinsics.djinn`, `util/version.djinn` | na build | `[Location]`, `attribute`, `[attribute]`, intrinsics de debug e inicializador posicional |
-| `sys/task.djinn`, `builtin/coro.djinn` | na build | structs `[intrinsic]`/`[no_mangle]` são lidas e descartadas; `task<T>` e as corrotinas vêm do core |
-| `sys/console.djinn`, `sys/spectre.djinn`, `net/socket.djinn` | na build | `...args` empacotado em `arr<object>`, `i8[n]`, constantes da struct sem prefixo, `async` em métodos |
+O djinnc compila os 19 arquivos de `std/` por inteiro com `--std` (a lista `pending_files` em `driver/std_library.djinn` está vazia). A suíte `tests/djinnc/std/` roda no `tests/djinnc/run.sh` com `--std` e cobre:
 
-A lista de exclusão está em `driver/std_library.djinn` (`pending_files`); cada item sai dela quando o djinnc passa a compilá-lo.
+| Teste | O que exercita |
+|---|---|
+| `collections` | `array<T>` (crescimento a partir de capacidade 0), `map<K,V>` (set/get/has/remove, rehash) e `range` |
+| `optional_result` | `optional<T>` e `result<T,E>` com `switch` e inferência de genéricos |
+| `console` | `Console.writeSync` com `{n}`, argumentos `string`, `str` e inteiros empacotados em `arr<object>` |
+| `math`, `io`, `process`, `logger`, `spectre` | bindings de libc, `i8*?` como `optional<i8*>`, saída ANSI do Spectre |
+| `hash_version`, `hash_wide` | `Hashable` de inteiros, `f32` e `i128` |
+| `version`, `semver` | `Version` com a gramática oficial do semver 2.0.0: `parse` estrito, pré-release, build e precedência |
 
-## Ordem proposta
+Correções que a primeira compilação real exigiu:
 
-1. Rodar `djinnc --std` com os arquivos acima e corrigir, um erro por vez, o que a primeira compilação apontar (nada disso foi executado ainda).
-2. `[Location]` e `Debug` da std no lugar do mínimo do core.
-3. `for ... in` sobre ranges e `arr`/`array`, depois `console`.
-4. Atributos declarados (`attribute`) e `[intrinsic]`, depois `intrinsics.djinn`, `task.djinn`, `coro.djinn`, `version.djinn`.
-5. `async` em I/O (`socket`), `spectre`.
-6. Exceções (`throws`/`try`/`catch`): a std atual não usa nenhuma; entram depois, junto com o framework.
+- Com a std presente, `drop_overridden_core` não removia o `str`/`string`/`arr` do core (o teste ainda procurava `core.djinn` depois da divisão em `runtime/core/*.djinn`); os dois tipos coexistiam e uma chamada com literal falhava.
+- O core enxerga `std::types` quando ele existe (o namespace raiz importa a std), porque os tipos descartados passam a vir de lá.
+- `string` e `str` passados a `...args` são empacotados como `i8*` terminado em NUL (`Reflection.terminated`/`terminated_view`), como as demais conversões declaradas por `IFormatable`.
+- `Console` lia o `i8*` empacotado sem a indireção (`data` aponta para o valor empacotado).
+- `array.grow` dobrava a capacidade 0, e `map.get` afirmava `state == 0` no caso de sucesso.
+
+## Pendente
+
+1. `[Location]` e `Debug` da std no lugar do mínimo do core.
+2. `for ... in` sobre `arr`/`array`.
+3. Atributos declarados (`attribute`) e `[intrinsic]` além de leitura/descarte: `intrinsics.djinn`, `task.djinn`, `coro.djinn`.
+4. `async` em I/O (`socket`), `Console.write` assíncrono e `readLine`.
+5. `T*` sem aritmética/indexação na própria std (issue #57): a std ainda indexa e soma em `T*`.
+6. Exceções (`throws`/`try`/`catch`): a std atual não usa nenhuma.

@@ -1,3 +1,5 @@
+import std::types;
+
 namespace std::util;
 
 [attribute(AttributeTarget.Struct | AttributeTarget.Field | AttributeTarget.Parameter)]
@@ -5,42 +7,282 @@ struct VersionAttribute {
     Version version;
 }
 
+struct SemverReader {
+    str text;
+    size pos;
+
+    bool done() {
+        return this.pos >= this.text.length;
+    }
+
+    i32 peek() {
+        if (this.done()) {
+            return 0;
+        }
+        return (i32)this.text.data[this.pos];
+    }
+
+    bool accept(i32 expected) {
+        if (!this.done() && this.peek() == expected) {
+            this.pos = this.pos + 1u;
+            return true;
+        }
+        return false;
+    }
+
+    static bool is_digit(i32 c) {
+        return c >= 48 && c <= 57;
+    }
+
+    static bool is_identifier_character(i32 c) {
+        return SemverReader.is_digit(c) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c == 45;
+    }
+
+    bool numeric(i32* result) {
+        size start = this.pos;
+        mut i64 value = 0;
+        while (SemverReader.is_digit(this.peek())) {
+            value = value * 10 + (this.peek() - 48);
+            if (value > 2147483647) {
+                return false;
+            }
+            this.pos = this.pos + 1u;
+        }
+        size length = this.pos - start;
+        if (length == 0u) {
+            return false;
+        }
+        if (length > 1u && this.text.data[start] == 48) {
+            return false;
+        }
+        *result = (i32)value;
+        return true;
+    }
+
+    bool identifiers(bool numeric_without_leading_zero, str* result) {
+        size start = this.pos;
+        while (true) {
+            size begin = this.pos;
+            mut bool numeric_only = true;
+            while (!this.done() && SemverReader.is_identifier_character(this.peek())) {
+                if (!SemverReader.is_digit(this.peek())) {
+                    numeric_only = false;
+                }
+                this.pos = this.pos + 1u;
+            }
+            size length = this.pos - begin;
+            if (length == 0u) {
+                return false;
+            }
+            if (numeric_without_leading_zero && numeric_only && length > 1u && this.text.data[begin] == 48) {
+                return false;
+            }
+            if (!this.accept(46)) {
+                break;
+            }
+        }
+        str found = { .data = this.text.data + start, .length = this.pos - start };
+        *result = found;
+        return true;
+    }
+}
+
 struct Version {
     i32 major;
     i32 minor;
     i32 patch;
+    str pre_release;
+    str build;
+
+    public static optional<Version> parse(str text) {
+        SemverReader reader = { .text = text, .pos = 0u };
+        mut i32 major = 0;
+        mut i32 minor = 0;
+        mut i32 patch = 0;
+        mut str pre_release = { .data = text.data, .length = 0u };
+        mut str build = { .data = text.data, .length = 0u };
+
+        if (!reader.numeric(&major) || !reader.accept(46)) {
+            return optional::Empty();
+        }
+        if (!reader.numeric(&minor) || !reader.accept(46)) {
+            return optional::Empty();
+        }
+        if (!reader.numeric(&patch)) {
+            return optional::Empty();
+        }
+        if (reader.accept(45) && !reader.identifiers(true, &pre_release)) {
+            return optional::Empty();
+        }
+        if (reader.accept(43) && !reader.identifiers(false, &build)) {
+            return optional::Empty();
+        }
+        if (!reader.done()) {
+            return optional::Empty();
+        }
+        Version version = { .major = major, .minor = minor, .patch = patch, .pre_release = pre_release, .build = build };
+        return optional::Value(version);
+    }
+
+    public bool is_prerelease() {
+        return this.pre_release.length != 0u;
+    }
+
+    static size identifier_end(str text, size from) {
+        mut size end = from;
+        while (end < text.length && text.data[end] != 46) {
+            end = end + 1u;
+        }
+        return end;
+    }
+
+    static bool is_numeric(str text, size from, size to) {
+        for (mut size i = from; i < to; i = i + 1u) {
+            if (!SemverReader.is_digit((i32)text.data[i])) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    static i32 compare_text(str left, size left_from, size left_to, str right, size right_from, size right_to) {
+        size left_length = left_to - left_from;
+        size right_length = right_to - right_from;
+        mut size shared = left_length;
+        if (right_length < shared) {
+            shared = right_length;
+        }
+        for (mut size i = 0u; i < shared; i = i + 1u) {
+            i32 a = (i32)left.data[left_from + i];
+            i32 b = (i32)right.data[right_from + i];
+            if (a != b) {
+                if (a < b) {
+                    return -1;
+                }
+                return 1;
+            }
+        }
+        if (left_length == right_length) {
+            return 0;
+        }
+        if (left_length < right_length) {
+            return -1;
+        }
+        return 1;
+    }
+
+    static i32 compare_identifier(str left, size left_from, size left_to, str right, size right_from, size right_to) {
+        bool left_numeric = Version.is_numeric(left, left_from, left_to);
+        bool right_numeric = Version.is_numeric(right, right_from, right_to);
+        if (left_numeric && right_numeric) {
+            size left_length = left_to - left_from;
+            size right_length = right_to - right_from;
+            if (left_length != right_length) {
+                if (left_length < right_length) {
+                    return -1;
+                }
+                return 1;
+            }
+        }
+        if (left_numeric && !right_numeric) {
+            return -1;
+        }
+        if (!left_numeric && right_numeric) {
+            return 1;
+        }
+        return Version.compare_text(left, left_from, left_to, right, right_from, right_to);
+    }
+
+    static i32 compare_pre_release(str left, str right) {
+        if (left.length == 0u && right.length == 0u) {
+            return 0;
+        }
+        if (left.length == 0u) {
+            return 1;
+        }
+        if (right.length == 0u) {
+            return -1;
+        }
+        mut size a = 0u;
+        mut size b = 0u;
+        while (true) {
+            size a_end = Version.identifier_end(left, a);
+            size b_end = Version.identifier_end(right, b);
+            i32 order = Version.compare_identifier(left, a, a_end, right, b, b_end);
+            if (order != 0) {
+                return order;
+            }
+            bool left_more = a_end < left.length;
+            bool right_more = b_end < right.length;
+            if (!left_more && !right_more) {
+                return 0;
+            }
+            if (!left_more) {
+                return -1;
+            }
+            if (!right_more) {
+                return 1;
+            }
+            a = a_end + 1u;
+            b = b_end + 1u;
+        }
+        return 0;
+    }
+
+    public static i32 compare(Version left, Version right) {
+        if (left.major != right.major) {
+            if (left.major < right.major) {
+                return -1;
+            }
+            return 1;
+        }
+        if (left.minor != right.minor) {
+            if (left.minor < right.minor) {
+                return -1;
+            }
+            return 1;
+        }
+        if (left.patch != right.patch) {
+            if (left.patch < right.patch) {
+                return -1;
+            }
+            return 1;
+        }
+        return Version.compare_pre_release(left.pre_release, right.pre_release);
+    }
+
+    public static bool identical(Version left, Version right) {
+        if (Version.compare(left, right) != 0) {
+            return false;
+        }
+        return Version.compare_text(left.build, 0u, left.build.length, right.build, 0u, right.build.length) == 0;
+    }
 
     operator==(Version left, Version right) -> bool {
-        return left.major == right.major &&
-               left.minor == right.minor &&
-               left.patch == right.patch;
+        return Version.compare(left, right) == 0;
     }
 
     operator<(Version left, Version right) -> bool {
-        if (left.major != right.major)
-            return left.major < right.major;
-        if (left.minor != right.minor)
-            return left.minor < right.minor;
-        return left.patch < right.patch;
+        return Version.compare(left, right) < 0;
     }
 
     operator>(Version left, Version right) -> bool {
-        return right < left;
+        return Version.compare(left, right) > 0;
     }
 
     operator<=(Version left, Version right) -> bool {
-        return !(right < left);
+        return Version.compare(left, right) <= 0;
     }
 
     operator>=(Version left, Version right) -> bool {
-        return !(left < right);
+        return Version.compare(left, right) >= 0;
     }
 
     operator!=(Version left, Version right) -> bool {
-        return !(left == right);
+        return Version.compare(left, right) != 0;
     }
 }
 
 impl Version {
-    const Version NONE = { 0, 0, 0 };
+    const Version NONE = { .major = 0, .minor = 0, .patch = 0 };
 }
