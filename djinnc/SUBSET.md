@@ -92,6 +92,12 @@ The core library (`runtime/core/*.djinn`, read from `--runtime-dir`) is compiled
 
 ## Range-for
 
+`for (T x in collection)` loops over an `arr<T>` (`T[]`): `collection` is a variable, a field path, a call or a literal, evaluated once; `x` is a copy of each element and `break`/`continue` work. It is lowered in the parser to a counting `for` with hidden `__indexN` (and `__itemsN` when the collection is not a plain path). A `..` between `in` and `)` makes it a range loop instead.
+
+`x++`, `++x`, `x--` and `--x` are one node: the operand is evaluated once and must be a variable, field or element (not a property or indexer) of an integer, float or pointer type; the postfix form yields the old value and the prefix form the new one. Raw pointers need `unsafe`; `constexpr` functions can use them on locals.
+
+The compile-time constants `Platform.Windows/Linux/MacOs`, `Arch.X64/X86/Arm64`, `Build.Debug/Release` (debug means `-g`) and `Runtime.PointerSize` come from the target triple, so `--target` changes them; a struct or variable with the same name takes precedence.
+
 `for (i32 i in [1..10])`, `[0..5)`, `0..5` and `0..=5` loop over a range. The start is always inclusive; `[a..b]` and `..=` include the end, `[a..b)` and `..` exclude it. The parser lowers it to a plain `for` with a hidden `__limitN` variable, so the end is evaluated once. `(a..b]` and `(a..b)` exclude the start: the loop begins at `a + 1`. A `(` after `in` is a range only when `..` appears directly inside it, so `(n)..5` is still the ordinary range.
 
 ## Named arguments
@@ -130,7 +136,7 @@ a sync `main` can still `await`. `yield` is not a coroutine yield (it is the swi
 ## Attributes
 `[Name]`, `[Name(16)]`, `[Name(key = "text")]` and `[A, B]` before functions, methods, structs, fields and parameters. The builtin names and
 targets are in `ast/attributes/attributes.djinn`: `ForceInline`, `NoInline`, `NoReturn`, `Hot`, `Cold`, `NoSync`, `NoUnwind`, `WillReturn`,
-`NoRecurse`, `InlineHint`, `OptSize`, `MinSize`, `NoFree`, `NoMerge`, `Speculatable` and `Llvm("attr")` become LLVM function attributes; `Const` and `Pure` become `memory(none)` and `memory(read)`. On parameters, `ReadOnly`, `WriteOnly`, `Restrict` (`noalias`), `NonNull`, `NoCapture` (`captures(none)`) and `Align(n)` become LLVM parameter attributes (the type must be a pointer). `Volatile`, `NoMangle` and `Deprecated` are validated but have no LLVM effect; `Reflect` (structs, enums, unions, interfaces) drives reflection, see below. Only attributes that cannot introduce undefined behavior are implicit: every defined function is `nounwind` and `__djinn_malloc` returns `noalias`; everything else is opt-in, and a wrong promise is undefined behavior. `likely(cond)` and `unlikely(cond)` emit `llvm.expect`.
+`NoRecurse`, `InlineHint`, `OptSize`, `MinSize`, `NoFree`, `NoMerge`, `Speculatable` and `Llvm("attr")` become LLVM function attributes; `Const` and `Pure` become `memory(none)` and `memory(read)`. On parameters, `ReadOnly`, `WriteOnly`, `Restrict` (`noalias`), `NonNull`, `NoCapture` (`captures(none)`) and `Align(n)` become LLVM parameter attributes (the type must be a pointer). `NonNull` on a function (or method) marks a pointer return value `nonnull`, and `Align(n)` on a function sets its alignment; `Align(n)` on a struct pads its size to a multiple of `n` and aligns its stack slots and globals (`new` of a struct aligned above 16 uses `__djinn_malloc_aligned(size, alignment)`, a power-of-two alignment as in C++ `align_val_t`; release it with `__djinn_free_aligned`), and a non-power-of-two `n` is a warning. `Align` on a field is accepted with a warning and not applied. `Volatile` on a field or a `static` makes every load and store of it volatile. `NoMangle` and `Deprecated` are validated but have no LLVM effect; `Reflect` (structs, enums, unions, interfaces) drives reflection, see below. Only attributes that cannot introduce undefined behavior are implicit: every defined function is `nounwind` and `__djinn_malloc` returns `noalias`; everything else is opt-in, and a wrong promise is undefined behavior. `likely(cond)` and `unlikely(cond)` emit `llvm.expect`.
 An unknown name is an error; a wrong target is a warning.
 
 `attribute Name(targets);` and `attribute Name(targets) { fields }` declare attributes (the targets expression is skipped, so declared

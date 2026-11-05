@@ -106,14 +106,47 @@ impl CodeGenerator {
                 FieldInfo* field = (FieldInfo*)fields.get(f);
                 this.require_layout(field.type, declaration);
             }
-            ptr<ptr> types = CodeGenerator.array_of(fields.length);
+            ptr<ptr> types = CodeGenerator.array_of(fields.length + 1);
             for (mut i32 f = 0; f < fields.length; f = f + 1) {
                 FieldInfo* field = (FieldInfo*)fields.get(f);
                 types[f] = this.llvm_type(field.type);
             }
-            LLVMStructSetBody(info.llvm, types, (u32)fields.length, 0);
+            mut i32 member_count = fields.length;
+            u32 alignment = this.declared_alignment(info);
+            if (alignment > 0 && fields.length > 0) {
+                ptr measured = LLVMStructTypeInContext(this.context, types, (u32)fields.length, 0);
+                u64 size = LLVMABISizeOfType(this.layout_data, measured);
+                u64 padded = (size + (u64)alignment - 1) / (u64)alignment * (u64)alignment;
+                if (padded > size) {
+                    types[fields.length] = LLVMArrayType2(LLVMIntTypeInContext(this.context, 8), padded - size);
+                    member_count = fields.length + 1;
+                }
+                info.align = alignment;
+            }
+            LLVMStructSetBody(info.llvm, types, (u32)member_count, 0);
         }
         info.layout_state = 2;
+    }
+
+    unsafe u32 declared_alignment(StructInfo* info) {
+        Node* declaration = info.node;
+        if (declaration == null) {
+            return 0;
+        }
+        PointerList* uses = Attributes.of(declaration);
+        for (mut i32 i = 0; i < uses.length; i = i + 1) {
+            AttributeUse* use = (AttributeUse*)uses.get(i);
+            if (!Strings.same(use.name, "Align")) {
+                continue;
+            }
+            i64 requested = use.int_arg;
+            if (requested <= 0 || (requested & (requested - 1)) != 0) {
+                this.warn_attribute(use, "'Align' needs a power of two");
+                return 0;
+            }
+            return (u32)requested;
+        }
+        return 0;
     }
 
     u64 payload_offset(Node* variant, i32 index) {

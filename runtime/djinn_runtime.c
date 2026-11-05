@@ -108,6 +108,27 @@ void* __djinn_malloc(size_t size)
     return chunk;
 }
 
+DJINN_ATTR_MALLOC_ALIGNED
+void* __djinn_malloc_aligned(size_t size, size_t alignment)
+{
+    DJINN_ASSERT(size > 0, "Size need be greater than zero!");
+    DJINN_ASSERT(alignment != 0 && (alignment & (alignment - 1)) == 0, "Alignment need be a power of two!");
+    if (alignment < sizeof(void*)) alignment = sizeof(void*);
+    void* raw = calloc(1, size + alignment + sizeof(void*));
+    DJINN_ASSERT(raw, "Out of memory");
+    uintptr_t address = ((uintptr_t)raw + sizeof(void*) + alignment - 1) & ~((uintptr_t)alignment - 1);
+    ((void**)address)[-1] = raw;
+    DJINN_TRACE("allocated size %zu aligned to %zu on heap at %p", size, alignment, (void*)address);
+    return (void*)address;
+}
+
+void __djinn_free_aligned(void* pointer)
+{
+    if (!pointer) return;
+    DJINN_TRACE("de-allocating aligned heap memory at %p", pointer);
+    free(((void**)pointer)[-1]);
+}
+
 static void init_queue(djinn_task_queue_t* q)
 {
     q->head = NULL;

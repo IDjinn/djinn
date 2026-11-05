@@ -662,5 +662,5 @@ O djinnc só compila o subset de `djinnc/SUBSET.md`. Falta, em ordem de dependê
 ## Status: `var`/`auto`, impl em primitivos e README
 
 - [x] `var` e `auto` são sinônimos (atom pré-internado + `TypeRef`); stage0 e djinnc.
-- [x] `impl Iface for <primitivo>` e `impl <primitivo>`, chamada `x.hash()` e restrições `where K : Hashable` para argumentos primitivos (`tests/djinnc/samples/primitive_methods.djinn`). `impl A for X, Y` (vários tipos) ainda não.
+- [x] `impl Iface for <primitivo>` e `impl <primitivo>`, chamada `x.hash()` e restrições `where K : Hashable` para argumentos primitivos (`tests/djinnc/samples/primitive_methods.djinn`). `impl A for X, Y` com structs, enums e primitivos funciona (samples `impl_many_types`, `impl_many_structs`); os atributos dos membros são copiados para cada tipo.
 - Exemplos do README que o djinnc ainda não compila: `printf` sem `extern` (std), `consteval/constexpr`, `optional/result` da std (enum genérico com payload gera 'type 0 has no code generation').
