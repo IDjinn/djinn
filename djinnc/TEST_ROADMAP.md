@@ -307,8 +307,8 @@ Linux e o caminho POSIX do runtime de processos não foram testados.
 
 | Item | Situação |
 |---|---|
-| 1. Diagnósticos com código | Parcial. `Diagnostics` recebe `code` em todos os métodos, `DiagnosticErrors` e `DiagnosticWarnings` ([diagnostic_code.djinn](src/support/source/diagnostic_code.djinn)) existe e o texto virou `file:l:c: error[E2001]: msg`. Os ~140 pontos que passam por `error(Node*, msg)` usam o código da fase (`E3000` semântica, `E4000` codegen); já têm código próprio: tratamento de erros (`E9001`-`E9010`), borrow (`E5003`, `E5006`), atributos (`E8001`-`E8005`), main ausente (`E4007`), macros, lexer e parser. **Falta** dar código específico aos demais, por área. |
-| 2. `--diagnostics-format=json` | Feito e verificado. Uma linha por diagnóstico, `length` fixo em 1 (o djinnc ainda não guarda o tamanho do token). |
+| 1. Diagnósticos com código | Feito. `Diagnostics` recebe `code` em todos os métodos e o texto virou `file:l:c: error[E2001]: msg`. [diagnostic_code.djinn](src/support/source/diagnostic_code.djinn) tem `DiagnosticErrors` (3001-3052 semântica, 4001-4003 codegen, 5001-5006 ownership, 8xxx atributos, 9xxx tratamento de erros) e `DiagnosticWarnings`. Todo erro do checker, do analyzer e do codegen usa um código específico; o genérico `E3000`/`E4000` só sobra como padrão de `error(Node*, msg)`. |
+| 2. `--diagnostics-format=json` | Feito. Uma linha por diagnóstico, com `code` (`"E3002"`), `line`, `column`, `length` (o tamanho do token do nó) e, onde o erro nomeia algo, `args`: `{"code":"E3002","length":12,"message":"undefined variable","args":["missing_name"]}`. Hoje `args` existe para variável indefinida, campo desconhecido e função não declarada; os demais erros ainda levam a informação só na mensagem. |
 | 3. Processo com captura | Feito no Windows: `__djinn_process_*` no runtime e `Process.start/wait/kill/...` no std. Amostra `tests/djinnc/std/process_spawn.djinn` roda `clang` e confere stdout, stderr e exit code. `wait_any` existe só no runtime. `spawn` é palavra reservada, então o wrapper se chama `start`. |
 | 4. `--check` | Feito. Não cobre erros que hoje só saem na geração. |
 | 5. `--run` para testes | Corrigido. No Windows falhava com *incompatible data layouts* (o módulo usava layout manual) e com `write` não resolvido (o JIT não enxerga o `write` legado). Agora o módulo adota o layout do JIT e `write` vira `_write`. Dos 94 samples e testes do std, **todos** batem em exit code e stdout pelo JIT. |
@@ -330,6 +330,12 @@ Linux e o caminho POSIX do runtime de processos não foram testados.
 `threads.c`, `console.c`, `filesystem.c` e `process.c`, com o estado compartilhado em `runtime_internal.h`. O seed
 `build/release` ainda lista só `djinn_runtime.c` e `logger.c`, então compila o runtime pela fonte apenas depois de um seed
 novo; com `--runtime-lib` funciona.
+
+**Problema conhecido no JIT (Windows).** `std/logger` (`logger_info` chamado por código no JIT) falha de forma intermitente:
+`__stdio_common_vfprintf` seguido de `fflush` no stdout lê um ponteiro com a metade baixa zerada dentro do `ucrtbase`. Reproduz
+com Djinn puro, sem o logger do runtime, e não acontece no binário linkado nem com `puts`. Causa não encontrada. O runner
+repete uma vez o caso que morre com exit code negativo (até duas vezes) e marca `retries` no relatório. O handler de crash agora
+imprime endereço, módulo e tipo de acesso.
 
 **Custo por estágio** (Windows, `arith.djinn`, média de 3 execuções, máquina de desenvolvimento):
 
@@ -362,7 +368,7 @@ checado como um inicializador do struct declarado em `attribute Stage { i32 mask
 - **Layout:** `AttributeInfo` passou de 2 para 3 campos em `runtime/core/type_info.djinn` e `std/types/types.djinn`. O stage0
   em C++ emite o layout antigo e não foi tocado; como ele sai de cena, isso só importa se alguém compilar o std com ele.
 
-Pronto quando: todo erro do djinnc tem código (falta), um programa Djinn consegue rodar um filho e ler stdout, stderr e
+Pronto quando: todo erro do djinnc tem código (feito), um programa Djinn consegue rodar um filho e ler stdout, stderr e
 exit code (feito), existe uma tabela medida de custo por estágio (feito) e `[Requires(IR | JIT)]` chega inteiro à reflexão (feito).
 
 **Fase 0b (runtime async): feita.** `Task.delay(ms)`, `Task.pause()` e `Process.wait_async` sobre o yield do event loop
@@ -396,7 +402,8 @@ runner --compiler <djinnc> --runtime-lib <lib> [--runtime-dir d] [--jobs n] [--f
 - Programas passam pelo JIT (`--run`): confere exit code e, se existir, o `.stdout`. Casos de erro rodam `--check` com
   diagnósticos em JSON e conferem um erro; um sidecar `<nome>.code` opcional exige o código.
 - Resultado: os 148 casos passam em poucos segundos com 8 jobs.
-- **Falta:** caminho `--link` (o `run.sh` ainda cobre o link e os `crash/` e `debug/`), os `.code` dos 48 casos de erro,
+- Os 51 casos de `errors/` têm um `.code` com o código esperado (primeiro erro), gerado da saída atual do djinnc.
+- **Falta:** caminho `--link` (o `run.sh` ainda cobre o link e os `crash/` e `debug/`),
   a máscara `[Requires]`, `Verify`/`Expected` e o grafo. O `run.sh` só sai quando o runner cobrir o link.
 
 ### Fase 2: migração do gtest

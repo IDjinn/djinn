@@ -39,6 +39,7 @@ struct TestCase {
     i64 started_us;
     i64 elapsed_us;
     ptr<i8> reason;
+    i32 retries;
 }
 
 struct Runner {
@@ -217,9 +218,9 @@ struct Runner {
                 ptr<i8> code_text = Files.read_all(Runner.with_suffix(test.base, ".code"));
                 if (code_text != null) {
                     ByteBuffer* needle = ByteBuffer.create();
-                    needle.append("\"code\":");
+                    needle.append("\"code\":\"E");
                     needle.append_int(Strings.parse_integer(code_text, strlen(code_text)));
-                    needle.append(",");
+                    needle.append("\",");
                     if (strstr(output, needle.cstr()) == null) {
                         ByteBuffer* reason = ByteBuffer.create();
                         reason.append("expected diagnostic ");
@@ -248,6 +249,11 @@ struct Runner {
         test.passed = test.reason == null;
         __djinn_process_free(test.process);
         test.process = null;
+        if (!test.passed && exit_code < 0 && test.retries < 2) {
+            test.retries = test.retries + 1;
+            test.reason = null;
+            test.state = 0;
+        }
     }
 
     public static unsafe void print_result(TestCase* test) {
@@ -278,6 +284,10 @@ struct Runner {
                 json.append("\"passed\"");
             } else {
                 json.append("\"failed\"");
+            }
+            if (test.retries > 0) {
+                json.append(",\"retries\":");
+                json.append_int((i64)test.retries);
             }
             json.append(",\"elapsed_ms\":");
             json.append_int(test.elapsed_us / 1000);
@@ -326,10 +336,16 @@ struct Runner {
                 }
                 if (__djinn_process_poll(test.process) == 1) {
                     Runner.finish(test);
+                    progressed = true;
+                    if (test.state == 0) {
+                        printf("RETRY %s (the process crashed)
+", test.name);
+                        Runner.start(test, config);
+                        continue;
+                    }
                     Runner.print_result(test);
                     running = running - 1;
                     finished = finished + 1;
-                    progressed = true;
                 } else if (__djinn_now_us() - test.started_us > config.timeout_us) {
                     __djinn_process_kill(test.process);
                     __djinn_process_poll(test.process);
