@@ -72,7 +72,7 @@ impl TypeChecker {
             }
             candidate = candidate.overload;
         }
-        this.error(call, "no declaration matches these argument names");
+        this.error_code(call, DiagnosticErrors.NO_MATCHING_OVERLOAD, "no declaration matches these argument names");
         for (mut i32 i = 0; i < call.count(); i = i + 1) {
             Node* argument = call.child(i);
             if (argument.kind() == NodeKind::NAMED_ARG) {
@@ -142,11 +142,11 @@ impl TypeChecker {
             candidate = candidate.overload;
         }
         if (best == null) {
-            this.error(call, "no overload matches these arguments");
+            this.error_code(call, DiagnosticErrors.NO_MATCHING_OVERLOAD, "no overload matches these arguments");
             return null;
         }
         if (ambiguous) {
-            this.error(call, "call is ambiguous between overloads");
+            this.error_code(call, DiagnosticErrors.AMBIGUOUS_CALL, "call is ambiguous between overloads");
             return null;
         }
         return best;
@@ -164,7 +164,7 @@ impl TypeChecker {
         }
         if (constructor == null) {
             if (node.count() > 0) {
-                this.error(node, "struct has no constructor");
+                this.error_code(node, DiagnosticErrors.INVALID_CONSTRUCTOR_CALL, "struct has no constructor");
             }
             for (mut i32 i = 0; i < node.count(); i = i + 1) {
                 this.check_expression(node.child(i), 0);
@@ -173,7 +173,7 @@ impl TypeChecker {
         }
         IdList* params = constructor.param_types;
         if (params.length != node.count() + 1) {
-            this.error(node, "wrong number of constructor arguments");
+            this.error_code(node, DiagnosticErrors.INVALID_CONSTRUCTOR_CALL, "wrong number of constructor arguments");
             return constructor;
         }
         for (mut i32 i = 0; i < node.count(); i = i + 1) {
@@ -192,14 +192,14 @@ impl TypeChecker {
         bool passed_scalar = Types.is_integer(passed) || Types.is_float(passed) || Types.is_pointer(passed);
         bool wanted_scalar = Types.is_integer(wanted) || Types.is_float(wanted) || Types.is_pointer(wanted);
         if ((passed_struct && wanted_scalar) || (passed_scalar && wanted_struct)) {
-            this.error(argument, "argument type does not match the parameter; a struct and a scalar or pointer are not convertible (use .ptr() to get the text pointer of a str or string)");
+            this.error_code(argument, DiagnosticErrors.ARGUMENT_TYPE_MISMATCH, "argument type does not match the parameter; a struct and a scalar or pointer are not convertible (use .ptr() to get the text pointer of a str or string)");
         }
     }
 
     u32 constructor_owner_type(Node* at, u32 type) {
         SymbolTable* symbols = this.symbols;
         if (!Types.is_struct(type) || symbols.enum_of_type(type) != null) {
-            this.error(at, "only structs have constructors");
+            this.error_code(at, DiagnosticErrors.INVALID_CONSTRUCTOR_CALL, "only structs have constructors");
             return 0;
         }
         return type;
@@ -238,7 +238,7 @@ impl TypeChecker {
             Node* variant = this.find_enum_variant(callee, node, expected);
             if (variant != null) {
                 if (node.count() != variant.payload_count()) {
-                    this.error(node, "wrong number of enum variant arguments");
+                    this.error_code(node, DiagnosticErrors.WRONG_ARGUMENT_COUNT, "wrong number of enum variant arguments");
                 }
                 for (mut i32 a = 0; a < node.count() && a < variant.payload_count(); a = a + 1) {
                     Node* payload = variant.child(a);
@@ -286,7 +286,7 @@ impl TypeChecker {
                     }
                 }
                 if (info != null && info.is_instance) {
-                    this.error(callee, "instance method called without an instance");
+                    this.error_code(callee, DiagnosticErrors.INSTANCE_STATIC_MISMATCH, "instance method called without an instance");
                     return Types.i32_type();
                 }
                 if (info != null && info.overload != null) {
@@ -315,7 +315,7 @@ impl TypeChecker {
                     }
                 }
                 if (info != null && !info.is_instance) {
-                    this.error(callee, "static method called on an instance");
+                    this.error_code(callee, DiagnosticErrors.INSTANCE_STATIC_MISMATCH, "static method called on an instance");
                     return Types.i32_type();
                 }
                 if (info != null && info.overload != null) {
@@ -328,12 +328,13 @@ impl TypeChecker {
                 offset = 1;
             }
         } else {
-            this.error(node, "only calls to named functions are supported yet");
+            this.error_code(node, DiagnosticErrors.UNDECLARED_FUNCTION, "only calls to named functions are supported yet");
             return Types.i32_type();
         }
 
         if (info == null) {
-            this.error(callee, "call to an undeclared function");
+            Diagnostics.add_argument(callee.text());
+            this.error_code(callee, DiagnosticErrors.UNDECLARED_FUNCTION, "call to an undeclared function");
             return Types.i32_type();
         }
 
@@ -348,7 +349,7 @@ impl TypeChecker {
             normal = fixed - 1;
         }
         if (given < normal || (given > fixed && !info.is_variadic && !info.packs_variadic)) {
-            this.error(node, "wrong number of arguments");
+            this.error_code(node, DiagnosticErrors.WRONG_ARGUMENT_COUNT, "wrong number of arguments");
             return info.return_type;
         }
 
