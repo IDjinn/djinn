@@ -383,6 +383,22 @@ exit code (feito), existe uma tabela medida de custo por estágio (feito) e `[Re
 Pronto quando: `samples`, `std`, `errors`, `crash` e `debug` rodam pelo runner, em paralelo, e o `run.sh` pode ser
 apagado. Os 48 casos de `errors/` ganham códigos esperados.
 
+#### Estado da Fase 1
+
+Começou pelo runner mínimo, `tests/conformance/runner.djinn`: compila com o djinnc e os fontes de `djinnc/src/support`, sem std.
+
+```bash
+djinnc tests/conformance/runner.djinn djinnc/src/support/{memory,collections}/*.djinn   djinnc/src/support/text/{byte_buffer,strings}.djinn djinnc/src/support/system/{libc,files,process}.djinn -o runner
+runner --compiler <djinnc> --runtime-lib <lib> [--runtime-dir d] [--jobs n] [--filter texto] [--report arquivo.json]
+```
+
+- Descobre `samples/`, `std/` e `errors/`, roda cada caso como um processo filho, 8 em paralelo por padrão, com timeout de 120 s.
+- Programas passam pelo JIT (`--run`): confere exit code e, se existir, o `.stdout`. Casos de erro rodam `--check` com
+  diagnósticos em JSON e conferem um erro; um sidecar `<nome>.code` opcional exige o código.
+- Resultado: 148 casos passam em ~4 s, contra ~40 s do `run.sh` com link.
+- **Falta:** caminho `--link` (o `run.sh` ainda cobre o link e os `crash/` e `debug/`), os `.code` dos 48 casos de erro,
+  a máscara `[Requires]`, `Verify`/`Expected` e o grafo. O `run.sh` só sai quando o runner cobrir o link.
+
 ### Fase 2: migração do gtest
 
 1. Script de porte único: extrai o `R"(...)"` e as expectativas de cada `TEST` para `tests/conformance/<área>/<nome>.djinn`.
