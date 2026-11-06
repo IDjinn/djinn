@@ -1,0 +1,379 @@
+namespace djinnc;
+
+extern "C" {
+    ptr __djinn_process_start(ptr<i8> command, ptr<i8> input, i32 input_length);
+    i32 __djinn_process_poll(ptr process);
+    void __djinn_process_kill(ptr process);
+    i32 __djinn_process_exit_code(ptr process);
+    ptr<i8> __djinn_process_stdout_data(ptr process);
+    i32 __djinn_process_stdout_length(ptr process);
+    ptr<i8> __djinn_process_stderr_data(ptr process);
+    i32 __djinn_process_stderr_length(ptr process);
+    void __djinn_process_free(ptr process);
+    void __djinn_thread_sleep(i64 milliseconds);
+    ptr<i8> strstr(ptr<i8> haystack, ptr<i8> needle);
+}
+
+struct Config {
+    ptr<i8> compiler;
+    ptr<i8> runtime_dir;
+    ptr<i8> runtime_lib;
+    ptr<i8> std_dir;
+    ptr<i8> tests_dir;
+    ptr<i8> filter;
+    ptr<i8> report;
+    i32 jobs;
+    i64 timeout_us;
+    bool ok;
+}
+
+struct TestCase {
+    ptr<i8> name;
+    ptr<i8> source;
+    ptr<i8> base;
+    i32 kind;
+    i32 expected_exit;
+    i32 state;
+    bool passed;
+    ptr process;
+    i64 started_us;
+    i64 elapsed_us;
+    ptr<i8> reason;
+}
+
+struct Runner {
+    public static unsafe Config* parse_config() {
+        Config* config = (Config*)Memory.zalloc(sizeof(Config));
+        config.tests_dir = "tests/djinnc";
+        config.std_dir = "std";
+        config.runtime_dir = "runtime";
+        config.jobs = 8;
+        config.timeout_us = 120000000;
+        config.ok = true;
+        mut i32 index = 1;
+        while (index < Process.argc()) {
+            ptr<i8> argument = Process.argv_or(index, "");
+            ptr<i8> value = Process.argv_or(index + 1, "");
+            if (Strings.same(argument, "--compiler")) {
+                config.compiler = value;
+            } else if (Strings.same(argument, "--runtime-dir")) {
+                config.runtime_dir = value;
+            } else if (Strings.same(argument, "--runtime-lib")) {
+                config.runtime_lib = value;
+            } else if (Strings.same(argument, "--std-dir")) {
+                config.std_dir = value;
+            } else if (Strings.same(argument, "--tests")) {
+                config.tests_dir = value;
+            } else if (Strings.same(argument, "--filter")) {
+                config.filter = value;
+            } else if (Strings.same(argument, "--report")) {
+                config.report = value;
+            } else if (Strings.same(argument, "--jobs")) {
+                config.jobs = (i32)Strings.parse_integer(value, strlen(value));
+            } else {
+                config.ok = false;
+            }
+            index = index + 2;
+        }
+        if (config.compiler == null || config.runtime_lib == null || config.jobs < 1) {
+            config.ok = false;
+        }
+        return config;
+    }
+
+    public static unsafe ptr<i8> base_name(ptr<i8> path) {
+        i32 length = strlen(path);
+        mut i32 start = 0;
+        for (mut i32 i = 0; i < length; i = i + 1) {
+            if (path[i] == 47 || path[i] == 92) {
+                start = i + 1;
+            }
+        }
+        mut i32 end = length;
+        if (length - start > 6 && Strings.same(path + (length - 6), ".djinn")) {
+            end = length - 6;
+        }
+        return Strings.duplicate(path + start, end - start);
+    }
+
+    public static unsafe ptr<i8> without_extension(ptr<i8> path) {
+        i32 length = strlen(path);
+        return Strings.duplicate(path, length - 6);
+    }
+
+    public static unsafe ptr<i8> with_suffix(ptr<i8> base, ptr<i8> suffix) {
+        ByteBuffer* text = ByteBuffer.create();
+        text.append(base);
+        text.append(suffix);
+        return text.cstr();
+    }
+
+    public static unsafe void discover(PointerList* cases, Config* config, ptr<i8> folder, i32 kind) {
+        ByteBuffer* directory = ByteBuffer.create();
+        directory.append(config.tests_dir);
+        directory.append("/");
+        directory.append(folder);
+        ptr<i8> listing = __djinn_list_files(directory.cstr(), ".djinn");
+        if (listing == null) {
+            return;
+        }
+        i32 length = strlen(listing);
+        mut i32 start = 0;
+        for (mut i32 i = 0; i < length; i = i + 1) {
+            if (listing[i] != 10) {
+                continue;
+            }
+            ptr<i8> path = Strings.duplicate(listing + start, i - start);
+            start = i + 1;
+            TestCase* test = (TestCase*)Memory.zalloc(sizeof(TestCase));
+            ByteBuffer* name = ByteBuffer.create();
+            name.append(folder);
+            name.append("/");
+            name.append(Runner.base_name(path));
+            test.name = name.cstr();
+            test.source = path;
+            test.base = Runner.without_extension(path);
+            test.kind = kind;
+            if (config.filter != null && strstr(test.name, config.filter) == null) {
+                continue;
+            }
+            if (kind != 2) {
+                ptr<i8> exit_text = Files.read_all(Runner.with_suffix(test.base, ".exit"));
+                if (exit_text == null) {
+                    test.state = 2;
+                    test.reason = "missing .exit file";
+                    cases.push(test);
+                    continue;
+                }
+                test.expected_exit = (i32)Strings.parse_integer(exit_text, strlen(exit_text));
+            }
+            cases.push(test);
+        }
+    }
+
+    public static unsafe void quote(ByteBuffer* command, ptr<i8> text) {
+        command.append(" \"");
+        command.append(text);
+        command.append("\"");
+    }
+
+    public static unsafe void start(TestCase* test, Config* config) {
+        ByteBuffer* command = ByteBuffer.create();
+        command.append("\"");
+        command.append(config.compiler);
+        command.append("\"");
+        Runner.quote(command, test.source);
+        if (test.kind == 2) {
+            command.append(" --check --diagnostics-format=json --runtime-dir");
+            Runner.quote(command, config.runtime_dir);
+        } else {
+            command.append(" --run --runtime-lib");
+            Runner.quote(command, config.runtime_lib);
+            command.append(" --runtime-dir");
+            Runner.quote(command, config.runtime_dir);
+            if (test.kind == 1) {
+                command.append(" --std --std-dir");
+                Runner.quote(command, config.std_dir);
+            }
+        }
+        test.started_us = __djinn_now_us();
+        test.process = __djinn_process_start(command.cstr(), "", 0);
+        if (test.process == null) {
+            test.state = 2;
+            test.reason = "could not start the compiler";
+            return;
+        }
+        test.state = 1;
+    }
+
+    public static unsafe ptr<i8> output_text(ptr process) {
+        ByteBuffer* text = ByteBuffer.create();
+        text.append_slice(__djinn_process_stdout_data(process), __djinn_process_stdout_length(process));
+        text.append_slice(__djinn_process_stderr_data(process), __djinn_process_stderr_length(process));
+        return text.cstr();
+    }
+
+    public static unsafe ptr<i8> normalized(ptr<i8> data, i32 length) {
+        ByteBuffer* text = ByteBuffer.create();
+        for (mut i32 i = 0; i < length; i = i + 1) {
+            if (data[i] != 13) {
+                text.append_char(data[i]);
+            }
+        }
+        return text.cstr();
+    }
+
+    public static unsafe void finish(TestCase* test) {
+        test.elapsed_us = __djinn_now_us() - test.started_us;
+        test.state = 2;
+        i32 exit_code = __djinn_process_exit_code(test.process);
+        if (test.kind == 2) {
+            ptr<i8> output = Runner.output_text(test.process);
+            if (exit_code == 0) {
+                test.reason = "expected a compile error";
+            } else if (strstr(output, "\"severity\":\"error\"") == null) {
+                test.reason = "no error diagnostic in the output";
+            } else {
+                ptr<i8> code_text = Files.read_all(Runner.with_suffix(test.base, ".code"));
+                if (code_text != null) {
+                    ByteBuffer* needle = ByteBuffer.create();
+                    needle.append("\"code\":");
+                    needle.append_int(Strings.parse_integer(code_text, strlen(code_text)));
+                    needle.append(",");
+                    if (strstr(output, needle.cstr()) == null) {
+                        ByteBuffer* reason = ByteBuffer.create();
+                        reason.append("expected diagnostic ");
+                        reason.append(needle.cstr());
+                        test.reason = reason.cstr();
+                    }
+                }
+            }
+        } else if (exit_code != test.expected_exit) {
+            ByteBuffer* reason = ByteBuffer.create();
+            reason.append("expected exit ");
+            reason.append_int((i64)test.expected_exit);
+            reason.append(", got ");
+            reason.append_int((i64)exit_code);
+            test.reason = reason.cstr();
+        } else {
+            ptr<i8> expected = Files.read_all(Runner.with_suffix(test.base, ".stdout"));
+            if (expected != null) {
+                ptr<i8> left = Runner.normalized(__djinn_process_stdout_data(test.process), __djinn_process_stdout_length(test.process));
+                ptr<i8> right = Runner.normalized(expected, strlen(expected));
+                if (!Strings.same(left, right)) {
+                    test.reason = "stdout differs";
+                }
+            }
+        }
+        test.passed = test.reason == null;
+        __djinn_process_free(test.process);
+        test.process = null;
+    }
+
+    public static unsafe void print_result(TestCase* test) {
+        i32 millis = (i32)(test.elapsed_us / 1000);
+        if (test.passed) {
+            printf("PASS %s (%d ms)\n", test.name, millis);
+        } else {
+            printf("FAIL %s: %s\n", test.name, test.reason);
+        }
+    }
+
+    public static unsafe void write_report(PointerList* cases, Config* config, i32 passed) {
+        ByteBuffer* json = ByteBuffer.create();
+        json.append("{\"total\":");
+        json.append_int((i64)cases.length);
+        json.append(",\"passed\":");
+        json.append_int((i64)passed);
+        json.append(",\"cases\":[");
+        for (mut i32 i = 0; i < cases.length; i = i + 1) {
+            TestCase* test = (TestCase*)cases.get(i);
+            if (i > 0) {
+                json.append(",");
+            }
+            json.append("{\"name\":");
+            json.append_json_string(test.name);
+            json.append(",\"status\":");
+            if (test.passed) {
+                json.append("\"passed\"");
+            } else {
+                json.append("\"failed\"");
+            }
+            json.append(",\"elapsed_ms\":");
+            json.append_int(test.elapsed_us / 1000);
+            if (test.reason != null) {
+                json.append(",\"reason\":");
+                json.append_json_string(test.reason);
+            }
+            json.append("}");
+        }
+        json.append("]}\n");
+        Files.write_bytes(config.report, json.cstr(), json.length);
+    }
+
+    public static unsafe i32 run(PointerList* cases, Config* config) {
+        i32 total = cases.length;
+        mut i32 next = 0;
+        mut i32 running = 0;
+        mut i32 finished = 0;
+        mut i32 passed = 0;
+        for (mut i32 i = 0; i < total; i = i + 1) {
+            TestCase* test = (TestCase*)cases.get(i);
+            if (test.state == 2) {
+                Runner.print_result(test);
+                finished = finished + 1;
+            }
+        }
+        while (finished < total) {
+            while (running < config.jobs && next < total) {
+                TestCase* test = (TestCase*)cases.get(next);
+                next = next + 1;
+                if (test.state == 0) {
+                    Runner.start(test, config);
+                    if (test.state == 1) {
+                        running = running + 1;
+                    } else {
+                        Runner.print_result(test);
+                        finished = finished + 1;
+                    }
+                }
+            }
+            mut bool progressed = false;
+            for (mut i32 i = 0; i < next; i = i + 1) {
+                TestCase* test = (TestCase*)cases.get(i);
+                if (test.state != 1) {
+                    continue;
+                }
+                if (__djinn_process_poll(test.process) == 1) {
+                    Runner.finish(test);
+                    Runner.print_result(test);
+                    running = running - 1;
+                    finished = finished + 1;
+                    progressed = true;
+                } else if (__djinn_now_us() - test.started_us > config.timeout_us) {
+                    __djinn_process_kill(test.process);
+                    __djinn_process_poll(test.process);
+                    test.elapsed_us = __djinn_now_us() - test.started_us;
+                    test.state = 2;
+                    test.reason = "timeout";
+                    __djinn_process_free(test.process);
+                    test.process = null;
+                    Runner.print_result(test);
+                    running = running - 1;
+                    finished = finished + 1;
+                    progressed = true;
+                }
+            }
+            if (!progressed) {
+                __djinn_thread_sleep(1);
+            }
+        }
+        for (mut i32 i = 0; i < total; i = i + 1) {
+            TestCase* test = (TestCase*)cases.get(i);
+            if (test.passed) {
+                passed = passed + 1;
+            }
+        }
+        printf("%d passed, %d failed, %d total\n", passed, total - passed, total);
+        if (config.report != null) {
+            Runner.write_report(cases, config, passed);
+        }
+        if (passed == total) {
+            return 0;
+        }
+        return 1;
+    }
+}
+
+i32 main() {
+    Config* config = Runner.parse_config();
+    if (!config.ok) {
+        printf("usage: runner --compiler <djinnc> --runtime-lib <lib> [--runtime-dir <dir>] [--std-dir <dir>] [--tests <dir>] [--filter <text>] [--jobs <n>] [--report <file>]\n");
+        return 2;
+    }
+    PointerList* cases = PointerList.create();
+    Runner.discover(cases, config, "samples", 0);
+    Runner.discover(cases, config, "std", 1);
+    Runner.discover(cases, config, "errors", 2);
+    return Runner.run(cases, config);
+}
