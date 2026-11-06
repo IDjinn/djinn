@@ -2,13 +2,13 @@
 set -eu
 
 usage() {
-    echo "usage: bootstrap.sh --stage0 <djinn executable> --runtime-dir <dir> [--runtime-lib <lib>] [--lld] [--out <dir>]"
+    echo "usage: bootstrap.sh --seed <djinnc executable> --runtime-dir <dir> [--runtime-lib <lib>] [--lld] [--out <dir>]"
     echo "                    [--bench-ref <file>] [--update-ref]"
     exit 2
 }
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
-stage0=""
+seed=""
 runtime=""
 runtime_lib=""
 use_lld=0
@@ -18,7 +18,7 @@ update_ref=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --stage0) stage0="$2"; shift 2 ;;
+        --seed) seed="$2"; shift 2 ;;
         --runtime-dir) runtime="$2"; shift 2 ;;
         --runtime-lib) runtime_lib="$2"; shift 2 ;;
         --lld) use_lld=1; shift ;;
@@ -28,10 +28,14 @@ while [ $# -gt 0 ]; do
         *) usage ;;
     esac
 done
-[ -n "$stage0" ] && [ -n "$runtime" ] || usage
+[ -n "$seed" ] && [ -n "$runtime" ] || usage
+[ -f "$seed" ] || { echo "seed not found: $seed"; exit 2; }
+seed="$(cd "$(dirname "$seed")" && pwd)/$(basename "$seed")"
 
 ext=""
-case "$stage0" in *.exe) ext=".exe" ;; esac
+case "$seed" in *.exe) ext=".exe" ;; esac
+
+opt_flags=(-O2)
 
 link_flags=()
 if [ -n "$runtime_lib" ]; then
@@ -45,17 +49,15 @@ rm -rf "$out"
 mkdir -p "$out/stage1" "$out/stage2" "$out/stage3" "$out/samples"
 cd "$root"
 
-echo "== stage0 -> stage1"
-rm -f "djinnc/build/djinnc$ext"
-"$stage0" -r djinnc >"$out/stage1.log" 2>&1 || true
-[ -f "djinnc/build/djinnc$ext" ] || { echo "FAIL stage1 not produced (see $out/stage1.log)"; exit 1; }
-cp "djinnc/build/djinnc$ext" "$out/stage1/djinnc$ext"
+echo "== seed -> stage1"
+"$seed" djinnc -o "$out/stage1/djinnc$ext" --runtime-dir "$runtime" "${opt_flags[@]}" ${link_flags[@]+"${link_flags[@]}"} >"$out/stage1.log" 2>&1 \
+    || { echo "FAIL stage1 not produced (see $out/stage1.log)"; exit 1; }
 
 echo "== stage1 -> stage2"
-"$out/stage1/djinnc$ext" djinnc -o "$out/stage2/djinnc$ext" --runtime-dir "$runtime" ${link_flags[@]+"${link_flags[@]}"} --keep-ir
+"$out/stage1/djinnc$ext" djinnc -o "$out/stage2/djinnc$ext" --runtime-dir "$runtime" "${opt_flags[@]}" ${link_flags[@]+"${link_flags[@]}"} --keep-ir
 
 echo "== stage2 -> stage3"
-"$out/stage2/djinnc$ext" djinnc -o "$out/stage3/djinnc$ext" --runtime-dir "$runtime" ${link_flags[@]+"${link_flags[@]}"} --keep-ir
+"$out/stage2/djinnc$ext" djinnc -o "$out/stage3/djinnc$ext" --runtime-dir "$runtime" "${opt_flags[@]}" ${link_flags[@]+"${link_flags[@]}"} --keep-ir
 
 echo "== fixpoint"
 if cmp -s "$out/stage2/djinnc$ext.ll" "$out/stage3/djinnc$ext.ll"; then

@@ -1,7 +1,10 @@
 # Djinn bootstrap subset
 
-The source of `djinnc/` may only use the constructs below. Both stage0 (C++) and djinnc itself must compile all
-of them. A construct outside this list is forbidden in `djinnc/src` until the djinnc codegen supports it.
+The source of `djinnc/` may only use the constructs below, and the published seed (see `PROMOTION.md`) must compile
+all of them. A new language feature enters the compiler first; the compiler source may only use it after a new seed
+that supports it is published. A construct outside this list is forbidden in `djinnc/src` until the seed supports it.
+The C++ compiler (stage0) was the seed until the tag `stage0-final`; the rules below that mention stage0 describe
+that history.
 
 `djinnc` does not depend on `std`: every external symbol is declared in `src/support/system/libc.djinn`.
 

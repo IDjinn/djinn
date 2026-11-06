@@ -1,5 +1,5 @@
 param(
-    [Parameter(Mandatory)] [string] $Stage0,
+    [Parameter(Mandatory)] [string] $Seed,
     [Parameter(Mandatory)] [string] $RuntimeDir,
     [string] $RuntimeLib = "",
     [switch] $Lld,
@@ -8,9 +8,10 @@ param(
     [switch] $UpdateRef
 )
 
-$bash = (Get-Command bash -ErrorAction Stop).Source
+$bash = "C:\Program Files\Git\bin\bash.exe"
+if (-not (Test-Path $bash)) { $bash = (Get-Command bash -ErrorAction Stop).Source }
 $script = Join-Path $PSScriptRoot "bootstrap.sh"
-$arguments = @($script, "--stage0", $Stage0, "--runtime-dir", $RuntimeDir)
+$arguments = @($script, "--seed", $Seed, "--runtime-dir", $RuntimeDir)
 if ($RuntimeLib) { $arguments += @("--runtime-lib", $RuntimeLib) }
 if ($Lld) { $arguments += "--lld" }
 if ($Out) { $arguments += @("--out", $Out) }

@@ -16,8 +16,7 @@ if (-not $compiler -or -not (Test-Path $compiler)) {
 }
 
 $runtime = $env:DJINN_RUNTIME_DIR
-if (-not $runtime) { $runtime = "$root\cmake-build-debug-visual-studio\runtime" }
-if (-not (Test-Path $runtime)) { $runtime = "$root\runtime" }
+if (-not $runtime) { $runtime = "$root\runtime" }
 
 $llvm = "C:\Program Files\LLVM\bin"
 if ((Test-Path $llvm) -and ($env:PATH -notlike "*$llvm*")) { $env:PATH += ";$llvm" }
