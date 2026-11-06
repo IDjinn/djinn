@@ -408,8 +408,9 @@ runner --compiler <djinnc> --runtime-lib <lib> [--runtime-dir d] [--jobs n] [--f
   `std/logger` ainda falha de forma intermitente); o relatório JSON traz `retries`.
 - `--selftest` do djinnc entra como um caso. Os 149 casos passam nos dois caminhos.
 - `--crash` (exige `--out`): roda `crash/*.djinn` linkado com `-g`, espera exit code diferente de zero e cada linha do
-  `.expect` na saída. É opt-in porque neste ambiente o executável não imprime o rastro (o filtro de exceção do runtime
-  não roda, nem com o runtime antigo), então `crash/null_read` falha aqui; `tools/debug_tests.sh` segue cobrindo esse caso.
+  `.expect` na saída. Opt-in porque só faz sentido com `--link`. A causa de o rastro não aparecer era a falta de
+  `uwtable`: sem `.pdata` o Windows não consegue desenrolar a pilha e encerra o processo sem chamar o filtro de exceção.
+  O djinnc agora marca toda função própria com `uwtable`.
 - **Falta:** `debug/` (lldb) e `library/`, ainda nos scripts; a máscara `[Requires]`, `Verify`/`Expected` e o grafo.
   O `run.sh` só sai quando o runner cobrir esses dois e o CTest chamar o runner.
 
