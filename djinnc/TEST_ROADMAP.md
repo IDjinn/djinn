@@ -278,6 +278,23 @@ erro de parser não depende de o atributo ser lido. Sem `[Requires]`, a máscara
 - **`[Requires(IR | JIT)]` funciona** (Fase 0, item 7): o argumento é uma expressão constante checada contra o `attribute`
   declarado e chega à reflexão como um payload tipado.
 
+### `[TestPolicy]`: repetição e timeout por teste
+
+```djinn
+[TestPolicy(retry = 2, timeout = 5000)]
+```
+
+- `retry`: quantas vezes o caso roda de novo se o processo morrer com exit code negativo. O padrão é 0, então um crash falha
+  na primeira vez, a não ser que o teste declare o contrário. Falha de asserção ou exit code errado não repete; casos de
+  `crash/` também não, porque ali morrer é o esperado.
+- `timeout`: limite em milissegundos, no lugar dos 120 s do runner.
+- O atributo é declarado em `std/sys/intrinsics.djinn` e chega à reflexão como payload tipado. O djinnc também aceita o nome
+  sem std, para casos que não importam nada.
+- Hoje o runner lê o atributo do texto da source, porque os casos são arquivos e ainda não existe método de teste. Por isso só
+  argumentos nomeados valem (posicional vira falha do caso), e funciona mesmo em caso de erro de parser. Quando `Verify` e
+  `[Test]` chegarem, ele passa para o método de teste, como `[Requires]`, e o runner lê da reflexão.
+- Novas regras entram como campos do atributo.
+
 ## Etapas
 
 Cada etapa entrega algo usável sozinha. As Fases 2 e 3 são independentes e podem andar em paralelo.
@@ -404,7 +421,8 @@ runner --compiler <djinnc> --runtime-lib <lib> [--runtime-dir d] [--jobs n] [--f
 - Resultado: os 148 casos passam em poucos segundos com 8 jobs.
 - Os 51 casos de `errors/` têm um `.code` com o código esperado (primeiro erro), gerado da saída atual do djinnc.
 - `--link --out <dir absoluto> [--lld]`: depois do JIT, cada caso é compilado para um executável em `<dir>` e executado de
-  novo, conferindo exit code e `.stdout`. Um processo que morre com exit code negativo é repetido até 2 vezes; o relatório JSON traz `retries`.
+  novo, conferindo exit code e `.stdout`.
+- `[TestPolicy]` define repetição e timeout por caso; o relatório JSON traz `retries`.
 - `--selftest` do djinnc entra como um caso. Os 149 casos passam nos dois caminhos.
 - `--crash` (exige `--out`): roda `crash/*.djinn` linkado com `-g`, espera exit code diferente de zero e cada linha do
   `.expect` na saída. Opt-in porque só faz sentido com `--link`. A causa de o rastro não aparecer era a falta de

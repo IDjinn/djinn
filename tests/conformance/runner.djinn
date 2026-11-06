@@ -58,6 +58,8 @@ struct TestCase {
     i64 elapsed_us;
     ptr<i8> reason;
     i32 retries;
+    i32 max_retries;
+    i64 timeout_us;
     i32 line;
     ptr<i8> patterns;
 }
@@ -170,6 +172,49 @@ struct Runner {
         return path.cstr();
     }
 
+    public static unsafe i64 policy_value(ptr<i8> policy, ptr<i8> key, i64 fallback) {
+        ptr<i8> found = strstr(policy, key);
+        if (found == null) {
+            return fallback;
+        }
+        mut i32 start = strlen(key);
+        while (found[start] == 32 || found[start] == 61) {
+            start = start + 1;
+        }
+        mut i32 end = start;
+        while (Strings.is_digit(found[end])) {
+            end = end + 1;
+        }
+        if (end == start) {
+            return fallback;
+        }
+        return Strings.parse_integer(found + start, end - start);
+    }
+
+    public static unsafe void read_policy(TestCase* test, Config* config) {
+        test.timeout_us = config.timeout_us;
+        ptr<i8> source = Files.read_all(test.source);
+        if (source == null) {
+            return;
+        }
+        ptr<i8> marker = strstr(source, "TestPolicy(");
+        if (marker == null) {
+            return;
+        }
+        mut i32 end = 0;
+        while (marker[end] != 0 && marker[end] != 41) {
+            end = end + 1;
+        }
+        ptr<i8> policy = Strings.duplicate(marker, end);
+        if (strstr(policy, "=") == null) {
+            test.state = 2;
+            test.reason = "TestPolicy needs named arguments, like retry = 1";
+            return;
+        }
+        test.max_retries = (i32)Runner.policy_value(policy, "retry", 0);
+        test.timeout_us = Runner.policy_value(policy, "timeout", config.timeout_us / 1000) * 1000;
+    }
+
     public static unsafe TestCase* new_case(Config* config, ptr<i8> folder, ptr<i8> path, i32 kind) {
         TestCase* test = (TestCase*)Memory.zalloc(sizeof(TestCase));
         ptr<i8> short_name = Runner.base_name(path);
@@ -184,6 +229,7 @@ struct Runner {
         if (config.out_dir != null) {
             test.binary = Runner.binary_path(config, folder, short_name);
         }
+        Runner.read_policy(test, config);
         return test;
     }
 
@@ -329,6 +375,7 @@ struct Runner {
         TestCase* test = (TestCase*)Memory.zalloc(sizeof(TestCase));
         test.name = "selftest";
         test.kind = Kind.SELFTEST;
+        test.timeout_us = config.timeout_us;
         if (config.filter != null && strstr(test.name, config.filter) == null) {
             return;
         }
@@ -636,7 +683,7 @@ struct Runner {
         test.passed = test.reason == null;
         __djinn_process_free(test.process);
         test.process = null;
-        if (!test.passed && exit_code < 0 && test.kind != Kind.CRASH && test.retries < 2) {
+        if (!test.passed && exit_code < 0 && test.kind != Kind.CRASH && test.retries < test.max_retries) {
             test.retries = test.retries + 1;
             test.reason = null;
             test.phase = 0;
@@ -750,7 +797,7 @@ struct Runner {
                     Runner.print_result(test);
                     running = running - 1;
                     finished = finished + 1;
-                } else if (__djinn_now_us() - test.started_us > config.timeout_us) {
+                } else if (__djinn_now_us() - test.started_us > test.timeout_us) {
                     Runner.time_out(test);
                     Runner.print_result(test);
                     running = running - 1;
