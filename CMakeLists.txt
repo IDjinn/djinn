@@ -308,9 +308,20 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
 add_library(djinn_runtime STATIC
         runtime/djinn_runtime.c
+        runtime/scheduler.c
+        runtime/io_file.c
+        runtime/io_socket.c
+        runtime/diagnostics.c
+        runtime/threads.c
+        runtime/console.c
+        runtime/filesystem.c
+        runtime/process.c
         runtime/djinn_runtime.h
         runtime/logger.h
+        runtime/runtime_internal.h
         runtime/logger.c
+        runtime/third_party/yyjson/yyjson.c
+        runtime/json/djinn_json.c
 )
 target_include_directories(djinn_runtime PUBLIC "${CMAKE_SOURCE_DIR}/runtime")
 set_target_properties(djinn_runtime PROPERTIES LINKER_LANGUAGE C)

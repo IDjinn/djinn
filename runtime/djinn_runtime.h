@@ -386,6 +386,26 @@ int __djinn_mutex_trylock(djinn_mutex_t* mutex);
 void __djinn_mutex_destroy(djinn_mutex_t* mutex);
 
 
+// Child processes with captured stdout/stderr and optional stdin. Output is
+// drained by reader threads while the child runs, so a chatty child never
+// blocks on a full pipe. On Windows the command line goes to CreateProcess;
+// on POSIX it runs through /bin/sh -c.
+typedef struct djinn_process djinn_process_t;
+djinn_process_t* __djinn_process_start(const char* command_line, const char* stdin_data, int32_t stdin_length);
+int32_t __djinn_process_poll(djinn_process_t* process);
+// Anchor so a host that JIT-loads the runtime pulls in the debug-info imports (dbghelp) the runtime objects need.
+void __djinn_link_debug_support(void);
+int32_t __djinn_process_wait(djinn_process_t* process, int32_t timeout_ms);
+int32_t __djinn_process_wait_any(djinn_process_t** processes, int32_t count, int32_t timeout_ms);
+void __djinn_process_kill(djinn_process_t* process);
+int32_t __djinn_process_exit_code(djinn_process_t* process);
+int32_t __djinn_process_killed(djinn_process_t* process);
+const char* __djinn_process_stdout_data(djinn_process_t* process);
+int32_t __djinn_process_stdout_length(djinn_process_t* process);
+const char* __djinn_process_stderr_data(djinn_process_t* process);
+int32_t __djinn_process_stderr_length(djinn_process_t* process);
+void __djinn_process_free(djinn_process_t* process);
+
 int64_t __djinn_console_write(const char* str, void* coro);
 int64_t __djinn_console_error(const char* str, void* coro);
 int64_t __djinn_console_read_line(char* buf, int64_t max, void* coro);

@@ -49,7 +49,7 @@ djinnc djinnc -o build/stage2/djinnc --runtime-dir runtime
 Several `.djinn` files can be passed at once; they share types and namespaces and are processed in sorted order, so
 the output is deterministic.
 
-The runtime (`djinn_runtime.c`, `logger.c`) is compiled together with the program unless you pass a prebuilt library.
+The runtime (the `.c` files in `runtime/`) is compiled together with the program unless you pass a prebuilt library.
 `--runtime-dir` is the directory that holds those two files (the CMake build copies `runtime/` into the build
 directory).
 
@@ -58,7 +58,7 @@ directory).
 | Option | Effect |
 |---|---|
 | `-o <path>` | Output executable (default `a.out`). |
-| `--runtime-dir <dir>` | Directory with `djinn_runtime.c` and `logger.c` (default `runtime`). |
+| `--runtime-dir <dir>` | Directory with the runtime `.c` sources (default `runtime`). |
 | `--runtime-lib <lib>` | Link a prebuilt runtime instead of recompiling it (CMake target `djinn_runtime`). |
 | `--link-arg <arg>` | Extra linker argument; repeatable. |
 | `-O0`, `-O1`, `-O2`, `-O3`, `-Os`, `-Oz` | Optimization level: runs `default<ON>` through `LLVMRunPasses` and sets the backend codegen level. Without it the pipeline is `default<O0>`. |
