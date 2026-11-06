@@ -70,7 +70,6 @@ GAP_BY_SUITE = {
     "ErrorHandling": "tipos de erro em `throws`",
     "RuntimeErrors": "relatório de erro em tempo de execução",
     "Overflow": "modos de overflow",
-    "Constructor": "bug: `new T(...)` atribuído a `T` por valor compila e lê lixo",
     "Object": "`object` e `...args` com `str`",
     "IsExpression": "`object` e `...args` com `str`",
 }
@@ -143,8 +142,6 @@ def gap_of(case):
     for token, gap in GAP_BY_TOKEN:
         if case.get("token", "").startswith(token):
             return gap
-    if case["id"].startswith("Nullable.") and "Forbidden" in case["id"] or case["id"] == "Nullable.ReassignNullToNonNullableErrors":
-        return "bug: `null` é aceito em tipo não anulável"
     if case["suite"] in GAP_BY_SUITE:
         return GAP_BY_SUITE[case["suite"]]
     if "message" in case:

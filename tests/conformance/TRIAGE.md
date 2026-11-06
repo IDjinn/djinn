@@ -5,9 +5,9 @@ resultado. Os grupos que falharam foram revisados à mão; os que passaram não 
 
 | Decisão | Testes | O que significa |
 |---|---|---|
-| Portar | 435 | Passa no djinnc; está em `tests/conformance/cases`. |
+| Portar | 444 | Passa no djinnc; está em `tests/conformance/cases`. |
 | Reescrever | 78 | O comportamento importa, mas o teste precisa de outra forma. |
-| Bloqueado | 168 | O djinnc não reproduz o comportamento; falta decidir se implementa ou se o recurso sai. |
+| Bloqueado | 159 | O djinnc não reproduz o comportamento; falta decidir se implementa ou se o recurso sai. |
 | Descartar | 42 | Interno do stage0 ou duplicado. |
 
 ## O que bloqueia
@@ -18,17 +18,15 @@ resultado. Os grupos que falharam foram revisados à mão; os que passaram não 
 | contratos | 20 |
 | modos de overflow | 19 |
 | `sizeof`/`typeof`/`alignof` de expressão | 18 |
+| tipos anuláveis | 12 |
 | `switch` com bloco e `yield` | 10 |
-| tipos anuláveis | 10 |
 | tipos non-zero | 8 |
 | `object` e `...args` com `str` | 6 |
-| bug: `new T(...)` atribuído a `T` por valor compila e lê lixo | 6 |
 | desestruturação | 4 |
-| o djinnc não reproduz o comportamento | 4 |
 | `for` com range | 4 |
 | relatório de erro em tempo de execução | 4 |
-| bug: `null` é aceito em tipo não anulável | 4 |
 | o djinnc rejeita: undefined variable | 3 |
+| o djinnc não reproduz o comportamento | 3 |
 | tipos nativos | 3 |
 | `const` local | 2 |
 | o djinnc rejeita: struct does not define this operator | 2 |
@@ -214,7 +212,7 @@ resultado. Os grupos que falharam foram revisados à mão; os que passaram não 
 | Async.ExpressionComputation | Portar | exit code 21 |
 | Async.AsyncMain | Portar | exit code 99 |
 | Async.AsyncMainWithComputation | Portar | exit code 25 |
-| Async.DiagnosticsForNonWaitableAsync | Bloqueado | o djinnc não reproduz o comportamento |
+| Async.DiagnosticsForNonWaitableAsync | Portar | erro E3053 |
 | Async.MultipleAwaitsSequential | Portar | exit code 30 |
 | Async.ThreeAwaitsAccumulate | Portar | exit code 60 |
 | Async.ChainedAwait | Portar | exit code 15 |
@@ -596,18 +594,18 @@ resultado. Os grupos que falharam foram revisados à mão; os que passaram não 
 | Constructor.StackFieldExpression | Portar | exit code 42 |
 | Constructor.StackThreeFields | Portar | exit code 6 |
 | Constructor.StackPassedToFunction | Portar | exit code 99 |
-| Constructor.HeapBasicFieldAccess | Bloqueado | bug: `new T(...)` atribuído a `T` por valor compila e lê lixo (esperado 1, veio 1810572992) |
-| Constructor.HeapSecondField | Bloqueado | bug: `new T(...)` atribuído a `T` por valor compila e lê lixo (esperado 69, veio 713) |
-| Constructor.HeapFieldExpression | Bloqueado | bug: `new T(...)` atribuído a `T` por valor compila e lê lixo (esperado 42, veio -2086475534) |
-| Constructor.HeapThreeFields | Bloqueado | bug: `new T(...)` atribuído a `T` por valor compila e lê lixo (esperado 60, veio -1946216955) |
+| Constructor.HeapBasicFieldAccess | Portar | exit code 1 |
+| Constructor.HeapSecondField | Portar | exit code 69 |
+| Constructor.HeapFieldExpression | Portar | exit code 42 |
+| Constructor.HeapThreeFields | Portar | exit code 60 |
 | Constructor.HeapFieldAssignment | Portar | exit code 77 |
-| Constructor.StackAndHeapSameStruct | Bloqueado | bug: `new T(...)` atribuído a `T` por valor compila e lê lixo (esperado 50, veio 645) |
+| Constructor.StackAndHeapSameStruct | Portar | exit code 50 |
 | Constructor.GenericStackBasic | Portar | exit code 42 |
 | Constructor.GenericStackNoArgs | Portar | exit code 0 |
 | Constructor.GenericStackTwoFields | Portar | exit code 42 |
 | Constructor.GenericStackMethodCall | Portar | exit code 77 |
 | Constructor.GenericStackMethodForwardReference | Portar | exit code 2 |
-| Constructor.GenericHeapBasic | Bloqueado | bug: `new T(...)` atribuído a `T` por valor compila e lê lixo (esperado 99, veio -663342160) |
+| Constructor.GenericHeapBasic | Portar | exit code 99 |
 | Constructor.GenericHeapMethodCall | Portar | exit code 55 |
 | Method.BasicMethodWithBlock | Portar | compila sem erros; as asserções sobre a AST do stage0 não valem para o djinnc |
 | Method.ExpressionBodyArrow | Portar | compila sem erros; as asserções sobre a AST do stage0 não valem para o djinnc |
@@ -806,12 +804,12 @@ resultado. Os grupos que falharam foram revisados à mão; os que passaram não 
 | NonZero.EnsureWorksInAnyDeclarationOrder | Bloqueado | contratos (`require`/`ensure`) |
 | NonZero.EntryCheckTrapsAtRuntime | Portar | exit code diferente de zero |
 | Nullable.NullLiteralAllowedOnNullableType | Bloqueado | tipos anuláveis |
-| Nullable.NullLiteralForbiddenOnNonNullableStruct | Bloqueado | bug: `null` é aceito em tipo não anulável |
-| Nullable.NullLiteralForbiddenOnNonNullablePointer | Bloqueado | bug: `null` é aceito em tipo não anulável |
-| Nullable.NullLiteralForbiddenOnInteger | Bloqueado | bug: `null` é aceito em tipo não anulável |
+| Nullable.NullLiteralForbiddenOnNonNullableStruct | Portar | erro E3053 |
+| Nullable.NullLiteralForbiddenOnNonNullablePointer | Bloqueado | tipos anuláveis |
+| Nullable.NullLiteralForbiddenOnInteger | Portar | erro E3053 |
 | Nullable.NullableArraySyntax | Bloqueado | tipos anuláveis |
 | Nullable.ReassignNullToNullableMutVariable | Bloqueado | tipos anuláveis |
-| Nullable.ReassignNullToNonNullableErrors | Bloqueado | bug: `null` é aceito em tipo não anulável |
+| Nullable.ReassignNullToNonNullableErrors | Bloqueado | tipos anuláveis |
 | Nullable.NullCoalescingParsesAndCompiles | Bloqueado | tipos anuláveis |
 | Nullable.NullCoalescingAssignmentDesugars | Bloqueado | tipos anuláveis |
 | Nullable.NullConditionalFieldAccessParses | Bloqueado | tipos anuláveis |
