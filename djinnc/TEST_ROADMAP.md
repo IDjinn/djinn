@@ -404,7 +404,7 @@ runner --compiler <djinnc> --runtime-lib <lib> [--runtime-dir d] [--jobs n] [--f
 - Resultado: os 148 casos passam em poucos segundos com 8 jobs.
 - Os 51 casos de `errors/` têm um `.code` com o código esperado (primeiro erro), gerado da saída atual do djinnc.
 - `--link --out <dir absoluto> [--lld]`: depois do JIT, cada caso é compilado para um executável em `<dir>` e executado de
-  novo, conferindo exit code e `.stdout`. Um processo que morre com exit code negativo é repetido até 2 vezes; o relatório JSON traz `retries`.
+  novo, conferindo exit code e `.stdout`.
 - `--selftest` do djinnc entra como um caso. Os 149 casos passam nos dois caminhos.
 - `--crash` (exige `--out`): roda `crash/*.djinn` linkado com `-g`, espera exit code diferente de zero e cada linha do
   `.expect` na saída. Opt-in porque só faz sentido com `--link`. A causa de o rastro não aparecer era a falta de
