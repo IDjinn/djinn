@@ -10,8 +10,7 @@ if [ -z "$compiler" ]; then
 fi
 [ -n "$compiler" ] && [ -f "$compiler" ] || { echo "djinnc not found: run tools/bootstrap.sh or set DJINNC" >&2; exit 1; }
 
-runtime="${DJINN_RUNTIME_DIR:-$root/cmake-build-debug-visual-studio/runtime}"
-[ -d "$runtime" ] || runtime="$root/runtime"
+runtime="${DJINN_RUNTIME_DIR:-$root/runtime}"
 out="$root/playground/build/playground$ext"
 mkdir -p "$root/playground/build"
 

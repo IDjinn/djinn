@@ -716,6 +716,8 @@ CompilerResult DjinnCompiler::compileFromDirectory(const std::filesystem::path& 
                 userFiles.push_back(entry.path());
             }
 
+            std::ranges::sort(userFiles);
+
             // Every user file must see the types declared by the others, otherwise
             // `Foo* x = ...` is parsed as a multiplication in files that do not declare Foo
             for (const auto& userFile : userFiles)
