@@ -411,8 +411,14 @@ runner --compiler <djinnc> --runtime-lib <lib> [--runtime-dir d] [--jobs n] [--f
   `.expect` na saída. Opt-in porque só faz sentido com `--link`. A causa de o rastro não aparecer era a falta de
   `uwtable`: sem `.pdata` o Windows não consegue desenrolar a pilha e encerra o processo sem chamar o filtro de exceção.
   O djinnc agora marca toda função própria com `uwtable`.
-- **Falta:** `debug/` (lldb) e `library/`, ainda nos scripts; a máscara `[Requires]`, `Verify`/`Expected` e o grafo.
-  O `run.sh` só sai quando o runner cobrir esses dois e o CTest chamar o runner.
+- `--debug` (exige `--out`): cada `debug/<nome>.debug` lista `break <linha>` seguido dos trechos esperados; um caso por
+  breakpoint, compilado com `-g` e executado sob `lldb -b` (`frame variable` e `bt`). Substitui `tools/debug_tests.sh`.
+- `--library` (exige `--out`): compila `library/mathlib.djinn` com `--library`, o `app.djinn` com `--lib` e confere o exit
+  code de `app.exit`. Substitui `library/run.cmd`.
+- `std/logger` falha de vez em quando no JIT com vários processos em paralelo (exit `0xC0000409`); sozinho passa sempre.
+  O runner repete o caso, mas o problema do JIT continua aberto.
+- **Falta:** a máscara `[Requires]`, `Verify`/`Expected`, o grafo e o CTest. Com isso o `run.sh`, o
+  `tools/debug_tests.sh` e o `library/run.cmd` podem ser apagados.
 
 ### Fase 2: migração do gtest
 
