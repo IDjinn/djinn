@@ -42,6 +42,7 @@ WRONG_REASON = {
     "ErrorHandling.YieldWithValueOutsideSwitchArmDiagnostic": "`switch` com bloco e `yield`",
     "GenericConstraints.EnumConstraintViolated": "enum genérico com restrição",
     "PointerCompat.IncompatibleTypes": "conversão entre ponteiros incompatíveis",
+    "Nullable.CastNullableToNonNullableEmitsWarning": "tipos anuláveis",
 }
 LINK_DIVERGES = {
     "Overflow.SaturatingRemIntMinIsZero": "modos de overflow (passa no JIT, mas o binário linkado morre com 0xC0000095)",

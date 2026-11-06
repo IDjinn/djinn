@@ -437,23 +437,24 @@ verify.test("debug/locals:8").stops_at(Sources.file("tests/djinnc/debug/locals.d
 
 ### Fase 2: migração do gtest
 
-Nem todo teste do gtest merece ir para o djinnc: são 724 `TEST` em 54 arquivos, e cada um é avaliado antes de ser portado.
+Nem todo teste do gtest merece ir para o djinnc: são 723 `TEST` em 54 arquivos, e cada um é avaliado antes de ser portado.
+`tests/conformance/port_gtests.py` extrai cada `TEST`, executa no djinnc, escreve `tests/conformance/TRIAGE.md` com a decisão e o
+motivo de cada um, e gera as sources e as suítes. Executar vale mais do que ler: um erro "esperado" pode sair por outro motivo,
+como `contracts are not supported yet`, e essa lista fica no script.
 
-1. **Triagem, um a um.** Uma tabela em `tests/conformance/TRIAGE.md` lista cada `TEST` com a decisão e o motivo, por pasta
-   (`compile_time` 158, `control_flow` 97, `types` 97, `compiler` 85, `aggregates` 79, `arithmetic` 72, `generics` 34,
-   `functions` 33, `async` 24, `modules` 17, `memory` 15, `strings` 12):
-   - **Portar:** comportamento da linguagem que o djinnc precisa manter e que nenhum caso atual cobre.
-   - **Reescrever:** o comportamento importa, mas o teste não serve como está, porque só conta diagnósticos ou depende de
-     detalhe do stage0. Vira um caso novo com código esperado.
-   - **Descartar:** já coberto por `samples/`, `std/` ou `errors/`, duplicado, ou específico de internos do stage0 (mangler,
-     binder, `DiagnosticEngine`). Também entra aqui o que só passava por acaso, como `Numbers.CompileTimeOverflowCheck`, que
-     espera 0 diagnósticos com overflow.
+- **Portar:** passa no djinnc. A source fica em `tests/conformance/cases/<área>/` e a expectativa em
+  `tests/conformance/suites/<área>.djinn`.
+- **Reescrever:** o comportamento importa, mas o teste precisa de outra forma: confere IR ou usa a API C++.
+- **Bloqueado:** o djinnc não reproduz o comportamento. Cada lacuna precisa de uma decisão: implementar, ou tirar o recurso da
+  linguagem e descartar os testes.
+- **Descartar:** interno do stage0 (mangler, `DiagnosticEngine`) ou duplicado.
+
+Próximos passos:
+
+1. Decidir cada lacuna da tabela de `TRIAGE.md`.
 2. Congelar `tests/**/*.cpp`: teste novo só em Djinn.
-3. Script de porte: extrai o `R"(...)"` e as expectativas apenas dos testes marcados **Portar** para
-   `tests/conformance/<área>/<nome>.djinn`. Não copia `generateBinary`: a máscara vem das expectativas, então um teste que só
-   conta diagnósticos deixa de linkar.
-4. Portar por pasta, da menor para a maior. O que falhar volta para a triagem: bug do djinnc, recurso fora do subset ou teste errado.
-5. Trocar contagem de diagnósticos por código esperado, aos poucos. O porte inicial só garante "falhou".
+3. Reescrever os casos marcados, o que depende de `ir_contains` e de um caso multiarquivo.
+4. Trocar os casos que só compilam por expectativas mais fortes, aos poucos.
 
 Pronto quando: todo `TEST` tem decisão na triagem e o gtest deixa de ser necessário para validar o djinnc. O stage0 pode manter o dele até ser aposentado.
 

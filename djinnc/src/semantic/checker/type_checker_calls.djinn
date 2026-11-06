@@ -143,11 +143,11 @@ impl TypeChecker {
         }
         if (best == null) {
             this.error_code(call, DiagnosticErrors.NO_MATCHING_OVERLOAD, "no overload matches these arguments");
-            return null;
+            return (FunctionInfo*)0;
         }
         if (ambiguous) {
             this.error_code(call, DiagnosticErrors.AMBIGUOUS_CALL, "call is ambiguous between overloads");
-            return null;
+            return (FunctionInfo*)0;
         }
         return best;
     }
@@ -182,8 +182,33 @@ impl TypeChecker {
         return constructor;
     }
 
+    u32 check_null(u32 expected) {
+        SymbolTable* symbols = this.symbols;
+        if (expected != 0 && symbols.nullable_payload(expected) != 0) {
+            return expected;
+        }
+        return Types.pointer_to(Types.void_type());
+    }
+
+    bool wraps_pointer(u32 passed, u32 wanted) {
+        SymbolTable* symbols = this.symbols;
+        return Types.is_pointer(passed) && symbols.nullable_payload(wanted) == passed;
+    }
+
+    void require_safe_pointer(Node* value, u32 passed, u32 wanted) {
+        if (!Types.is_safe_pointer(wanted)) {
+            return;
+        }
+        if (value.kind() == NodeKind::NULL_LITERAL) {
+            this.error_code(value, DiagnosticErrors.VALUE_TYPE_MISMATCH, "null needs a nullable pointer; declare it as 'T*?'");
+        } else if (Types.is_nullable_pointer(passed)) {
+            this.error_code(value, DiagnosticErrors.VALUE_TYPE_MISMATCH, "a nullable pointer cannot be used as 'T*' without a cast");
+        }
+    }
+
     void require_argument_shape(Node* argument, u32 passed, u32 wanted) {
-        if (wanted == 0 || passed == wanted || wanted == this.core_type("object")) {
+        this.require_safe_pointer(argument, passed, wanted);
+        if (wanted == 0 || passed == wanted || wanted == this.core_type("object") || this.wraps_pointer(passed, wanted)) {
             return;
         }
         SymbolTable* symbols = this.symbols;
@@ -197,7 +222,8 @@ impl TypeChecker {
     }
 
     void require_value_type(Node* value, u32 passed, u32 wanted) {
-        if (passed == 0 || wanted == 0 || passed == wanted || wanted == this.core_type("object")) {
+        this.require_safe_pointer(value, passed, wanted);
+        if (passed == 0 || wanted == 0 || passed == wanted || wanted == this.core_type("object") || this.wraps_pointer(passed, wanted)) {
             return;
         }
         SymbolTable* symbols = this.symbols;

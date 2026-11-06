@@ -5,9 +5,9 @@ resultado. Os grupos que falharam foram revisados à mão; os que passaram não 
 
 | Decisão | Testes | O que significa |
 |---|---|---|
-| Portar | 444 | Passa no djinnc; está em `tests/conformance/cases`. |
+| Portar | 449 | Passa no djinnc; está em `tests/conformance/cases`. |
 | Reescrever | 78 | O comportamento importa, mas o teste precisa de outra forma. |
-| Bloqueado | 159 | O djinnc não reproduz o comportamento; falta decidir se implementa ou se o recurso sai. |
+| Bloqueado | 154 | O djinnc não reproduz o comportamento; falta decidir se implementa ou se o recurso sai. |
 | Descartar | 42 | Interno do stage0 ou duplicado. |
 
 ## O que bloqueia
@@ -18,9 +18,9 @@ resultado. Os grupos que falharam foram revisados à mão; os que passaram não 
 | contratos | 20 |
 | modos de overflow | 19 |
 | `sizeof`/`typeof`/`alignof` de expressão | 18 |
-| tipos anuláveis | 12 |
 | `switch` com bloco e `yield` | 10 |
 | tipos non-zero | 8 |
+| tipos anuláveis | 7 |
 | `object` e `...args` com `str` | 6 |
 | desestruturação | 4 |
 | `for` com range | 4 |
@@ -803,20 +803,20 @@ resultado. Os grupos que falharam foram revisados à mão; os que passaram não 
 | NonZero.EnsureProvesNonZeroReturn | Bloqueado | contratos (`require`/`ensure`) |
 | NonZero.EnsureWorksInAnyDeclarationOrder | Bloqueado | contratos (`require`/`ensure`) |
 | NonZero.EntryCheckTrapsAtRuntime | Portar | exit code diferente de zero |
-| Nullable.NullLiteralAllowedOnNullableType | Bloqueado | tipos anuláveis |
+| Nullable.NullLiteralAllowedOnNullableType | Portar | compila sem erros |
 | Nullable.NullLiteralForbiddenOnNonNullableStruct | Portar | erro E3053 |
-| Nullable.NullLiteralForbiddenOnNonNullablePointer | Bloqueado | tipos anuláveis |
+| Nullable.NullLiteralForbiddenOnNonNullablePointer | Portar | erro E3053 |
 | Nullable.NullLiteralForbiddenOnInteger | Portar | erro E3053 |
 | Nullable.NullableArraySyntax | Bloqueado | tipos anuláveis |
-| Nullable.ReassignNullToNullableMutVariable | Bloqueado | tipos anuláveis |
-| Nullable.ReassignNullToNonNullableErrors | Bloqueado | tipos anuláveis |
+| Nullable.ReassignNullToNullableMutVariable | Portar | compila sem erros |
+| Nullable.ReassignNullToNonNullableErrors | Portar | erro E3053 |
 | Nullable.NullCoalescingParsesAndCompiles | Bloqueado | tipos anuláveis |
 | Nullable.NullCoalescingAssignmentDesugars | Bloqueado | tipos anuláveis |
 | Nullable.NullConditionalFieldAccessParses | Bloqueado | tipos anuláveis |
 | Nullable.NullForgivingFieldAccessParses | Bloqueado | tipos anuláveis |
 | Nullable.CastNonNullableToNullableAllowed | Bloqueado | tipos anuláveis |
-| Nullable.CastNullableToNonNullableEmitsWarning | Bloqueado | tipos anuláveis |
-| Nullable.CastNullableToNullableNoWarning | Bloqueado | tipos anuláveis |
+| Nullable.CastNullableToNonNullableEmitsWarning | Bloqueado | tipos anuláveis (o erro atual tem outro motivo) |
+| Nullable.CastNullableToNullableNoWarning | Portar | compila sem erros |
 | Nullable.CastIntegerToPointerNoWarning | Portar | compila sem erros |
 | PointerCompat.VoidToTyped | Portar | compila sem erros |
 | PointerCompat.TypedToVoid | Portar | compila sem erros |
