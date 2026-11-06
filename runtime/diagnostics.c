@@ -549,7 +549,17 @@ static LPTOP_LEVEL_EXCEPTION_FILTER djinn_previous_filter;
 
 static LONG WINAPI djinn_crash_filter(EXCEPTION_POINTERS* info)
 {
-    fprintf(stderr, "djinn crash: exception 0x%08lx\n", (unsigned long)info->ExceptionRecord->ExceptionCode);
+    EXCEPTION_RECORD* record = info->ExceptionRecord;
+    fprintf(stderr, "djinn crash: exception 0x%08lx at %p\n", (unsigned long)record->ExceptionCode, record->ExceptionAddress);
+    HMODULE module = NULL;
+    char module_name[260] = "";
+    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)record->ExceptionAddress, &module))
+    {
+        GetModuleFileNameA(module, module_name, sizeof(module_name));
+        fprintf(stderr, "  in %s +0x%llx\n", module_name, (unsigned long long)((char*)record->ExceptionAddress - (char*)module));
+    }
+    if (record->NumberParameters >= 2)
+        fprintf(stderr, "  access type %llu address %p\n", (unsigned long long)record->ExceptionInformation[0], (void*)record->ExceptionInformation[1]);
     djinn_native_stack();
     if (djinn_previous_filter != NULL) return djinn_previous_filter(info);
     return EXCEPTION_CONTINUE_SEARCH;
