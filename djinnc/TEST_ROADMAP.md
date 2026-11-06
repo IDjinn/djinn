@@ -403,8 +403,15 @@ runner --compiler <djinnc> --runtime-lib <lib> [--runtime-dir d] [--jobs n] [--f
   diagnósticos em JSON e conferem um erro; um sidecar `<nome>.code` opcional exige o código.
 - Resultado: os 148 casos passam em poucos segundos com 8 jobs.
 - Os 51 casos de `errors/` têm um `.code` com o código esperado (primeiro erro), gerado da saída atual do djinnc.
-- **Falta:** caminho `--link` (o `run.sh` ainda cobre o link e os `crash/` e `debug/`),
-  a máscara `[Requires]`, `Verify`/`Expected` e o grafo. O `run.sh` só sai quando o runner cobrir o link.
+- `--link --out <dir absoluto> [--lld]`: depois do JIT, cada caso é compilado para um executável em `<dir>` e executado de
+  novo, conferindo exit code e `.stdout`. Um processo que morre com exit code negativo é repetido até 2 vezes (o JIT do
+  `std/logger` ainda falha de forma intermitente); o relatório JSON traz `retries`.
+- `--selftest` do djinnc entra como um caso. Os 149 casos passam nos dois caminhos.
+- `--crash` (exige `--out`): roda `crash/*.djinn` linkado com `-g`, espera exit code diferente de zero e cada linha do
+  `.expect` na saída. É opt-in porque neste ambiente o executável não imprime o rastro (o filtro de exceção do runtime
+  não roda, nem com o runtime antigo), então `crash/null_read` falha aqui; `tools/debug_tests.sh` segue cobrindo esse caso.
+- **Falta:** `debug/` (lldb) e `library/`, ainda nos scripts; a máscara `[Requires]`, `Verify`/`Expected` e o grafo.
+  O `run.sh` só sai quando o runner cobrir esses dois e o CTest chamar o runner.
 
 ### Fase 2: migração do gtest
 
