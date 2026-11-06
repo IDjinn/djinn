@@ -402,8 +402,9 @@ impl Parser {
             this.parse_where_clauses(constraints);
         }
 
-        if (this.check(TokenKind::THROWS) || this.check(TokenKind::REQUIRE) || this.check(TokenKind::ENSURE)) {
-            this.fail("throws and contracts are not supported yet");
+        this.parse_throws_clause(function);
+        if (this.check(TokenKind::REQUIRE) || this.check(TokenKind::ENSURE)) {
+            this.fail("contracts are not supported yet");
             return function;
         }
 
@@ -429,6 +430,28 @@ impl Parser {
 
         function.set_first(this.parse_body(function.generics() == null && (function.op() & 7) == 0));
         return function;
+    }
+
+    void parse_throws_clause(Node* function) {
+        if (!this.check(TokenKind::THROWS)) {
+            return;
+        }
+        i32 start = this.advance();
+        function.set_op(function.op() | 16);
+        if (!this.match(TokenKind::LPAREN)) {
+            return;
+        }
+        Node* clause = Node.create_list(NodeKind::BLOCK, start);
+        while (!this.check(TokenKind::RPAREN) && !this.at_end() && !this.failed) {
+            Node* entry = Node.create(NodeKind::PARAMETER, this.current());
+            entry.set_type(this.parse_type());
+            clause.add(entry);
+            if (!this.match(TokenKind::COMMA)) {
+                break;
+            }
+        }
+        this.expect(TokenKind::RPAREN, "expected ')' after the throws types");
+        function.set_second(clause);
     }
 
     Node* parse_body(bool strippable) {

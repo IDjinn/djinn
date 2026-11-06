@@ -1,0 +1,78 @@
+namespace djinnc;
+
+// Debug-build shadow stack: functions push a frame on entry and pop it before returning; a throw
+// snapshots it so Error.stackTrace can print the call chain.
+impl CodeGenerator {
+    bool stack_enabled() {
+        return this.debug != null;
+    }
+
+    unsafe void emit_frame_push(FunctionInfo* info) {
+        FunctionContext* function_context = this.function_context;
+        if (!this.stack_enabled() || function_context.is_async || info.node == null) {
+            return;
+        }
+        Node* declaration = info.node;
+        ptr i32_type = LLVMIntTypeInContext(this.context, 32);
+        ptr pointer_llvm = LLVMPointerTypeInContext(this.context, 0);
+        ptr<ptr> params = CodeGenerator.array_of(3);
+        ptr<ptr> args = CodeGenerator.array_of(3);
+        params[0] = pointer_llvm;
+        params[1] = pointer_llvm;
+        params[2] = i32_type;
+        args[0] = this.string_constant(info.name);
+        args[1] = this.string_constant(declaration.file_name());
+        args[2] = LLVMConstInt(i32_type, (u64)declaration.line(), 0);
+        this.call_runtime("__djinn_frame_push", LLVMVoidTypeInContext(this.context), params, args, 3);
+    }
+
+    void emit_frame_pop() {
+        FunctionContext* function_context = this.function_context;
+        if (!this.stack_enabled() || function_context.is_async) {
+            return;
+        }
+        this.call_runtime("__djinn_frame_pop", LLVMVoidTypeInContext(this.context), CodeGenerator.array_of(0), CodeGenerator.array_of(0), 0);
+    }
+
+    unsafe void emit_stack_capture(Node* at) {
+        if (!this.stack_enabled()) {
+            return;
+        }
+        ptr i32_type = LLVMIntTypeInContext(this.context, 32);
+        ptr<ptr> params = CodeGenerator.array_of(1);
+        ptr<ptr> args = CodeGenerator.array_of(1);
+        params[0] = i32_type;
+        args[0] = LLVMConstInt(i32_type, (u64)at.line(), 0);
+        this.call_runtime("__djinn_capture_error_stack", LLVMVoidTypeInContext(this.context), params, args, 1);
+    }
+
+    void emit_noreturn() {
+        LLVMBuildUnreachable(this.builder);
+        this.start_dead_block();
+    }
+
+    unsafe Value* generate_panic(Node* node) {
+        ptr i32_type = LLVMIntTypeInContext(this.context, 32);
+        ptr pointer_llvm = LLVMPointerTypeInContext(this.context, 0);
+        Value* message = this.gen_expression(node.first());
+        ptr<ptr> params = CodeGenerator.array_of(3);
+        ptr<ptr> args = CodeGenerator.array_of(3);
+        params[0] = pointer_llvm;
+        params[1] = pointer_llvm;
+        params[2] = i32_type;
+        args[0] = this.coerce(message, Types.byte_pointer());
+        args[1] = this.string_constant(node.file_name());
+        args[2] = LLVMConstInt(i32_type, (u64)node.line(), 0);
+        this.call_runtime("__djinn_panic", LLVMVoidTypeInContext(this.context), params, args, 3);
+        this.emit_noreturn();
+        return Value.create(null, Types.void_type());
+    }
+
+    ptr stack_text() {
+        ptr pointer_llvm = LLVMPointerTypeInContext(this.context, 0);
+        if (!this.stack_enabled()) {
+            return LLVMConstNull(pointer_llvm);
+        }
+        return this.call_runtime("__djinn_error_stack_text", pointer_llvm, CodeGenerator.array_of(0), CodeGenerator.array_of(0), 0);
+    }
+}

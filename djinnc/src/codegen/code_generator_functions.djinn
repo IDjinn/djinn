@@ -16,9 +16,14 @@ impl CodeGenerator {
                 params[p] = this.llvm_type(param_types.get(p));
             }
 
+            if (info.has_throws) {
+                this.prepare_result(info);
+            }
             mut ptr return_type = this.llvm_type(info.return_type);
             if (info.is_async) {
                 return_type = LLVMPointerTypeInContext(this.context, 0);
+            } else if (info.has_throws) {
+                return_type = info.result_type;
             }
             mut i32 variadic = 0;
             if (info.is_variadic) {
@@ -103,6 +108,7 @@ impl CodeGenerator {
             LLVMPositionBuilderBefore(this.alloca_builder, jump);
         }
         LLVMPositionBuilderAtEnd(this.builder, body);
+        this.init_function_state(info);
 
         mut i32 offset = 0;
         if (info.is_instance) {
@@ -129,7 +135,7 @@ impl CodeGenerator {
             this.finish_coroutine();
         } else if (!this.is_terminated()) {
             if (Types.is_void(info.return_type)) {
-                LLVMBuildRetVoid(this.builder);
+                this.emit_void_return(info);
             } else {
                 LLVMBuildUnreachable(this.builder);
             }
@@ -249,11 +255,19 @@ impl CodeGenerator {
             ptr<ptr> loop_args = CodeGenerator.array_of(1);
             loop_params[0] = pointer_llvm;
             loop_args[0] = handle;
-            if (Types.is_void(user.return_type)) {
+            if (user.has_throws) {
+                exit_code = this.emit_async_entry(main_fn, user, handle);
+            } else if (Types.is_void(user.return_type)) {
                 this.call_runtime("__djinn_event_loop_run", void_type, loop_params, loop_args, 1);
                 this.call_runtime("__djinn_coro_destroy", void_type, loop_params, loop_args, 1);
             } else {
                 exit_code = this.call_runtime("__djinn_event_loop", i32_type, loop_params, loop_args, 1);
+            }
+        } else if (user.has_throws) {
+            ptr record = LLVMBuildCall2(this.builder, user.function_type, user.function, CodeGenerator.array_of(0), 0, "main.record");
+            ptr value = this.emit_entry_result(main_fn, user, record);
+            if (value != null) {
+                exit_code = this.coerce(Value.create(value, user.return_type), Types.i32_type());
             }
         } else if (Types.is_void(user.return_type)) {
             LLVMBuildCall2(this.builder, user.function_type, user.function, CodeGenerator.array_of(0), 0, "");

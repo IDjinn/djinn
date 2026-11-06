@@ -1,0 +1,111 @@
+namespace djinnc;
+
+// Receiving a record: reporting an uncaught error, re-throwing it to the caller, and the throwing call itself.
+impl CodeGenerator {
+    unsafe void emit_report(ptr error) {
+        ptr i32_type = LLVMIntTypeInContext(this.context, 32);
+        ptr pointer_llvm = LLVMPointerTypeInContext(this.context, 0);
+        ptr<ptr> params = CodeGenerator.array_of(6);
+        ptr<ptr> args = CodeGenerator.array_of(6);
+        params[0] = i32_type;
+        params[1] = pointer_llvm;
+        params[2] = pointer_llvm;
+        params[3] = pointer_llvm;
+        params[4] = i32_type;
+        params[5] = i32_type;
+        args[0] = LLVMBuildExtractValue(this.builder, error, 2, "report.code");
+        args[1] = LLVMBuildExtractValue(this.builder, error, 0, "report.name");
+        args[2] = LLVMBuildExtractValue(this.builder, error, 1, "report.message");
+        args[3] = LLVMConstNull(pointer_llvm);
+        args[4] = LLVMConstInt(i32_type, 0, 0);
+        args[5] = LLVMConstInt(i32_type, 0, 0);
+        this.call_runtime("__djinn_uncaught_error", LLVMVoidTypeInContext(this.context), params, args, 6);
+        LLVMBuildUnreachable(this.builder);
+    }
+
+    unsafe void emit_uncaught(ptr function, ptr slot, FunctionInfo* source, ptr tag) {
+        ptr i32_type = LLVMIntTypeInContext(this.context, 32);
+        i32 count = this.member_count(source);
+        ptr payload = this.record_field(source, slot, 1, "err.payload");
+        ptr none_block = LLVMAppendBasicBlockInContext(this.context, function, "err.none");
+        ptr dispatch = LLVMBuildSwitch(this.builder, tag, none_block, (u32)count);
+        PointerList* blocks = PointerList.create();
+        for (mut i32 k = 0; k < count; k = k + 1) {
+            ptr block = LLVMAppendBasicBlockInContext(this.context, function, "err.report");
+            blocks.push(block);
+            LLVMAddCase(dispatch, LLVMConstInt(i32_type, (u64)(k + 1), 0), block);
+        }
+        for (mut i32 k = 0; k < count; k = k + 1) {
+            LLVMPositionBuilderAtEnd(this.builder, blocks.get(k));
+            this.emit_report(this.error_value_from(this.member_type(source, k), payload));
+        }
+        LLVMPositionBuilderAtEnd(this.builder, none_block);
+        LLVMBuildUnreachable(this.builder);
+    }
+
+    // Returns the error held by a failed record from the current function, converting it to the
+    // enclosing function's error type list (or to the core 'Error' for a plain 'throws').
+    unsafe void emit_rethrow(ptr slot, FunctionInfo* source, ptr tag) {
+        FunctionInfo* current = this.current_function();
+        if (!current.has_throws) {
+            this.emit_uncaught(current.function, slot, source, tag);
+            return;
+        }
+        ptr i32_type = LLVMIntTypeInContext(this.context, 32);
+        i32 count = this.member_count(source);
+        ptr payload = this.record_field(source, slot, 1, "err.payload");
+        ptr none_block = this.new_block("err.none");
+        ptr dispatch = LLVMBuildSwitch(this.builder, tag, none_block, (u32)count);
+        PointerList* blocks = PointerList.create();
+        for (mut i32 k = 0; k < count; k = k + 1) {
+            ptr block = this.new_block("err.member");
+            blocks.push(block);
+            LLVMAddCase(dispatch, LLVMConstInt(i32_type, (u64)(k + 1), 0), block);
+        }
+        for (mut i32 k = 0; k < count; k = k + 1) {
+            LLVMPositionBuilderAtEnd(this.builder, blocks.get(k));
+            u32 member = this.member_type(source, k);
+            if (current.throws_any) {
+                this.emit_exit(this.build_record(current, 1, this.error_value_from(member, payload)));
+            } else {
+                ptr value = LLVMBuildLoad2(this.builder, this.llvm_type(member), payload, "err.value");
+                this.emit_exit(this.build_record(current, (u64)this.member_tag(current, member), value));
+            }
+        }
+        LLVMPositionBuilderAtEnd(this.builder, none_block);
+        LLVMBuildUnreachable(this.builder);
+    }
+
+    unsafe void emit_propagate(ptr slot, FunctionInfo* source) {
+        ptr i32_type = LLVMIntTypeInContext(this.context, 32);
+        ptr tag = this.record_tag(source, slot);
+        ptr failed = LLVMBuildICmp(this.builder, LlvmConst.INT_NE, tag, LLVMConstInt(i32_type, 0, 0), "call.failed");
+        ptr raise_block = this.new_block("err.raise");
+        ptr ok_block = this.new_block("err.ok");
+        LLVMBuildCondBr(this.builder, failed, raise_block, ok_block);
+        LLVMPositionBuilderAtEnd(this.builder, raise_block);
+        this.emit_rethrow(slot, source, tag);
+        LLVMPositionBuilderAtEnd(this.builder, ok_block);
+    }
+
+    // A call to a throwing sync function: keeps the record for 'try' / the error switch and yields
+    // the success value; with 'propagate' a failure is re-thrown on the spot.
+    unsafe Value* finish_throwing_call(Node* node, FunctionInfo* info, ptr result, bool propagate) {
+        ptr slot = LLVMBuildAlloca(this.alloca_builder, info.result_type, "call.result");
+        LLVMBuildStore(this.builder, result, slot);
+        if (propagate) {
+            this.emit_propagate(slot, info);
+        }
+        Value* outcome = this.record_value(slot, info);
+        outcome.record = slot;
+        outcome.source = info;
+        return outcome;
+    }
+
+    unsafe Value* generate_throwing_operand(Node* operand) {
+        if (operand.kind() == NodeKind::AWAIT_EXPR) {
+            return this.generate_await_with_propagation(operand, false);
+        }
+        return this.generate_call_with_propagation(operand, false);
+    }
+}

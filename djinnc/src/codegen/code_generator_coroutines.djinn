@@ -51,10 +51,10 @@ impl CodeGenerator {
 
         mut ptr promise = (ptr)0;
         mut u64 alignment = 0;
-        if (!Types.is_void(info.return_type)) {
-            ptr result_llvm = this.llvm_type(info.return_type);
-            promise = LLVMBuildAlloca(this.alloca_builder, result_llvm, "coro.promise");
-            alignment = LLVMABIAlignmentOfType(this.layout_data, result_llvm);
+        if (!Types.is_void(info.return_type) || info.has_throws) {
+            ptr promise_llvm = this.promise_type(info);
+            promise = LLVMBuildAlloca(this.alloca_builder, promise_llvm, "coro.promise");
+            alignment = LLVMABIAlignmentOfType(this.layout_data, promise_llvm);
         } else {
             promise = LLVMConstNull(pointer_llvm);
         }
@@ -161,6 +161,10 @@ impl CodeGenerator {
     }
 
     unsafe Value* gen_await(Node* node) {
+        return this.generate_await_with_propagation(node, true);
+    }
+
+    unsafe Value* generate_await_with_propagation(Node* node, bool propagate) {
         FunctionContext* function_context = this.function_context;
         u32 result_type = node.value_type();
         ptr handle = this.task_handle(node.first());
@@ -181,20 +185,27 @@ impl CodeGenerator {
             this.call_runtime("__djinn_event_loop_run", void_llvm, params, args, 1);
         }
 
+        if (node.symbol_kind() == SymbolKind.FUNCTION) {
+            FunctionInfo* view = (FunctionInfo*)node.symbol();
+            this.prepare_result(view);
+            return this.finish_await(handle, this.promise_address(handle, view.result_type), view, propagate);
+        }
+
         mut ptr result = handle;
         if (!Types.is_void(result_type)) {
-            ptr result_llvm = this.llvm_type(result_type);
-            ptr<ptr> promise_args = CodeGenerator.array_of(3);
-            promise_args[0] = handle;
-            promise_args[1] = LLVMConstInt(LLVMIntTypeInContext(this.context, 32), LLVMABIAlignmentOfType(this.layout_data, result_llvm), 0);
-            promise_args[2] = LLVMConstInt(LLVMIntTypeInContext(this.context, 1), 0, 0);
-            ptr promise = this.coro_intrinsic("llvm.coro.promise", null, 0, promise_args, 3, "await.promise");
-            result = LLVMBuildLoad2(this.builder, result_llvm, promise, "await.result");
+            ptr promise = this.promise_address(handle, this.llvm_type(result_type));
+            result = LLVMBuildLoad2(this.builder, this.llvm_type(result_type), promise, "await.result");
         }
-        ptr<ptr> destroy_args = CodeGenerator.array_of(1);
-        destroy_args[0] = handle;
-        this.coro_intrinsic("llvm.coro.destroy", null, 0, destroy_args, 1, "");
+        this.destroy_task(handle);
         return Value.create(result, result_type);
+    }
+
+    unsafe ptr promise_address(ptr handle, ptr promise_llvm) {
+        ptr<ptr> promise_args = CodeGenerator.array_of(3);
+        promise_args[0] = handle;
+        promise_args[1] = LLVMConstInt(LLVMIntTypeInContext(this.context, 32), LLVMABIAlignmentOfType(this.layout_data, promise_llvm), 0);
+        promise_args[2] = LLVMConstInt(LLVMIntTypeInContext(this.context, 1), 0, 0);
+        return this.coro_intrinsic("llvm.coro.promise", null, 0, promise_args, 3, "await.promise");
     }
 }
 
@@ -234,9 +245,11 @@ impl CodeGenerator {
             return Value.create(null, void_result);
         }
         if (id == Intrinsic.UNREACHABLE) {
-            LLVMBuildUnreachable(this.builder);
-            this.start_dead_block();
+            this.emit_noreturn();
             return Value.create(null, void_result);
+        }
+        if (id == Intrinsic.PANIC) {
+            return this.generate_panic(node);
         }
         ptr condition = this.to_condition(this.gen_expression(node.first()));
         ptr<ptr> args = CodeGenerator.array_of(2);

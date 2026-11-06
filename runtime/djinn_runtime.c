@@ -1148,6 +1148,30 @@ void __djinn_uncaught_error(const int tag, const char* type_name, const char* me
     abort();
 }
 
+const char* __djinn_error_stack_text(void)
+{
+    char buffer[DJINN_ERROR_REPORT_SIZE];
+    const int used = djinn_render_frames(buffer, 0, djinn_error_stack.frames, djinn_error_stack.depth);
+    char* copy = (char*)malloc((size_t)used + 1);
+    if (copy == NULL) return NULL;
+    memcpy(copy, buffer, (size_t)used);
+    copy[used] = '\0';
+    return copy;
+}
+
+void __djinn_panic(const char* message, const char* file, const uint32_t line)
+{
+    char* report = __djinn_last_error_report;
+    int used = djinn_report_append(report, 0, "djinn runtime error: panic\n");
+    used = djinn_report_append(report, used, "  error: %s\n", (message != NULL && message[0] != '\0') ? message : "<no message>");
+    if (file != NULL && file[0] != '\0')
+        used = djinn_report_append(report, used, "  --> %s:%u\n", file, (unsigned)line);
+    used = djinn_render_frames(report, used, djinn_shadow_stack.frames, djinn_shadow_stack.depth);
+    fputs(report, stderr);
+    fflush(stderr);
+    abort();
+}
+
 void __djinn_runtime_init(int num_threads)
 {
     memset(&runtime, 0, sizeof(runtime));

@@ -1,0 +1,246 @@
+namespace djinnc;
+
+impl TypeChecker {
+    unsafe FunctionInfo* call_target(Node* node) {
+        if (node.kind() != NodeKind::CALL) {
+            return null;
+        }
+        Node* callee = node.first();
+        i32 kind = callee.symbol_kind();
+        if (kind == SymbolKind.FUNCTION || kind == SymbolKind.STATIC_METHOD || kind == SymbolKind.INSTANCE_METHOD) {
+            return (FunctionInfo*)callee.symbol();
+        }
+        return null;
+    }
+
+    unsafe FunctionInfo* thrower_of(Node* node) {
+        if (node.kind() == NodeKind::AWAIT_EXPR) {
+            if (node.symbol_kind() == SymbolKind.FUNCTION) {
+                return (FunctionInfo*)node.symbol();
+            }
+            return null;
+        }
+        FunctionInfo* callee = this.call_target(node);
+        if (callee != null && !callee.is_async && callee.has_throws) {
+            return callee;
+        }
+        return null;
+    }
+
+    unsafe StructInfo* error_struct(u32 type) {
+        if (!Types.is_struct(type)) {
+            return null;
+        }
+        SymbolTable* symbols = this.symbols;
+        if (symbols.enum_of_type(type) != null) {
+            return null;
+        }
+        return symbols.struct_at(Types.struct_index(type));
+    }
+
+    unsafe void require_covered(Node* at, FunctionInfo* source, FunctionInfo* current) {
+        if (current.throws_any) {
+            return;
+        }
+        if (source.throws_any) {
+            this.error(at, "this call can throw any error: the enclosing function must declare a plain 'throws'");
+            return;
+        }
+        IdList* types = source.throws_types;
+        for (mut i32 i = 0; i < types.length; i = i + 1) {
+            if (!current.allows(types.get(i))) {
+                this.error(at, "an error of this call is not covered by the enclosing function's throws clause");
+                return;
+            }
+        }
+    }
+
+    unsafe void require_propagation(Node* at, FunctionInfo* source) {
+        FunctionInfo* current = this.function;
+        if (current == null || !current.has_throws) {
+            this.error(at, "this call can fail: use 'try' or declare 'throws' on the enclosing function");
+            return;
+        }
+        this.require_covered(at, source, current);
+    }
+
+    void check_throwing_call(Node* call, FunctionInfo* callee) {
+        if (callee.is_async || !callee.has_throws) {
+            return;
+        }
+        if (this.try_target == call) {
+            return;
+        }
+        this.require_propagation(call, callee);
+    }
+
+    unsafe void check_throw(Node* node) {
+        u32 type = this.check_expression(node.first(), 0);
+        if (Types.is_void(type)) {
+            this.error(node, "a void value cannot be thrown");
+            return;
+        }
+        FunctionInfo* current = this.function;
+        if (current == null || !current.has_throws) {
+            this.error(node, "'throw' needs the enclosing function to declare 'throws'");
+            return;
+        }
+        if (!current.allows(type)) {
+            this.error(node, "thrown error type is not listed in the throws clause");
+            return;
+        }
+        StructInfo* error = this.error_struct(type);
+        if (error != null) {
+            SymbolTable* symbols = this.symbols;
+            symbols.register_error(error);
+        }
+    }
+
+    unsafe u32 check_try(Node* node, u32 expected) {
+        Node* operand = node.first();
+        Node* saved = this.try_target;
+        this.try_target = operand;
+        u32 type = this.check_expression(operand, expected);
+        this.try_target = saved;
+        FunctionInfo* source = this.thrower_of(operand);
+        if (source == null) {
+            this.error(node, "'try' needs a call to a function that declares 'throws'");
+            return type;
+        }
+        Node* fallback = node.second();
+        if (fallback == null) {
+            this.require_propagation(node, source);
+            return type;
+        }
+        if (Types.is_void(type)) {
+            this.error(node, "a void call cannot have a '?:' fallback");
+            return type;
+        }
+        u32 fallback_type = this.check_expression(fallback, type);
+        this.require_argument_shape(fallback, fallback_type, type);
+        return type;
+    }
+
+    unsafe u32 check_error_switch(Node* node, u32 expected, FunctionInfo* source, u32 success_type) {
+        SymbolTable* symbols = this.symbols;
+        LocalScopes* scopes = this.scopes;
+        u32 any_error = this.core_type("Error");
+        mut u32 result = expected;
+        mut bool has_success = false;
+        mut bool has_catch_all = false;
+        IdList* handled = IdList.create();
+
+        for (mut i32 i = 0; i < node.count(); i = i + 1) {
+            Node* arm = node.child(i);
+            ptr<i8> pattern = arm.text();
+            mut u32 binding_type = 0;
+            if (Strings.same(pattern, "Result") || Strings.same(pattern, "_")) {
+                arm.set_op(1);
+                has_success = true;
+                binding_type = success_type;
+                if (Types.is_void(success_type) && arm.count() > 0) {
+                    this.error(arm, "a void call has no result to bind");
+                    continue;
+                }
+            } else if (Strings.same(pattern, "Error")) {
+                arm.set_op(2);
+                has_catch_all = true;
+                binding_type = any_error;
+                if (any_error == 0) {
+                    this.error(arm, "the 'Error' arm needs the core 'Error' type");
+                    continue;
+                }
+            } else {
+                u32 matched = this.arm_error_type(arm, source);
+                if (matched == 0) {
+                    this.error(arm, "unknown error type in switch arm");
+                    continue;
+                }
+                if (!source.allows(matched)) {
+                    this.error(arm, "this call does not throw that error type");
+                    continue;
+                }
+                arm.set_op(3);
+                arm.set_symbol(SymbolKind.TYPE, (ptr)(u64)matched);
+                handled.push(matched);
+                binding_type = matched;
+            }
+            if (arm.count() > 1) {
+                this.error(arm, "a switch arm binds at most one value");
+                continue;
+            }
+
+            i32 mark = scopes.mark();
+            for (mut i32 b = 0; b < arm.count(); b = b + 1) {
+                Node* binding = arm.child(b);
+                LocalVariable* variable = (LocalVariable*)Memory.zalloc(sizeof(LocalVariable));
+                variable.name = binding.text();
+                variable.name_atom = binding.name();
+                variable.type = binding_type;
+                variable.node = binding;
+                binding.set_symbol(SymbolKind.LOCAL, (ptr)variable);
+                binding.set_value_type(binding_type);
+                scopes.define(variable.name_atom, variable);
+            }
+            u32 arm_type = this.check_expression(arm.first(), result);
+            if (result == 0) {
+                result = arm_type;
+            } else {
+                this.require_argument_shape(arm.first(), arm_type, result);
+            }
+            scopes.reset_to(mark);
+        }
+
+        if (!has_success) {
+            this.error(node, "an error switch needs a 'Result' arm for the success value");
+        }
+        if (!has_catch_all) {
+            this.require_unhandled(node, source, handled);
+        }
+        node.set_symbol(SymbolKind.ERROR_SWITCH, (ptr)source);
+        if (result == 0) {
+            return success_type;
+        }
+        return result;
+    }
+
+    unsafe u32 arm_error_type(Node* arm, FunctionInfo* source) {
+        SymbolTable* symbols = this.symbols;
+        StructInfo* named = symbols.find_struct(arm.text_atom(), arm.name(), this.scope);
+        if (named != null && !named.is_template) {
+            return named.type_id;
+        }
+        if (source.throws_types == null) {
+            return 0;
+        }
+        IdList* types = source.throws_types;
+        for (mut i32 i = 0; i < types.length; i = i + 1) {
+            ByteBuffer* label = ByteBuffer.create();
+            Types.describe(types.get(i), label);
+            if (Strings.same(label.cstr(), arm.text())) {
+                return types.get(i);
+            }
+        }
+        return 0;
+    }
+
+    unsafe void require_unhandled(Node* node, FunctionInfo* source, IdList* handled) {
+        if (source.throws_any) {
+            this.error(node, "this call can throw any error: the switch needs an 'Error' arm");
+            return;
+        }
+        IdList* types = source.throws_types;
+        for (mut i32 i = 0; i < types.length; i = i + 1) {
+            mut bool covered = false;
+            for (mut i32 h = 0; h < handled.length; h = h + 1) {
+                if (handled.get(h) == types.get(i)) {
+                    covered = true;
+                }
+            }
+            if (!covered) {
+                this.error(node, "the switch is not exhaustive: handle every error type of the call or add an 'Error' arm");
+                return;
+            }
+        }
+    }
+}

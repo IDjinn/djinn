@@ -316,6 +316,12 @@ void __djinn_frame_set_line(uint32_t line);
 // the uncaught-exception report keeps the trace after the error unwinds.
 void __djinn_capture_error_stack(uint32_t line);
 
+// Heap copy of the rendered stack captured at the last throw (Error.stackTrace).
+const char* __djinn_error_stack_text(void);
+
+// Unrecoverable failure (a bug, not an error value): prints the message with the live stack and aborts.
+void __djinn_panic(const char* message, const char* file, uint32_t line);
+
 extern void __djinn_coro_resume(void* handle);
 extern int __djinn_coro_done(void* handle);
 extern void __djinn_coro_destroy(void* handle);

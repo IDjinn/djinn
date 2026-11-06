@@ -27,6 +27,8 @@ impl CodeGenerator {
                 this.gen_spawn(node);
             case RETURN:
                 this.gen_return(node);
+            case THROW_STMT:
+                this.generate_throw_statement(node);
             case IF:
                 this.gen_if(node);
             case WHILE:
@@ -65,6 +67,10 @@ impl CodeGenerator {
 
     void gen_return(Node* node) {
         FunctionContext* function_context = this.function_context;
+        if (this.current_function().has_throws) {
+            this.generate_throwing_return(node, this.current_function());
+            return;
+        }
         if (function_context.is_async) {
             if (node.first() != null) {
                 Value* produced = this.gen_expression(node.first());
@@ -74,12 +80,15 @@ impl CodeGenerator {
             this.start_dead_block();
             return;
         }
+        FunctionInfo* current = this.current_function();
         if (node.first() == null) {
+            this.emit_frame_pop();
             LLVMBuildRetVoid(this.builder);
         } else {
-            u32 expected = this.current_function().return_type;
             Value* returned = this.gen_expression(node.first());
-            LLVMBuildRet(this.builder, this.coerce(returned, expected));
+            ptr coerced = this.coerce(returned, current.return_type);
+            this.emit_frame_pop();
+            LLVMBuildRet(this.builder, coerced);
         }
         this.start_dead_block();
     }
@@ -239,6 +248,9 @@ impl CodeGenerator {
     }
 
     unsafe Value* gen_switch_expression(Node* node) {
+        if (node.symbol_kind() == SymbolKind.ERROR_SWITCH) {
+            return this.generate_error_switch(node);
+        }
         SymbolTable* symbols = this.symbols;
         Node* subject_node = node.first();
         Value* subject = this.gen_expression(subject_node);

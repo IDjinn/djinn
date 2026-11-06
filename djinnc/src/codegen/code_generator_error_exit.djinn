@@ -1,0 +1,92 @@
+namespace djinnc;
+
+// Leaving a function with a record: 'throw', 'return' and falling off the end of a throwing function.
+impl CodeGenerator {
+    unsafe ptr error_value_from(u32 type, ptr payload) {
+        u32 core = this.symbols_core_type("Error");
+        ptr core_llvm = this.llvm_type(core);
+        if (type == core) {
+            return LLVMBuildLoad2(this.builder, core_llvm, payload, "error.any");
+        }
+        SymbolTable* symbols = this.symbols;
+        ptr i32_type = LLVMIntTypeInContext(this.context, 32);
+        ptr pointer_llvm = LLVMPointerTypeInContext(this.context, 0);
+        mut ptr message = LLVMConstNull(pointer_llvm);
+        if (!Types.is_struct(type) || symbols.enum_of_type(type) != null) {
+            ByteBuffer* label = ByteBuffer.create();
+            Types.describe(type, label);
+            mut ptr plain = LLVMConstNull(core_llvm);
+            plain = LLVMBuildInsertValue(this.builder, plain, this.string_constant(label.cstr()), 0, "error.name");
+            plain = LLVMBuildInsertValue(this.builder, plain, message, 1, "error.message");
+            plain = LLVMBuildInsertValue(this.builder, plain, LLVMConstInt(i32_type, (u64)type, 0), 2, "error.code");
+            return LLVMBuildInsertValue(this.builder, plain, this.stack_text(), 3, "error.stack");
+        }
+        StructInfo* info = this.struct_of(type);
+        FieldInfo* field = symbols.find_field(info, Ast.intern_base_name("message", 7));
+        if (field != null && field.type == Types.byte_pointer()) {
+            ptr address = LLVMBuildStructGEP2(this.builder, this.llvm_type(type), payload, (u32)field.index, "error.text.ptr");
+            message = LLVMBuildLoad2(this.builder, pointer_llvm, address, "error.text");
+        }
+        mut ptr value = LLVMConstNull(core_llvm);
+        value = LLVMBuildInsertValue(this.builder, value, this.string_constant(CodeGenerator.base_name(info.name)), 0, "error.name");
+        value = LLVMBuildInsertValue(this.builder, value, message, 1, "error.message");
+        value = LLVMBuildInsertValue(this.builder, value, LLVMConstInt(i32_type, (u64)info.error_code, 0), 2, "error.code");
+        value = LLVMBuildInsertValue(this.builder, value, this.stack_text(), 3, "error.stack");
+        return value;
+    }
+
+    unsafe void emit_exit(ptr record) {
+        FunctionContext* function_context = this.function_context;
+        if (function_context.is_async) {
+            LLVMBuildStore(this.builder, record, function_context.promise);
+            LLVMBuildBr(this.builder, function_context.final_block);
+            return;
+        }
+        this.emit_frame_pop();
+        LLVMBuildRet(this.builder, record);
+    }
+
+    unsafe void generate_throwing_return(Node* node, FunctionInfo* current) {
+        mut ptr value = (ptr)0;
+        if (node != null && node.first() != null) {
+            Value* produced = this.gen_expression(node.first());
+            value = this.coerce(produced, current.return_type);
+        }
+        this.emit_exit(this.build_record(current, 0, value));
+        this.start_dead_block();
+    }
+
+    unsafe void generate_throw_statement(Node* node) {
+        FunctionInfo* current = this.current_function();
+        Node* thrown = node.first();
+        u32 type = thrown.value_type();
+        Value* produced = this.gen_expression(thrown);
+        ptr value = this.coerce(produced, type);
+        this.emit_stack_capture(node);
+
+        if (current.throws_any) {
+            ptr scratch = LLVMBuildAlloca(this.alloca_builder, this.llvm_type(type), "throw.value");
+            LLVMBuildStore(this.builder, value, scratch);
+            this.emit_exit(this.build_record(current, 1, this.error_value_from(type, scratch)));
+        } else {
+            this.emit_exit(this.build_record(current, (u64)this.member_tag(current, type), value));
+        }
+        this.start_dead_block();
+    }
+
+    unsafe void emit_void_return(FunctionInfo* info) {
+        if (info.has_throws) {
+            this.emit_exit(this.build_record(info, 0, (ptr)0));
+            return;
+        }
+        this.emit_frame_pop();
+        LLVMBuildRetVoid(this.builder);
+    }
+
+    unsafe void init_function_state(FunctionInfo* info) {
+        FunctionContext* function_context = this.function_context;
+        if (!function_context.is_async) {
+            this.emit_frame_push(info);
+        }
+    }
+}

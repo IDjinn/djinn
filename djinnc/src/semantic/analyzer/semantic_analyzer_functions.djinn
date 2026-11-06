@@ -186,8 +186,40 @@ impl SemanticAnalyzer {
                 info.packs_variadic = true;
             }
         }
+        this.resolve_throws(declaration, info);
 
         return info;
+    }
+
+    unsafe void resolve_throws(Node* declaration, FunctionInfo* info) {
+        if ((declaration.op() & 16) == 0) {
+            return;
+        }
+        info.has_throws = true;
+        Node* clause = declaration.second();
+        if (clause == null || clause.count() == 0) {
+            info.throws_any = true;
+            return;
+        }
+        SymbolTable* symbols = this.symbols;
+        info.throws_types = IdList.create();
+        IdList* list = info.throws_types;
+        for (mut i32 i = 0; i < clause.count(); i = i + 1) {
+            Node* entry = clause.child(i);
+            u32 type = this.resolve(entry.type(), entry);
+            if (Types.is_void(type)) {
+                this.error(entry, "a throws type cannot be void");
+                continue;
+            }
+            if (Types.is_struct(type) && symbols.enum_of_type(type) == null) {
+                symbols.register_error(symbols.struct_at(Types.struct_index(type)));
+            }
+            list.push(type);
+        }
+        if (info.is_async && list.length > 1) {
+            info.throws_any = true;
+            info.throws_types = null;
+        }
     }
 
     ptr<i8> function_name(StructInfo* owner, Node* declaration, bool is_extern, u32 namespace_id) {

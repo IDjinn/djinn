@@ -1,0 +1,33 @@
+namespace djinnc;
+
+// Tasks that can fail: task<T, E> keeps the same { tag, payload } record inline in the coroutine
+// promise, so awaiting needs no allocation and no knowledge of the callee beyond the task type.
+impl CodeGenerator {
+    unsafe ptr promise_type(FunctionInfo* info) {
+        if (info.has_throws) {
+            return info.result_type;
+        }
+        return this.llvm_type(info.return_type);
+    }
+
+    unsafe void destroy_task(ptr handle) {
+        ptr<ptr> destroy_args = CodeGenerator.array_of(1);
+        destroy_args[0] = handle;
+        this.coro_intrinsic("llvm.coro.destroy", null, 0, destroy_args, 1, "");
+    }
+
+    // After an await resumes: copies the record out of the promise, releases the task and, unless
+    // the caller handles the record itself, re-throws a failure.
+    unsafe Value* finish_await(ptr handle, ptr promise, FunctionInfo* view, bool propagate) {
+        ptr slot = LLVMBuildAlloca(this.alloca_builder, view.result_type, "await.result");
+        LLVMBuildStore(this.builder, LLVMBuildLoad2(this.builder, view.result_type, promise, "task.record"), slot);
+        this.destroy_task(handle);
+        if (propagate) {
+            this.emit_propagate(slot, view);
+        }
+        Value* outcome = this.record_value(slot, view);
+        outcome.record = slot;
+        outcome.source = view;
+        return outcome;
+    }
+}

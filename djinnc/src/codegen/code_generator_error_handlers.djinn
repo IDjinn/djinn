@@ -1,0 +1,169 @@
+namespace djinnc;
+
+// Consuming a record in place: 'try f() ?: fallback' and 'switch f() { Result v -> ..., E e -> ... }'.
+impl CodeGenerator {
+    unsafe Value* generate_try_expression(Node* node) {
+        u32 type = node.value_type();
+        Node* operand = node.first();
+        Value* attempt = this.generate_throwing_operand(operand);
+        ptr slot = attempt.record;
+        FunctionInfo* source = attempt.source;
+
+        if (node.second() == null) {
+            this.emit_propagate(slot, source);
+            return attempt;
+        }
+
+        ptr i32_type = LLVMIntTypeInContext(this.context, 32);
+        ptr failed = LLVMBuildICmp(this.builder, LlvmConst.INT_NE, this.record_tag(source, slot), LLVMConstInt(i32_type, 0, 0), "try.failed");
+        ptr result = this.create_slot(type, "try.value");
+        ptr ok_block = this.new_block("try.ok");
+        ptr err_block = this.new_block("try.err");
+        ptr end_block = this.new_block("try.end");
+        LLVMBuildCondBr(this.builder, failed, err_block, ok_block);
+
+        LLVMPositionBuilderAtEnd(this.builder, ok_block);
+        LLVMBuildStore(this.builder, this.coerce(attempt, type), result);
+        LLVMBuildBr(this.builder, end_block);
+
+        LLVMPositionBuilderAtEnd(this.builder, err_block);
+        Value* fallback = this.gen_expression(node.second());
+        LLVMBuildStore(this.builder, this.coerce(fallback, type), result);
+        this.branch_if_open(end_block);
+
+        LLVMPositionBuilderAtEnd(this.builder, end_block);
+        return Value.create(LLVMBuildLoad2(this.builder, this.llvm_type(type), result, "try.loaded"), type);
+    }
+
+    unsafe void bind_arm_value(Node* arm, ptr value) {
+        if (arm.count() == 0) {
+            return;
+        }
+        Node* binding = arm.child(0);
+        LocalVariable* variable = (LocalVariable*)binding.symbol();
+        variable.slot = this.create_slot(variable.type, variable.name);
+        LLVMBuildStore(this.builder, value, variable.slot);
+        this.declare_variable(variable.slot, variable.name, variable.type, binding, 0);
+    }
+
+    void generate_arm_value(Node* arm, ptr slot, u32 result_type, bool has_value) {
+        Value* produced = this.gen_expression(arm.first());
+        if (has_value) {
+            LLVMBuildStore(this.builder, this.coerce(produced, result_type), slot);
+        }
+    }
+
+    // 'Error e' arm: converts whichever error was returned into the core 'Error' value.
+    unsafe void generate_catch_all_error_arm(Node* arm, ptr slot, FunctionInfo* source, ptr tag, ptr end_block, ptr result, u32 result_type, bool has_value) {
+        ptr i32_type = LLVMIntTypeInContext(this.context, 32);
+        i32 count = this.member_count(source);
+        u32 core = this.symbols_core_type("Error");
+        ptr payload = this.record_field(source, slot, 1, "err.payload");
+        ptr none_block = this.new_block("catch.none");
+        ptr join_block = this.new_block("catch.join");
+        ptr value_slot = this.create_slot(core, "catch.value");
+        ptr dispatch = LLVMBuildSwitch(this.builder, tag, none_block, (u32)count);
+        PointerList* blocks = PointerList.create();
+        for (mut i32 k = 0; k < count; k = k + 1) {
+            ptr block = this.new_block("catch.member");
+            blocks.push(block);
+            LLVMAddCase(dispatch, LLVMConstInt(i32_type, (u64)(k + 1), 0), block);
+        }
+        for (mut i32 k = 0; k < count; k = k + 1) {
+            LLVMPositionBuilderAtEnd(this.builder, blocks.get(k));
+            LLVMBuildStore(this.builder, this.error_value_from(this.member_type(source, k), payload), value_slot);
+            LLVMBuildBr(this.builder, join_block);
+        }
+        LLVMPositionBuilderAtEnd(this.builder, none_block);
+        LLVMBuildUnreachable(this.builder);
+
+        LLVMPositionBuilderAtEnd(this.builder, join_block);
+        this.bind_arm_value(arm, LLVMBuildLoad2(this.builder, this.llvm_type(core), value_slot, "catch.error"));
+        this.generate_arm_value(arm, result, result_type, has_value);
+        this.branch_if_open(end_block);
+    }
+
+    unsafe void generate_typed_error_arm(Node* arm, ptr slot, FunctionInfo* source, ptr tag, ptr end_block, ptr result, u32 result_type, bool has_value) {
+        ptr i32_type = LLVMIntTypeInContext(this.context, 32);
+        u32 error_type = (u32)(u64)arm.symbol();
+        ptr payload = this.record_field(source, slot, 1, "err.payload");
+        ptr arm_block = this.new_block("switch.error");
+        ptr next_block = this.new_block("switch.next");
+        ptr expected = LLVMConstInt(i32_type, (u64)this.member_tag(source, error_type), 0);
+        ptr matches = LLVMBuildICmp(this.builder, LlvmConst.INT_EQ, tag, expected, "error.match");
+        LLVMBuildCondBr(this.builder, matches, arm_block, next_block);
+
+        LLVMPositionBuilderAtEnd(this.builder, arm_block);
+        if (arm.count() > 0) {
+            this.bind_arm_value(arm, LLVMBuildLoad2(this.builder, this.llvm_type(error_type), payload, "error.value"));
+        }
+        this.generate_arm_value(arm, result, result_type, has_value);
+        this.branch_if_open(end_block);
+
+        LLVMPositionBuilderAtEnd(this.builder, next_block);
+    }
+
+    unsafe Value* generate_error_switch(Node* node) {
+        u32 result_type = node.value_type();
+        Node* subject = node.first();
+        bool has_value = !Types.is_void(result_type);
+
+        Value* outcome = this.generate_throwing_operand(subject);
+        ptr slot = outcome.record;
+        FunctionInfo* source = outcome.source;
+
+        ptr i32_type = LLVMIntTypeInContext(this.context, 32);
+        ptr tag = this.record_tag(source, slot);
+        ptr failed = LLVMBuildICmp(this.builder, LlvmConst.INT_NE, tag, LLVMConstInt(i32_type, 0, 0), "switch.failed");
+
+        mut ptr result = (ptr)0;
+        if (has_value) {
+            result = this.create_slot(result_type, "switch.value");
+        }
+        ptr ok_block = this.new_block("switch.ok");
+        ptr err_block = this.new_block("switch.err");
+        ptr end_block = this.new_block("switch.end");
+        LLVMBuildCondBr(this.builder, failed, err_block, ok_block);
+
+        LLVMPositionBuilderAtEnd(this.builder, ok_block);
+        for (mut i32 i = 0; i < node.count(); i = i + 1) {
+            Node* arm = node.child(i);
+            if (arm.op() != 1) {
+                continue;
+            }
+            if (arm.count() > 0 && !Types.is_void(outcome.type)) {
+                this.bind_arm_value(arm, outcome.ref);
+            }
+            this.generate_arm_value(arm, result, result_type, has_value);
+            break;
+        }
+        this.branch_if_open(end_block);
+
+        LLVMPositionBuilderAtEnd(this.builder, err_block);
+        mut Node* catch_all = (Node*)0;
+        for (mut i32 i = 0; i < node.count(); i = i + 1) {
+            Node* arm = node.child(i);
+            if (arm.op() == 2) {
+                catch_all = arm;
+            }
+        }
+        for (mut i32 i = 0; i < node.count(); i = i + 1) {
+            Node* arm = node.child(i);
+            if (arm.op() == 3) {
+                this.generate_typed_error_arm(arm, slot, source, tag, end_block, result, result_type, has_value);
+            }
+        }
+
+        if (catch_all != null) {
+            this.generate_catch_all_error_arm(catch_all, slot, source, tag, end_block, result, result_type, has_value);
+        } else {
+            LLVMBuildUnreachable(this.builder);
+        }
+
+        LLVMPositionBuilderAtEnd(this.builder, end_block);
+        if (!has_value) {
+            return Value.create(null, result_type);
+        }
+        return Value.create(LLVMBuildLoad2(this.builder, this.llvm_type(result_type), result, "switch.loaded"), result_type);
+    }
+}

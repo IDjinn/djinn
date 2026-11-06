@@ -1,0 +1,96 @@
+namespace djinnc;
+
+// A function declared 'throws(A, B)' returns, by value, a record { i32 tag, payload } where tag 0 is
+// the success value and tag k is the k-th listed error type (the same shape as Rust's
+// Result<T, E> with E = A | B). There is no unwinding and no global state. This file holds the
+// record layout; the other code_generator_error_*.djinn files build, propagate and consume it.
+impl CodeGenerator {
+    unsafe i32 member_count(FunctionInfo* source) {
+        if (source.throws_any) {
+            return 1;
+        }
+        if (source.throws_types == null) {
+            return 0;
+        }
+        IdList* types = source.throws_types;
+        return types.length;
+    }
+
+    unsafe u32 member_type(FunctionInfo* source, i32 index) {
+        if (source.throws_any) {
+            return this.symbols_core_type("Error");
+        }
+        IdList* types = source.throws_types;
+        return types.get(index);
+    }
+
+    unsafe i32 member_tag(FunctionInfo* function, u32 type) {
+        for (mut i32 i = 0; i < this.member_count(function); i = i + 1) {
+            if (this.member_type(function, i) == type) {
+                return i + 1;
+            }
+        }
+        return 0;
+    }
+
+    unsafe u64 size_of_type(u32 type) {
+        if (Types.kind(type) != TypeKind.NAMED) {
+            return LLVMABISizeOfType(this.layout_data, this.llvm_type(type));
+        }
+        StructInfo* info = this.struct_of(type);
+        if (info.byte_size == 0) {
+            info.byte_size = LLVMABISizeOfType(this.layout_data, info.llvm);
+        }
+        return info.byte_size;
+    }
+
+    unsafe void prepare_result(FunctionInfo* info) {
+        if (info.result_type != null) {
+            return;
+        }
+        mut u64 bytes = 8;
+        if (!Types.is_void(info.return_type)) {
+            u64 value_bytes = this.size_of_type(info.return_type);
+            if (value_bytes > bytes) {
+                bytes = value_bytes;
+            }
+        }
+        for (mut i32 i = 0; i < this.member_count(info); i = i + 1) {
+            u64 member_bytes = this.size_of_type(this.member_type(info, i));
+            if (member_bytes > bytes) {
+                bytes = member_bytes;
+            }
+        }
+        ptr<ptr> fields = CodeGenerator.array_of(2);
+        fields[0] = LLVMIntTypeInContext(this.context, 32);
+        fields[1] = LLVMArrayType2(LLVMIntTypeInContext(this.context, 64), (bytes + 7) / 8);
+        info.result_type = LLVMStructTypeInContext(this.context, fields, 2, 0);
+    }
+
+    ptr record_field(FunctionInfo* source, ptr slot, u32 index, ptr<i8> label) {
+        return LLVMBuildStructGEP2(this.builder, source.result_type, slot, index, label);
+    }
+
+    unsafe ptr build_record(FunctionInfo* target, u64 tag, ptr value) {
+        ptr slot = LLVMBuildAlloca(this.alloca_builder, target.result_type, "result");
+        ptr i32_type = LLVMIntTypeInContext(this.context, 32);
+        LLVMBuildStore(this.builder, LLVMConstInt(i32_type, tag, 0), this.record_field(target, slot, 0, "result.tag"));
+        if (value != null) {
+            LLVMBuildStore(this.builder, value, this.record_field(target, slot, 1, "result.value"));
+        }
+        return LLVMBuildLoad2(this.builder, target.result_type, slot, "result.loaded");
+    }
+
+    ptr record_tag(FunctionInfo* source, ptr slot) {
+        ptr i32_type = LLVMIntTypeInContext(this.context, 32);
+        return LLVMBuildLoad2(this.builder, i32_type, this.record_field(source, slot, 0, "result.tag"), "result.tag.value");
+    }
+
+    unsafe Value* record_value(ptr slot, FunctionInfo* info) {
+        if (Types.is_void(info.return_type)) {
+            return Value.create(null, info.return_type);
+        }
+        ptr loaded = LLVMBuildLoad2(this.builder, this.llvm_type(info.return_type), this.record_field(info, slot, 1, "call.value.ptr"), "call.value");
+        return Value.create(loaded, info.return_type);
+    }
+}

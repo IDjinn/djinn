@@ -1,0 +1,47 @@
+namespace djinnc;
+
+// Program entry when 'main' throws: a failed record is reported and aborts.
+impl CodeGenerator {
+    unsafe ptr check_entry_record(ptr main_function, FunctionInfo* user, ptr slot) {
+        ptr i32_type = LLVMIntTypeInContext(this.context, 32);
+        ptr tag = this.record_tag(user, slot);
+        ptr failed = LLVMBuildICmp(this.builder, LlvmConst.INT_NE, tag, LLVMConstInt(i32_type, 0, 0), "main.failed");
+        ptr trap_block = LLVMAppendBasicBlockInContext(this.context, main_function, "main.uncaught");
+        ptr ok_block = LLVMAppendBasicBlockInContext(this.context, main_function, "main.clean");
+        LLVMBuildCondBr(this.builder, failed, trap_block, ok_block);
+        LLVMPositionBuilderAtEnd(this.builder, trap_block);
+        this.emit_uncaught(main_function, slot, user, tag);
+        LLVMPositionBuilderAtEnd(this.builder, ok_block);
+        if (Types.is_void(user.return_type)) {
+            return (ptr)0;
+        }
+        return LLVMBuildLoad2(this.builder, this.llvm_type(user.return_type), this.record_field(user, slot, 1, "main.value.ptr"), "main.value");
+    }
+
+    unsafe ptr emit_entry_result(ptr main_function, FunctionInfo* user, ptr record) {
+        ptr slot = LLVMBuildAlloca(this.builder, user.result_type, "main.result");
+        LLVMBuildStore(this.builder, record, slot);
+        return this.check_entry_record(main_function, user, slot);
+    }
+
+    // Async 'main' that throws: the loop runs the coroutine, then the promise record is inspected here.
+    unsafe ptr emit_async_entry(ptr main_function, FunctionInfo* user, ptr handle) {
+        ptr i32_type = LLVMIntTypeInContext(this.context, 32);
+        ptr pointer_llvm = LLVMPointerTypeInContext(this.context, 0);
+        ptr<ptr> params = CodeGenerator.array_of(1);
+        ptr<ptr> args = CodeGenerator.array_of(1);
+        params[0] = pointer_llvm;
+        args[0] = handle;
+        this.call_runtime("__djinn_event_loop_run", LLVMVoidTypeInContext(this.context), params, args, 1);
+
+        ptr promise = this.promise_address(handle, user.result_type);
+        ptr slot = LLVMBuildAlloca(this.builder, user.result_type, "main.result");
+        LLVMBuildStore(this.builder, LLVMBuildLoad2(this.builder, user.result_type, promise, "main.record"), slot);
+        this.destroy_task(handle);
+        ptr value = this.check_entry_record(main_function, user, slot);
+        if (value == null) {
+            return LLVMConstInt(i32_type, 0, 0);
+        }
+        return this.coerce(Value.create(value, user.return_type), Types.i32_type());
+    }
+}

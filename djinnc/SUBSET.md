@@ -49,7 +49,11 @@ of them. A construct outside this list is forbidden in `djinnc/src` until the dj
 
 ## Forbidden
 
-`try`/`throws`, `ensure`, closures, destructuring.
+`ensure`/`require` contracts, closures, destructuring.
+
+## Errors
+
+`throws(A, B)` after a function signature, `throw value;`, `try call() ?: fallback`, `try call()` (re-throw) and `switch call() { Result v -> ..., ErrorType e -> ..., Error e -> ... }` are supported. A function that throws returns a `{ i32 tag, payload }` record by value (the shape of Rust's `Result`); an error type is any struct listed in a `throws` clause, without hierarchy. A bare `throws` converts every error to the core `Error`. Async functions box the record on the coroutine promise. `Error.stackTrace` is filled in debug builds.
 
 Each plain enum is its own type: `==`/`!=` only between values of the same enum (compared by tag); ordering, arithmetic and comparisons with integers or other enums are errors, so go through `getValue()` (returns the `i32` tag; a cast `(Kind)(i32)value` rebuilds the enum). `switch value { A -> 1, _ -> 0 }` accepts a `_` catch-all arm in place of the missing variants. `NodeKind` and `TokenKind` in the compiler source are real enums (their name/text/precedence tables are `switch` expressions); other enum-like `i32` constants in `static` structs remain.
 

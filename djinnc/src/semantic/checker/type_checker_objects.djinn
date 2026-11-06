@@ -38,7 +38,39 @@ impl TypeChecker {
         return args.get(0) + 1;
     }
 
-    u32 task_of(u32 result, Node* at) {
+    u32 task_error(u32 type) {
+        SymbolTable* symbols = this.symbols;
+        StructInfo* info = symbols.struct_at(Types.struct_index(type));
+        IdList* args = info.type_args;
+        return args.get(1);
+    }
+
+    unsafe u32 error_of(FunctionInfo* info) {
+        if (!info.has_throws) {
+            return Types.void_type();
+        }
+        if (info.throws_any) {
+            return this.core_type("Error");
+        }
+        IdList* types = info.throws_types;
+        return types.get(0);
+    }
+
+    unsafe FunctionInfo* async_view(u32 value, u32 error) {
+        FunctionInfo* view = (FunctionInfo*)Memory.zalloc(sizeof(FunctionInfo));
+        view.has_throws = true;
+        view.return_type = value;
+        if (error == this.core_type("Error")) {
+            view.throws_any = true;
+        } else {
+            view.throws_types = IdList.create();
+            IdList* members = view.throws_types;
+            members.push(error);
+        }
+        return view;
+    }
+
+    u32 task_of(u32 result, u32 error, Node* at) {
         SymbolTable* symbols = this.symbols;
         u32 atom = Ast.intern_base_name("task", 4);
         StructInfo* template = symbols.find_core_struct(atom);
@@ -48,6 +80,7 @@ impl TypeChecker {
         }
         IdList* args = IdList.create();
         args.push(result);
+        args.push(error);
         symbols.blame = at;
         SemanticAnalyzer* analyzer = symbols.analyzer;
         return analyzer.instantiate(template, args);
@@ -59,6 +92,14 @@ impl TypeChecker {
         if (held == 0) {
             this.error(node, "'await' needs the task returned by an async function");
             return Types.i32_type();
+        }
+        u32 error = this.task_error(operand);
+        if (!Types.is_void(error)) {
+            FunctionInfo* source = this.async_view(held - 1, error);
+            node.set_symbol(SymbolKind.FUNCTION, (ptr)source);
+            if (this.try_target != node) {
+                this.require_propagation(node, source);
+            }
         }
         return held - 1;
     }
@@ -254,7 +295,14 @@ impl TypeChecker {
 
     unsafe u32 check_switch_expression(Node* node, u32 expected) {
         SymbolTable* symbols = this.symbols;
+        Node* saved_target = this.try_target;
+        this.try_target = node.first();
         u32 subject_type = this.check_expression(node.first(), 0);
+        this.try_target = saved_target;
+        FunctionInfo* thrower = this.thrower_of(node.first());
+        if (thrower != null) {
+            return this.check_error_switch(node, expected, thrower, subject_type);
+        }
         StructInfo* owner = symbols.enum_of_type(subject_type);
         if (owner == null) {
             this.error(node.first(), "switch expression needs an enum value");
