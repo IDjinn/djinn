@@ -5,9 +5,9 @@ resultado. Os grupos que falharam foram revisados à mão; os que passaram não 
 
 | Decisão | Testes | O que significa |
 |---|---|---|
-| Portar | 449 | Passa no djinnc; está em `tests/conformance/cases`. |
+| Portar | 450 | Passa no djinnc; está em `tests/conformance/cases`. |
 | Reescrever | 78 | O comportamento importa, mas o teste precisa de outra forma. |
-| Bloqueado | 154 | O djinnc não reproduz o comportamento; falta decidir se implementa ou se o recurso sai. |
+| Bloqueado | 153 | O djinnc não reproduz o comportamento; falta decidir se implementa ou se o recurso sai. |
 | Descartar | 42 | Interno do stage0 ou duplicado. |
 
 ## O que bloqueia
@@ -16,7 +16,7 @@ resultado. Os grupos que falharam foram revisados à mão; os que passaram não 
 |---|---|
 | tipos de erro em `throws` | 30 |
 | contratos | 20 |
-| modos de overflow | 19 |
+| modos de overflow | 18 |
 | `sizeof`/`typeof`/`alignof` de expressão | 18 |
 | `switch` com bloco e `yield` | 10 |
 | tipos non-zero | 8 |
@@ -183,7 +183,7 @@ resultado. Os grupos que falharam foram revisados à mão; os que passaram não 
 | Overflow.UnaryNegateTrappedAborts | Portar | exit code diferente de zero |
 | Overflow.DivIntMinMinusOneTrappedAborts | Portar | exit code diferente de zero |
 | Overflow.SaturatingDivIntMinClampsToMax | Bloqueado | modos de overflow (esperado 2, veio -2) |
-| Overflow.SaturatingRemIntMinIsZero | Bloqueado | modos de overflow (passa no JIT, mas o binário linkado morre com 0xC0000095) |
+| Overflow.SaturatingRemIntMinIsZero | Portar | exit code 5 |
 | Overflow.SaturatingSubClampsToMin | Bloqueado | modos de overflow (esperado 2, veio 0) |
 | Overflow.SaturatingMulClampsToMax | Bloqueado | modos de overflow (esperado 2, veio 0) |
 | Overflow.UnsignedSaturatingSubClampsToZero | Bloqueado | modos de overflow (esperado 7, veio 6) |

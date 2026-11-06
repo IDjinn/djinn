@@ -44,9 +44,6 @@ WRONG_REASON = {
     "PointerCompat.IncompatibleTypes": "conversão entre ponteiros incompatíveis",
     "Nullable.CastNullableToNonNullableEmitsWarning": "tipos anuláveis",
 }
-LINK_DIVERGES = {
-    "Overflow.SaturatingRemIntMinIsZero": "modos de overflow (passa no JIT, mas o binário linkado morre com 0xC0000095)",
-}
 GAP_BY_TOKEN = [
     ("require", "contratos (`require`/`ensure`)"),
     ("ensure", "contratos (`require`/`ensure`)"),
@@ -160,8 +157,6 @@ def decide(case):
         return "Bloqueado", gap_of(case)
     if case["id"] in WRONG_REASON:
         return "Bloqueado", gap_of(case) + " (o erro atual tem outro motivo)"
-    if case["id"] in LINK_DIVERGES:
-        return "Bloqueado", LINK_DIVERGES[case["id"]]
     wants_error = case["diagnostics"] > 0 or case["wants_diagnostic"]
     if wants_error:
         if "code" in case:
