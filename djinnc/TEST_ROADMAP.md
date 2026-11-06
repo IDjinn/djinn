@@ -331,11 +331,11 @@ Linux e o caminho POSIX do runtime de processos não foram testados.
 `build/release` ainda lista só `djinn_runtime.c` e `logger.c`, então compila o runtime pela fonte apenas depois de um seed
 novo; com `--runtime-lib` funciona.
 
-**Problema conhecido no JIT (Windows).** `std/logger` (`logger_info` chamado por código no JIT) falha de forma intermitente:
-`__stdio_common_vfprintf` seguido de `fflush` no stdout lê um ponteiro com a metade baixa zerada dentro do `ucrtbase`. Reproduz
-com Djinn puro, sem o logger do runtime, e não acontece no binário linkado nem com `puts`. Causa não encontrada. O runner
-repete uma vez o caso que morre com exit code negativo (até duas vezes) e marca `retries` no relatório. O handler de crash agora
-imprime endereço, módulo e tipo de acesso.
+**Resolvido: CRT misturado no JIT (Windows).** `std/logger` falhava em cerca de metade das execuções com stdout em arquivo
+ou pipe (exit `0xC0000409`, fast fail 5, parâmetro inválido na CRT); com stdout em `NUL` nunca falhava. O gerador de símbolos do
+processo procura em todos os módulos carregados, e `fflush`, `_fileno` e outros vinham do `msvcrt.dll`, que o processo também carrega,
+enquanto o `FILE*` vinha do `ucrtbase.dll`. Os dois têm layouts diferentes. O `--run` agora consulta o `ucrtbase.dll` antes do
+processo. Não tinha relação com estado estático do logger.
 
 **Custo por estágio** (Windows, `arith.djinn`, média de 3 execuções, máquina de desenvolvimento):
 
@@ -404,8 +404,7 @@ runner --compiler <djinnc> --runtime-lib <lib> [--runtime-dir d] [--jobs n] [--f
 - Resultado: os 148 casos passam em poucos segundos com 8 jobs.
 - Os 51 casos de `errors/` têm um `.code` com o código esperado (primeiro erro), gerado da saída atual do djinnc.
 - `--link --out <dir absoluto> [--lld]`: depois do JIT, cada caso é compilado para um executável em `<dir>` e executado de
-  novo, conferindo exit code e `.stdout`. Um processo que morre com exit code negativo é repetido até 2 vezes (o JIT do
-  `std/logger` ainda falha de forma intermitente); o relatório JSON traz `retries`.
+  novo, conferindo exit code e `.stdout`. Um processo que morre com exit code negativo é repetido até 2 vezes; o relatório JSON traz `retries`.
 - `--selftest` do djinnc entra como um caso. Os 149 casos passam nos dois caminhos.
 - `--crash` (exige `--out`): roda `crash/*.djinn` linkado com `-g`, espera exit code diferente de zero e cada linha do
   `.expect` na saída. Opt-in porque só faz sentido com `--link`. A causa de o rastro não aparecer era a falta de
@@ -415,22 +414,30 @@ runner --compiler <djinnc> --runtime-lib <lib> [--runtime-dir d] [--jobs n] [--f
   breakpoint, compilado com `-g` e executado sob `lldb -b` (`frame variable` e `bt`). Substitui `tools/debug_tests.sh`.
 - `--library` (exige `--out`): compila `library/mathlib.djinn` com `--library`, o `app.djinn` com `--lib` e confere o exit
   code de `app.exit`. Substitui `library/run.cmd`.
-- `std/logger` falha de vez em quando no JIT com vários processos em paralelo (exit `0xC0000409`); sozinho passa sempre.
-  O runner repete o caso, mas o problema do JIT continua aberto.
 - **Falta:** a máscara `[Requires]`, `Verify`/`Expected`, o grafo e o CTest. Com isso o `run.sh`, o
   `tools/debug_tests.sh` e o `library/run.cmd` podem ser apagados.
 
 ### Fase 2: migração do gtest
 
-1. Script de porte único: extrai o `R"(...)"` e as expectativas de cada `TEST` para `tests/conformance/<área>/<nome>.djinn`.
-   Não copia `generateBinary`: a máscara vem das expectativas, então um teste que só conta diagnósticos deixa de linkar.
-2. Congelar `tests/**/*.cpp`: teste novo só em Djinn.
-3. Portar por pasta, da menor para a maior, e triar o que falhar: bug do djinnc, recurso fora do subset ou teste que
-   só passava por acaso (como `Numbers.CompileTimeOverflowCheck`, que espera 0 diagnósticos com overflow).
-4. Trocar contagem de diagnósticos por código esperado, aos poucos. O porte inicial só garante "falhou".
-5. Testes que só fazem sentido para internos do stage0 (mangler, binder, `DiagnosticEngine`) morrem com o stage0.
+Nem todo teste do gtest merece ir para o djinnc: são 724 `TEST` em 54 arquivos, e cada um é avaliado antes de ser portado.
 
-Pronto quando: o gtest deixa de ser necessário para validar o djinnc. O stage0 pode manter o dele até ser aposentado.
+1. **Triagem, um a um.** Uma tabela em `tests/conformance/TRIAGE.md` lista cada `TEST` com a decisão e o motivo, por pasta
+   (`compile_time` 158, `control_flow` 97, `types` 97, `compiler` 85, `aggregates` 79, `arithmetic` 72, `generics` 34,
+   `functions` 33, `async` 24, `modules` 17, `memory` 15, `strings` 12):
+   - **Portar:** comportamento da linguagem que o djinnc precisa manter e que nenhum caso atual cobre.
+   - **Reescrever:** o comportamento importa, mas o teste não serve como está, porque só conta diagnósticos ou depende de
+     detalhe do stage0. Vira um caso novo com código esperado.
+   - **Descartar:** já coberto por `samples/`, `std/` ou `errors/`, duplicado, ou específico de internos do stage0 (mangler,
+     binder, `DiagnosticEngine`). Também entra aqui o que só passava por acaso, como `Numbers.CompileTimeOverflowCheck`, que
+     espera 0 diagnósticos com overflow.
+2. Congelar `tests/**/*.cpp`: teste novo só em Djinn.
+3. Script de porte: extrai o `R"(...)"` e as expectativas apenas dos testes marcados **Portar** para
+   `tests/conformance/<área>/<nome>.djinn`. Não copia `generateBinary`: a máscara vem das expectativas, então um teste que só
+   conta diagnósticos deixa de linkar.
+4. Portar por pasta, da menor para a maior. O que falhar volta para a triagem: bug do djinnc, recurso fora do subset ou teste errado.
+5. Trocar contagem de diagnósticos por código esperado, aos poucos. O porte inicial só garante "falhou".
+
+Pronto quando: todo `TEST` tem decisão na triagem e o gtest deixa de ser necessário para validar o djinnc. O stage0 pode manter o dele até ser aposentado.
 
 ### Fase 3: `[Test]` e `djinnc test`
 

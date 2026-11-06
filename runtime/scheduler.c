@@ -262,7 +262,7 @@ DWORD WINAPI djinn_worker_thread(LPVOID arg)
 void __djinn_runtime_init(int num_threads)
 {
     memset(&djinn_rt, 0, sizeof(djinn_rt));
-    logger = logger_create("RUNTIME", 1, LOG_TRACE);
+    logger = logger_get("RUNTIME", 1, LOG_TRACE);
     logger_configure_from_properties(logger, "runtime.properties");
 #ifdef _WIN32
     SetConsoleOutputCP(CP_UTF8);
@@ -430,6 +430,8 @@ void __djinn_runtime_shutdown(void)
 #endif
 
     DJINN_TRACE("runtime shut down");
+    logger_destroy_all();
+    logger = NULL;
 }
 
 void __djinn_spawn(void* coro_handle)
