@@ -395,7 +395,7 @@ runner --compiler <djinnc> --runtime-lib <lib> [--runtime-dir d] [--jobs n] [--f
 - Descobre `samples/`, `std/` e `errors/`, roda cada caso como um processo filho, 8 em paralelo por padrão, com timeout de 120 s.
 - Programas passam pelo JIT (`--run`): confere exit code e, se existir, o `.stdout`. Casos de erro rodam `--check` com
   diagnósticos em JSON e conferem um erro; um sidecar `<nome>.code` opcional exige o código.
-- Resultado: 148 casos passam em ~4 s, contra ~40 s do `run.sh` com link.
+- Resultado: os 148 casos passam em poucos segundos com 8 jobs.
 - **Falta:** caminho `--link` (o `run.sh` ainda cobre o link e os `crash/` e `debug/`), os `.code` dos 48 casos de erro,
   a máscara `[Requires]`, `Verify`/`Expected` e o grafo. O `run.sh` só sai quando o runner cobrir o link.
 
