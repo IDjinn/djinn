@@ -1,0 +1,96 @@
+namespace djinnc;
+
+struct Verify {
+    PointerList* cases;
+    Config* config;
+    ptr<i8> name;
+    bool std;
+    i32 retry;
+    i32 timeout;
+
+    public static unsafe Verify* create(PointerList* cases, Config* config) {
+        Verify* verify = (Verify*)Memory.zalloc(sizeof(Verify));
+        verify.cases = cases;
+        verify.config = config;
+        return verify;
+    }
+
+    public unsafe Verify* test(ptr<i8> name) {
+        this.name = name;
+        this.std = false;
+        this.retry = 0;
+        this.timeout = 0;
+        return this;
+    }
+
+    public unsafe Verify* with_std() {
+        this.std = true;
+        return this;
+    }
+
+    public unsafe Verify* policy(MethodInfo* method) {
+        for (mut i32 i = 0; i < (i32)method.attrCount; i = i + 1) {
+            if (Strings.same((ptr<i8>)method.attrs[i].name, "TestPolicy")) {
+                TestPolicy* policy = (TestPolicy*)method.attrs[i].payload;
+                this.retry = policy.retry;
+                this.timeout = policy.timeout;
+            }
+        }
+        return this;
+    }
+
+    unsafe TestCase* add(Source* source, i32 kind, Expected* expected) {
+        Config* config = this.config;
+        TestCase* test = Runner.new_case(config, this.name, source.path, kind);
+        test.std = this.std;
+        test.expected = expected;
+        test.max_retries = this.retry;
+        if (this.timeout > 0) {
+            test.timeout_us = (i64)this.timeout * 1000;
+        }
+        if (config.filter == null || strstr(test.name, config.filter) != null) {
+            PointerList* cases = this.cases;
+            cases.push((ptr)test);
+        }
+        return test;
+    }
+
+    public unsafe void runs(Source* source, Expected* expected) {
+        this.add(source, Kind.RUN, expected);
+    }
+
+    public unsafe void compiles(Source* source) {
+        this.add(source, Kind.CLEAN, Expected.create());
+    }
+
+    public unsafe void diagnostics(Source* source, Expected* expected) {
+        this.add(source, Kind.ERROR, expected);
+    }
+
+    public unsafe void crashes(Source* source, Expected* expected) {
+        Config* config = this.config;
+        if (config.crash) {
+            this.add(source, Kind.CRASH, expected);
+        }
+    }
+
+    public unsafe void stops_at(Source* source, i32 line, Expected* expected) {
+        Config* config = this.config;
+        if (config.debug) {
+            TestCase* test = this.add(source, Kind.DEBUG, expected);
+            test.line = line;
+        }
+    }
+
+    public unsafe void links_library(Source* library, Source* application, Expected* expected) {
+        Config* config = this.config;
+        if (config.library) {
+            TestCase* test = this.add(application, Kind.LIBRARY, expected);
+            test.library = library.path;
+        }
+    }
+
+    public unsafe void selftest() {
+        this.add(Sources.file(""), Kind.SELFTEST, Expected.create());
+    }
+}

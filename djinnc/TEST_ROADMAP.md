@@ -245,8 +245,7 @@ struct GoodOne {}
   o que faltou e o que sobrou, com o código e a posição de cada um.
 - **IR e AST:** `verify.ir_contains(source, "sdiv")` e `verify.ast_matches(source, snapshot)`.
 - **Exit code:** em POSIX compara os 8 bits baixos (a regra de `DJINN_EXIT` em `tests/TestHelpers.h`). Sinal e abort são estados próprios.
-- **Sidecars antigos:** `samples/x.djinn` com `x.exit` e `x.stdout` continuam valendo. O runner os transforma em
-  `Expected.exit(...).stdout(...)` e gera o teste correspondente. Casos novos usam o código acima.
+- **Sem sidecars:** `.exit`, `.stdout`, `.code`, `.expect` e `.debug` não existem mais. Toda expectativa está em `tests/conformance/suites/`.
 
 ### `[Requires]`: até onde um teste do compilador vai
 
@@ -280,20 +279,22 @@ erro de parser não depende de o atributo ser lido. Sem `[Requires]`, a máscara
 
 ### `[TestPolicy]`: repetição e timeout por teste
 
+O sistema de testes não depende do compilador: o atributo é declarado em `tests/conformance/testing/policy.djinn` como qualquer
+`attribute` de usuário, e o runner o identifica pela reflexão. Nem o djinnc nem a std conhecem esse nome.
+
 ```djinn
 [TestPolicy(retry = 2, timeout = 5000)]
+void flaky_network() {
+}
+
+verify.test("net/flaky").policy(typeof(flaky_network)).runs(Sources.file("cases/net.djinn"), Expected.exit(0));
 ```
 
-- `retry`: quantas vezes o caso roda de novo se o processo morrer com exit code negativo. O padrão é 0, então um crash falha
-  na primeira vez, a não ser que o teste declare o contrário. Falha de asserção ou exit code errado não repete; casos de
-  `crash/` também não, porque ali morrer é o esperado.
+- `retry`: quantas vezes o caso roda de novo se o processo morrer com exit code negativo. O padrão é 0, então um crash falha na
+  primeira vez. Falha de asserção ou exit code errado não repete; casos de crash também não, porque ali morrer é o esperado.
 - `timeout`: limite em milissegundos, no lugar dos 120 s do runner.
-- O atributo é declarado em `std/sys/intrinsics.djinn` e chega à reflexão como payload tipado. O djinnc também aceita o nome
-  sem std, para casos que não importam nada.
-- Hoje o runner lê o atributo do texto da source, porque os casos são arquivos e ainda não existe método de teste. Por isso só
-  argumentos nomeados valem (posicional vira falha do caso), e funciona mesmo em caso de erro de parser. Quando `Verify` e
-  `[Test]` chegarem, ele passa para o método de teste, como `[Requires]`, e o runner lê da reflexão.
-- Novas regras entram como campos do atributo.
+- A source do caso não leva o atributo: ela continua sendo só a entrada sob teste.
+- Hoje a função é só o portador do atributo. Quando `[Test]` tiver descoberta, ele fica no próprio método de teste.
 
 ## Etapas
 
@@ -408,32 +409,31 @@ apagado. Os 48 casos de `errors/` ganham códigos esperados.
 
 #### Estado da Fase 1
 
-Começou pelo runner mínimo, `tests/conformance/runner.djinn`: compila com o djinnc e os fontes de `djinnc/src/support`, sem std.
+O runner é `tests/conformance/runner.djinn`, compilado com `tests/conformance/build.sh`, sem std, junto com as fontes de
+`djinnc/src/support`. Rode da raiz do repositório:
 
 ```bash
-djinnc tests/conformance/runner.djinn djinnc/src/support/{memory,collections}/*.djinn   djinnc/src/support/text/{byte_buffer,strings}.djinn djinnc/src/support/system/{libc,files,process}.djinn -o runner
-runner --compiler <djinnc> --runtime-lib <lib> [--runtime-dir d] [--jobs n] [--filter texto] [--report arquivo.json]
+DJINN_USE_LLD=1 bash tests/conformance/build.sh <djinnc> <lib> build/runner
+build/runner --compiler <djinnc absoluto> --runtime-lib <lib> [--runtime-dir d] [--jobs n] [--filter texto] [--report arquivo.json]
+             [--link] [--link-debug] [--crash] [--debug] [--library] [--out <dir absoluto> [--lld]]
 ```
 
-- Descobre `samples/`, `std/` e `errors/`, roda cada caso como um processo filho, 8 em paralelo por padrão, com timeout de 120 s.
-- Programas passam pelo JIT (`--run`): confere exit code e, se existir, o `.stdout`. Casos de erro rodam `--check` com
-  diagnósticos em JSON e conferem um erro; um sidecar `<nome>.code` opcional exige o código.
-- Resultado: os 148 casos passam em poucos segundos com 8 jobs.
-- Os 51 casos de `errors/` têm um `.code` com o código esperado (primeiro erro), gerado da saída atual do djinnc.
-- `--link --out <dir absoluto> [--lld]`: depois do JIT, cada caso é compilado para um executável em `<dir>` e executado de
-  novo, conferindo exit code e `.stdout`.
-- `[TestPolicy]` define repetição e timeout por caso; o relatório JSON traz `retries`.
-- `--selftest` do djinnc entra como um caso. Os 149 casos passam nos dois caminhos.
-- `--crash` (exige `--out`): roda `crash/*.djinn` linkado com `-g`, espera exit code diferente de zero e cada linha do
-  `.expect` na saída. Opt-in porque só faz sentido com `--link`. A causa de o rastro não aparecer era a falta de
-  `uwtable`: sem `.pdata` o Windows não consegue desenrolar a pilha e encerra o processo sem chamar o filtro de exceção.
-  O djinnc agora marca toda função própria com `uwtable`.
-- `--debug` (exige `--out`): cada `debug/<nome>.debug` lista `break <linha>` seguido dos trechos esperados; um caso por
-  breakpoint, compilado com `-g` e executado sob `lldb -b` (`frame variable` e `bt`). Substitui `tools/debug_tests.sh`.
-- `--library` (exige `--out`): compila `library/mathlib.djinn` com `--library`, o `app.djinn` com `--lib` e confere o exit
-  code de `app.exit`. Substitui `library/run.cmd`.
-- **Falta:** a máscara `[Requires]`, `Verify`/`Expected`, o grafo e o CTest. Com isso o `run.sh`, o
-  `tools/debug_tests.sh` e o `library/run.cmd` podem ser apagados.
+- As expectativas são código. `tests/conformance/testing/` tem `Sources`, `Expected` e `Verify`; `tests/conformance/suites/` registra
+  cada teste. A source é um `.djinn` puro, em `tests/djinnc/` ou `tests/conformance/cases/`.
+
+```djinn
+verify.test("samples/add").runs(Sources.file("tests/djinnc/samples/add.djinn"), Expected.exit(3).stdout("3\n"));
+verify.test("errors/moved").diagnostics(Sources.file("tests/djinnc/errors/moved.djinn"), Expected.error(DiagnosticErrors.USE_AFTER_MOVE));
+verify.test("types/ok").with_std().compiles(Sources.file("tests/conformance/cases/types/ok.djinn"));
+verify.test("crash/null").crashes(Sources.file("tests/djinnc/crash/null_read.djinn"), Expected.contains("native stack trace"));
+verify.test("debug/locals:8").stops_at(Sources.file("tests/djinnc/debug/locals.djinn"), 8, Expected.contains("a = 3"));
+```
+
+- Cada teste vira um processo filho, 8 em paralelo por padrão, com timeout de 120 s. `--link` troca o JIT por um executável em `--out`.
+- `--crash`, `--debug` (lldb) e `--library` ligam os grupos que precisam de executável; exigem `--out`.
+- `tests/djinnc/run.sh`, `tools/debug_tests.sh` e `tests/djinnc/library/run.cmd` foram apagados. O `tools/bootstrap.sh` usa o runner.
+- **Falta:** `[Test]` com descoberta (hoje cada teste é registrado à mão em `Verify`), `.at()`/`.with_message()` e a comparação exata
+  de diagnósticos, `Sources.text`, a máscara `[Requires]`, o grafo e o CTest. Uma source sem teste registrado não é detectada.
 
 ### Fase 2: migração do gtest
 
