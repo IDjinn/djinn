@@ -151,8 +151,12 @@ Intrinsics: `unlikely(bool)`, `assume(bool)`, `debugtrap()`, `trap()`, `unreacha
 
 ## Ownership
 Non-copy values (structs, tagged enums, `str`, `string`, `arr<T>`) move on `T x = y;` and `x = y;`. Using a moved variable is an error;
-assigning to it re-initializes it. Integers, floats, `bool`, pointers and payload-less enums copy. Passing to a function does not move,
-and there is no borrow checking (same as stage0).
+assigning to it re-initializes it. Integers, floats, `bool`, pointers and payload-less enums copy. Passing to a function does not move.
+
+Borrows: `T* p = &x;` (local `x`, safe pointer) borrows `x` until `p` leaves scope. While the borrow is live, `x = ...`, `x++` and moving `x`
+are errors, and a second `&x` is an error when `x` is `mut` (the borrow is exclusive; borrows of an immutable `x` are shared and can coexist).
+Only a declaration initialized directly with `&x` is tracked: borrows passed to calls or stored in fields are not, reads of `x` are not
+checked, and there is no flow analysis (a borrow lives for the whole scope of its pointer). `return &local;` is an error.
 
 ## Macros
 `macro name { (params) => { expression } ... }`. Parameters are `expression x`, `identifier x`, `literal x`, `type T` or a bare literal token
