@@ -78,8 +78,7 @@ directory).
 `--emit-ir`, `--emit-asm` and `--emit-ast` are view modes: they show only the files given as inputs. The runtime (`runtime/core/`) and the std loaded by `--std` are dependencies, so their functions are not emitted (only declarations when referenced) and their declarations are not dumped; pass a std file as an input to see it. `--keep-ir`, `--no-link` and linked builds keep everything.
 | `--emit-tokens` / `--emit-ast` | Dump the token list or the AST and exit. |
 | `--stats` | Print files, tokens, AST nodes and arena usage, plus a `PerformanceMonitor` lap per phase (lex, parse, codegen, write-ir, object, link) and the total, in ms. |
-| `--selftest` | Run the built-in unit checks (arena, atoms, maps, ...). |
-| `test <dir> [options] [-- args]` | Build the project in `<dir>` with its `*_test.djinn` files (and `test-libs:` from `djinn.proj`), reflection on, then run the result. Everything after `--` goes to the test program (`--filter`, `--jobs`, `--report`, `--list`). The exit code is the test program's. |
+| `test <dir> [options] [-- args]` | Build the project in `<dir>` with its `*_test.djinn` files (and `test-libs:` from `djinn.proj`), reflection on, then run the result. Everything after `--` goes to the test program (`--filter`, `--tag`, `--fail-fast`, `--jobs`, `--report`, `--list`). Without a `main` in the test files, the driver generates one that runs the tests; `entry:` in `djinn.proj` names the normal `main` file to leave out. The exit code is the test program's. |
 | `--tests` | Include `*_test.djinn` in a project build without running anything. Normal builds skip those files. |
 
 Objects are emitted directly through LLVM-C (`LLVMTargetMachineEmitToFile`); only the x86 target is initialized.
@@ -115,11 +114,14 @@ enums, `switch`, interfaces, async, exceptions and string interpolation are not 
 
 ## Testing
 
-### Unit checks
+### Unit tests
 
 ```bash
-djinnc --selftest
+djinnc test djinnc
+djinnc test libs/testing
 ```
+
+The unit tests live next to the code in `*_test.djinn` (arena, atoms, `U32Map`). `tests/djinnc/unit.sh <djinnc> <runtime lib>` runs both projects.
 
 ### Samples and error cases
 

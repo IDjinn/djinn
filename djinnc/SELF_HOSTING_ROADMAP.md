@@ -516,7 +516,7 @@ Fases 0 e 1 podem andar em paralelo (arquivos disjuntos: `generator/`+`binder/`+
 
 | Item | Estado |
 |---|---|
-| 2.1 `Arena` (alloc, zalloc, mark, reset_to, destroy) | feito, coberto por `djinnc --selftest` |
+| 2.1 `Arena` (alloc, zalloc, mark, reset_to, destroy) | feito, coberto por `djinnc/src/support/memory/arena_test.djinn` (`djinnc test djinnc`) |
 | 2.2 `Mem`/`PtrVec`/`ByteBuf` sobre a arena do processo (`unsafe static mut void*`), sem `free` | feito |
 | 2.3 `AtomTable` (FNV-1a, endereçamento aberto, `intern` zero-copy e `intern_copy` terminado em NUL) | feito, usado pela AST; keywords do lexer ainda usam `Str.equals` |
 | 2.4 `TokenList` contígua (32 bytes por token) | feito; SoA de verdade pendente |

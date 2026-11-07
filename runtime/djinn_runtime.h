@@ -232,6 +232,9 @@ void __djinn_call_method(void* address, void* target);
 void* __djinn_call_entry_handle(void* address);
 void* __djinn_call_method_handle(void* address, void* target);
 void __djinn_reflect_register(void** types, int32_t count);
+void __djinn_invoke_register(void** entries, int32_t count);
+void* __djinn_invoke_lookup(void* function);
+void __djinn_invoke_call(void* thunk, void* target, void** args, void* out);
 int32_t __djinn_reflected_count(void);
 void* __djinn_reflected_type(int32_t index);
 

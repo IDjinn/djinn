@@ -14,6 +14,8 @@ struct TestEntry {
 struct TestOptions {
     ptr<i8> filter;
     ptr<i8> report;
+    ptr<i8> tag;
+    bool fail_fast;
     i32 jobs;
     bool ok;
 }
@@ -88,8 +90,15 @@ struct TestProgram {
         while (index < Process.argc()) {
             ptr<i8> argument = Environment.argument(index);
             ptr<i8> value = Environment.argument(index + 1);
+            if (Text.same(argument, "--fail-fast")) {
+                options.fail_fast = true;
+                index = index + 1;
+                continue;
+            }
             if (Text.same(argument, "--filter")) {
                 options.filter = value;
+            } else if (Text.same(argument, "--tag")) {
+                options.tag = value;
             } else if (Text.same(argument, "--report")) {
                 options.report = value;
             } else if (Text.same(argument, "--jobs")) {
@@ -133,7 +142,7 @@ struct TestProgram {
     static unsafe i32 run_all() {
         TestOptions* options = TestProgram.parse_options();
         if (!options.ok) {
-            printf("usage: <tests> [--list | --run <name> | --filter <text> --jobs <n> --report <file>]\n");
+            printf("usage: <tests> [--list | --run <name> | --filter <text> --tag <tag> --fail-fast --jobs <n> --report <file>]\n");
             return 2;
         }
         ItemList* entries = TestProgram.collect();
@@ -141,6 +150,9 @@ struct TestProgram {
         for (mut i32 i = 0; i < entries.length; i = i + 1) {
             TestEntry* entry = (TestEntry*)entries.get(i);
             if (options.filter != null && !Text.contains(entry.name, options.filter)) {
+                continue;
+            }
+            if (options.tag != null && !TestMethods.has_tag(entry.method, options.tag)) {
                 continue;
             }
             TestNode* node = TestNode.create(entry.name, 60000000);
@@ -156,20 +168,30 @@ struct TestProgram {
             node.command = TestProgram.command_for(entry.name);
             pool.add(node);
         }
+        mut bool stopped = false;
+        mut i32 skipped = 0;
         mut ptr next = pool.wait();
         while (next != null) {
             TestNode* node = (TestNode*)next;
             mut ptr<i8> reason = null;
             if (node.exit_code != 0) {
-                if (node.exit_code < 0 && Text.contains(node.output, "runtime error: panic")) {
+                if (node.exit_code < 0 && (Text.contains(node.output, "runtime error: panic") || Text.contains(node.output, "uncaught exception"))) {
                     node.exit_code = 1;
                 }
                 reason = TestProgram.failure_reason(node);
             }
-            pool.complete(node, reason);
+            bool retrying = pool.complete(node, reason);
+            if (!retrying && reason != null && options.fail_fast && !stopped) {
+                stopped = true;
+                skipped = pool.stop_scheduling();
+            }
             next = pool.wait();
         }
         TestReport.print_summary(pool);
+        if (skipped > 0) {
+            printf("stopped at the first failure: %d not run
+", skipped);
+        }
         if (options.report != null) {
             TestReport.write_json(pool, options.report);
         }

@@ -1,0 +1,77 @@
+namespace djinnc;
+
+import testing;
+
+struct AtomTests {
+    [Test]
+    unsafe void ids_are_sequential() {
+        Arena* arena = Arena.create(65536);
+        AtomTable* table = AtomTable.create(arena);
+        u32 foo = table.intern("foo", 3);
+        u32 bar = table.intern("bar", 3);
+        Expect.equal(0, (i64)foo);
+        Expect.equal(1, (i64)bar);
+        arena.destroy();
+    }
+
+    [Test]
+    unsafe void the_same_text_gets_the_same_id() {
+        Arena* arena = Arena.create(65536);
+        AtomTable* table = AtomTable.create(arena);
+        u32 foo = table.intern("foo", 3);
+        Expect.equal((i64)foo, (i64)table.intern("foo", 3));
+        arena.destroy();
+    }
+
+    [Test]
+    unsafe void the_length_is_part_of_the_key() {
+        Arena* arena = Arena.create(65536);
+        AtomTable* table = AtomTable.create(arena);
+        u32 foo = table.intern("foo", 3);
+        Expect.is_true(table.intern("fo", 2) != foo);
+        arena.destroy();
+    }
+
+    [Test]
+    unsafe void lookups_survive_a_rehash() {
+        Arena* arena = Arena.create(65536);
+        AtomTable* table = AtomTable.create(arena);
+        ByteBuffer* text = ByteBuffer.create();
+        for (mut i32 i = 0; i < 5000; i = i + 1) {
+            text.length = 0;
+            text.append("name_");
+            text.append_int(i);
+            ptr<i8> copy = Strings.duplicate(text.data, text.length);
+            table.intern(copy, (u32)text.length);
+        }
+        Expect.equal(5000, (i64)table.count);
+        text.length = 0;
+        text.append("name_4321");
+        u32 found = table.intern(text.data, (u32)text.length);
+        Expect.is_true(found < table.count);
+        Expect.equal_text("name_4321", table.text(found));
+        Expect.equal(5000, (i64)table.count);
+        arena.destroy();
+    }
+
+    [Test]
+    unsafe void copying_hits_an_existing_atom() {
+        Arena* arena = Arena.create(65536);
+        AtomTable* table = AtomTable.create(arena);
+        u32 existing = table.intern("name_1", 6);
+        Expect.equal((i64)existing, (i64)table.intern_copy("name_1", 6));
+        Expect.equal(1, (i64)table.count);
+        arena.destroy();
+    }
+
+    [Test]
+    unsafe void a_copied_atom_is_terminated() {
+        Arena* arena = Arena.create(65536);
+        AtomTable* table = AtomTable.create(arena);
+        u32 fresh = table.intern_copy("fresh_atom", 10);
+        ptr<i8> fresh_text = table.text(fresh);
+        Expect.equal(0, (i64)fresh_text[10]);
+        Expect.equal_text("fresh_atom", fresh_text);
+        arena.destroy();
+    }
+}

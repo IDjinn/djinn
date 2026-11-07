@@ -12,7 +12,7 @@ validado em vez de repetir tudo. É o primeiro passo para o djinnc virar um SDK 
 | O que os gtests verificam | `returnCode` (474 usos), `diagnostics` (607), IR (73), AST (~70), relatório de runtime (9). |
 | Código de erro nos gtests | Só 6 usos de `hasErrorCode`. O resto conta diagnósticos, então não sabe *qual* erro saiu. |
 | `tests/djinnc/run.sh` | Samples com `.exit` e `.stdout` opcional. Erros: só faz `grep "error:"`. Sequencial, sem stdin. |
-| `djinnc --selftest` | Runner manual (`SelfTest.check`) para arena, atoms e mapas. |
+| `djinnc --selftest` (removido) | Era um runner manual para arena, atoms e mapas; virou `*_test.djinn` em `djinnc/src`. |
 | `tools/bootstrap.sh`, `tests/djinnc/library/run.cmd` | Cadeias em que um passo consome o artefato do anterior, escritas à mão. |
 
 Lacunas do djinnc que condicionam o desenho (verificadas no código):
@@ -486,15 +486,11 @@ Pronto quando: todo `TEST` tem decisão na triagem e o gtest deixa de ser necess
 
 `[Test]` já existe no runner de conformidade, por reflexão (veja o estado da Fase 1). O que segue é para testes de projeto, com `djinnc test`.
 
-1. **Parcial:** `[Test]` `async` sem parâmetros já roda (o worker chama a função, recebe a corrotina e roda o event loop, via `__djinn_call_entry_handle`/`__djinn_call_method_handle` no runtime). Parâmetros ficam para os testes parametrizados da Fase 5, porque hoje nada fornece os valores, e `[Test]` com `throws` continua de fora. Original: em modo teste, o compilador emite uma tabela de descritores (nome, arquivo, linha, atributos, `MethodInfo*`) e um
-   thunk por teste, `void(ptr* args, ptr out)`, porque o runner não pode chamar uma assinatura desconhecida. Thunks de `async` fazem `await`.
-2. **Feito:** `Expect` em `libs/testing` (`is_true`, `is_false`, `equal`, `equal_text`, `contains`, `fail`, com o local do chamador) sobre `__djinn_panic`. Falha de `Expect` aborta com stack trace e não é repetida pelo `[TestPolicy]`; um crash é.
-3. **Feito, com ressalvas:** subcomando `djinnc test [dir]`: compila o projeto incluindo `*_test.djinn`, gera o entrypoint se não houver `main`,
-   linka um binário só e executa. Workers são esse mesmo binário reexecutado, então é um link por projeto, não por teste.
-   Flags: `--filter`, `--tag`, `--jobs`, `--list`, `--report`, `--fail-fast`. `djinnc arquivo.djinn` continua funcionando.
-   Hoje existem `--filter`, `--jobs`, `--list`, `--report` (em `TestProgram`, repassadas depois de `--`). Ainda faltam `--tag` e `--fail-fast`, e o entrypoint não é gerado: o `main` do projeto de testes vive em um `*_test.djinn` (ou no arquivo do `entry:` do manifesto, que o modo teste exclui).
+1. **Feito, com uma ressalva:** `[Test]` roda por um thunk que o compilador gera para todo método refletido que tenha atributo (`void(ptr target, ptr* args, ptr out)`, registrado com `__djinn_invoke_register`; o runner o acha com `__djinn_invoke_lookup`). O thunk lê os argumentos de `args`, chama a função e, se ela tem `throws` e devolveu um erro, termina pelo caminho do erro não tratado: o teste falha com o erro e o stack trace, sem mudar o fluxo do código testado. Isso funciona para qualquer código, não só para testes. `[Test]` `async` segue pelo caminho do event loop (`__djinn_call_*_handle`), então `async` com `throws` ainda não é verificado. **Falta:** parâmetros. O thunk já aceita `args`, mas nada fornece os valores; isso depende do grafo (Fase 4) ou dos testes parametrizados (Fase 5).
+2. **Feito:** `Expect` em `libs/testing` (`is_true`, `is_false`, `equal`, `equal_text`, `contains`, `fail`, com o local do chamador) sobre `__djinn_panic`. Todas as verificações aceitam uma mensagem opcional antes do local (`Expect.equal(4, soma, "soma")`), que aparece junto do esperado quando falha, como no `Debug.Assert`. Falha de `Expect` aborta com stack trace e não é repetida pelo `[TestPolicy]`; um crash é.
+3. **Feito:** subcomando `djinnc test [dir]`: compila o projeto incluindo `*_test.djinn`, linka um binário só e executa. Workers são esse mesmo binário reexecutado, então é um link por projeto, não por teste. Se nenhum `*_test.djinn` define `main`, o driver gera um (`import testing; i32 main() { return TestProgram.run(); }`); o `main` normal do projeto sai do build de teste pelo `entry:` do manifesto. Flags (repassadas depois de `--`): `--filter`, `--tag` (atributo `[Tag("x")]`), `--fail-fast` (para de agendar no primeiro erro final e diz quantos não rodaram), `--jobs`, `--list`, `--report`.
 4. **Feito:** `*_test.djinn` não entra em build normal (`--tests` inclui). O manifesto aceita `test-libs:` e `entry:`. Isso cobre tanto testes ao lado do código quanto um projeto só de testes. `libs/testing` ganhou os próprios testes.
-5. Migrar `SelfTest` para `djinnc/src/**/*_test.djinn` e remover `--selftest`.
+5. **Feito:** `SelfTest` virou `djinnc/src/support/{memory/arena,text/atoms,collections/u32_map}_test.djinn` (16 testes) e `--selftest` foi removido, junto do caso `compiler_selftest` do runner de conformidade. `tests/djinnc/unit.sh` roda `djinnc test djinnc` e `djinnc test libs/testing`; o CTest tem `djinn_unit`. O bloqueio era a colisão de externs entre `djinnc/src/support/system/libc.djinn` e `std/sys/libc.djinn` (mesmo símbolo C, mesmos parâmetros, retornos diferentes): o djinnc descartava a segunda declaração e chamadas no std pegavam a do djinnc. Agora externs iguais de namespaces diferentes viram sobrecargas, e a chamada prefere a do próprio namespace, depois as importadas.
 
 Pronto quando: `djinnc test djinnc` roda os antigos checks de arena, atoms e mapas.
 

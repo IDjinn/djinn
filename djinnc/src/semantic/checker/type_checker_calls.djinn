@@ -82,7 +82,24 @@ impl TypeChecker {
         return head;
     }
 
-    FunctionInfo* pick_overload(FunctionInfo* head, Node* call, i32 offset) {
+    unsafe i32 visibility(u32 home) {
+        if (home == this.scope) {
+            return 2;
+        }
+        SymbolTable* symbols = this.symbols;
+        NamespaceInfo* info = symbols.namespace_at(this.scope);
+        if (info.imports != null) {
+            IdList* imports = info.imports;
+            for (mut i32 i = 0; i < imports.length; i = i + 1) {
+                if (imports.get(i) == home) {
+                    return 1;
+                }
+            }
+        }
+        return 0;
+    }
+
+    unsafe FunctionInfo* pick_overload(FunctionInfo* head, Node* call, i32 offset) {
         IdList* types = IdList.create();
         for (mut i32 i = 0; i < call.count(); i = i + 1) {
             Node* argument = call.child(i);
@@ -99,7 +116,7 @@ impl TypeChecker {
         while (candidate != null) {
             IdList* params = candidate.param_types;
             i32 fixed = params.length - offset;
-            bool arity_ok = call.count() == fixed || (candidate.is_variadic && call.count() >= fixed);
+            bool arity_ok = call.count() == fixed || (candidate.is_variadic && call.count() >= fixed) || (call.count() + 1 == fixed && this.takes_location(candidate));
             if (!candidate.is_template && arity_ok) {
                 mut i32 score = 0;
                 mut bool fits = true;
@@ -130,6 +147,9 @@ impl TypeChecker {
                     }
                 }
                 if (fits) {
+                    if (candidate.is_extern) {
+                        score = score + this.visibility(candidate.home_scope) * 1000;
+                    }
                     if (score > best_score) {
                         best = candidate;
                         best_score = score;

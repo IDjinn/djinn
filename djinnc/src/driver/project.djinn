@@ -4,6 +4,7 @@ struct ProjectList {
     const i32 NONE = 0;
     const i32 LIBS = 1;
     const i32 SOURCES = 2;
+    const i32 IGNORED = 3;
 }
 
 struct Project {
@@ -15,6 +16,44 @@ struct Project {
     public static unsafe bool is_test_file(ptr<i8> path) {
         i32 length = strlen(path);
         return length > 11 && Strings.equals(path + length - 11, 11, "_test.djinn");
+    }
+
+    public static ptr<i8> generated_entry() {
+        return "<generated test entry>";
+    }
+
+    public static unsafe ptr<i8> read_input(ptr<i8> path) {
+        if (Strings.same(path, Project.generated_entry())) {
+            ptr<i8> text = "import testing;
+
+i32 main() {
+    return TestProgram.run();
+}
+";
+            return Strings.duplicate(text, strlen(text));
+        }
+        return Files.read_all(path);
+    }
+
+    static unsafe bool defines_main(Options* options) {
+        PointerList* inputs = options.inputs;
+        for (mut i32 i = 0; i < inputs.length; i = i + 1) {
+            ptr<i8> path = (ptr<i8>)inputs.get(i);
+            if (!Project.is_test_file(path)) {
+                continue;
+            }
+            ptr<i8> text = Files.read_all(path);
+            if (text == null) {
+                continue;
+            }
+            i32 length = strlen(text);
+            for (mut i32 at = 0; at + 9 <= length; at = at + 1) {
+                if (Strings.equals(text + at, 9, "i32 main(") && (at == 0 || text[at - 1] == 10)) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     public static unsafe bool has_base_name(ptr<i8> path, ptr<i8> name) {
@@ -46,6 +85,10 @@ struct Project {
             return false;
         }
         Project.add_listed_files(options, listing);
+        if (options.test_command && !Project.defines_main(options)) {
+            PointerList* inputs = options.inputs;
+            inputs.push((ptr)Project.generated_entry());
+        }
         return options.inputs.length > 0;
     }
 
@@ -83,9 +126,11 @@ struct Project {
                     options.use_std = false;
                     open_list = Project.read_items(options, manifest, first + 5, i, ProjectList.LIBS, directory);
                 } else if (Strings.starts_with(manifest, first, i, "test-libs:")) {
+                    mut i32 kind = ProjectList.IGNORED;
                     if (options.include_tests) {
-                        open_list = Project.read_items(options, manifest, first + 10, i, ProjectList.LIBS, directory);
+                        kind = ProjectList.LIBS;
                     }
+                    open_list = Project.read_items(options, manifest, first + 10, i, kind, directory);
                 } else if (Strings.starts_with(manifest, first, i, "entry:")) {
                     options.entry_file = Project.read_value(manifest, first + 6, i);
                 } else if (Strings.starts_with(manifest, first, i, "sources:")) {
@@ -154,6 +199,9 @@ struct Project {
     }
 
     static unsafe void add_item(Options* options, ptr<i8> item, i32 list, ptr<i8> directory) {
+        if (list == ProjectList.IGNORED) {
+            return;
+        }
         if (list == ProjectList.LIBS && Strings.same(item, "std")) {
             options.use_std = true;
             return;

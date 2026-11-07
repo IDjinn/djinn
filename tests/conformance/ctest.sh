@@ -15,7 +15,8 @@ flags=(--runtime-dir runtime --runtime-lib "$runtime_lib")
 if [ -n "${DJINN_USE_LLD:-}" ]; then
     flags+=(--lld)
 fi
-"$seed" djinnc -o "$out/djinnc_seeded" "${flags[@]}"
+bash tools/seed_source.sh "$out/seed_src"
+"$seed" "$out/seed_src" -o "$out/djinnc_seeded" "${flags[@]}"
 "$out/djinnc_seeded" djinnc -o "$out/djinnc" "${flags[@]}"
 bash tests/conformance/build.sh "$out/djinnc" "$runtime_lib" "$out/runner"
 

@@ -302,6 +302,10 @@ if (DJINNC_SEED AND DJINN_BASH)
     add_test(NAME djinn_conformance_link
             COMMAND ${DJINN_BASH} tests/conformance/ctest.sh ${DJINNC_SEED} --require Link --crash --library
             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    add_test(NAME djinn_unit
+            COMMAND ${DJINN_BASH} tests/djinnc/unit_ctest.sh ${DJINNC_SEED}
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    set_tests_properties(djinn_unit PROPERTIES LABELS conformance TIMEOUT 1800)
     set_tests_properties(djinn_conformance djinn_conformance_link PROPERTIES
             LABELS conformance RESOURCE_LOCK djinn_conformance TIMEOUT 3600)
 endif ()

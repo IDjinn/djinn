@@ -173,6 +173,30 @@ void __djinn_reflect_register(void** types, int32_t count)
     reflected_type_count = count;
 }
 
+static void** invoke_entries;
+static int32_t invoke_count;
+
+void __djinn_invoke_register(void** entries, int32_t count)
+{
+    invoke_entries = entries;
+    invoke_count = count;
+}
+
+void* __djinn_invoke_lookup(void* function)
+{
+    for (int32_t i = 0; i < invoke_count; i++) {
+        if (invoke_entries[i * 2] == function) {
+            return invoke_entries[i * 2 + 1];
+        }
+    }
+    return 0;
+}
+
+void __djinn_invoke_call(void* thunk, void* target, void** args, void* out)
+{
+    ((void (*)(void*, void**, void*))thunk)(target, args, out);
+}
+
 int32_t __djinn_reflected_count(void)
 {
     return reflected_type_count;

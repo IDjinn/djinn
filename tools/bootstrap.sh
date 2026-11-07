@@ -50,7 +50,8 @@ mkdir -p "$out/stage1" "$out/stage2" "$out/stage3" "$out/samples"
 cd "$root"
 
 echo "== seed -> stage1"
-"$seed" djinnc -o "$out/stage1/djinnc$ext" --runtime-dir "$runtime" "${opt_flags[@]}" ${link_flags[@]+"${link_flags[@]}"} >"$out/stage1.log" 2>&1 \
+bash "$root/tools/seed_source.sh" "$out/seed_src"
+"$seed" "$out/seed_src" -o "$out/stage1/djinnc$ext" --runtime-dir "$runtime" "${opt_flags[@]}" ${link_flags[@]+"${link_flags[@]}"} >"$out/stage1.log" 2>&1 \
     || { echo "FAIL stage1 not produced (see $out/stage1.log)"; exit 1; }
 
 echo "== stage1 -> stage2"
