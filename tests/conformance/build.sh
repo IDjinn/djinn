@@ -14,4 +14,4 @@ fi
     "$support"/memory/*.djinn "$support/text/byte_buffer.djinn" "$support/text/strings.djinn" \
     "$support/collections/pointer_list.djinn" "$support/source/diagnostic_code.djinn" "$support/system/libc.djinn" \
     "$support/system/files.djinn" "$support/system/process.djinn" \
-    -o "$output" --runtime-dir "$runtime" --runtime-lib "$runtime_lib" ${flags[@]+"${flags[@]}"}
+    -o "$output" --reflect-all --runtime-dir "$runtime" --runtime-lib "$runtime_lib" ${flags[@]+"${flags[@]}"}

@@ -149,3 +149,8 @@ int __djinn_call_entry(void* address)
     return ((int (*)(void))address)();
 }
 
+void __djinn_call_method(void* address, void* target)
+{
+    ((void (*)(void*))address)(target);
+}
+

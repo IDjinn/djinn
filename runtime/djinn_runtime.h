@@ -228,6 +228,7 @@ char* __djinn_list_files(const char* directory, const char* extension);
 
 // Calls a JIT-compiled entry point `int main(void)` at `address` and returns its exit code.
 int __djinn_call_entry(void* address);
+void __djinn_call_method(void* address, void* target);
 
 // ── Runtime error reporting (traps: integer overflow, division by zero) ──
 //
