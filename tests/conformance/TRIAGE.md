@@ -5,10 +5,10 @@ resultado. Os grupos que falharam foram revisados à mão; os que passaram não 
 
 | Decisão | Testes | O que significa |
 |---|---|---|
-| Portar | 450 | Passa no djinnc; está em `tests/conformance/cases`. |
+| Portar | 451 | Passa no djinnc; está em `tests/conformance/cases`. |
 | Reescrever | 78 | O comportamento importa, mas o teste precisa de outra forma. |
-| Bloqueado | 153 | O djinnc não reproduz o comportamento; falta decidir se implementa ou se o recurso sai. |
-| Descartar | 42 | Interno do stage0 ou duplicado. |
+| Bloqueado | 151 | O djinnc não reproduz o comportamento; falta decidir se implementa ou se o recurso sai. |
+| Descartar | 43 | Interno do stage0 ou duplicado. |
 
 ## O que bloqueia
 
@@ -24,12 +24,12 @@ resultado. Os grupos que falharam foram revisados à mão; os que passaram não 
 | `object` e `...args` com `str` | 6 |
 | desestruturação | 4 |
 | `for` com range | 4 |
-| relatório de erro em tempo de execução | 4 |
 | o djinnc rejeita: undefined variable | 3 |
 | o djinnc não reproduz o comportamento | 3 |
 | tipos nativos | 3 |
 | `const` local | 2 |
 | o djinnc rejeita: struct does not define this operator | 2 |
+| relatório de erro em tempo de execução | 2 |
 | o djinnc rejeita: an enum cannot carry a payload: declare it as a union | 2 |
 | o djinnc rejeita: struct does not define operator get[] | 1 |
 | o djinnc rejeita: a struct initializer needs a struct type from its context | 1 |
@@ -182,7 +182,7 @@ resultado. Os grupos que falharam foram revisados à mão; os que passaram não 
 | Overflow.UnaryNegateSaturatesMinToMax | Bloqueado | modos de overflow (esperado 2, veio -2) |
 | Overflow.UnaryNegateTrappedAborts | Portar | exit code diferente de zero |
 | Overflow.DivIntMinMinusOneTrappedAborts | Portar | exit code diferente de zero |
-| Overflow.SaturatingDivIntMinClampsToMax | Bloqueado | modos de overflow (esperado 2, veio -2) |
+| Overflow.SaturatingDivIntMinClampsToMax | Bloqueado | modos de overflow (esperado 2, veio -1073740791) |
 | Overflow.SaturatingRemIntMinIsZero | Portar | exit code 5 |
 | Overflow.SaturatingSubClampsToMin | Bloqueado | modos de overflow (esperado 2, veio 0) |
 | Overflow.SaturatingMulClampsToMax | Bloqueado | modos de overflow (esperado 2, veio 0) |
@@ -573,7 +573,7 @@ resultado. Os grupos que falharam foram revisados à mão; os que passaram não 
 | ErrorHandling.SwitchBlockArmYieldAfterStatements | Bloqueado | `switch` com bloco e `yield` |
 | ErrorHandling.YieldWithValueOutsideSwitchArmDiagnostic | Bloqueado | `switch` com bloco e `yield` (o erro atual tem outro motivo) |
 | RuntimeErrors.TrappedOverflowReportHasLocationValuesAndTrace | Portar | exit code diferente de zero |
-| RuntimeErrors.DivisionByZeroReportShowsOperands | Bloqueado | relatório de erro em tempo de execução |
+| RuntimeErrors.DivisionByZeroReportShowsOperands | Portar | exit code diferente de zero |
 | RuntimeErrors.NegateOverflowReport | Portar | exit code diferente de zero |
 | RuntimeErrors.VariableHistoryShowsLastAssignments | Portar | exit code diferente de zero |
 | RuntimeErrors.StackTraceShowsIntermediateFrames | Portar | exit code diferente de zero |
@@ -583,7 +583,7 @@ resultado. Os grupos que falharam foram revisados à mão; os que passaram não 
 | RuntimeErrors.UncaughtExceptionReleaseReportHasNoStackTrace | Bloqueado | relatório de erro em tempo de execução |
 | RuntimeErrors.ReleaseModeOmitsShadowStackAndVarTracking | Reescrever | confere IR; depende de `ir_contains` |
 | RuntimeErrors.ReleaseModeTrapUsesMinimalCall | Reescrever | confere IR; depende de `ir_contains` |
-| RuntimeErrors.ReleaseModeTrapReportKeepsLocationAndValues | Bloqueado | relatório de erro em tempo de execução |
+| RuntimeErrors.ReleaseModeTrapReportKeepsLocationAndValues | Descartar | duplicado de `RuntimeErrors.DivisionByZeroReportShowsOperands` |
 
 ## functions
 

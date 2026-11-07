@@ -339,7 +339,7 @@ impl CodeGenerator {
             PIPE -> Value.create(LLVMBuildOr(builder, lhs, rhs, "or"), common),
             CARET -> Value.create(LLVMBuildXor(builder, lhs, rhs, "xor"), common),
             LESS_LESS -> Value.create(LLVMBuildShl(builder, lhs, rhs, "shl"), common),
-            SLASH -> this.gen_division(is_signed, common, lhs, rhs),
+            SLASH -> this.gen_division(node, is_signed, common, lhs, rhs),
             PERCENT -> this.gen_remainder(is_signed, common, lhs, rhs),
             GREATER_GREATER -> this.gen_shift_right(is_signed, common, lhs, rhs),
             _ -> this.unsupported_arithmetic(node, common, lhs)
@@ -354,8 +354,29 @@ impl CodeGenerator {
         return LLVMBuildSelect(this.builder, is_minus_one, LLVMConstInt(type, 1, 0), rhs, "rem.divisor");
     }
 
-    Value* gen_division(bool is_signed, u32 common, ptr lhs, ptr rhs) {
-        if (is_signed) { return Value.create(LLVMBuildSDiv(this.builder, lhs, rhs, "sdiv"), common); }
+    unsafe void check_division_overflow(Node* node, u32 common, ptr lhs, ptr rhs) {
+        ptr type = LLVMTypeOf(rhs);
+        ptr is_minus_one = LLVMBuildICmp(this.builder, LlvmConst.INT_EQ, rhs, LLVMConstInt(type, (u64)(0 - 1), 1), "div.minus_one");
+        if (LLVMIsConstant(is_minus_one) != 0 && LLVMIsNull(is_minus_one) != 0) {
+            return;
+        }
+        ptr minimum = LLVMBuildShl(this.builder, LLVMConstInt(type, 1, 0), LLVMConstInt(type, (u64)Types.bits(common) - 1, 0), "div.minimum");
+        ptr is_minimum = LLVMBuildICmp(this.builder, LlvmConst.INT_EQ, lhs, minimum, "div.is_minimum");
+        ptr overflow = LLVMBuildAnd(this.builder, is_minus_one, is_minimum, "div.overflow");
+        ptr failed = this.new_block("div.failed");
+        ptr safe = this.new_block("div.safe");
+        LLVMBuildCondBr(this.builder, overflow, failed, safe);
+        LLVMPositionBuilderAtEnd(this.builder, failed);
+        this.call_panic(this.string_constant("integer overflow: the minimum value divided by -1"), node);
+        LLVMBuildUnreachable(this.builder);
+        LLVMPositionBuilderAtEnd(this.builder, safe);
+    }
+
+    Value* gen_division(Node* node, bool is_signed, u32 common, ptr lhs, ptr rhs) {
+        if (is_signed) {
+            this.check_division_overflow(node, common, lhs, rhs);
+            return Value.create(LLVMBuildSDiv(this.builder, lhs, rhs, "sdiv"), common);
+        }
         return Value.create(LLVMBuildUDiv(this.builder, lhs, rhs, "udiv"), common);
     }
 
