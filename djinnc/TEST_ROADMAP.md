@@ -190,7 +190,7 @@ void overflow_is_rejected(Verify verify) {
     Source source = Sources.file("cases/overflow.djinn");
     verify.diagnostics(source,
         Expected.error(DiagnosticErrors.INVALID_NUMBER).at(3, 13).with_message("128"),
-        Expected.warning(DiagnosticWarnings.ATTRIBUTE_NOT_APPLIED).at(source.find("[Align")));
+        Expected.warning(DiagnosticWarnings.ATTRIBUTE_NOT_APPLIED).at_position(source.find("[Align")));
 }
 
 [Test]
@@ -217,7 +217,7 @@ void small_case(Verify verify) {
   para `error(code, "member names cannot be the same as '{0}'", name)` é parte da Fase 0 (item 1, pendente).
 - **Localização completa:** `.at(linha, coluna)` e `.at_range(linha, coluna, linha_fim, coluna_fim)`; o JSON passa a
   trazer `length` real (hoje fixo em 1) e `end_line`/`end_column`.
-- **Vários diagnósticos de uma vez**, no estilo `DiagnosticResult[] expected`, aceitos como lista:
+- **Vários diagnósticos de uma vez**, no estilo `DiagnosticResult[] expected`. Hoje a lista é encadeada: `Expected.error(A).at(1, 2).and_error(B).and_warning(C)`, e `.at` e `.with_message` valem para o último da cadeia. O exemplo abaixo mostra a forma com `[Test]`, da Fase 3:
 
 ```djinn
 [Test]
@@ -268,6 +268,10 @@ erro de parser não depende de o atributo ser lido. Sem `[Requires]`, a máscara
 (`diagnostics` sem execução pede `Check`; `runs` pede `JIT`; `ir_contains` pede `IR`), o que cobre a maior parte dos casos.
 
 - Pedir menos do que o método exige é erro: um teste que chama `runs` não aceita `[Requires(Check)]`.
+- Enquanto `[Test]` não existe, a função é só o portador do atributo, como em `[TestPolicy]`:
+  `verify.test("x").policy(typeof(fn)).runs(...)`. Os valores ficam em `TestPath`: `[Requires(TestPath.JIT | TestPath.LINK)]`.
+- `--require Link` só vale para testes que executam código. `compiles` e `diagnostics` não avançam, porque muitas sources
+  desses grupos não têm `main`. Com `--require Link`, um teste de `runs` passa pelo JIT e pelo link.
 - Hoje `generateBinary = true` aparece em 466 dos 724 gtests. A maioria só olha o exit code, então cabe em `JIT`.
 - **Nem todo erro sai na semântica.** `ReflectionDiagnostics.check` e "no 'main' function defined" são emitidos no
   `CodeGenerator`. Por isso a dedução usa a categoria do código (`E4xxx` vai para `IR`), e esses pontos podem subir para a semântica depois.
@@ -415,7 +419,7 @@ O runner é `tests/conformance/runner.djinn`, compilado com `tests/conformance/b
 ```bash
 DJINN_USE_LLD=1 bash tests/conformance/build.sh <djinnc> <lib> build/runner
 build/runner --compiler <djinnc absoluto> --runtime-lib <lib> [--runtime-dir d] [--jobs n] [--filter texto] [--report arquivo.json]
-             [--link] [--link-debug] [--crash] [--debug] [--library] [--out <dir absoluto> [--lld]]
+             [--require Check|IR|JIT|Link] [--link-debug] [--crash] [--debug] [--library] [--out <dir absoluto> [--lld]]
 ```
 
 - As expectativas são código. `tests/conformance/testing/` tem `Sources`, `Expected` e `Verify`; `tests/conformance/suites/` registra
@@ -429,11 +433,20 @@ verify.test("crash/null").crashes(Sources.file("tests/djinnc/crash/null_read.dji
 verify.test("debug/locals:8").stops_at(Sources.file("tests/djinnc/debug/locals.djinn"), 8, Expected.contains("a = 3"));
 ```
 
-- Cada teste vira um processo filho, 8 em paralelo por padrão, com timeout de 120 s. `--link` troca o JIT por um executável em `--out`.
+- Cada teste vira um processo filho, 8 em paralelo por padrão, com timeout de 120 s. `--require Link` soma o executável em `--out` ao JIT.
 - `--crash`, `--debug` (lldb) e `--library` ligam os grupos que precisam de executável; exigem `--out`.
 - `tests/djinnc/run.sh`, `tools/debug_tests.sh` e `tests/djinnc/library/run.cmd` foram apagados. O `tools/bootstrap.sh` usa o runner.
-- **Falta:** `[Test]` com descoberta (hoje cada teste é registrado à mão em `Verify`), `.at()`/`.with_message()` e a comparação exata
-  de diagnósticos, `Sources.text`, a máscara `[Requires]`, o grafo e o CTest. Uma source sem teste registrado não é detectada.
+- A comparação de diagnósticos é exata: `verify.diagnostics` e `verify.compiles` reprovam com qualquer diagnóstico que sobre ou falte.
+  `.at`, `.at_position(source.find("texto"))`, `.with_message` e `.with_arguments` são opcionais. A mensagem lista o que faltou e o que sobrou.
+- `Sources.text` aceita a source inline, com `"""`. O runner grava o texto em `--out` ou na pasta temporária do sistema.
+  Um bloco `"""` guarda a quebra de linha depois da abertura, então o código começa na linha 2.
+- `[Requires]` limita até onde cada teste vai; sem ele, a máscara é deduzida do método. O console e o `--report` mostram quantos
+  casos rodaram em cada caminho. Um `[Requires(Link)]` sem `--out` não roda, e o resumo informa quantos foram pulados.
+- Um `.djinn` em `tests/djinnc` ou `tests/conformance/cases` sem teste registrado reprova como `orphans/<caminho>`.
+- CTest: com `-DDJINNC_SEED=<djinnc>`, `ctest -L conformance` roda `djinn_conformance` (JIT) e `djinn_conformance_link`
+  (`--require Link --crash --library`), por meio de `tests/conformance/ctest.sh`.
+- **Falta:** `libs/testing` e a sublib (os itens 1 e 3 acima; hoje tudo são fontes em `tests/conformance`), `[Test]` com descoberta
+  (hoje cada teste é registrado à mão em `Verify`), `.at_range` (o JSON ainda não traz o fim do intervalo) e o grafo.
 
 ### Fase 2: migração do gtest
 
