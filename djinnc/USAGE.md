@@ -121,6 +121,8 @@ djinnc test djinnc
 djinnc test libs/testing
 ```
 
+A `[Test]` that takes a parameter receives the value returned by the `[Test]` of that type; `[From("name")]` picks one when there are several. Tests linked this way run in one worker, a failure blocks the ones below it, and `--list` rejects missing producers, ambiguity and cycles (see `tests/graph`).
+
 The unit tests live next to the code in `*_test.djinn` (arena, atoms, `U32Map`). `tests/djinnc/unit.sh <djinnc> <runtime lib>` runs both projects.
 
 ### Samples and error cases

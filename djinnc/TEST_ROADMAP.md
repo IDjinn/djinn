@@ -496,13 +496,17 @@ Pronto quando: `djinnc test djinnc` roda os antigos checks de arena, atoms e map
 
 ### Fase 4: grafo de dados
 
-1. Ligação por tipo, `[From]`, validador (sem produtor, ambíguo, ciclo) com diagnóstico que aponta a declaração.
-2. Execução com passagem de valores, memoização por função + ligações, estado `Blocked`, componentes conexos como unidade de agendamento.
+Estado: os itens 1 e 2 estão feitos no que o desenho pede para rodar fluxos reais; os itens 3 a 7 estão por fazer.
+
+1. **Feito:** ligação por tipo. Um parâmetro `T` liga ao único `[Test]` que retorna `T` (o `typeId` do `ParamInfo` contra o `returnTypeId` do `MethodInfo`). `[From("nome")]` no parâmetro desempata. O validador (`libs/testing/src/graph.djinn`) recusa, antes de rodar qualquer teste, parâmetro sem produtor, produtor ambíguo, `[From]` que não acha ninguém, ciclo (inclusive auto-referência) e `async [Test]` que recebe ou entrega valor; a mensagem aponta a função e o parâmetro. `--list` valida sem executar e sai com 2.
+2. **Feito, com limites:** execução com passagem de valores. A unidade de agendamento é o componente conexo: um componente com mais de um nó roda em um processo worker (`<exe> --graph a,b,c`), em ordem topológica, e cada valor é entregue ao consumidor pelo thunk de `invoke` (`args` aponta para os valores, `out` recebe o retorno). Cada nó roda uma vez por worker, então `login` serve a todos os que dependem dele. Se um nó falha ou o processo morre, o runner marca o nó `Failed`, marca todos os descendentes `Blocked` (o relatório diz `blocked by <nó>` e o resumo conta `N blocked` à parte) e sobe outro worker para o que sobrou, que reexecuta os ancestrais de que precisa. Nós sem ligações continuam no caminho de um processo por teste, com `[TestPolicy]`. `--filter` e `--tag` escolhem os alvos; os ancestrais necessários entram e são reportados. **Limites:** o nó é identificado pela função, não por função mais ligações; `[TestPolicy]` (retry, timeout por nó) não vale dentro de componentes; o timeout é por componente (60 s por nó); `async` não participa.
 3. API fluente: `TestPlan.discover()`, `workflow()`, `step()`, filtro `--workflow`.
 4. `[Mutates]`.
 5. `Artifact` (saída em arquivo) e `--graph` em DOT e JSON, com o estado de cada nó.
 6. Primeiro uso real: reescrever `tests/djinnc/library/run.cmd` e `tools/bootstrap.sh` (`stage1 → stage2 → stage3 → fixpoint`) como workflows.
 7. Na sublib: o resultado da compilação (`Compilation`) passa a ser a saída de um nó, para um teste de IR ou de execução reaproveitar a compilação de um teste de diagnóstico da mesma source.
+
+Cobertura: `tests/graph` (cadeia de 64 níveis, losango, leque de 8, componentes independentes, dois produtores desempatados por `[From]`) e `tests/graph_invalid` (7 grafos inválidos), rodados por `tests/djinnc/graph.sh` com falha injetada por variável de ambiente (`GRAPH_FAIL`, `GRAPH_EXIT`): falha no meio da cadeia, na raiz, num ramo do losango e num filho do leque; saída do processo com código 3; filtro que puxa só os ancestrais.
 
 Pronto quando: o bootstrap roda como workflow, e o exemplo do marketplace executa `login` uma vez para vários workflows
 e mostra `Blocked` quando ele falha.

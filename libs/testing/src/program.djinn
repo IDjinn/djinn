@@ -29,6 +29,9 @@ struct TestProgram {
         if (Text.same(mode, "--run")) {
             return TestProgram.run_one(Environment.argument(2));
         }
+        if (Text.same(mode, "--graph")) {
+            return TestProgram.run_graph(Environment.argument(2));
+        }
         return TestProgram.run_all();
     }
 
@@ -57,10 +60,25 @@ struct TestProgram {
 
     static unsafe i32 list() {
         ItemList* entries = TestProgram.collect();
+        TestGraph* graph = TestGraph.build(entries);
+        if (!graph.valid()) {
+            graph.print_errors();
+            return 2;
+        }
         for (mut i32 i = 0; i < entries.length; i = i + 1) {
             TestEntry* entry = (TestEntry*)entries.get(i);
             printf("%s\n", entry.name);
         }
+        return 0;
+    }
+
+    static unsafe i32 run_graph(ptr<i8> targets) {
+        TestGraph* graph = TestGraph.build(TestProgram.collect());
+        if (!graph.valid()) {
+            graph.print_errors();
+            return 2;
+        }
+        graph.run_wanted(targets);
         return 0;
     }
 
@@ -139,6 +157,164 @@ struct TestProgram {
         return reason.cstr();
     }
 
+    static unsafe ptr<i8> graph_command(TestGraph* graph, i32 component) {
+        TextBuffer* command = TextBuffer.create();
+        command.append("\"");
+        command.append(Environment.argument(0));
+        command.append("\" --graph \"");
+        ItemList* nodes = graph.nodes;
+        mut bool first = true;
+        for (mut i32 i = 0; i < nodes.length; i = i + 1) {
+            GraphNode* node = (GraphNode*)nodes.get(i);
+            if (node.component != component || !node.wanted || node.state != NodeState.PENDING) {
+                continue;
+            }
+            if (!first) {
+                command.append(",");
+            }
+            first = false;
+            command.append(node.entry.name);
+        }
+        command.append("\"");
+        return command.cstr();
+    }
+
+    static unsafe i32 pending_in(TestGraph* graph, i32 component) {
+        ItemList* nodes = graph.nodes;
+        mut i32 count = 0;
+        for (mut i32 i = 0; i < nodes.length; i = i + 1) {
+            GraphNode* node = (GraphNode*)nodes.get(i);
+            if (node.component == component && node.wanted && node.state == NodeState.PENDING) {
+                count = count + 1;
+            }
+        }
+        return count;
+    }
+
+    static unsafe TestNode* result_node(GraphNode* node, ptr<i8> reason, i64 elapsed_us) {
+        TestNode* result = TestNode.create(node.entry.name, 0);
+        result.elapsed_us = elapsed_us;
+        result.tags = "Run";
+        result.reason = reason;
+        node.recorded = true;
+        return result;
+    }
+
+    static unsafe void record_blocked(Scheduler* pool, TestGraph* graph, i32 component) {
+        ItemList* nodes = graph.nodes;
+        for (mut i32 i = 0; i < nodes.length; i = i + 1) {
+            GraphNode* node = (GraphNode*)nodes.get(i);
+            if (node.component != component || !node.wanted || node.state != NodeState.BLOCKED || node.recorded) {
+                continue;
+            }
+            TextBuffer* reason = TextBuffer.create();
+            reason.append("blocked by ");
+            reason.append(node.blocker);
+            TestNode* result = TestProgram.result_node(node, reason.cstr(), 0);
+            result.tags = "Blocked";
+            result.block(reason.cstr());
+            pool.record(result);
+        }
+    }
+
+    static unsafe ptr<i8> line_value(ptr<i8> text, i32 from, i32 to) {
+        return Text.duplicate(text + from, to - from);
+    }
+
+    static unsafe ptr<i8> without_protocol(ptr<i8> text) {
+        TextBuffer* kept = TextBuffer.create();
+        i32 length = (i32)strlen(text);
+        mut i32 start = 0;
+        for (mut i32 at = 0; at <= length; at = at + 1) {
+            if (at != length && text[at] != 10) {
+                continue;
+            }
+            bool run_line = at - start > 4 && text[start] == 82 && text[start + 1] == 85 && text[start + 2] == 78 && text[start + 3] == 32;
+            bool ok_line = at - start > 3 && text[start] == 79 && text[start + 1] == 75 && text[start + 2] == 32;
+            if (at > start && !run_line && !ok_line) {
+                kept.append_slice(text + start, at - start);
+                kept.append("
+");
+            }
+            start = at + 1;
+        }
+        return kept.cstr();
+    }
+
+    static unsafe void read_worker(Scheduler* pool, TestGraph* graph, TestNode* job, i32 component) {
+        ptr<i8> text = job.stdout_text;
+        i32 length = (i32)strlen(text);
+        mut GraphNode* running = (GraphNode*)0;
+        mut i32 start = 0;
+        for (mut i32 at = 0; at <= length; at = at + 1) {
+            if (at != length && text[at] != 10) {
+                continue;
+            }
+            if (at > start) {
+                ptr<i8> line = TestProgram.line_value(text, start, at);
+                if (Text.contains(line, "RUN ") && line[0] == 82) {
+                    running = graph.find(line + 4);
+                } else if (line[0] == 79 && line[1] == 75 && line[2] == 32) {
+                    mut i32 end = (i32)strlen(line);
+                    mut i32 space = end;
+                    while (space > 3 && line[space - 1] != 32) {
+                        space = space - 1;
+                    }
+                    ptr<i8> name = Text.duplicate(line + 3, space - 4);
+                    GraphNode* done = graph.find(name);
+                    if (done != null && done.state == NodeState.PENDING) {
+                        done.state = NodeState.PASSED;
+                        i64 millis = (i64)Text.parse_integer(line + space, end - space);
+                        pool.record(TestProgram.result_node(done, null, millis * 1000));
+                    }
+                    running = (GraphNode*)0;
+                }
+            }
+            start = at + 1;
+        }
+        job.output = TestProgram.without_protocol(job.output);
+        bool failed = job.exit_code != 0 || job.timed_out;
+        mut ptr<i8> reason = TestProgram.failure_reason(job);
+        if (!failed) {
+            running = (GraphNode*)0;
+            reason = "the worker finished without running it";
+        }
+        if (job.timed_out) {
+            reason = "timeout";
+        } else if (job.exit_code < 0 && Text.contains(job.output, "runtime error: panic")) {
+            job.exit_code = 1;
+            reason = TestProgram.failure_reason(job);
+        }
+        if (running != null) {
+            running.state = NodeState.FAILED;
+            pool.record(TestProgram.result_node(running, reason, 0));
+            graph.block_dependents(running, running.entry.name);
+            TestProgram.record_blocked(pool, graph, component);
+            return;
+        }
+        ItemList* nodes = graph.nodes;
+        for (mut i32 i = 0; i < nodes.length; i = i + 1) {
+            GraphNode* node = (GraphNode*)nodes.get(i);
+            if (node.component == component && node.wanted && node.state == NodeState.PENDING) {
+                node.state = NodeState.FAILED;
+                pool.record(TestProgram.result_node(node, reason, 0));
+            }
+        }
+        TestProgram.record_blocked(pool, graph, component);
+    }
+
+    static unsafe void finish_job(Scheduler* pool, TestGraph* graph, TestNode* job) {
+        i32 component = (i32)job.data;
+        TestProgram.read_worker(pool, graph, job, component);
+        if (TestProgram.pending_in(graph, component) > 0 && job.retries < 1000) {
+            job.retries = job.retries + 1;
+            job.timed_out = false;
+            pool.relaunch(job, TestProgram.graph_command(graph, component));
+            return;
+        }
+        pool.complete(job, null);
+    }
+
     static unsafe i32 run_all() {
         TestOptions* options = TestProgram.parse_options();
         if (!options.ok) {
@@ -146,6 +322,11 @@ struct TestProgram {
             return 2;
         }
         ItemList* entries = TestProgram.collect();
+        TestGraph* graph = TestGraph.build(entries);
+        if (!graph.valid()) {
+            graph.print_errors();
+            return 2;
+        }
         Scheduler* pool = Scheduler.create(options.jobs);
         for (mut i32 i = 0; i < entries.length; i = i + 1) {
             TestEntry* entry = (TestEntry*)entries.get(i);
@@ -153,6 +334,11 @@ struct TestProgram {
                 continue;
             }
             if (options.tag != null && !TestMethods.has_tag(entry.method, options.tag)) {
+                continue;
+            }
+            GraphNode* graph_node = (GraphNode*)graph.nodes.get(i);
+            if (graph.component_size(graph_node.component) > 1) {
+                graph.mark_needed(graph_node);
                 continue;
             }
             TestNode* node = TestNode.create(entry.name, 60000000);
@@ -168,11 +354,26 @@ struct TestProgram {
             node.command = TestProgram.command_for(entry.name);
             pool.add(node);
         }
+        for (mut i32 c = 0; c < graph.components; c = c + 1) {
+            if (TestProgram.pending_in(graph, c) == 0) {
+                continue;
+            }
+            TestNode* job = TestNode.create("graph", 60000000 * (i64)graph.component_size(c));
+            job.hidden = true;
+            job.data = (ptr)c;
+            job.command = TestProgram.graph_command(graph, c);
+            pool.add(job);
+        }
         mut bool stopped = false;
         mut i32 skipped = 0;
         mut ptr next = pool.wait();
         while (next != null) {
             TestNode* node = (TestNode*)next;
+            if (node.hidden) {
+                TestProgram.finish_job(pool, graph, node);
+                next = pool.wait();
+                continue;
+            }
             mut ptr<i8> reason = null;
             if (node.exit_code != 0) {
                 if (node.exit_code < 0 && (Text.contains(node.output, "runtime error: panic") || Text.contains(node.output, "uncaught exception"))) {
@@ -196,7 +397,7 @@ struct TestProgram {
             TestReport.write_json(pool, options.report);
         }
         ItemList* nodes = pool.nodes;
-        if (TestReport.passed(nodes) == nodes.length) {
+        if (TestReport.passed(nodes) == TestReport.total(nodes)) {
             return 0;
         }
         return 1;

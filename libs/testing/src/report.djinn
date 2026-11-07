@@ -13,7 +13,12 @@ struct TagCount {
 struct TestReport {
     public static unsafe void print_node(TestNode* node) {
         i32 millis = (i32)(node.elapsed_us / 1000);
-        if (node.reason != null) {
+        if (node.hidden) {
+            return;
+        }
+        if (node.blocked) {
+            printf("BLOCKED %s: %s\n", node.name, node.reason);
+        } else if (node.reason != null) {
             printf("FAIL %s: %s\n", node.name, node.reason);
         } else if (node.retries > 0) {
             printf("PASS %s (%d ms, after %d retries)\n", node.name, millis, node.retries);
@@ -59,7 +64,29 @@ struct TestReport {
         mut i32 count = 0;
         for (mut i32 i = 0; i < nodes.length; i = i + 1) {
             TestNode* node = (TestNode*)nodes.get(i);
-            if (node.passed) {
+            if (node.passed && !node.hidden) {
+                count = count + 1;
+            }
+        }
+        return count;
+    }
+
+    public static unsafe i32 blocked(ItemList* nodes) {
+        mut i32 count = 0;
+        for (mut i32 i = 0; i < nodes.length; i = i + 1) {
+            TestNode* node = (TestNode*)nodes.get(i);
+            if (node.blocked && !node.hidden) {
+                count = count + 1;
+            }
+        }
+        return count;
+    }
+
+    public static unsafe i32 total(ItemList* nodes) {
+        mut i32 count = 0;
+        for (mut i32 i = 0; i < nodes.length; i = i + 1) {
+            TestNode* node = (TestNode*)nodes.get(i);
+            if (!node.hidden) {
                 count = count + 1;
             }
         }
@@ -69,7 +96,13 @@ struct TestReport {
     public static unsafe void print_summary(Scheduler* scheduler) {
         ItemList* nodes = scheduler.nodes;
         i32 passed = TestReport.passed(nodes);
-        printf("%d passed, %d failed, %d total\n", passed, nodes.length - passed, nodes.length);
+        i32 blocked = TestReport.blocked(nodes);
+        i32 total = TestReport.total(nodes);
+        if (blocked > 0) {
+            printf("%d passed, %d failed, %d blocked, %d total\n", passed, total - passed - blocked, blocked, total);
+        } else {
+            printf("%d passed, %d failed, %d total\n", passed, total - passed, total);
+        }
         ItemList* counts = TestReport.tag_counts(nodes);
         for (mut i32 i = 0; i < counts.length; i = i + 1) {
             TagCount* tag = (TagCount*)counts.get(i);
@@ -87,7 +120,7 @@ struct TestReport {
         ItemList* nodes = scheduler.nodes;
         TextBuffer* json = TextBuffer.create();
         json.append("{\"total\":");
-        json.append_int((i64)nodes.length);
+        json.append_int((i64)TestReport.total(nodes));
         json.append(",\"passed\":");
         json.append_int((i64)TestReport.passed(nodes));
         json.append(",\"tags\":{");
@@ -102,16 +135,23 @@ struct TestReport {
             json.append_int((i64)tag.count);
         }
         json.append("},\"cases\":[");
+        mut bool first_case = true;
         for (mut i32 i = 0; i < nodes.length; i = i + 1) {
             TestNode* node = (TestNode*)nodes.get(i);
-            if (i > 0) {
+            if (node.hidden) {
+                continue;
+            }
+            if (!first_case) {
                 json.append(",");
             }
+            first_case = false;
             json.append("{\"name\":");
             json.append_json_string(node.name);
             json.append(",\"status\":");
             if (node.passed) {
                 json.append("\"passed\"");
+            } else if (node.blocked) {
+                json.append("\"blocked\"");
             } else {
                 json.append("\"failed\"");
             }

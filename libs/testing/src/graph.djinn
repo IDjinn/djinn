@@ -1,0 +1,324 @@
+namespace testing;
+
+import std::sys;
+import std::types;
+import std::libc;
+import std::io;
+
+struct NodeState {
+    const i32 PENDING = 0;
+    const i32 PASSED = 1;
+    const i32 FAILED = 2;
+    const i32 BLOCKED = 3;
+}
+
+struct GraphNode {
+    TestEntry* entry;
+    ItemList* inputs;
+    ItemList* dependents;
+    i32 component;
+    i32 state;
+    i32 visit;
+    bool wanted;
+    bool recorded;
+    ptr value;
+    ptr<i8> blocker;
+}
+
+struct TestGraph {
+    ItemList* nodes;
+    ItemList* errors;
+    i32 components;
+
+    public static unsafe TestGraph* build(ItemList* entries) {
+        TestGraph* graph = (TestGraph*)Allocator.zeroed(sizeof(TestGraph));
+        graph.nodes = ItemList.create();
+        graph.errors = ItemList.create();
+        ItemList* nodes = graph.nodes;
+        for (mut i32 i = 0; i < entries.length; i = i + 1) {
+            GraphNode* node = (GraphNode*)Allocator.zeroed(sizeof(GraphNode));
+            node.entry = (TestEntry*)entries.get(i);
+            node.inputs = ItemList.create();
+            node.dependents = ItemList.create();
+            node.component = -1;
+            nodes.push((ptr)node);
+        }
+        for (mut i32 i = 0; i < nodes.length; i = i + 1) {
+            graph.bind((GraphNode*)nodes.get(i));
+        }
+        graph.find_cycles();
+        graph.assign_components();
+        return graph;
+    }
+
+    static unsafe ptr<i8> simple_name(ptr<i8> name) {
+        mut i32 last = -1;
+        i32 length = (i32)strlen(name);
+        for (mut i32 i = 0; i < length; i = i + 1) {
+            if (name[i] == 46) {
+                last = i;
+            }
+        }
+        return name + last + 1;
+    }
+
+    static unsafe ptr<i8> type_name(i32 id) {
+        for (mut i32 i = 0; i < Reflection.type_count(); i = i + 1) {
+            TypeInfo* info = Reflection.type_at(i);
+            if (info.id == id) {
+                return (ptr<i8>)info.name;
+            }
+        }
+        return "an unknown type";
+    }
+
+    static unsafe i32 type_size(i32 id) {
+        for (mut i32 i = 0; i < Reflection.type_count(); i = i + 1) {
+            TypeInfo* info = Reflection.type_at(i);
+            if (info.id == id) {
+                return info.size;
+            }
+        }
+        return 256;
+    }
+
+    static unsafe ptr<i8> chosen(ParamInfo* param) {
+        for (mut i32 i = 0; i < (i32)param.attrCount; i = i + 1) {
+            if (Text.same((ptr<i8>)param.attrs[i].name, "From")) {
+                From* values = (From*)param.attrs[i].payload;
+                return (ptr<i8>)values.name;
+            }
+        }
+        return null;
+    }
+
+    unsafe void report(ptr<i8> text) {
+        ItemList* errors = this.errors;
+        errors.push((ptr)text);
+    }
+
+    unsafe void bind(GraphNode* node) {
+        MethodInfo* method = node.entry.method;
+        ItemList* nodes = this.nodes;
+        ItemList* inputs = node.inputs;
+        for (mut i32 p = 0; p < (i32)method.paramCount; p = p + 1) {
+            ParamInfo* param = &method.params[p];
+            ptr<i8> wanted = TestGraph.chosen(param);
+            mut GraphNode* found = (GraphNode*)0;
+            mut i32 matches = 0;
+            for (mut i32 c = 0; c < nodes.length; c = c + 1) {
+                GraphNode* candidate = (GraphNode*)nodes.get(c);
+                if (candidate.entry.method.returnTypeId != param.typeId) {
+                    continue;
+                }
+                if (wanted != null && !Text.same(TestGraph.simple_name(candidate.entry.name), wanted) && !Text.same(candidate.entry.name, wanted)) {
+                    continue;
+                }
+                found = candidate;
+                matches = matches + 1;
+            }
+            if (matches == 1) {
+                inputs.push((ptr)found);
+                ItemList* dependents = found.dependents;
+                dependents.push((ptr)node);
+                continue;
+            }
+            TextBuffer* message = TextBuffer.create();
+            message.append(node.entry.name);
+            message.append(": parameter '");
+            message.append((ptr<i8>)param.name);
+            message.append("' of type ");
+            message.append(TestGraph.type_name(param.typeId));
+            if (matches == 0 && wanted != null) {
+                message.append(" has no [Test] named '");
+                message.append(wanted);
+                message.append("' that returns it");
+            } else if (matches == 0) {
+                message.append(" has no [Test] that returns it");
+            } else {
+                message.append(" has ");
+                message.append_int((i64)matches);
+                message.append(" producers; pick one with [From(\"name\")]");
+            }
+            this.report(message.cstr());
+            inputs.push(null);
+        }
+        if (((i32)method.flags & Reflection.METHOD_ASYNC) != 0 && (method.paramCount > 0 || node.dependents.length > 0)) {
+            this.report(TestGraph.unsupported(node.entry.name));
+        }
+    }
+
+    static unsafe ptr<i8> unsupported(ptr<i8> name) {
+        TextBuffer* message = TextBuffer.create();
+        message.append(name);
+        message.append(": an async [Test] cannot take or give values yet");
+        return message.cstr();
+    }
+
+    unsafe void find_cycles() {
+        ItemList* nodes = this.nodes;
+        for (mut i32 i = 0; i < nodes.length; i = i + 1) {
+            GraphNode* node = (GraphNode*)nodes.get(i);
+            if (node.visit == 0 && this.walk(node)) {
+                return;
+            }
+        }
+    }
+
+    unsafe bool walk(GraphNode* node) {
+        node.visit = 1;
+        ItemList* inputs = node.inputs;
+        for (mut i32 i = 0; i < inputs.length; i = i + 1) {
+            GraphNode* input = (GraphNode*)inputs.get(i);
+            if (input == null) {
+                continue;
+            }
+            if (input.visit == 1) {
+                TextBuffer* message = TextBuffer.create();
+                message.append("cycle: ");
+                message.append(node.entry.name);
+                message.append(" needs ");
+                message.append(input.entry.name);
+                message.append(", which needs it back");
+                this.report(message.cstr());
+                return true;
+            }
+            if (input.visit == 0 && this.walk(input)) {
+                return true;
+            }
+        }
+        node.visit = 2;
+        return false;
+    }
+
+    unsafe void spread(GraphNode* node, i32 component) {
+        if (node.component >= 0) {
+            return;
+        }
+        node.component = component;
+        ItemList* inputs = node.inputs;
+        for (mut i32 i = 0; i < inputs.length; i = i + 1) {
+            GraphNode* input = (GraphNode*)inputs.get(i);
+            if (input != null) {
+                this.spread(input, component);
+            }
+        }
+        ItemList* dependents = node.dependents;
+        for (mut i32 i = 0; i < dependents.length; i = i + 1) {
+            this.spread((GraphNode*)dependents.get(i), component);
+        }
+    }
+
+    unsafe void assign_components() {
+        ItemList* nodes = this.nodes;
+        for (mut i32 i = 0; i < nodes.length; i = i + 1) {
+            GraphNode* node = (GraphNode*)nodes.get(i);
+            if (node.component < 0) {
+                this.spread(node, this.components);
+                this.components = this.components + 1;
+            }
+        }
+    }
+
+    public unsafe bool valid() {
+        ItemList* errors = this.errors;
+        return errors.length == 0;
+    }
+
+    public unsafe i32 print_errors() {
+        ItemList* errors = this.errors;
+        for (mut i32 i = 0; i < errors.length; i = i + 1) {
+            printf("graph error: %s\n", (ptr<i8>)errors.get(i));
+        }
+        return errors.length;
+    }
+
+    public unsafe GraphNode* find(ptr<i8> name) {
+        ItemList* nodes = this.nodes;
+        for (mut i32 i = 0; i < nodes.length; i = i + 1) {
+            GraphNode* node = (GraphNode*)nodes.get(i);
+            if (Text.same(node.entry.name, name)) {
+                return node;
+            }
+        }
+        return (GraphNode*)0;
+    }
+
+    public unsafe i32 component_size(i32 component) {
+        ItemList* nodes = this.nodes;
+        mut i32 count = 0;
+        for (mut i32 i = 0; i < nodes.length; i = i + 1) {
+            GraphNode* node = (GraphNode*)nodes.get(i);
+            if (node.component == component) {
+                count = count + 1;
+            }
+        }
+        return count;
+    }
+
+    public unsafe void mark_needed(GraphNode* node) {
+        if (node.wanted) {
+            return;
+        }
+        node.wanted = true;
+        ItemList* inputs = node.inputs;
+        for (mut i32 i = 0; i < inputs.length; i = i + 1) {
+            GraphNode* input = (GraphNode*)inputs.get(i);
+            if (input != null) {
+                this.mark_needed(input);
+            }
+        }
+    }
+
+    public unsafe void block_dependents(GraphNode* node, ptr<i8> blocker) {
+        ItemList* dependents = node.dependents;
+        for (mut i32 i = 0; i < dependents.length; i = i + 1) {
+            GraphNode* dependent = (GraphNode*)dependents.get(i);
+            if (dependent.state == NodeState.PENDING) {
+                dependent.state = NodeState.BLOCKED;
+                dependent.blocker = blocker;
+                this.block_dependents(dependent, blocker);
+            }
+        }
+    }
+
+    unsafe void execute(GraphNode* node) {
+        if (node.value != null || node.state == NodeState.PASSED) {
+            return;
+        }
+        ItemList* inputs = node.inputs;
+        for (mut i32 i = 0; i < inputs.length; i = i + 1) {
+            this.execute((GraphNode*)inputs.get(i));
+        }
+        MethodInfo* method = node.entry.method;
+        ptr<ptr> arguments = (ptr<ptr>)Allocator.zeroed(8 * (u64)(inputs.length + 1));
+        for (mut i32 i = 0; i < inputs.length; i = i + 1) {
+            GraphNode* input = (GraphNode*)inputs.get(i);
+            arguments[i] = input.value;
+        }
+        node.value = Allocator.zeroed((u64)TestGraph.type_size(method.returnTypeId) + 16);
+        printf("RUN %s\n", node.entry.name);
+        fflush((ptr)0);
+        i64 started = __djinn_now_us();
+        TestMethods.invoke(node.entry.type, method, (ptr)arguments, node.value);
+        node.state = NodeState.PASSED;
+        printf("OK %s %d\n", node.entry.name, (i32)((__djinn_now_us() - started) / 1000));
+        fflush((ptr)0);
+    }
+
+    public unsafe void run_wanted(ptr<i8> targets) {
+        i32 length = (i32)strlen(targets);
+        mut i32 start = 0;
+        for (mut i32 at = 0; at <= length; at = at + 1) {
+            if (at == length || targets[at] == 44) {
+                if (at > start) {
+                    GraphNode* node = this.find(Text.duplicate(targets + start, at - start));
+                    if (node != null) {
+                        this.execute(node);
+                    }
+                }
+                start = at + 1;
+            }
+        }
+    }
+}
