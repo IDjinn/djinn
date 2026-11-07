@@ -12,6 +12,20 @@ struct Project {
         return length > 6 && Strings.equals(path + length - 6, 6, ".djinn");
     }
 
+    public static unsafe bool is_test_file(ptr<i8> path) {
+        i32 length = strlen(path);
+        return length > 11 && Strings.equals(path + length - 11, 11, "_test.djinn");
+    }
+
+    public static unsafe bool has_base_name(ptr<i8> path, ptr<i8> name) {
+        i32 length = strlen(path);
+        i32 base = strlen(name);
+        if (length <= base || !Strings.same(path + length - base, name)) {
+            return false;
+        }
+        return path[length - base - 1] == 47 || path[length - base - 1] == 92;
+    }
+
     public static bool apply(Options* options, ptr<i8> directory) {
         ByteBuffer* manifest_path = ByteBuffer.create();
         manifest_path.append(directory);
@@ -42,7 +56,11 @@ struct Project {
         for (mut i32 i = 0; i <= length; i = i + 1) {
             if (i == length || listing[i] == 10) {
                 if (i > start) {
-                    inputs.push((ptr)Strings.duplicate(listing + start, i - start));
+                    ptr<i8> path = Strings.duplicate(listing + start, i - start);
+                    bool is_entry = options.include_tests && options.entry_file != null && Project.has_base_name(path, options.entry_file);
+                    if (!is_entry && (options.include_tests || !Project.is_test_file(path))) {
+                        inputs.push((ptr)path);
+                    }
                 }
                 start = i + 1;
             }
@@ -64,6 +82,12 @@ struct Project {
                 } else if (Strings.starts_with(manifest, first, i, "libs:")) {
                     options.use_std = false;
                     open_list = Project.read_items(options, manifest, first + 5, i, ProjectList.LIBS, directory);
+                } else if (Strings.starts_with(manifest, first, i, "test-libs:")) {
+                    if (options.include_tests) {
+                        open_list = Project.read_items(options, manifest, first + 10, i, ProjectList.LIBS, directory);
+                    }
+                } else if (Strings.starts_with(manifest, first, i, "entry:")) {
+                    options.entry_file = Project.read_value(manifest, first + 6, i);
                 } else if (Strings.starts_with(manifest, first, i, "sources:")) {
                     open_list = Project.read_items(options, manifest, first + 8, i, ProjectList.SOURCES, directory);
                 } else if (Strings.starts_with(manifest, first, i, "library-mode:")) {

@@ -487,11 +487,12 @@ Pronto quando: todo `TEST` tem decisão na triagem e o gtest deixa de ser necess
 
 1. Em modo teste, o compilador emite uma tabela de descritores (nome, arquivo, linha, atributos, `MethodInfo*`) e um
    thunk por teste, `void(ptr* args, ptr out)`, porque o runner não pode chamar uma assinatura desconhecida. Thunks de `async` fazem `await`.
-2. `Expect`/`Assert` e o gancho de panic no runtime.
-3. Subcomando `djinnc test [dir]`: compila o projeto incluindo `*_test.djinn`, gera o entrypoint se não houver `main`,
+2. **Feito:** `Expect` em `libs/testing` (`is_true`, `is_false`, `equal`, `equal_text`, `contains`, `fail`, com o local do chamador) sobre `__djinn_panic`. Falha de `Expect` aborta com stack trace e não é repetida pelo `[TestPolicy]`; um crash é.
+3. **Feito, com ressalvas:** subcomando `djinnc test [dir]`: compila o projeto incluindo `*_test.djinn`, gera o entrypoint se não houver `main`,
    linka um binário só e executa. Workers são esse mesmo binário reexecutado, então é um link por projeto, não por teste.
    Flags: `--filter`, `--tag`, `--jobs`, `--list`, `--report`, `--fail-fast`. `djinnc arquivo.djinn` continua funcionando.
-4. `*_test.djinn` não entra em build normal. Isso cobre tanto testes ao lado do código quanto um projeto só de testes.
+   Hoje existem `--filter`, `--jobs`, `--list`, `--report` (em `TestProgram`, repassadas depois de `--`). Ainda faltam `--tag` e `--fail-fast`, e o entrypoint não é gerado: o `main` do projeto de testes vive em um `*_test.djinn` (ou no arquivo do `entry:` do manifesto, que o modo teste exclui).
+4. **Feito:** `*_test.djinn` não entra em build normal (`--tests` inclui). O manifesto aceita `test-libs:` e `entry:`. Isso cobre tanto testes ao lado do código quanto um projeto só de testes. `libs/testing` ganhou os próprios testes.
 5. Migrar `SelfTest` para `djinnc/src/**/*_test.djinn` e remover `--selftest`.
 
 Pronto quando: `djinnc test djinnc` roda os antigos checks de arena, atoms e mapas.

@@ -79,6 +79,8 @@ directory).
 | `--emit-tokens` / `--emit-ast` | Dump the token list or the AST and exit. |
 | `--stats` | Print files, tokens, AST nodes and arena usage, plus a `PerformanceMonitor` lap per phase (lex, parse, codegen, write-ir, object, link) and the total, in ms. |
 | `--selftest` | Run the built-in unit checks (arena, atoms, maps, ...). |
+| `test <dir> [options] [-- args]` | Build the project in `<dir>` with its `*_test.djinn` files (and `test-libs:` from `djinn.proj`), reflection on, then run the result. Everything after `--` goes to the test program (`--filter`, `--jobs`, `--report`, `--list`). The exit code is the test program's. |
+| `--tests` | Include `*_test.djinn` in a project build without running anything. Normal builds skip those files. |
 
 Objects are emitted directly through LLVM-C (`LLVMTargetMachineEmitToFile`); only the x86 target is initialized.
 

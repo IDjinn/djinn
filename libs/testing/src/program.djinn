@@ -1,0 +1,182 @@
+namespace testing;
+
+import std::sys;
+import std::types;
+import std::libc;
+import std::io;
+
+struct TestEntry {
+    TypeInfo* type;
+    MethodInfo* method;
+    ptr<i8> name;
+}
+
+struct TestOptions {
+    ptr<i8> filter;
+    ptr<i8> report;
+    i32 jobs;
+    bool ok;
+}
+
+struct TestProgram {
+    public static unsafe i32 run() {
+        ptr<i8> mode = Environment.argument(1);
+        if (Text.same(mode, "--list")) {
+            return TestProgram.list();
+        }
+        if (Text.same(mode, "--run")) {
+            return TestProgram.run_one(Environment.argument(2));
+        }
+        return TestProgram.run_all();
+    }
+
+    static unsafe ItemList* collect() {
+        ItemList* entries = ItemList.create();
+        for (mut i32 i = 0; i < Reflection.type_count(); i = i + 1) {
+            TypeInfo* type = Reflection.type_at(i);
+            if (!TestMethods.has_tests(type)) {
+                continue;
+            }
+            TypeInfoExt* info = Reflection.ext(type);
+            for (mut i32 m = 0; m < (i32)info.methodCount; m = m + 1) {
+                MethodInfo* method = &info.methods[m];
+                if (!TestMethods.is_test(method)) {
+                    continue;
+                }
+                TestEntry* entry = (TestEntry*)Allocator.zeroed(sizeof(TestEntry));
+                entry.type = type;
+                entry.method = method;
+                entry.name = (ptr<i8>)method.name;
+                entries.push((ptr)entry);
+            }
+        }
+        return entries;
+    }
+
+    static unsafe i32 list() {
+        ItemList* entries = TestProgram.collect();
+        for (mut i32 i = 0; i < entries.length; i = i + 1) {
+            TestEntry* entry = (TestEntry*)entries.get(i);
+            printf("%s\n", entry.name);
+        }
+        return 0;
+    }
+
+    static unsafe i32 run_one(ptr<i8> name) {
+        ItemList* entries = TestProgram.collect();
+        for (mut i32 i = 0; i < entries.length; i = i + 1) {
+            TestEntry* entry = (TestEntry*)entries.get(i);
+            if (!Text.same(entry.name, name)) {
+                continue;
+            }
+            if (!TestMethods.can_call(entry.method)) {
+                printf("a [Test] takes no parameters and is not async yet\n");
+                return 2;
+            }
+            TestMethods.call(entry.type, entry.method);
+            return 0;
+        }
+        printf("no test named %s\n", name);
+        return 3;
+    }
+
+    static unsafe TestOptions* parse_options() {
+        TestOptions* options = (TestOptions*)Allocator.zeroed(sizeof(TestOptions));
+        options.jobs = 8;
+        options.ok = true;
+        mut i32 index = 1;
+        while (index < Process.argc()) {
+            ptr<i8> argument = Environment.argument(index);
+            ptr<i8> value = Environment.argument(index + 1);
+            if (Text.same(argument, "--filter")) {
+                options.filter = value;
+            } else if (Text.same(argument, "--report")) {
+                options.report = value;
+            } else if (Text.same(argument, "--jobs")) {
+                options.jobs = Text.parse_integer(value, (i32)strlen(value));
+            } else {
+                options.ok = false;
+            }
+            index = index + 2;
+        }
+        if (options.jobs < 1) {
+            options.ok = false;
+        }
+        return options;
+    }
+
+    static unsafe ptr<i8> command_for(ptr<i8> name) {
+        TextBuffer* command = TextBuffer.create();
+        command.append("\"");
+        command.append(Environment.argument(0));
+        command.append("\" --run \"");
+        command.append(name);
+        command.append("\"");
+        return command.cstr();
+    }
+
+    static unsafe ptr<i8> failure_reason(TestNode* node) {
+        TextBuffer* reason = TextBuffer.create();
+        reason.append("exit ");
+        reason.append_int((i64)node.exit_code);
+        mut i32 length = (i32)strlen(node.output);
+        if (length > 0) {
+            reason.append(": ");
+            if (length > 600) {
+                length = 600;
+            }
+            reason.append_slice(node.output, length);
+        }
+        return reason.cstr();
+    }
+
+    static unsafe i32 run_all() {
+        TestOptions* options = TestProgram.parse_options();
+        if (!options.ok) {
+            printf("usage: <tests> [--list | --run <name> | --filter <text> --jobs <n> --report <file>]\n");
+            return 2;
+        }
+        ItemList* entries = TestProgram.collect();
+        Scheduler* pool = Scheduler.create(options.jobs);
+        for (mut i32 i = 0; i < entries.length; i = i + 1) {
+            TestEntry* entry = (TestEntry*)entries.get(i);
+            if (options.filter != null && !Text.contains(entry.name, options.filter)) {
+                continue;
+            }
+            TestNode* node = TestNode.create(entry.name, 60000000);
+            ptr policy = TestMethods.attribute(entry.method, "TestPolicy");
+            if (policy != null) {
+                TestPolicy* values = (TestPolicy*)policy;
+                node.max_retries = values.retry;
+                if (values.timeout > 0) {
+                    node.timeout_us = (i64)values.timeout * 1000;
+                }
+            }
+            node.tags = "Run";
+            node.command = TestProgram.command_for(entry.name);
+            pool.add(node);
+        }
+        mut ptr next = pool.wait();
+        while (next != null) {
+            TestNode* node = (TestNode*)next;
+            mut ptr<i8> reason = null;
+            if (node.exit_code != 0) {
+                if (node.exit_code < 0 && Text.contains(node.output, "runtime error: panic")) {
+                    node.exit_code = 1;
+                }
+                reason = TestProgram.failure_reason(node);
+            }
+            pool.complete(node, reason);
+            next = pool.wait();
+        }
+        TestReport.print_summary(pool);
+        if (options.report != null) {
+            TestReport.write_json(pool, options.report);
+        }
+        ItemList* nodes = pool.nodes;
+        if (TestReport.passed(nodes) == nodes.length) {
+            return 0;
+        }
+        return 1;
+    }
+}
