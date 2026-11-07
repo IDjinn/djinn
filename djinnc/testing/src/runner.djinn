@@ -6,10 +6,6 @@ import std::libc;
 import std::io;
 import testing;
 
-extern "C" {
-    ptr<i8> __djinn_list_files(ptr<i8> directory, ptr<i8> extension);
-}
-
 struct Kind {
     const i32 RUN = 0;
     const i32 ERROR = 2;
@@ -239,9 +235,8 @@ struct Runner {
     }
 
     public static unsafe ptr<i8> library_command(TestCase* test, Config* config) {
-        TextBuffer* library = TextBuffer.create();
-        library.append(config.out_dir);
-        library.append("/library_mathlib.djlib");
+        TestNode* node = test.node;
+        ptr<i8> library = Runner.output_path(config, node.name, ".djlib");
         TextBuffer* command = TextBuffer.create();
         command.append("\"");
         if (test.phase == 2) {
@@ -254,11 +249,11 @@ struct Runner {
         if (test.phase == 0) {
             Runner.quote(command, test.library);
             command.append(" --library -o");
-            Runner.quote(command, library.cstr());
+            Runner.quote(command, library);
         } else {
             Runner.quote(command, test.source);
             command.append(" --lib");
-            Runner.quote(command, library.cstr());
+            Runner.quote(command, library);
             command.append(" -o");
             Runner.quote(command, test.binary);
         }
@@ -407,7 +402,7 @@ struct Runner {
             if (node.exit_code == 0) {
                 return "expected a non-zero exit code";
             }
-            return null;
+            return Runner.check_output(test);
         }
         if (node.exit_code != expected.exit_code) {
             return Runner.exit_mismatch(expected.exit_code, node.exit_code);
@@ -415,7 +410,7 @@ struct Runner {
         if (expected.stdout_text != null && !Text.same(node.stdout_text, expected.stdout_text)) {
             return "stdout differs";
         }
-        return null;
+        return Runner.check_output(test);
     }
 
     public static unsafe void advance(TestCase* test, Config* config, Scheduler* pool) {
@@ -467,33 +462,6 @@ struct Runner {
         path.append(test.binary);
         path.append(".ll");
         remove(path.cstr());
-    }
-
-    public static unsafe void add_orphans(Verify* verify, ptr<i8> directory) {
-        Config* config = verify.config;
-        ptr<i8> listing = __djinn_list_files(directory, ".djinn");
-        if (listing == null) {
-            return;
-        }
-        i32 length = (i32)strlen(listing);
-        mut i32 start = 0;
-        for (mut i32 i = 0; i < length; i = i + 1) {
-            if (listing[i] != 10) {
-                continue;
-            }
-            ptr<i8> path = Text.duplicate(listing + start, i - start);
-            start = i + 1;
-            if (verify.uses(path)) {
-                continue;
-            }
-            TextBuffer* name = TextBuffer.create();
-            name.append("orphans/");
-            name.append(path);
-            TestCase* test = Runner.new_case(config, name.cstr(), path, Kind.CLEAN);
-            TestNode* node = test.node;
-            node.fail("no test uses this source");
-            verify.select(test);
-        }
     }
 
     public static unsafe ptr<i8> path_names(i32 paths) {

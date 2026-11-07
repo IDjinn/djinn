@@ -10,7 +10,6 @@ unsafe static mut ptr current_verify = null;
 
 struct Verify {
     ItemList* cases;
-    ItemList* sources;
     Config* config;
     ptr<i8> name;
     bool std;
@@ -23,12 +22,11 @@ struct Verify {
     public static unsafe Verify* create(Config* config) {
         Verify* verify = (Verify*)Allocator.zeroed(sizeof(Verify));
         verify.cases = ItemList.create();
-        verify.sources = ItemList.create();
         verify.config = config;
         return verify;
     }
 
-    public unsafe Verify* test(ptr<i8> name) {
+    unsafe Verify* test(ptr<i8> name) {
         this.name = name;
         this.std = false;
         this.retry = 0;
@@ -48,12 +46,17 @@ struct Verify {
         return Verify.with_source(Sources.text(Reflection.terminated_view(text)));
     }
 
-    public static unsafe Verify* file(ptr<i8> path) {
-        return Verify.with_source(Sources.file(path));
+    public unsafe void discover() {
+        current_verify = (ptr)this;
+        for (mut i32 i = 0; i < Reflection.type_count(); i = i + 1) {
+            TypeInfo* type = Reflection.type_at(i);
+            if (TestMethods.has_tests(type)) {
+                this.suite(type);
+            }
+        }
     }
 
-    public unsafe void suite(TypeInfo* type) {
-        current_verify = (ptr)this;
+    unsafe void suite(TypeInfo* type) {
         TypeInfoExt* info = Reflection.ext(type);
         for (mut i32 i = 0; i < (i32)info.methodCount; i = i + 1) {
             MethodInfo* method = &info.methods[i];
@@ -84,7 +87,7 @@ struct Verify {
         this.select(test);
     }
 
-    public unsafe void select(TestCase* test) {
+    unsafe void select(TestCase* test) {
         TestNode* node = test.node;
         if (this.selected(node.name)) {
             ItemList* cases = this.cases;
@@ -102,7 +105,7 @@ struct Verify {
         return this;
     }
 
-    public unsafe Verify* policy(MethodInfo* method) {
+    unsafe Verify* policy(MethodInfo* method) {
         ptr retry = TestMethods.attribute(method, "TestPolicy");
         if (retry != null) {
             TestPolicy* policy = (TestPolicy*)retry;
@@ -115,24 +118,6 @@ struct Verify {
             this.required = requires.paths;
         }
         return this;
-    }
-
-    public unsafe bool uses(ptr<i8> path) {
-        ItemList* sources = this.sources;
-        for (mut i32 i = 0; i < sources.length; i = i + 1) {
-            if (Text.same((ptr<i8>)sources.get(i), path)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    unsafe void remember(Source* source) {
-        this.checks = this.checks + 1;
-        if (source.path != null) {
-            ItemList* sources = this.sources;
-            sources.push((ptr)source.path);
-        }
     }
 
     unsafe void resolve_paths(TestCase* test, i32 minimum) {
@@ -197,65 +182,63 @@ struct Verify {
         return test;
     }
 
-    public unsafe void runs(Source* source, Expected* expected) {
-        this.remember(source);
-        this.add(source, Kind.RUN, expected, TestPath.JIT | TestPath.LINK);
+    public unsafe Verify* runs(Expected* expected) {
+        this.checks = this.checks + 1;
+        this.add(this.pending, Kind.RUN, expected, TestPath.JIT | TestPath.LINK);
+        return this;
     }
 
-    public unsafe void runs(Expected* expected) {
-        this.runs(this.pending, expected);
+    public unsafe Verify* compiles() {
+        this.checks = this.checks + 1;
+        this.add(this.pending, Kind.CLEAN, Expected.create(), TestPath.ANY);
+        return this;
     }
 
-    public unsafe void compiles() {
-        this.compiles(this.pending);
-    }
-
-    public unsafe void diagnostics(Expected* expected) {
-        this.diagnostics(this.pending, expected);
-    }
-
-    public unsafe void compiles(Source* source) {
-        this.remember(source);
-        this.add(source, Kind.CLEAN, Expected.create(), TestPath.ANY);
-    }
-
-    public unsafe void diagnostics(Source* source, Expected* expected) {
-        this.remember(source);
+    public unsafe Verify* diagnostics(Expected* expected) {
+        this.checks = this.checks + 1;
         if (expected.reaches_codegen()) {
-            this.add(source, Kind.ERROR, expected, TestPath.CODEGEN);
+            this.add(this.pending, Kind.ERROR, expected, TestPath.CODEGEN);
         } else {
-            this.add(source, Kind.ERROR, expected, TestPath.ANY);
+            this.add(this.pending, Kind.ERROR, expected, TestPath.ANY);
         }
+        return this;
     }
 
-    public unsafe void crashes(Source* source, Expected* expected) {
-        this.remember(source);
+    public unsafe Verify* crashes(Expected* expected) {
+        this.checks = this.checks + 1;
         Config* config = this.config;
         if (config.crash) {
-            this.add(source, Kind.CRASH, expected, TestPath.LINK);
+            this.add(this.pending, Kind.CRASH, expected, TestPath.LINK);
         }
+        return this;
     }
 
-    public unsafe void stops_at(Source* source, i32 line, Expected* expected) {
-        this.remember(source);
+    public unsafe Verify* stops_at(i32 line, Expected* expected) {
+        this.checks = this.checks + 1;
         Config* config = this.config;
         if (config.debug) {
-            TestCase* test = this.add(source, Kind.DEBUG, expected, TestPath.LINK);
+            TestCase* test = this.add(this.pending, Kind.DEBUG, expected, TestPath.LINK);
             test.line = line;
         }
+        return this;
     }
 
-    public unsafe void links_library(Source* library, Source* application, Expected* expected) {
-        this.remember(library);
-        this.remember(application);
+    public unsafe Verify* links_library(str library, Expected* expected) {
+        this.checks = this.checks + 1;
         Config* config = this.config;
         if (config.library) {
-            TestCase* test = this.add(application, Kind.LIBRARY, expected, TestPath.LINK);
-            test.library = library.path;
+            TestCase* test = this.add(this.pending, Kind.LIBRARY, expected, TestPath.LINK);
+            Source* source = Sources.text(Reflection.terminated_view(library));
+            TestNode* node = test.node;
+            test.library = Runner.output_path(config, node.name, "_library.djinn");
+            TextFiles.write(test.library, source.text, (i32)strlen(source.text));
         }
+        return this;
     }
 
-    public unsafe void selftest() {
-        this.add(Sources.file(""), Kind.SELFTEST, Expected.create(), TestPath.ANY);
+    public static unsafe void selftest() {
+        Verify* verify = (Verify*)current_verify;
+        verify.checks = verify.checks + 1;
+        verify.add(Sources.file(""), Kind.SELFTEST, Expected.create(), TestPath.ANY);
     }
 }

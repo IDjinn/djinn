@@ -151,7 +151,7 @@ def execute(case, options, scratch):
     code, output = call([options.compiler, path, "--check", "--diagnostics-format=json", "--runtime-dir", options.runtime_dir] + std)
     case["check"] = code
     case["warnings"] = re.findall(r'"severity":"warning","code":"(E[0-9]+)"', output)
-    first = re.search(r'"severity":"error","code":"E([0-9]+)","file":"[^"]*","line":([0-9]+),"column":([0-9]+),"length":([0-9]+),"message":"((?:[^"]|[\\]")*)"', output)
+    first = re.search(r'"severity":"error","code":"E([0-9]+)","file":"[^"]*","line":([0-9]+),"column":([0-9]+),"length":([0-9]+),"end_line":[0-9]+,"end_column":[0-9]+,"message":"((?:[^"]|[\\]")*)"', output)
     if first:
         lines = case["source"].split("\n")
         line, column, length = int(first.group(2)) - 1, int(first.group(3)) - 1, int(first.group(4))
@@ -223,7 +223,9 @@ def shape(source):
 
 
 def written_tests():
-    for area, owner in (("samples", "SamplesTests"), ("errors", "ErrorsTests"), ("floats", "FloatIeeeTests")):
+    owners = (("samples", "SamplesTests"), ("errors", "ErrorsTests"), ("floats", "FloatIeeeTests"), ("std", "StdTests"),
+              ("crash", "CrashTests"), ("debug", "DebugTests"), ("library", "LibraryTests"))
+    for area, owner in owners:
         text = open(os.path.join(SUITES, area + ".djinn"), encoding="utf-8").read()
         for name, source in re.findall(r'void (\w+)[(][)] [{]\n +str source = """\n(.*?)\n""";', text, re.S):
             yield source, "%s.%s" % (owner, name)
@@ -231,8 +233,6 @@ def written_tests():
 
 def mark_duplicates(cases):
     seen = {}
-    for path in glob.glob("tests/djinnc/*/*.djinn"):
-        seen.setdefault(shape(open(path, errors="replace", encoding="utf-8").read()), path.replace(os.sep, "/"))
     for source, name in written_tests():
         seen.setdefault(shape(source), name)
     for case in cases:
@@ -260,19 +260,10 @@ def literal(text):
 
 
 def write_suite(area, groups):
-    name = "".join(part.capitalize() for part in area.split("_")) + "Suite"
     os.makedirs(SUITES, exist_ok=True)
-    structs = "".join("struct %sTests {\n%s}\n\n" % (group, "\n".join(methods)) for group, methods in groups.items())
-    calls = "".join("        verify.suite(typeof(%sTests));\n" % group for group in groups)
+    structs = "\n".join("struct %sTests {\n%s}\n" % (group, "\n".join(methods)) for group, methods in groups.items())
     with open(os.path.join(SUITES, area + ".djinn"), "w", encoding="utf-8", newline="\n") as stream:
-        stream.write(HEADER + "\n%sstruct %s {\n    public static unsafe void register(Verify* verify) {\n%s    }\n}\n" % (structs, name, calls))
-
-
-def write_registry():
-    areas = sorted(os.path.basename(path)[:-6] for path in glob.glob(SUITES + "/*.djinn") if not path.endswith("suites.djinn"))
-    calls = "".join("        %sSuite.register(verify);\n" % "".join(part.capitalize() for part in area.split("_")) for area in areas)
-    with open(os.path.join(SUITES, "suites.djinn"), "w", encoding="utf-8", newline="\n") as stream:
-        stream.write(HEADER + "\nstruct Suites {\n    public static unsafe void register(Verify* verify) {\n%s    }\n}\n" % calls)
+        stream.write(HEADER + "\n" + structs)
 
 
 def check(case, names):
@@ -304,7 +295,6 @@ def write_tests(cases):
             areas[case["area"]][case["suite"]].append(test_method(case, names))
     for area, groups in areas.items():
         write_suite(area, groups)
-    write_registry()
 
 
 def write_report(cases, path):
