@@ -186,18 +186,17 @@ no editor sem ruído e pode ser reaproveitada por mais de um teste.
 ```djinn
 [Test]
 [Requires(Check)]
-void overflow_is_rejected(Verify verify) {
-    Source source = Sources.file("cases/overflow.djinn");
-    verify.diagnostics(source,
-        Expected.error(DiagnosticErrors.INVALID_NUMBER).at(3, 13).with_message("128"),
-        Expected.warning(DiagnosticWarnings.ATTRIBUTE_NOT_APPLIED).at_position(source.find("[Align")));
+void overflow_is_rejected() {
+    Source* source = Sources.text(OVERFLOW);
+    Verify.with_source(source).diagnostics(
+        Expected.error(DiagnosticErrors.INVALID_NUMBER).at(3, 13).with_message("128")
+            .and_warning(DiagnosticWarnings.ATTRIBUTE_NOT_APPLIED).at_position(source.find("[Align")));
 }
 
 [Test]
 [Requires(JIT)]
-void arithmetic_runs(Verify verify) {
-    verify.runs(Sources.file("cases/arith.djinn"),
-        Expected.exit(110).stdout("hello\n").stdin("").stderr_empty());
+void arithmetic_runs() {
+    Verify.source(ARITHMETIC).runs(Expected.exit(110).stdout("hello\n"));
 }
 
 [Test]
@@ -268,8 +267,7 @@ erro de parser não depende de o atributo ser lido. Sem `[Requires]`, a máscara
 (`diagnostics` sem execução pede `Check`; `runs` pede `JIT`; `ir_contains` pede `IR`), o que cobre a maior parte dos casos.
 
 - Pedir menos do que o método exige é erro: um teste que chama `runs` não aceita `[Requires(Check)]`.
-- Os valores ficam em `TestPath`: `[Requires(TestPath.JIT | TestPath.LINK)]`. Em um método com `[Test]`, o atributo é lido
-  do próprio método. Em um teste registrado à mão, a função é só o portador: `verify.test("x").policy(typeof(fn)).runs(...)`.
+- Os valores ficam em `TestPath`: `[Requires(TestPath.JIT | TestPath.LINK)]`. O atributo é lido do próprio método `[Test]`.
 - `--require Link` só vale para testes que executam código. `compiles` e `diagnostics` não avançam, porque muitas sources
   desses grupos não têm `main`. Com `--require Link`, um teste de `runs` passa pelo JIT e pelo link.
 - Hoje `generateBinary = true` aparece em 466 dos 724 gtests. A maioria só olha o exit code, então cabe em `JIT`.
@@ -287,11 +285,11 @@ O sistema de testes não depende do compilador: o atributo é declarado em `libs
 `attribute` de usuário, e o runner o identifica pela reflexão. Nem o djinnc nem a std conhecem esse nome.
 
 ```djinn
-[TestPolicy(retry = 2, timeout = 5000)]
+[Test]
+[TestPolicy(2, 5000)]
 void flaky_network() {
+    Verify.source(NETWORK).runs(Expected.exit(0));
 }
-
-verify.test("net/flaky").policy(typeof(flaky_network)).runs(Sources.file("cases/net.djinn"), Expected.exit(0));
 ```
 
 - `retry`: quantas vezes o caso roda de novo se o processo morrer com exit code negativo. O padrão é 0, então um crash falha na
@@ -407,7 +405,7 @@ exit code (feito), existe uma tabela medida de custo por estágio (feito) e `[Re
    quantos casos rodaram em cada caminho.
 6. Projeto `tests/conformance`, ligado ao CTest.
 
-Pronto quando: `samples`, `std`, `errors`, `crash` e `debug` rodam pelo runner, em paralelo, e o `run.sh` pode ser
+Pronto quando (feito): `samples`, `std`, `errors`, `crash` e `debug` rodam pelo runner, em paralelo, e o `run.sh` pode ser
 apagado. Os 48 casos de `errors/` ganham códigos esperados.
 
 #### Estado da Fase 1
@@ -433,52 +431,32 @@ build/runner --compiler <djinnc absoluto> --runtime-lib <lib> [--runtime-dir d] 
              [--require Check|IR|JIT|Link] [--link-debug] [--crash] [--debug] [--library] [--out <dir absoluto> [--lld]]
 ```
 
-- As expectativas são código. `djinnc/testing/src/` tem `Sources`, `Expected` e `Verify`; `tests/conformance/src/suites/` registra
-  cada teste. A source fica inline no `[Test]`; só `crash`, `debug`, `library` e `std` ainda usam um `.djinn` em `tests/djinnc/`.
+- As expectativas são código. `djinnc/testing/src/` tem `Sources`, `Expected` e `Verify`; os testes ficam em `tests/conformance/src/suites/`.
+  Todo teste tem a source inline: `tests/djinnc/` só guarda o `fixpoint.sh`.
+- A descoberta não tem lista: `verify.discover()` percorre `Reflection.type_count()` e `Reflection.type_at(i)`, e roda cada struct que tem um método
+  `[Test]`. A lista é genérica: o `main` gerado registra os tipos refletidos no runtime, e o compilador não sabe o que é um teste.
 
 ```djinn
-verify.test("std/add").runs(Sources.file("tests/djinnc/std/add.djinn"), Expected.exit(3).stdout("3\n"));
-verify.test("std/moved").diagnostics(Sources.file("tests/djinnc/std/moved.djinn"), Expected.error(DiagnosticErrors.USE_AFTER_MOVE));
-verify.test("std/ok").with_std().compiles(Sources.file("tests/djinnc/std/ok.djinn"));
-verify.test("crash/null").crashes(Sources.file("tests/djinnc/crash/null_read.djinn"), Expected.contains("native stack trace"));
-verify.test("debug/locals:8").stops_at(Sources.file("tests/djinnc/debug/locals.djinn"), 8, Expected.contains("a = 3"));
-```
-
-- Cada teste vira um processo filho, 8 em paralelo por padrão, com timeout de 120 s. `--require Link` soma o executável em `--out` ao JIT.
-- `--crash`, `--debug` (lldb) e `--library` ligam os grupos que precisam de executável; exigem `--out`.
-- `tests/djinnc/run.sh`, `tools/debug_tests.sh` e `tests/djinnc/library/run.cmd` foram apagados. O `tools/bootstrap.sh` usa o runner.
-- A comparação de diagnósticos é exata: `verify.diagnostics` e `verify.compiles` reprovam com qualquer diagnóstico que sobre ou falte.
-  `.at`, `.at_position(source.find("texto"))`, `.with_message` e `.with_arguments` são opcionais. A mensagem lista o que faltou e o que sobrou.
-- `Sources.text` aceita a source inline, com `"""`. O runner grava o texto em `--out` ou na pasta temporária do sistema.
-  A quebra de linha logo depois da abertura do bloco é ignorada, então o código começa na linha 1.
-- `[Requires]` limita até onde cada teste vai; sem ele, a máscara é deduzida do método. O console e o `--report` mostram quantos
-  casos rodaram em cada caminho. Um `[Requires(Link)]` sem `--out` não roda, e o resumo informa quantos foram pulados.
-- Um `.djinn` em `tests/djinnc` sem teste registrado reprova como `orphans/<caminho>`.
-- CTest: com `-DDJINNC_SEED=<djinnc>`, `ctest -L conformance` roda `djinn_conformance` (JIT) e `djinn_conformance_link`
-  (`--require Link --crash --library`), por meio de `tests/conformance/ctest.sh`.
-- `[Test]` funciona por reflexão, sem nada no compilador: `verify.suite(typeof(Testes))` lê os métodos da struct e chama cada
-  um com `[Test]`, em uma instância nova. O nome do caso é o do método. O `build.sh` compila com `--reflect-all` para isso.
-
-```djinn
-struct FloatIeeeTests {
+struct MathTests {
     [Test]
-    void follows_ieee() {
+    void adds() {
         str source = """
-i32 main() { return 0; }
+i32 main() {
+    return 1 + 2;
+}
 """;
-        Verify.source(source).runs(Expected.exit(0));
+        Verify.source(source).runs(Expected.exit(3));
     }
 }
 ```
 
-- `SamplesTests`, `ErrorsTests` e os testes portados do gtest, uma struct por suite (`MathTests`, `EnumTests`), estão nessa forma, com a source inline. O `port_gtests.py` já escreve assim. Os testes de `samples` que usam uma source de
-  `tests/djinnc/crash` chamam `Verify.file`, porque `crash` depende do nome do arquivo e da linha.
-- `Verify.source(texto)`, `Verify.file(caminho)` e `Verify.with_source(source)` escolhem a entrada. Mais de uma checagem no mesmo
-  método ganha o sufixo `#2`, `#3`. Um `[Test]` com parâmetros, `async` ou sem nenhuma checagem reprova.
+- `Verify.source(texto)` e `Verify.with_source(source)` escolhem a entrada. Cada checagem devolve o `Verify`, então a mesma source encadeia
+  `.runs(...).crashes(...)` ou `.stops_at(8, ...).stops_at(14, ...)`. Mais de uma checagem no mesmo método ganha o sufixo `#2`, `#3`.
+  Um `[Test]` com parâmetros, `async` ou sem nenhuma checagem reprova.
+- `.at(linha, coluna)` e `.at_range(linha, coluna, linha_fim, coluna_fim)` localizam um diagnóstico. O JSON traz `end_line` e `end_column`, calculados
+  a partir de `length`; por isso um token que ocupa várias linhas ainda sai com o fim na primeira.
 - Um `[Test]` só registra casos: cada caso roda depois em um processo próprio. Não há `Expect` dentro do método (item 2 da Fase 3).
-- **Falta:** migrar os testes
-  que ainda são registrados à mão (`std`, `crash`, `debug`, `library`), uma lista global de structs de teste (hoje cada uma entra com `verify.suite`), `.at_range` (o JSON ainda não
-  traz o fim do intervalo) e o grafo.
+- **Falta:** o grafo, que é a Fase 4.
 
 ### Fase 2: migração do gtest
 

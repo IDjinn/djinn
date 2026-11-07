@@ -129,7 +129,8 @@ DJINN_USE_LLD=1 bash tests/conformance/build.sh <djinnc> <runtime lib> build/run
 build/runner --compiler <absolute djinnc> --runtime-lib <runtime lib> --filter SamplesTests
 ```
 
-To add a test, add a method to `SamplesTests` or `ErrorsTests`:
+To add a test, add a `[Test]` method to any struct in `tests/conformance/src/suites`. The runner finds it through
+reflection, so there is nothing to register:
 
 ```djinn
 [Test]
