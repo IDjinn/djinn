@@ -24,7 +24,13 @@ REWRITE_FILES = {
     "tests/compile_time/constexpr.cpp": "usa a API C++ do avaliador de constantes; vira um caso constexpr em Djinn",
     "tests/compiler/bootstrap_subset.cpp": "compila vários arquivos pela API C++; vira um caso multiarquivo",
 }
+SUPERSEDED = {
+    "Numbers.CompileTimeOverflowCheck": "aceitava literais fora da faixa, que agora são erro; coberto por `errors/literal_out_of_range`",
+}
 WRONG_REASON = {
+    "Overflow.TrappedRuntimeOverflowAborts": "modos de overflow",
+    "Overflow.CompoundAssignmentTrappedAborts": "modos de overflow",
+    "Overflow.UnaryNegateTrappedAborts": "modos de overflow",
     "Contracts.ContractCallSiteRequiresTry": "contratos (`require`/`ensure`)",
     "Contracts.RequireConstantViolationIsCompileError": "contratos (`require`/`ensure`)",
     "Contracts.EnforcementStrictRequiresTryEverywhere": "contratos (`require`/`ensure`)",
@@ -44,6 +50,22 @@ WRONG_REASON = {
     "PointerCompat.IncompatibleTypes": "conversão entre ponteiros incompatíveis",
     "Nullable.CastNullableToNonNullableEmitsWarning": "tipos anuláveis",
 }
+# The gtest sources predate the rule that only a wider type of the same kind converts implicitly: the port spells the cast.
+EXPLICIT_CASTS = [
+    (r"Math[.]", "return res;", "return (i32)res;"),
+    (r"Math[.]Exp$", "return floor(e_squared);", "return (i32)floor(e_squared);"),
+    (r"Math[.]Log$", "return round(ln_e);", "return (i32)round(ln_e);"),
+    (r"Math[.]ImportMathMultipleFunctions", "return a + b + c;", "return (i32)(a + b + c);"),
+    (r"Math[.]CombinedMathOperations", "return h;", "return (i32)h;"),
+    (r"Hash[.]", "return x.hash();", "return (i32)x.hash();"),
+    (r"Hash[.]", "i32 h = x.hash();", "i32 h = (i32)x.hash();"),
+    (r"(Str|String)[.]", "return s.length;", "return (i32)s.length;"),
+    (r"String[.]", "return s.capacity;", "return (i32)s.capacity;"),
+    (r"String[.]", ".data = 0,", ".data = (i8*)0,"),
+    (r"Arr[.]", "return nums.length;", "return (i32)nums.length;"),
+    (r"NativeTypes[.]NintNegation", "return 0 - y;", "return (i32)(0 - y);"),
+    (r"NativeTypes[.]NintAsFunctionSignature", "return r;", "return (i32)r;"),
+]
 GAP_BY_TOKEN = [
     ("require", "contratos (`require`/`ensure`)"),
     ("ensure", "contratos (`require`/`ensure`)"),
@@ -79,6 +101,13 @@ def extract(path):
         yield path.replace(os.sep, "/"), mark.group(1), mark.group(2), text[mark.end():end]
 
 
+def with_explicit_casts(identifier, source):
+    for pattern, implicit, explicit in EXPLICIT_CASTS:
+        if re.match(pattern, identifier):
+            source = source.replace(implicit, explicit)
+    return source
+
+
 def describe(file, suite, name, body):
     source = re.search(r'R"([a-zA-Z]*)[(](.*?)[)]\1"', body, re.S)
     helper = re.search(r"=[ ]*(run[A-Za-z]*|compile[A-Za-z]*|execute[A-Za-z]*)[(]", body)
@@ -89,7 +118,7 @@ def describe(file, suite, name, body):
         "area": file.split("/")[1].replace(".cpp", ""),
         "id": suite + "." + name,
         "suite": suite,
-        "source": textwrap.dedent(source.group(2)).strip() + "\n" if source else None,
+        "source": with_explicit_casts(suite + "." + name, textwrap.dedent(source.group(2)).strip() + "\n") if source else None,
         "runs": "DjinnCompiler::run" in body or helper is not None,
         "binary": "generateBinary = true" in body or (helper is not None and helper.group(1).startswith(("run", "execute"))),
         "std": "includeStd = false" not in body,
@@ -99,6 +128,7 @@ def describe(file, suite, name, body):
         "wants_diagnostic": re.search(r"EXPECT_G[TE][(]result[.]diagnostics[.]size|EXPECT_TRUE[(]hasError|errorCount[(]result[)],[ ]*[1-9]", body) is not None,
         "checks_ir": "result.ir" in body or "verifiedIr" in body,
         "checks_ast": "result.program" in body or "structDecl" in body,
+        "checks_report": "runtimeErrorReport" in body,
     }
 
 
@@ -149,6 +179,8 @@ def gap_of(case):
 
 def decide(case):
     file = case["file"]
+    if case["id"] in SUPERSEDED:
+        return "Descartar", SUPERSEDED[case["id"]]
     if file in INTERNAL_FILES:
         return "Descartar", INTERNAL_FILES[file]
     if file in REWRITE_FILES and not (case["source"] and case["runs"]):
@@ -157,6 +189,8 @@ def decide(case):
         return "Bloqueado", gap_of(case)
     if case["id"] in WRONG_REASON:
         return "Bloqueado", gap_of(case) + " (o erro atual tem outro motivo)"
+    if case["checks_report"]:
+        return "Reescrever", "confere o texto do relatório de erro, que no djinnc não mostra operandos nem histórico"
     wants_error = case["diagnostics"] > 0 or case["wants_diagnostic"]
     if wants_error:
         if "code" in case:

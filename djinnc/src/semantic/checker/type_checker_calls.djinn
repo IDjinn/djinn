@@ -56,7 +56,7 @@ impl TypeChecker {
             if (this.names_fit(call, candidate)) {
                 Node* declaration = candidate.node;
                 i32 count = call.count();
-                Node** ordered = (Node**)Memory.zalloc((i64)count * 8);
+                Node** ordered = (Node**)Memory.zalloc((u64)count * 8);
                 for (mut i32 i = 0; i < count; i = i + 1) {
                     Node* argument = call.child(i);
                     if (argument.kind() == NodeKind::NAMED_ARG) {
@@ -206,8 +206,20 @@ impl TypeChecker {
         }
     }
 
+    void require_explicit_cast(Node* value, u32 passed, u32 wanted) {
+        bool passed_number = Types.is_integer(passed) || Types.is_float(passed);
+        bool wanted_number = Types.is_integer(wanted) || Types.is_float(wanted);
+        if (passed_number && wanted_number && !Types.widens(passed, wanted)) {
+            this.error_code(value, DiagnosticErrors.IMPLICIT_CONVERSION, "only a wider type of the same kind converts implicitly; use an explicit cast");
+        }
+        if (passed_number && Types.is_pointer(wanted) && value.kind() != NodeKind::NULL_LITERAL) {
+            this.error_code(value, DiagnosticErrors.IMPLICIT_CONVERSION, "a number does not convert to a pointer implicitly; use an explicit cast");
+        }
+    }
+
     void require_argument_shape(Node* argument, u32 passed, u32 wanted) {
         this.require_safe_pointer(argument, passed, wanted);
+        this.require_explicit_cast(argument, passed, wanted);
         if (wanted == 0 || passed == wanted || wanted == this.core_type("object") || this.wraps_pointer(passed, wanted)) {
             return;
         }
@@ -223,6 +235,7 @@ impl TypeChecker {
 
     void require_value_type(Node* value, u32 passed, u32 wanted) {
         this.require_safe_pointer(value, passed, wanted);
+        this.require_explicit_cast(value, passed, wanted);
         if (passed == 0 || wanted == 0 || passed == wanted || wanted == this.core_type("object") || this.wraps_pointer(passed, wanted)) {
             return;
         }

@@ -5,9 +5,9 @@ resultado. Os grupos que falharam foram revisados à mão; os que passaram não 
 
 | Decisão | Testes | O que significa |
 |---|---|---|
-| Portar | 451 | Passa no djinnc; está em `tests/conformance/cases`. |
-| Reescrever | 78 | O comportamento importa, mas o teste precisa de outra forma. |
-| Bloqueado | 151 | O djinnc não reproduz o comportamento; falta decidir se implementa ou se o recurso sai. |
+| Portar | 439 | Passa no djinnc; está em `tests/conformance/cases`. |
+| Reescrever | 87 | O comportamento importa, mas o teste precisa de outra forma. |
+| Bloqueado | 154 | O djinnc não reproduz o comportamento; falta decidir se implementa ou se o recurso sai. |
 | Descartar | 43 | Interno do stage0 ou duplicado. |
 
 ## O que bloqueia
@@ -15,8 +15,8 @@ resultado. Os grupos que falharam foram revisados à mão; os que passaram não 
 | Lacuna | Testes |
 |---|---|
 | tipos de erro em `throws` | 30 |
+| modos de overflow | 23 |
 | contratos | 20 |
-| modos de overflow | 18 |
 | `sizeof`/`typeof`/`alignof` de expressão | 18 |
 | `switch` com bloco e `yield` | 10 |
 | tipos non-zero | 8 |
@@ -29,7 +29,6 @@ resultado. Os grupos que falharam foram revisados à mão; os que passaram não 
 | tipos nativos | 3 |
 | `const` local | 2 |
 | o djinnc rejeita: struct does not define this operator | 2 |
-| relatório de erro em tempo de execução | 2 |
 | o djinnc rejeita: an enum cannot carry a payload: declare it as a union | 2 |
 | o djinnc rejeita: struct does not define operator get[] | 1 |
 | o djinnc rejeita: a struct initializer needs a struct type from its context | 1 |
@@ -158,35 +157,35 @@ resultado. Os grupos que falharam foram revisados à mão; os que passaram não 
 | Math.IntegerMultFunction | Portar | compila sem erros; as asserções sobre a AST do stage0 não valem para o djinnc |
 | Math.IntegerMult | Portar | exit code 6 |
 | Numbers.MultipleNumbersDeclaration | Portar | compila sem erros |
-| Numbers.CompileTimeOverflowCheck | Portar | compila sem erros |
+| Numbers.CompileTimeOverflowCheck | Descartar | aceitava literais fora da faixa, que agora são erro; coberto por `errors/literal_out_of_range` |
 | Overflow.SuffixDeclarationsCompile | Portar | compila sem erros |
 | Overflow.WrappedIsPlainAdd | Reescrever | confere IR; depende de `ir_contains` |
 | Overflow.TrappedEmitsOverflowCheck | Reescrever | confere IR; depende de `ir_contains` |
-| Overflow.TrappedRuntimeOverflowAborts | Portar | exit code diferente de zero |
+| Overflow.TrappedRuntimeOverflowAborts | Bloqueado | modos de overflow (o erro atual tem outro motivo) |
 | Overflow.CheckedRequiresThrows | Bloqueado | modos de overflow |
 | Overflow.CheckedWithThrowsSetsErrorFlag | Reescrever | confere IR; depende de `ir_contains` |
 | Overflow.SaturatingUsesSatIntrinsic | Reescrever | confere IR; depende de `ir_contains` |
 | Overflow.SaturatingRuntimeAddClampsToMax | Bloqueado | modos de overflow (esperado 2, veio 0) |
-| Overflow.SaturatingLiteralClampsAtCompileTime | Bloqueado | modos de overflow (esperado 2, veio -1) |
-| Overflow.TrappedLiteralOutOfRangeIsCompileError | Bloqueado | modos de overflow |
-| Overflow.WrappedLiteralOutOfRangeStillCompiles | Portar | compila sem erros |
+| Overflow.SaturatingLiteralClampsAtCompileTime | Bloqueado | modos de overflow |
+| Overflow.TrappedLiteralOutOfRangeIsCompileError | Portar | erro E3051 |
+| Overflow.WrappedLiteralOutOfRangeStillCompiles | Bloqueado | modos de overflow |
 | Overflow.ConflictingModesAreRejected | Bloqueado | modos de overflow |
 | Overflow.PostfixIncrementRespectsMode | Portar | exit code 2 |
 | Overflow.FloatTypeSuffixIsRejected | Bloqueado | modos de overflow (o erro atual tem outro motivo) |
-| Overflow.WrappedLiteralKeepsCStyleValue | Portar | exit code 1294967296 |
-| Overflow.HexLiteralSuffixCompiles | Portar | exit code 1 |
+| Overflow.WrappedLiteralKeepsCStyleValue | Bloqueado | modos de overflow |
+| Overflow.HexLiteralSuffixCompiles | Bloqueado | modos de overflow |
 | Overflow.HexDigitCIsNotASuffix | Portar | exit code 28 |
 | Overflow.BinaryLiteralSuffix | Portar | exit code 10 |
 | Overflow.CompoundAssignmentSaturates | Bloqueado | modos de overflow (esperado 2, veio -1) |
-| Overflow.CompoundAssignmentTrappedAborts | Portar | exit code diferente de zero |
+| Overflow.CompoundAssignmentTrappedAborts | Bloqueado | modos de overflow (o erro atual tem outro motivo) |
 | Overflow.UnaryNegateSaturatesMinToMax | Bloqueado | modos de overflow (esperado 2, veio -2) |
-| Overflow.UnaryNegateTrappedAborts | Portar | exit code diferente de zero |
+| Overflow.UnaryNegateTrappedAborts | Bloqueado | modos de overflow (o erro atual tem outro motivo) |
 | Overflow.DivIntMinMinusOneTrappedAborts | Portar | exit code diferente de zero |
 | Overflow.SaturatingDivIntMinClampsToMax | Bloqueado | modos de overflow (esperado 2, veio -1073740791) |
 | Overflow.SaturatingRemIntMinIsZero | Portar | exit code 5 |
 | Overflow.SaturatingSubClampsToMin | Bloqueado | modos de overflow (esperado 2, veio 0) |
 | Overflow.SaturatingMulClampsToMax | Bloqueado | modos de overflow (esperado 2, veio 0) |
-| Overflow.UnsignedSaturatingSubClampsToZero | Bloqueado | modos de overflow (esperado 7, veio 6) |
+| Overflow.UnsignedSaturatingSubClampsToZero | Bloqueado | modos de overflow |
 | Overflow.UnsignedTrappedAddAborts | Bloqueado | modos de overflow |
 | Overflow.ConstexprSaturatingAdd | Bloqueado | modos de overflow (esperado 2, veio 0) |
 | Overflow.ConstevalTrappedOverflowIsError | Bloqueado | modos de overflow |
@@ -572,18 +571,18 @@ resultado. Os grupos que falharam foram revisados à mão; os que passaram não 
 | ErrorHandling.SwitchBlockArmYieldContinuesAfterSwitch | Bloqueado | `switch` com bloco e `yield` |
 | ErrorHandling.SwitchBlockArmYieldAfterStatements | Bloqueado | `switch` com bloco e `yield` |
 | ErrorHandling.YieldWithValueOutsideSwitchArmDiagnostic | Bloqueado | `switch` com bloco e `yield` (o erro atual tem outro motivo) |
-| RuntimeErrors.TrappedOverflowReportHasLocationValuesAndTrace | Portar | exit code diferente de zero |
-| RuntimeErrors.DivisionByZeroReportShowsOperands | Portar | exit code diferente de zero |
-| RuntimeErrors.NegateOverflowReport | Portar | exit code diferente de zero |
-| RuntimeErrors.VariableHistoryShowsLastAssignments | Portar | exit code diferente de zero |
-| RuntimeErrors.StackTraceShowsIntermediateFrames | Portar | exit code diferente de zero |
+| RuntimeErrors.TrappedOverflowReportHasLocationValuesAndTrace | Reescrever | confere o texto do relatório de erro, que no djinnc não mostra operandos nem histórico |
+| RuntimeErrors.DivisionByZeroReportShowsOperands | Reescrever | confere o texto do relatório de erro, que no djinnc não mostra operandos nem histórico |
+| RuntimeErrors.NegateOverflowReport | Reescrever | confere o texto do relatório de erro, que no djinnc não mostra operandos nem histórico |
+| RuntimeErrors.VariableHistoryShowsLastAssignments | Reescrever | confere o texto do relatório de erro, que no djinnc não mostra operandos nem histórico |
+| RuntimeErrors.StackTraceShowsIntermediateFrames | Reescrever | confere o texto do relatório de erro, que no djinnc não mostra operandos nem histórico |
 | RuntimeErrors.ShadowStackCallsAppearInIr | Reescrever | confere IR; depende de `ir_contains` |
-| RuntimeErrors.NormalRunHasEmptyReport | Portar | exit code 123 |
-| RuntimeErrors.UncaughtExceptionEscapingMainReportsAndAborts | Bloqueado | relatório de erro em tempo de execução |
-| RuntimeErrors.UncaughtExceptionReleaseReportHasNoStackTrace | Bloqueado | relatório de erro em tempo de execução |
+| RuntimeErrors.NormalRunHasEmptyReport | Reescrever | confere o texto do relatório de erro, que no djinnc não mostra operandos nem histórico |
+| RuntimeErrors.UncaughtExceptionEscapingMainReportsAndAborts | Reescrever | confere o texto do relatório de erro, que no djinnc não mostra operandos nem histórico |
+| RuntimeErrors.UncaughtExceptionReleaseReportHasNoStackTrace | Reescrever | confere o texto do relatório de erro, que no djinnc não mostra operandos nem histórico |
 | RuntimeErrors.ReleaseModeOmitsShadowStackAndVarTracking | Reescrever | confere IR; depende de `ir_contains` |
 | RuntimeErrors.ReleaseModeTrapUsesMinimalCall | Reescrever | confere IR; depende de `ir_contains` |
-| RuntimeErrors.ReleaseModeTrapReportKeepsLocationAndValues | Descartar | duplicado de `RuntimeErrors.DivisionByZeroReportShowsOperands` |
+| RuntimeErrors.ReleaseModeTrapReportKeepsLocationAndValues | Reescrever | confere o texto do relatório de erro, que no djinnc não mostra operandos nem histórico |
 
 ## functions
 
