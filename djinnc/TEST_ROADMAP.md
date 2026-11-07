@@ -283,7 +283,7 @@ erro de parser não depende de o atributo ser lido. Sem `[Requires]`, a máscara
 
 ### `[TestPolicy]`: repetição e timeout por teste
 
-O sistema de testes não depende do compilador: o atributo é declarado em `tests/conformance/testing/policy.djinn` como qualquer
+O sistema de testes não depende do compilador: o atributo é declarado em `libs/testing/src/attributes.djinn` como qualquer
 `attribute` de usuário, e o runner o identifica pela reflexão. Nem o djinnc nem a std conhecem esse nome.
 
 ```djinn
@@ -401,8 +401,7 @@ exit code (feito), existe uma tabela medida de custo por estágio (feito) e `[Re
 1. `libs/testing` com `djinn.proj` próprio; `libs:` do `djinn.proj` aceita bibliotecas além de `std`.
 2. Modelo de nó e resultado, scheduler com pool de processos, relatório no console e em JSON.
 3. `djinnc/testing` como sublib: fora de `djinnc/src`, para não entrar no compilador. Como `.djlib` não declara dependências,
-   o consumidor passa `--lib` das duas; confirmar logo no início se uma biblioteca compila sobre a outra. Se não, ela
-   começa como fontes dentro de `tests/conformance`.
+   o consumidor lista as duas em `libs:`.
 4. Na sublib: `Sources`, `Expected` e `Verify`, e o leitor dos sidecars `.exit` e `.stdout`, que gera um teste por caso antigo.
 5. Na sublib: máscara `requires`, dedução pelas chamadas do método, `--require Link` e `--compiler`; o relatório mostra
    quantos casos rodaram em cada caminho.
@@ -413,8 +412,20 @@ apagado. Os 48 casos de `errors/` ganham códigos esperados.
 
 #### Estado da Fase 1
 
-O runner é `tests/conformance/runner.djinn`, compilado com `tests/conformance/build.sh`, sem std, junto com as fontes de
-`djinnc/src/support`. Rode da raiz do repositório:
+São três projetos, compilados nesta ordem por `tests/conformance/build.sh`:
+
+| Projeto | Conteúdo | Depende de |
+|---|---|---|
+| `libs/testing` | `Test`, `TestPolicy`, `TestMethods`, `TestNode`, `Scheduler`, `TestReport`; não sabe o que é um compilador | `std` |
+| `djinnc/testing` | `Runner`, `Verify`, `Expected`, `Sources`, comparação de diagnósticos, `TestPath`, `Requires` | `std`, `testing` |
+| `tests/conformance` | só o `main` e os testes | `std`, `testing`, `djinnc_testing` |
+
+O `Scheduler` não chama quem o usa, porque a linguagem ainda não tem ponteiro de função nem interface como valor. O controle é
+invertido: `wait()` devolve o próximo nó cujo processo terminou, a sublib decide, e chama `proceed(node, comando)` para o próximo
+passo ou `complete(node, motivo)` para encerrar. `TestNode.data` aponta para o `TestCase` da sublib.
+
+O build usa o compilador sob teste, porque o seed publicado ainda não lê `libs:`, `sources:` nem `--lib-dir`. Depois de um seed
+novo, `ctest.sh` pode compilar o runner com ele. Rode da raiz do repositório:
 
 ```bash
 DJINN_USE_LLD=1 bash tests/conformance/build.sh <djinnc> <lib> build/runner
@@ -422,7 +433,7 @@ build/runner --compiler <djinnc absoluto> --runtime-lib <lib> [--runtime-dir d] 
              [--require Check|IR|JIT|Link] [--link-debug] [--crash] [--debug] [--library] [--out <dir absoluto> [--lld]]
 ```
 
-- As expectativas são código. `tests/conformance/testing/` tem `Sources`, `Expected` e `Verify`; `tests/conformance/suites/` registra
+- As expectativas são código. `djinnc/testing/src/` tem `Sources`, `Expected` e `Verify`; `tests/conformance/src/suites/` registra
   cada teste. A source fica inline no `[Test]`; só `crash`, `debug`, `library` e `std` ainda usam um `.djinn` em `tests/djinnc/`.
 
 ```djinn
@@ -465,7 +476,7 @@ i32 main() { return 0; }
 - `Verify.source(texto)`, `Verify.file(caminho)` e `Verify.with_source(source)` escolhem a entrada. Mais de uma checagem no mesmo
   método ganha o sufixo `#2`, `#3`. Um `[Test]` com parâmetros, `async` ou sem nenhuma checagem reprova.
 - Um `[Test]` só registra casos: cada caso roda depois em um processo próprio. Não há `Expect` dentro do método (item 2 da Fase 3).
-- **Falta:** `libs/testing` e a sublib (os itens 1 e 3 acima; hoje tudo são fontes em `tests/conformance`), migrar os testes
+- **Falta:** migrar os testes
   que ainda são registrados à mão (`std`, `crash`, `debug`, `library`), uma lista global de structs de teste (hoje cada uma entra com `verify.suite`), `.at_range` (o JSON ainda não
   traz o fim do intervalo) e o grafo.
 
@@ -477,7 +488,7 @@ motivo de cada um, e gera as sources e as suítes. Executar vale mais do que ler
 como `contracts are not supported yet`, e essa lista fica no script.
 
 - **Portar:** passa no djinnc. A source e a expectativa ficam em um `[Test]` em
-  `tests/conformance/suites/<área>.djinn`.
+  `tests/conformance/src/suites/<área>.djinn`.
 - **Reescrever:** o comportamento importa, mas o teste precisa de outra forma: confere IR ou usa a API C++.
 - **Bloqueado:** o djinnc não reproduz o comportamento. Cada lacuna precisa de uma decisão: implementar, ou tirar o recurso da
   linguagem e descartar os testes.
@@ -557,15 +568,12 @@ segundo consumidor para definir essa abstração. O scheduler fica sem conceitos
 - **Custo por teste.** Evitar o link corta o clang, mas não a compilação do std em casos com `--std`. Se a medição da
   Fase 0 mostrar que esse é o gargalo, std como `.djlib` vira pré-requisito da Fase 2.
 - **`JIT` mascarar bug de AOT.** Mitigado pelo `--require Link` no CI noturno e por `JIT | Link` nos casos sensíveis.
-- **Biblioteca sobre biblioteca.** `.djlib` não tem lista de dependências e esse caminho não foi exercitado; o plano B é
-  manter a sublib como fontes de `tests/conformance`.
+- **Biblioteca sobre biblioteca.** Funciona, mas `.djlib` não tem lista de dependências: cada consumidor lista todas em `libs:`.
 
 ## Decisões em aberto
 
 | Decisão | Recomendação |
 |---|---|
-| Nome e local da biblioteca | `libs/testing`, namespace `testing` |
-| Nome e local da sublib | `djinnc/testing`, namespace `djinnc::testing` |
 | Sintaxe de `[Requires]` | `[Requires(IR \| JIT)]`, com a mudança no parser; a alternativa sem mudança é `[Requires("IR\|JIT")]`, que já funciona hoje |
 | Estilo dos asserts | `Expect.equal(a, b)` estático, em vez de `expect(a).to_equal(b)`: menos alocação e mensagens mais diretas |
 | Códigos de erro | Reaproveitar os do stage0 onde houver equivalente |
