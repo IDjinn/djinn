@@ -15,6 +15,7 @@ struct TestOptions {
     ptr<i8> filter;
     ptr<i8> report;
     ptr<i8> tag;
+    ptr<i8> workflow;
     bool fail_fast;
     i32 jobs;
     bool ok;
@@ -22,17 +23,27 @@ struct TestOptions {
 
 struct TestProgram {
     public static unsafe i32 run() {
+        return TestProgram.run_plan(TestPlan.discover());
+    }
+
+    public static unsafe i32 run_plan(TestPlan* plan) {
         ptr<i8> mode = Environment.argument(1);
+        TestGraph* graph = TestGraph.build(plan);
+        if (!graph.valid()) {
+            graph.print_errors();
+            return 2;
+        }
         if (Text.same(mode, "--list")) {
-            return TestProgram.list();
+            return TestProgram.list(graph);
         }
         if (Text.same(mode, "--run")) {
-            return TestProgram.run_one(Environment.argument(2));
+            return TestProgram.run_one(graph, Environment.argument(2));
         }
         if (Text.same(mode, "--graph")) {
-            return TestProgram.run_graph(Environment.argument(2));
+            graph.run_wanted(Environment.argument(2));
+            return 0;
         }
-        return TestProgram.run_all();
+        return TestProgram.run_all(plan, graph);
     }
 
     static unsafe ItemList* collect() {
@@ -58,46 +69,27 @@ struct TestProgram {
         return entries;
     }
 
-    static unsafe i32 list() {
-        ItemList* entries = TestProgram.collect();
-        TestGraph* graph = TestGraph.build(entries);
-        if (!graph.valid()) {
-            graph.print_errors();
-            return 2;
-        }
-        for (mut i32 i = 0; i < entries.length; i = i + 1) {
-            TestEntry* entry = (TestEntry*)entries.get(i);
-            printf("%s\n", entry.name);
+    static unsafe i32 list(TestGraph* graph) {
+        ItemList* nodes = graph.nodes;
+        for (mut i32 i = 0; i < nodes.length; i = i + 1) {
+            GraphNode* node = (GraphNode*)nodes.get(i);
+            printf("%s\n", node.name);
         }
         return 0;
     }
 
-    static unsafe i32 run_graph(ptr<i8> targets) {
-        TestGraph* graph = TestGraph.build(TestProgram.collect());
-        if (!graph.valid()) {
-            graph.print_errors();
+    static unsafe i32 run_one(TestGraph* graph, ptr<i8> name) {
+        GraphNode* node = graph.find(name);
+        if (node == null) {
+            printf("no test named %s\n", name);
+            return 3;
+        }
+        if (!TestMethods.can_call(node.entry.method)) {
+            printf("a [Test] takes no parameters yet\n");
             return 2;
         }
-        graph.run_wanted(targets);
+        TestMethods.call(node.entry.type, node.entry.method);
         return 0;
-    }
-
-    static unsafe i32 run_one(ptr<i8> name) {
-        ItemList* entries = TestProgram.collect();
-        for (mut i32 i = 0; i < entries.length; i = i + 1) {
-            TestEntry* entry = (TestEntry*)entries.get(i);
-            if (!Text.same(entry.name, name)) {
-                continue;
-            }
-            if (!TestMethods.can_call(entry.method)) {
-                printf("a [Test] takes no parameters yet\n");
-                return 2;
-            }
-            TestMethods.call(entry.type, entry.method);
-            return 0;
-        }
-        printf("no test named %s\n", name);
-        return 3;
     }
 
     static unsafe TestOptions* parse_options() {
@@ -115,6 +107,8 @@ struct TestProgram {
             }
             if (Text.same(argument, "--filter")) {
                 options.filter = value;
+            } else if (Text.same(argument, "--workflow")) {
+                options.workflow = value;
             } else if (Text.same(argument, "--tag")) {
                 options.tag = value;
             } else if (Text.same(argument, "--report")) {
@@ -173,7 +167,7 @@ struct TestProgram {
                 command.append(",");
             }
             first = false;
-            command.append(node.entry.name);
+            command.append(node.name);
         }
         command.append("\"");
         return command.cstr();
@@ -192,7 +186,7 @@ struct TestProgram {
     }
 
     static unsafe TestNode* result_node(GraphNode* node, ptr<i8> reason, i64 elapsed_us) {
-        TestNode* result = TestNode.create(node.entry.name, 0);
+        TestNode* result = TestNode.create(node.name, 0);
         result.elapsed_us = elapsed_us;
         result.tags = "Run";
         result.reason = reason;
@@ -288,7 +282,7 @@ struct TestProgram {
         if (running != null) {
             running.state = NodeState.FAILED;
             pool.record(TestProgram.result_node(running, reason, 0));
-            graph.block_dependents(running, running.entry.name);
+            graph.block_dependents(running, running.name);
             TestProgram.record_blocked(pool, graph, component);
             return;
         }
@@ -315,33 +309,39 @@ struct TestProgram {
         pool.complete(job, null);
     }
 
-    static unsafe i32 run_all() {
+    static unsafe i32 run_all(TestPlan* plan, TestGraph* graph) {
         TestOptions* options = TestProgram.parse_options();
         if (!options.ok) {
-            printf("usage: <tests> [--list | --run <name> | --filter <text> --tag <tag> --fail-fast --jobs <n> --report <file>]\n");
+            printf("usage: <tests> [--list | --run <name> | --filter <text> --tag <tag> --workflow <name> --fail-fast --jobs <n> --report <file>]\n");
             return 2;
         }
-        ItemList* entries = TestProgram.collect();
-        TestGraph* graph = TestGraph.build(entries);
-        if (!graph.valid()) {
-            graph.print_errors();
-            return 2;
+        if (options.workflow != null) {
+            Workflow* chosen = plan.find_workflow(options.workflow);
+            if (chosen == null) {
+                printf("no workflow named %s\n", options.workflow);
+                return 3;
+            }
+            graph.select(chosen);
         }
         Scheduler* pool = Scheduler.create(options.jobs);
-        for (mut i32 i = 0; i < entries.length; i = i + 1) {
-            TestEntry* entry = (TestEntry*)entries.get(i);
-            if (options.filter != null && !Text.contains(entry.name, options.filter)) {
+        ItemList* all = graph.nodes;
+        for (mut i32 i = 0; i < all.length; i = i + 1) {
+            GraphNode* graph_node = (GraphNode*)all.get(i);
+            TestEntry* entry = graph_node.entry;
+            if (options.workflow != null && !graph_node.member) {
+                continue;
+            }
+            if (options.filter != null && !Text.contains(graph_node.name, options.filter)) {
                 continue;
             }
             if (options.tag != null && !TestMethods.has_tag(entry.method, options.tag)) {
                 continue;
             }
-            GraphNode* graph_node = (GraphNode*)graph.nodes.get(i);
             if (graph.component_size(graph_node.component) > 1) {
                 graph.mark_needed(graph_node);
                 continue;
             }
-            TestNode* node = TestNode.create(entry.name, 60000000);
+            TestNode* node = TestNode.create(graph_node.name, 60000000);
             ptr policy = TestMethods.attribute(entry.method, "TestPolicy");
             if (policy != null) {
                 TestPolicy* values = (TestPolicy*)policy;
@@ -351,7 +351,7 @@ struct TestProgram {
                 }
             }
             node.tags = "Run";
-            node.command = TestProgram.command_for(entry.name);
+            node.command = TestProgram.command_for(graph_node.name);
             pool.add(node);
         }
         for (mut i32 c = 0; c < graph.components; c = c + 1) {

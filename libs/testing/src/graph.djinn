@@ -14,6 +14,9 @@ struct NodeState {
 
 struct GraphNode {
     TestEntry* entry;
+    ptr<i8> name;
+    bool built;
+    bool member;
     ItemList* inputs;
     ItemList* dependents;
     i32 component;
@@ -30,25 +33,189 @@ struct TestGraph {
     ItemList* errors;
     i32 components;
 
-    public static unsafe TestGraph* build(ItemList* entries) {
+    public static unsafe TestGraph* build(TestPlan* plan) {
         TestGraph* graph = (TestGraph*)Allocator.zeroed(sizeof(TestGraph));
         graph.nodes = ItemList.create();
         graph.errors = ItemList.create();
         ItemList* nodes = graph.nodes;
+        ItemList* entries = plan.entries;
         for (mut i32 i = 0; i < entries.length; i = i + 1) {
-            GraphNode* node = (GraphNode*)Allocator.zeroed(sizeof(GraphNode));
-            node.entry = (TestEntry*)entries.get(i);
-            node.inputs = ItemList.create();
-            node.dependents = ItemList.create();
-            node.component = -1;
-            nodes.push((ptr)node);
+            TestEntry* entry = (TestEntry*)entries.get(i);
+            if (!plan.uses(entry.method)) {
+                graph.add(entry, entry.name);
+            }
         }
         for (mut i32 i = 0; i < nodes.length; i = i + 1) {
             graph.bind((GraphNode*)nodes.get(i));
         }
+        ItemList* workflows = plan.workflows;
+        for (mut i32 w = 0; w < workflows.length; w = w + 1) {
+            graph.add_workflow(plan, (Workflow*)workflows.get(w));
+        }
+        graph.check_async();
         graph.find_cycles();
         graph.assign_components();
         return graph;
+    }
+
+    unsafe GraphNode* add(TestEntry* entry, ptr<i8> name) {
+        GraphNode* node = (GraphNode*)Allocator.zeroed(sizeof(GraphNode));
+        node.entry = entry;
+        node.name = name;
+        node.inputs = ItemList.create();
+        node.dependents = ItemList.create();
+        node.component = -1;
+        ItemList* nodes = this.nodes;
+        nodes.push((ptr)node);
+        return node;
+    }
+
+    static unsafe ptr<i8> short_name(ptr<i8> name) {
+        i32 length = (i32)strlen(name);
+        mut i32 end = 0;
+        while (end < length && name[end] != 40) {
+            end = end + 1;
+        }
+        mut i32 last = -1;
+        for (mut i32 i = 0; i < end; i = i + 1) {
+            if (name[i] == 46) {
+                last = i;
+            }
+        }
+        return name + last + 1;
+    }
+
+    unsafe GraphNode* latest(ItemList* chain, i32 type_id, ptr<i8> wanted) {
+        mut i32 at = chain.length - 1;
+        while (at >= 0) {
+            GraphNode* candidate = (GraphNode*)chain.get(at);
+            at = at - 1;
+            if (candidate.entry.method.returnTypeId != type_id) {
+                continue;
+            }
+            if (wanted != null && !Text.same(TestGraph.short_name(candidate.name), wanted) && !Text.same(TestGraph.simple_name(candidate.entry.name), wanted)) {
+                continue;
+            }
+            return candidate;
+        }
+        return (GraphNode*)0;
+    }
+
+    unsafe GraphNode* shared(TestEntry* entry, ItemList* inputs) {
+        ItemList* nodes = this.nodes;
+        for (mut i32 n = 0; n < nodes.length; n = n + 1) {
+            GraphNode* node = (GraphNode*)nodes.get(n);
+            if (!node.built || node.entry != entry || node.inputs.length != inputs.length) {
+                continue;
+            }
+            mut bool same = true;
+            for (mut i32 i = 0; i < inputs.length; i = i + 1) {
+                if (node.inputs.get(i) != inputs.get(i)) {
+                    same = false;
+                }
+            }
+            if (same) {
+                return node;
+            }
+        }
+        TextBuffer* label = TextBuffer.create();
+        label.append(entry.name);
+        if (inputs.length > 0) {
+            label.append("(");
+            for (mut i32 i = 0; i < inputs.length; i = i + 1) {
+                if (i > 0) {
+                    label.append("+");
+                }
+                GraphNode* input = (GraphNode*)inputs.get(i);
+                label.append(TestGraph.short_name(input.name));
+            }
+            label.append(")");
+        }
+        mut ptr<i8> name = label.cstr();
+        mut i32 copies = 1;
+        while (this.find(name) != null) {
+            copies = copies + 1;
+            TextBuffer* numbered = TextBuffer.create();
+            numbered.append(label.cstr());
+            numbered.append("#");
+            numbered.append_int((i64)copies);
+            name = numbered.cstr();
+        }
+        GraphNode* created = this.add(entry, name);
+        created.built = true;
+        for (mut i32 i = 0; i < inputs.length; i = i + 1) {
+            GraphNode* input = (GraphNode*)inputs.get(i);
+            created.inputs.push((ptr)input);
+            input.dependents.push((ptr)created);
+        }
+        return created;
+    }
+
+    unsafe void add_workflow(TestPlan* plan, Workflow* workflow) {
+        ItemList* steps = workflow.steps;
+        ItemList* chain = ItemList.create();
+        for (mut i32 s = 0; s < steps.length; s = s + 1) {
+            MethodInfo* method = (MethodInfo*)steps.get(s);
+            TestEntry* entry = plan.entry_of(method);
+            if (entry == null) {
+                TextBuffer* message = TextBuffer.create();
+                message.append("workflow '");
+                message.append(workflow.name);
+                message.append("': step ");
+                message.append_int((i64)(s + 1));
+                message.append(" is not a [Test]");
+                this.report(message.cstr());
+                continue;
+            }
+            ItemList* inputs = ItemList.create();
+            mut bool complete = true;
+            for (mut i32 p = 0; p < (i32)method.paramCount; p = p + 1) {
+                ParamInfo* param = &method.params[p];
+                GraphNode* source = this.latest(chain, param.typeId, TestGraph.chosen(param));
+                if (source == null) {
+                    TextBuffer* message = TextBuffer.create();
+                    message.append("workflow '");
+                    message.append(workflow.name);
+                    message.append("': ");
+                    message.append(entry.name);
+                    message.append(": parameter '");
+                    message.append((ptr<i8>)param.name);
+                    message.append("' of type ");
+                    message.append(TestGraph.type_name(param.typeId));
+                    message.append(" has no earlier step that returns it");
+                    this.report(message.cstr());
+                    complete = false;
+                    continue;
+                }
+                inputs.push((ptr)source);
+            }
+            if (!complete) {
+                continue;
+            }
+            GraphNode* node = this.shared(entry, inputs);
+            chain.push((ptr)node);
+            workflow.nodes.push((ptr)node);
+        }
+    }
+
+    unsafe void check_async() {
+        ItemList* nodes = this.nodes;
+        for (mut i32 i = 0; i < nodes.length; i = i + 1) {
+            GraphNode* node = (GraphNode*)nodes.get(i);
+            MethodInfo* method = node.entry.method;
+            if (((i32)method.flags & Reflection.METHOD_ASYNC) != 0 && (method.paramCount > 0 || node.dependents.length > 0)) {
+                this.report(TestGraph.unsupported(node.name));
+            }
+        }
+    }
+
+    public unsafe i32 select(Workflow* workflow) {
+        ItemList* members = workflow.nodes;
+        for (mut i32 i = 0; i < members.length; i = i + 1) {
+            GraphNode* node = (GraphNode*)members.get(i);
+            node.member = true;
+        }
+        return members.length;
     }
 
     static unsafe ptr<i8> simple_name(ptr<i8> name) {
@@ -124,7 +291,7 @@ struct TestGraph {
                 continue;
             }
             TextBuffer* message = TextBuffer.create();
-            message.append(node.entry.name);
+            message.append(node.name);
             message.append(": parameter '");
             message.append((ptr<i8>)param.name);
             message.append("' of type ");
@@ -142,9 +309,6 @@ struct TestGraph {
             }
             this.report(message.cstr());
             inputs.push(null);
-        }
-        if (((i32)method.flags & Reflection.METHOD_ASYNC) != 0 && (method.paramCount > 0 || node.dependents.length > 0)) {
-            this.report(TestGraph.unsupported(node.entry.name));
         }
     }
 
@@ -176,9 +340,9 @@ struct TestGraph {
             if (input.visit == 1) {
                 TextBuffer* message = TextBuffer.create();
                 message.append("cycle: ");
-                message.append(node.entry.name);
+                message.append(node.name);
                 message.append(" needs ");
-                message.append(input.entry.name);
+                message.append(input.name);
                 message.append(", which needs it back");
                 this.report(message.cstr());
                 return true;
@@ -237,7 +401,7 @@ struct TestGraph {
         ItemList* nodes = this.nodes;
         for (mut i32 i = 0; i < nodes.length; i = i + 1) {
             GraphNode* node = (GraphNode*)nodes.get(i);
-            if (Text.same(node.entry.name, name)) {
+            if (Text.same(node.name, name)) {
                 return node;
             }
         }
@@ -297,12 +461,12 @@ struct TestGraph {
             arguments[i] = input.value;
         }
         node.value = Allocator.zeroed((u64)TestGraph.type_size(method.returnTypeId) + 16);
-        printf("RUN %s\n", node.entry.name);
+        printf("RUN %s\n", node.name);
         fflush((ptr)0);
         i64 started = __djinn_now_us();
         TestMethods.invoke(node.entry.type, method, (ptr)arguments, node.value);
         node.state = NodeState.PASSED;
-        printf("OK %s %d\n", node.entry.name, (i32)((__djinn_now_us() - started) / 1000));
+        printf("OK %s %d\n", node.name, (i32)((__djinn_now_us() - started) / 1000));
         fflush((ptr)0);
     }
 

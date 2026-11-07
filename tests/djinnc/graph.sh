@@ -92,4 +92,32 @@ grep -q "Diamond\|Fan\|Wide" "$out/graph_filter.log" && fail "filter: unrelated 
 "$exe_path" --list > "$out/graph_list.log"
 [ "$(grep -c "" "$out/graph_list.log")" -gt 80 ] || fail "list: every test must be listed"
 
+# Explicit workflows share nodes by function and bindings.
+"$compiler" test tests/workflow -o "$out/workflow_tests$exe" "${flags[@]}" > "$out/workflow_ok.log"
+workflow_exe="$out/workflow_tests$exe"
+summary "$out/workflow_ok.log" | grep -Eq "^10 passed, 0 failed, 10 total" || { head -30 "$out/workflow_ok.log"; fail "workflow: the healthy run must pass 10 nodes"; }
+[ "$(grep -c "^PASS Flow.login (" "$out/workflow_ok.log")" = 1 ] || fail "workflow: login must run once for every workflow that uses it"
+expect_line "$out/workflow_ok.log" "^PASS Flow.edit(login) " "workflow: edit must exist bound to login"
+expect_line "$out/workflow_ok.log" "^PASS Flow.edit(login_admin) " "workflow: edit must exist bound to login_admin"
+expect_line "$out/workflow_ok.log" "^PASS Flow.compare(login+edit(login)) " "workflow: compare must reuse the shared edit node"
+
+"$workflow_exe" --workflow admin > "$out/workflow_admin.log"
+[ "$(grep -c "^PASS " "$out/workflow_admin.log")" = 4 ] || { cat "$out/workflow_admin.log"; fail "workflow: admin must run exactly its 4 nodes"; }
+grep -q "Flow.login (\|Flow.user_only\|Flow.alone" "$out/workflow_admin.log" && fail "workflow: admin must not run other workflows"
+
+"$workflow_exe" --workflow recheck > "$out/workflow_recheck.log"
+[ "$(grep -c "^PASS " "$out/workflow_recheck.log")" = 3 ] || { cat "$out/workflow_recheck.log"; fail "workflow: recheck must run exactly its 3 nodes"; }
+
+"$workflow_exe" --workflow nope > "$out/workflow_nope.log" && fail "workflow: an unknown name must fail"
+expect_line "$out/workflow_nope.log" "no workflow named nope" "workflow: unknown name must be reported"
+
+WF_FAIL=login_admin "$workflow_exe" > "$out/workflow_fail.log" && fail "workflow: a broken login must fail the run"
+expect_line "$out/workflow_fail.log" "^FAIL Flow.login_admin" "workflow: login_admin must fail"
+[ "$(grep -c "^BLOCKED .*blocked by Flow.login_admin" "$out/workflow_fail.log")" = 3 ] || fail "workflow: the admin chain must be blocked"
+expect_line "$out/workflow_fail.log" "^PASS Flow.audit(edit(login)+login)" "workflow: the user chain must still pass"
+
+"$compiler" test tests/workflow_invalid -o "$out/workflow_invalid$exe" "${flags[@]}" > "$out/workflow_invalid.log" 2>/dev/null && fail "workflow_invalid must not run"
+expect_line "$out/workflow_invalid.log" "^graph error: workflow 'early': Broken.use_token: parameter 'token' of type Token has no earlier step that returns it" "workflow_invalid: a step needing a later producer"
+expect_line "$out/workflow_invalid.log" "^graph error: workflow 'helper': step 2 is not a \[Test\]" "workflow_invalid: a step that is not a test"
+
 echo "graph: ok"

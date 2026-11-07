@@ -238,6 +238,29 @@ impl TypeChecker {
 }
 
 impl TypeChecker {
+    unsafe u32 check_typeof_method(Node* node, TypeRef* reference) {
+        SymbolTable* known = this.symbols;
+        u32 method_info = Types.pointer_to(this.core_type("MethodInfo"));
+        StructInfo* owner = known.find_struct(reference.full_atom, reference.name_atom, this.scope);
+        if (owner == null) {
+            this.error_code(node, DiagnosticErrors.UNKNOWN_TYPE, "unknown type");
+            return method_info;
+        }
+        ptr<i8> member = node.text();
+        FunctionInfo* function = known.find_method(owner, Ast.intern_base_name(member, strlen(member)));
+        if (function == null) {
+            this.error_code(node, DiagnosticErrors.INVALID_REFLECTION_TARGET, "the type has no method with this name");
+            return method_info;
+        }
+        if (function.is_template) {
+            this.error_code(node, DiagnosticErrors.INVALID_REFLECTION_TARGET, "typeof needs a concrete function: instantiate the generic function first");
+        } else if (function.overload != null) {
+            this.error_code(node, DiagnosticErrors.INVALID_REFLECTION_TARGET, "typeof is ambiguous on an overloaded function");
+        }
+        node.set_symbol(SymbolKind.FUNCTION, (ptr)function);
+        return method_info;
+    }
+
     unsafe u32 check_intrinsic(Node* node) {
         i32 id = node.op();
         if (id == Intrinsic.ALLOCA) {
@@ -271,6 +294,9 @@ impl TypeChecker {
             TypeRef* reference = node.type();
             SymbolTable* known = this.symbols;
             known.blame = node;
+            if (node.text() != null) {
+                return this.check_typeof_method(node, reference);
+            }
             mut u32 measured = known.resolve_type(reference, this.scope);
             if (measured == 0 && reference.kind == TypeKind.NAMED && reference.args == null) {
                 InterfaceInfo* contract = known.find_interface(reference.full_atom, reference.name_atom, this.scope);
