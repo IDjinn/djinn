@@ -423,12 +423,12 @@ build/runner --compiler <djinnc absoluto> --runtime-lib <lib> [--runtime-dir d] 
 ```
 
 - As expectativas são código. `tests/conformance/testing/` tem `Sources`, `Expected` e `Verify`; `tests/conformance/suites/` registra
-  cada teste. A source é um `.djinn` puro, em `tests/djinnc/` ou `tests/conformance/cases/`.
+  cada teste. A source fica inline no `[Test]`; só `crash`, `debug`, `library` e `std` ainda usam um `.djinn` em `tests/djinnc/`.
 
 ```djinn
-verify.test("cases/add").runs(Sources.file("tests/conformance/cases/add.djinn"), Expected.exit(3).stdout("3\n"));
-verify.test("cases/moved").diagnostics(Sources.file("tests/conformance/cases/moved.djinn"), Expected.error(DiagnosticErrors.USE_AFTER_MOVE));
-verify.test("types/ok").with_std().compiles(Sources.file("tests/conformance/cases/types/ok.djinn"));
+verify.test("std/add").runs(Sources.file("tests/djinnc/std/add.djinn"), Expected.exit(3).stdout("3\n"));
+verify.test("std/moved").diagnostics(Sources.file("tests/djinnc/std/moved.djinn"), Expected.error(DiagnosticErrors.USE_AFTER_MOVE));
+verify.test("std/ok").with_std().compiles(Sources.file("tests/djinnc/std/ok.djinn"));
 verify.test("crash/null").crashes(Sources.file("tests/djinnc/crash/null_read.djinn"), Expected.contains("native stack trace"));
 verify.test("debug/locals:8").stops_at(Sources.file("tests/djinnc/debug/locals.djinn"), 8, Expected.contains("a = 3"));
 ```
@@ -442,7 +442,7 @@ verify.test("debug/locals:8").stops_at(Sources.file("tests/djinnc/debug/locals.d
   A quebra de linha logo depois da abertura do bloco é ignorada, então o código começa na linha 1.
 - `[Requires]` limita até onde cada teste vai; sem ele, a máscara é deduzida do método. O console e o `--report` mostram quantos
   casos rodaram em cada caminho. Um `[Requires(Link)]` sem `--out` não roda, e o resumo informa quantos foram pulados.
-- Um `.djinn` em `tests/djinnc` ou `tests/conformance/cases` sem teste registrado reprova como `orphans/<caminho>`.
+- Um `.djinn` em `tests/djinnc` sem teste registrado reprova como `orphans/<caminho>`.
 - CTest: com `-DDJINNC_SEED=<djinnc>`, `ctest -L conformance` roda `djinn_conformance` (JIT) e `djinn_conformance_link`
   (`--require Link --crash --library`), por meio de `tests/conformance/ctest.sh`.
 - `[Test]` funciona por reflexão, sem nada no compilador: `verify.suite(typeof(Testes))` lê os métodos da struct e chama cada
@@ -460,13 +460,13 @@ i32 main() { return 0; }
 }
 ```
 
-- `SamplesTests` e `ErrorsTests` estão nessa forma, com a source inline. Os testes de `samples` que usam uma source de
+- `SamplesTests`, `ErrorsTests` e os testes portados do gtest, uma struct por suite (`MathTests`, `EnumTests`), estão nessa forma, com a source inline. O `port_gtests.py` já escreve assim. Os testes de `samples` que usam uma source de
   `tests/djinnc/crash` chamam `Verify.file`, porque `crash` depende do nome do arquivo e da linha.
 - `Verify.source(texto)`, `Verify.file(caminho)` e `Verify.with_source(source)` escolhem a entrada. Mais de uma checagem no mesmo
   método ganha o sufixo `#2`, `#3`. Um `[Test]` com parâmetros, `async` ou sem nenhuma checagem reprova.
 - Um `[Test]` só registra casos: cada caso roda depois em um processo próprio. Não há `Expect` dentro do método (item 2 da Fase 3).
 - **Falta:** `libs/testing` e a sublib (os itens 1 e 3 acima; hoje tudo são fontes em `tests/conformance`), migrar os testes
-  que ainda são registrados à mão (`tests/conformance/cases`, `std`, `crash`, `debug`, `library`), uma lista global de structs de teste (hoje cada uma entra com `verify.suite`), `.at_range` (o JSON ainda não
+  que ainda são registrados à mão (`std`, `crash`, `debug`, `library`), uma lista global de structs de teste (hoje cada uma entra com `verify.suite`), `.at_range` (o JSON ainda não
   traz o fim do intervalo) e o grafo.
 
 ### Fase 2: migração do gtest
@@ -476,7 +476,7 @@ Nem todo teste do gtest merece ir para o djinnc: são 723 `TEST` em 54 arquivos,
 motivo de cada um, e gera as sources e as suítes. Executar vale mais do que ler: um erro "esperado" pode sair por outro motivo,
 como `contracts are not supported yet`, e essa lista fica no script.
 
-- **Portar:** passa no djinnc. A source fica em `tests/conformance/cases/<área>/` e a expectativa em
+- **Portar:** passa no djinnc. A source e a expectativa ficam em um `[Test]` em
   `tests/conformance/suites/<área>.djinn`.
 - **Reescrever:** o comportamento importa, mas o teste precisa de outra forma: confere IR ou usa a API C++.
 - **Bloqueado:** o djinnc não reproduz o comportamento. Cada lacuna precisa de uma decisão: implementar, ou tirar o recurso da
