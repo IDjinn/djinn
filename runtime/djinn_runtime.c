@@ -154,3 +154,22 @@ void __djinn_call_method(void* address, void* target)
     ((void (*)(void*))address)(target);
 }
 
+static void** reflected_types;
+static int32_t reflected_type_count;
+
+void __djinn_reflect_register(void** types, int32_t count)
+{
+    reflected_types = types;
+    reflected_type_count = count;
+}
+
+int32_t __djinn_reflected_count(void)
+{
+    return reflected_type_count;
+}
+
+void* __djinn_reflected_type(int32_t index)
+{
+    return reflected_types[index];
+}
+

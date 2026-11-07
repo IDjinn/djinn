@@ -35,6 +35,33 @@ impl CodeGenerator {
         return Attributes.has(this.reflection_node(info), "Reflect");
     }
 
+    unsafe void register_reflected_types() {
+        SymbolTable* symbols = this.symbols;
+        PointerList* structs = symbols.structs;
+        ptr<ptr> values = CodeGenerator.array_of(structs.length + 1);
+        mut i32 count = 0;
+        for (mut i32 i = 0; i < structs.length; i = i + 1) {
+            StructInfo* info = (StructInfo*)structs.get(i);
+            u32 type = Types.structure((u32)i);
+            if (info.origin == null && !info.is_enum && this.is_reflected(type)) {
+                values[count] = this.type_info_of(type);
+                count = count + 1;
+            }
+        }
+        if (count == 0) {
+            return;
+        }
+        ptr pointer_llvm = LLVMPointerTypeInContext(this.context, 0);
+        ptr i32_type = LLVMIntTypeInContext(this.context, 32);
+        ptr<ptr> params = CodeGenerator.array_of(2);
+        params[0] = pointer_llvm;
+        params[1] = i32_type;
+        ptr<ptr> args = CodeGenerator.array_of(2);
+        args[0] = this.constant_array(pointer_llvm, values, count, "__djinn_reflected_types");
+        args[1] = LLVMConstInt(i32_type, (u64)count, 0);
+        this.call_runtime("__djinn_reflect_register", LLVMVoidTypeInContext(this.context), params, args, 2);
+    }
+
     ptr null_pointer() {
         return LLVMConstNull(LLVMPointerTypeInContext(this.context, 0));
     }
@@ -241,6 +268,10 @@ impl CodeGenerator {
 
     unsafe bool is_reflected_method(FunctionInfo* method, StructInfo* info) {
         if (method.owner != info || method.is_template || method.node == null) {
+            return false;
+        }
+        Node* declaration = method.node;
+        if (declaration.first() == null && !declaration.is_header()) {
             return false;
         }
         return method.name[0] != 46;
