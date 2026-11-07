@@ -14,7 +14,8 @@ import subprocess
 import tempfile
 import textwrap
 
-SUITES = "tests/conformance/suites"
+SUITES = "tests/conformance/src/suites"
+HEADER = "namespace conformance;\n\nimport testing;\nimport djinnc::testing;\nimport djinnc;\n"
 INTERNAL_FILES = {
     "tests/compiler/mangler.cpp": "testa o mangler do stage0",
     "tests/compiler/diagnostics.cpp": "testa a formatação do DiagnosticEngine do stage0",
@@ -264,14 +265,14 @@ def write_suite(area, groups):
     structs = "".join("struct %sTests {\n%s}\n\n" % (group, "\n".join(methods)) for group, methods in groups.items())
     calls = "".join("        verify.suite(typeof(%sTests));\n" % group for group in groups)
     with open(os.path.join(SUITES, area + ".djinn"), "w", encoding="utf-8", newline="\n") as stream:
-        stream.write("namespace djinnc;\n\n%sstruct %s {\n    public static unsafe void register(Verify* verify) {\n%s    }\n}\n" % (structs, name, calls))
+        stream.write(HEADER + "\n%sstruct %s {\n    public static unsafe void register(Verify* verify) {\n%s    }\n}\n" % (structs, name, calls))
 
 
 def write_registry():
     areas = sorted(os.path.basename(path)[:-6] for path in glob.glob(SUITES + "/*.djinn") if not path.endswith("suites.djinn"))
     calls = "".join("        %sSuite.register(verify);\n" % "".join(part.capitalize() for part in area.split("_")) for area in areas)
     with open(os.path.join(SUITES, "suites.djinn"), "w", encoding="utf-8", newline="\n") as stream:
-        stream.write("namespace djinnc;\n\nstruct Suites {\n    public static unsafe void register(Verify* verify) {\n%s    }\n}\n" % calls)
+        stream.write(HEADER + "\nstruct Suites {\n    public static unsafe void register(Verify* verify) {\n%s    }\n}\n" % calls)
 
 
 def check(case, names):
@@ -313,7 +314,7 @@ def write_report(cases, path):
              "Gerado por `tests/conformance/port_gtests.py`: cada `TEST` foi extraído e executado no djinnc, e a decisão sai do",
              "resultado. Os grupos que falharam foram revisados à mão; os que passaram não tiveram a intenção lida um a um.", "",
              "| Decisão | Testes | O que significa |", "|---|---|---|",
-             "| Portar | %d | Passa no djinnc; está em `tests/conformance/suites`, como `[Test]`. |" % totals["Portar"],
+             "| Portar | %d | Passa no djinnc; está em `tests/conformance/src/suites`, como `[Test]`. |" % totals["Portar"],
              "| Reescrever | %d | O comportamento importa, mas o teste precisa de outra forma. |" % totals["Reescrever"],
              "| Bloqueado | %d | O djinnc não reproduz o comportamento; falta decidir se implementa ou se o recurso sai. |" % totals["Bloqueado"],
              "| Descartar | %d | Interno do stage0 ou duplicado. |" % totals["Descartar"], "",

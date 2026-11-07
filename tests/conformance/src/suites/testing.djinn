@@ -1,0 +1,81 @@
+namespace conformance;
+
+import testing;
+import djinnc::testing;
+import djinnc;
+
+[Requires(TestPath.IR)]
+void stops_at_ir() {
+}
+
+[Requires(TestPath.JIT | TestPath.LINK)]
+void runs_on_both_paths() {
+}
+
+[Requires(TestPath.LINK)]
+void runs_only_linked() {
+}
+
+struct TestAttributeTests {
+    [Test]
+    [Requires(TestPath.JIT | TestPath.LINK)]
+    void reads_attributes_from_the_method() {
+        Verify.source("i32 main() { return 6; }").runs(Expected.exit(6));
+    }
+
+    [Test]
+    void finds_positions() {
+        Source* source = Sources.text("""
+i32 main() {
+    return null;
+}
+""");
+        Verify.with_source(source).diagnostics(Expected.error(DiagnosticErrors.VALUE_TYPE_MISMATCH).at_position(source.find("null")));
+    }
+
+    [Test]
+    void names_every_check() {
+        Verify.source("i32 main() { return 1; }").runs(Expected.exit(1));
+        Verify.source("i32 main() { return 2; }").runs(Expected.exit(2));
+    }
+
+    [Test]
+    static void runs_static_methods() {
+        Verify.source("i32 main() { return 0; }").compiles();
+    }
+
+    void skips_other_methods() {
+        Verify.source("i32 main() { return 7; }").runs(Expected.exit(0));
+    }
+}
+
+struct TestingSuite {
+    public static unsafe void register(Verify* verify) {
+        verify.suite(typeof(TestAttributeTests));
+        verify.test("testing/inline_source").compiles(Sources.text("i32 main() { return 0; }"));
+        verify.test("testing/block_string").runs(Sources.text("""
+i32 main() {
+    return 3;
+}
+"""), Expected.exit(3));
+
+        Source* two_errors = Sources.text("""
+i32 main() {
+    mut i32 first = null;
+    mut i32 second = null;
+    return first + second;
+}
+""");
+        verify.test("testing/many_diagnostics").diagnostics(two_errors,
+            Expected.error(DiagnosticErrors.VALUE_TYPE_MISMATCH).at_position(two_errors.find("null")).with_message("does not match")
+                .and_error(DiagnosticErrors.VALUE_TYPE_MISMATCH).at(3, 22));
+
+        verify.test("testing/arguments").diagnostics(Sources.text("i32 main() { return missing(); }"),
+            Expected.error(DiagnosticErrors.UNDECLARED_FUNCTION).at(1, 21).with_arguments("missing"));
+
+        verify.test("testing/requires_ir").policy(typeof(stops_at_ir)).compiles(Sources.text("i32 main() { return 0; }"));
+        verify.test("testing/deduced_ir").diagnostics(Sources.text("i32 helper() { return 0; }"), Expected.error(DiagnosticErrors.MISSING_MAIN).at(1, 1));
+        verify.test("testing/requires_jit_and_link").policy(typeof(runs_on_both_paths)).runs(Sources.text("i32 main() { return 4; }"), Expected.exit(4));
+        verify.test("testing/requires_link").policy(typeof(runs_only_linked)).runs(Sources.text("i32 main() { return 5; }"), Expected.exit(5));
+    }
+}
