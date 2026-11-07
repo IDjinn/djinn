@@ -268,8 +268,8 @@ erro de parser não depende de o atributo ser lido. Sem `[Requires]`, a máscara
 (`diagnostics` sem execução pede `Check`; `runs` pede `JIT`; `ir_contains` pede `IR`), o que cobre a maior parte dos casos.
 
 - Pedir menos do que o método exige é erro: um teste que chama `runs` não aceita `[Requires(Check)]`.
-- Enquanto `[Test]` não existe, a função é só o portador do atributo, como em `[TestPolicy]`:
-  `verify.test("x").policy(typeof(fn)).runs(...)`. Os valores ficam em `TestPath`: `[Requires(TestPath.JIT | TestPath.LINK)]`.
+- Os valores ficam em `TestPath`: `[Requires(TestPath.JIT | TestPath.LINK)]`. Em um método com `[Test]`, o atributo é lido
+  do próprio método. Em um teste registrado à mão, a função é só o portador: `verify.test("x").policy(typeof(fn)).runs(...)`.
 - `--require Link` só vale para testes que executam código. `compiles` e `diagnostics` não avançam, porque muitas sources
   desses grupos não têm `main`. Com `--require Link`, um teste de `runs` passa pelo JIT e pelo link.
 - Hoje `generateBinary = true` aparece em 466 dos 724 gtests. A maioria só olha o exit code, então cabe em `JIT`.
@@ -298,7 +298,7 @@ verify.test("net/flaky").policy(typeof(flaky_network)).runs(Sources.file("cases/
   primeira vez. Falha de asserção ou exit code errado não repete; casos de crash também não, porque ali morrer é o esperado.
 - `timeout`: limite em milissegundos, no lugar dos 120 s do runner.
 - A source do caso não leva o atributo: ela continua sendo só a entrada sob teste.
-- Hoje a função é só o portador do atributo. Quando `[Test]` tiver descoberta, ele fica no próprio método de teste.
+- Em um método com `[Test]`, o atributo é lido do próprio método. Em um teste registrado à mão, a função é só o portador.
 
 ## Etapas
 
@@ -445,8 +445,27 @@ verify.test("debug/locals:8").stops_at(Sources.file("tests/djinnc/debug/locals.d
 - Um `.djinn` em `tests/djinnc` ou `tests/conformance/cases` sem teste registrado reprova como `orphans/<caminho>`.
 - CTest: com `-DDJINNC_SEED=<djinnc>`, `ctest -L conformance` roda `djinn_conformance` (JIT) e `djinn_conformance_link`
   (`--require Link --crash --library`), por meio de `tests/conformance/ctest.sh`.
-- **Falta:** `libs/testing` e a sublib (os itens 1 e 3 acima; hoje tudo são fontes em `tests/conformance`), `[Test]` com descoberta
-  (hoje cada teste é registrado à mão em `Verify`), `.at_range` (o JSON ainda não traz o fim do intervalo) e o grafo.
+- `[Test]` funciona por reflexão, sem nada no compilador: `verify.suite(typeof(Testes))` lê os métodos da struct e chama cada
+  um com `[Test]`, em uma instância nova. O nome do caso é o do método. O `build.sh` compila com `--reflect-all` para isso.
+
+```djinn
+struct FloatIeeeTests {
+    [Test]
+    void follows_ieee() {
+        str source = """
+i32 main() { return 0; }
+""";
+        Verify.source(source).runs(Expected.exit(0));
+    }
+}
+```
+
+- `Verify.source(texto)`, `Verify.file(caminho)` e `Verify.with_source(source)` escolhem a entrada. Mais de uma checagem no mesmo
+  método ganha o sufixo `#2`, `#3`. Um `[Test]` com parâmetros, `async` ou sem nenhuma checagem reprova.
+- Um `[Test]` só registra casos: cada caso roda depois em um processo próprio. Não há `Expect` dentro do método (item 2 da Fase 3).
+- **Falta:** `libs/testing` e a sublib (os itens 1 e 3 acima; hoje tudo são fontes em `tests/conformance`), migrar os testes
+  registrados à mão, uma lista global de structs de teste (hoje cada uma entra com `verify.suite`), `.at_range` (o JSON ainda não
+  traz o fim do intervalo) e o grafo.
 
 ### Fase 2: migração do gtest
 
@@ -472,6 +491,8 @@ Próximos passos:
 Pronto quando: todo `TEST` tem decisão na triagem e o gtest deixa de ser necessário para validar o djinnc. O stage0 pode manter o dele até ser aposentado.
 
 ### Fase 3: `[Test]` e `djinnc test`
+
+`[Test]` já existe no runner de conformidade, por reflexão (veja o estado da Fase 1). O que segue é para testes de projeto, com `djinnc test`.
 
 1. Em modo teste, o compilador emite uma tabela de descritores (nome, arquivo, linha, atributos, `MethodInfo*`) e um
    thunk por teste, `void(ptr* args, ptr out)`, porque o runner não pode chamar uma assinatura desconhecida. Thunks de `async` fazem `await`.
