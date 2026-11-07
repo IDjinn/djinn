@@ -2,15 +2,18 @@ namespace djinnc;
 
 struct Verify {
     PointerList* cases;
+    PointerList* sources;
     Config* config;
     ptr<i8> name;
     bool std;
     i32 retry;
     i32 timeout;
+    i32 required;
 
     public static unsafe Verify* create(PointerList* cases, Config* config) {
         Verify* verify = (Verify*)Memory.zalloc(sizeof(Verify));
         verify.cases = cases;
+        verify.sources = PointerList.create();
         verify.config = config;
         return verify;
     }
@@ -20,6 +23,7 @@ struct Verify {
         this.std = false;
         this.retry = 0;
         this.timeout = 0;
+        this.required = 0;
         return this;
     }
 
@@ -34,13 +38,61 @@ struct Verify {
                 TestPolicy* policy = (TestPolicy*)method.attrs[i].payload;
                 this.retry = policy.retry;
                 this.timeout = policy.timeout;
+            } else if (Strings.same((ptr<i8>)method.attrs[i].name, "Requires")) {
+                Requires* requires = (Requires*)method.attrs[i].payload;
+                this.required = requires.paths;
             }
         }
         return this;
     }
 
-    unsafe TestCase* add(Source* source, i32 kind, Expected* expected) {
+    public unsafe bool uses(ptr<i8> path) {
+        PointerList* sources = this.sources;
+        for (mut i32 i = 0; i < sources.length; i = i + 1) {
+            if (Strings.same((ptr<i8>)sources.get(i), path)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    unsafe void remember(Source* source) {
+        if (source.path != null) {
+            PointerList* sources = this.sources;
+            sources.push((ptr)source.path);
+        }
+    }
+
+    unsafe void resolve_paths(TestCase* test, i32 minimum) {
         Config* config = this.config;
+        mut i32 paths = this.required;
+        if (paths == 0) {
+            paths = minimum & (0 - minimum);
+        }
+        if ((paths & minimum) == 0) {
+            test.state = 2;
+            test.reason = "[Requires] asks for less than this test needs";
+            return;
+        }
+        if (test.kind == Kind.RUN) {
+            paths = paths | config.forced_paths;
+        }
+        if (config.out_dir == null && (paths & TestPath.LINK) != 0) {
+            config.skipped_links = config.skipped_links + 1;
+            paths = paths - TestPath.LINK;
+        }
+        test.requires = paths;
+        test.path = Runner.first_path(test);
+        if (test.path == 0 && test.kind != Kind.SELFTEST) {
+            test.skipped = true;
+        }
+    }
+
+    unsafe TestCase* add(Source* source, i32 kind, Expected* expected, i32 minimum) {
+        Config* config = this.config;
+        if (source.path == null) {
+            source.path = Runner.output_path(config, this.name, ".djinn");
+        }
         TestCase* test = Runner.new_case(config, this.name, source.path, kind);
         test.std = this.std;
         test.expected = expected;
@@ -48,7 +100,11 @@ struct Verify {
         if (this.timeout > 0) {
             test.timeout_us = (i64)this.timeout * 1000;
         }
-        if (config.filter == null || strstr(test.name, config.filter) != null) {
+        this.resolve_paths(test, minimum);
+        if (!test.skipped && (config.filter == null || strstr(test.name, config.filter) != null)) {
+            if (source.text != null) {
+                Files.write_bytes(source.path, source.text, strlen(source.text));
+            }
             PointerList* cases = this.cases;
             cases.push((ptr)test);
         }
@@ -56,41 +112,52 @@ struct Verify {
     }
 
     public unsafe void runs(Source* source, Expected* expected) {
-        this.add(source, Kind.RUN, expected);
+        this.remember(source);
+        this.add(source, Kind.RUN, expected, TestPath.JIT | TestPath.LINK);
     }
 
     public unsafe void compiles(Source* source) {
-        this.add(source, Kind.CLEAN, Expected.create());
+        this.remember(source);
+        this.add(source, Kind.CLEAN, Expected.create(), TestPath.ANY);
     }
 
     public unsafe void diagnostics(Source* source, Expected* expected) {
-        this.add(source, Kind.ERROR, expected);
+        this.remember(source);
+        if (expected.reaches_codegen()) {
+            this.add(source, Kind.ERROR, expected, TestPath.CODEGEN);
+        } else {
+            this.add(source, Kind.ERROR, expected, TestPath.ANY);
+        }
     }
 
     public unsafe void crashes(Source* source, Expected* expected) {
+        this.remember(source);
         Config* config = this.config;
         if (config.crash) {
-            this.add(source, Kind.CRASH, expected);
+            this.add(source, Kind.CRASH, expected, TestPath.LINK);
         }
     }
 
     public unsafe void stops_at(Source* source, i32 line, Expected* expected) {
+        this.remember(source);
         Config* config = this.config;
         if (config.debug) {
-            TestCase* test = this.add(source, Kind.DEBUG, expected);
+            TestCase* test = this.add(source, Kind.DEBUG, expected, TestPath.LINK);
             test.line = line;
         }
     }
 
     public unsafe void links_library(Source* library, Source* application, Expected* expected) {
+        this.remember(library);
+        this.remember(application);
         Config* config = this.config;
         if (config.library) {
-            TestCase* test = this.add(application, Kind.LIBRARY, expected);
+            TestCase* test = this.add(application, Kind.LIBRARY, expected, TestPath.LINK);
             test.library = library.path;
         }
     }
 
     public unsafe void selftest() {
-        this.add(Sources.file(""), Kind.SELFTEST, Expected.create());
+        this.add(Sources.file(""), Kind.SELFTEST, Expected.create(), TestPath.ANY);
     }
 }

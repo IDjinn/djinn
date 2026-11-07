@@ -1,0 +1,43 @@
+namespace djinnc;
+
+[Requires(TestPath.IR)]
+void stops_at_ir() {
+}
+
+[Requires(TestPath.JIT | TestPath.LINK)]
+void runs_on_both_paths() {
+}
+
+[Requires(TestPath.LINK)]
+void runs_only_linked() {
+}
+
+struct TestingSuite {
+    public static unsafe void register(Verify* verify) {
+        verify.test("testing/inline_source").compiles(Sources.text("i32 main() { return 0; }"));
+        verify.test("testing/block_string").runs(Sources.text("""
+i32 main() {
+    return 3;
+}
+"""), Expected.exit(3));
+
+        Source* two_errors = Sources.text("""
+i32 main() {
+    mut i32 first = null;
+    mut i32 second = null;
+    return first + second;
+}
+""");
+        verify.test("testing/many_diagnostics").diagnostics(two_errors,
+            Expected.error(DiagnosticErrors.VALUE_TYPE_MISMATCH).at_position(two_errors.find("null")).with_message("does not match")
+                .and_error(DiagnosticErrors.VALUE_TYPE_MISMATCH).at(4, 22));
+
+        verify.test("testing/arguments").diagnostics(Sources.text("i32 main() { return missing(); }"),
+            Expected.error(DiagnosticErrors.UNDECLARED_FUNCTION).at(1, 21).with_arguments("missing"));
+
+        verify.test("testing/requires_ir").policy(typeof(stops_at_ir)).compiles(Sources.text("i32 main() { return 0; }"));
+        verify.test("testing/deduced_ir").diagnostics(Sources.text("i32 helper() { return 0; }"), Expected.error(DiagnosticErrors.MISSING_MAIN).at(1, 1));
+        verify.test("testing/requires_jit_and_link").policy(typeof(runs_on_both_paths)).runs(Sources.text("i32 main() { return 4; }"), Expected.exit(4));
+        verify.test("testing/requires_link").policy(typeof(runs_only_linked)).runs(Sources.text("i32 main() { return 5; }"), Expected.exit(5));
+    }
+}

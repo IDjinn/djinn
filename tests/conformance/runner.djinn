@@ -30,11 +30,13 @@ struct Config {
     ptr<i8> runtime_lib;
     ptr<i8> std_dir;
     ptr<i8> out_dir;
+    ptr<i8> work_dir;
     ptr<i8> filter;
     ptr<i8> report;
     i32 jobs;
     i64 timeout_us;
-    bool link;
+    i32 forced_paths;
+    i32 skipped_links;
     bool link_debug;
     bool lld;
     bool crash;
@@ -62,6 +64,10 @@ struct TestCase {
     bool std;
     i64 timeout_us;
     i32 line;
+    i32 requires;
+    i32 path;
+    i32 ran;
+    bool skipped;
 }
 
 struct Runner {
@@ -76,11 +82,6 @@ struct Runner {
         while (index < Process.argc()) {
             ptr<i8> argument = Process.argv_or(index, "");
             ptr<i8> value = Process.argv_or(index + 1, "");
-            if (Strings.same(argument, "--link")) {
-                config.link = true;
-                index = index + 1;
-                continue;
-            }
             if (Strings.same(argument, "--link-debug")) {
                 config.link_debug = true;
                 index = index + 1;
@@ -122,6 +123,12 @@ struct Runner {
                 config.report = value;
             } else if (Strings.same(argument, "--jobs")) {
                 config.jobs = (i32)Strings.parse_integer(value, strlen(value));
+            } else if (Strings.same(argument, "--require")) {
+                i32 path = Runner.path_named(value);
+                if (path == 0) {
+                    config.ok = false;
+                }
+                config.forced_paths = config.forced_paths | path;
             } else {
                 config.ok = false;
             }
@@ -130,10 +137,59 @@ struct Runner {
         if (config.compiler == null || config.runtime_lib == null || config.jobs < 1) {
             config.ok = false;
         }
-        if ((config.link || config.crash || config.debug || config.library) && config.out_dir == null) {
+        if (((config.forced_paths & TestPath.LINK) != 0 || config.crash || config.debug || config.library) && config.out_dir == null) {
             config.ok = false;
         }
+        config.work_dir = config.out_dir;
+        if (config.work_dir == null) {
+            config.work_dir = Process.env_or("TEMP", Process.env_or("TMPDIR", "/tmp"));
+        }
         return config;
+    }
+
+    public static unsafe i32 path_named(ptr<i8> name) {
+        if (Strings.same(name, "Check")) {
+            return TestPath.CHECK;
+        }
+        if (Strings.same(name, "IR")) {
+            return TestPath.IR;
+        }
+        if (Strings.same(name, "JIT")) {
+            return TestPath.JIT;
+        }
+        if (Strings.same(name, "Link")) {
+            return TestPath.LINK;
+        }
+        return 0;
+    }
+
+    public static unsafe i32 first_path(TestCase* test) {
+        i32 paths = test.requires;
+        if (test.kind == Kind.SELFTEST) {
+            return 0;
+        }
+        if (test.kind == Kind.RUN) {
+            if ((paths & TestPath.JIT) != 0) {
+                return TestPath.JIT;
+            }
+            return paths & TestPath.LINK;
+        }
+        if (test.kind == Kind.ERROR) {
+            if ((paths & TestPath.CODEGEN) != 0) {
+                return TestPath.IR;
+            }
+            return paths & TestPath.CHECK;
+        }
+        if (test.kind == Kind.CLEAN) {
+            if ((paths & TestPath.LINK) != 0) {
+                return TestPath.LINK;
+            }
+            if ((paths & TestPath.CODEGEN) != 0) {
+                return TestPath.IR;
+            }
+            return paths & TestPath.CHECK;
+        }
+        return paths & TestPath.LINK;
     }
 
     public static unsafe ptr<i8> base_name(ptr<i8> path) {
@@ -151,9 +207,9 @@ struct Runner {
         return Strings.duplicate(path + start, end - start);
     }
 
-    public static unsafe ptr<i8> binary_path(Config* config, ptr<i8> name) {
+    public static unsafe ptr<i8> output_path(Config* config, ptr<i8> name, ptr<i8> extension) {
         ByteBuffer* path = ByteBuffer.create();
-        path.append(config.out_dir);
+        path.append(config.work_dir);
         path.append("/");
         i32 length = strlen(name);
         for (mut i32 i = 0; i < length; i = i + 1) {
@@ -163,7 +219,7 @@ struct Runner {
                 path.append_char(name[i]);
             }
         }
-        path.append(".exe");
+        path.append(extension);
         return path.cstr();
     }
 
@@ -172,9 +228,7 @@ struct Runner {
         test.name = name;
         test.source = path;
         test.kind = kind;
-        if (config.out_dir != null) {
-            test.binary = Runner.binary_path(config, name);
-        }
+        test.binary = Runner.output_path(config, name, ".exe");
         test.timeout_us = config.timeout_us;
         return test;
     }
@@ -183,13 +237,6 @@ struct Runner {
         command.append(" \"");
         command.append(text);
         command.append("\"");
-    }
-
-    public static unsafe bool links(TestCase* test, Config* config) {
-        if (test.kind == Kind.CRASH || test.kind == Kind.DEBUG || test.kind == Kind.LIBRARY) {
-            return true;
-        }
-        return config.link && test.kind == Kind.RUN;
     }
 
     public static unsafe ptr<i8> debug_command(TestCase* test) {
@@ -259,12 +306,18 @@ struct Runner {
         }
         Runner.quote(command, test.source);
         if (test.kind == Kind.ERROR || test.kind == Kind.CLEAN) {
-            command.append(" --check --diagnostics-format=json --runtime-dir");
+            command.append(" --diagnostics-format=json");
+        }
+        if (test.path == TestPath.CHECK) {
+            command.append(" --check --runtime-dir");
             Runner.quote(command, config.runtime_dir);
             Runner.append_std(command, test, config);
             return command.cstr();
         }
-        if (Runner.links(test, config)) {
+        if (test.path == TestPath.IR) {
+            command.append(" --no-link -o");
+            Runner.quote(command, test.binary);
+        } else if (test.path == TestPath.LINK) {
             command.append(" -o");
             Runner.quote(command, test.binary);
             if (test.kind == Kind.CRASH || test.kind == Kind.DEBUG || config.link_debug) {
@@ -293,9 +346,10 @@ struct Runner {
 
     public static unsafe void start(TestCase* test, Config* config) {
         ptr<i8> command = Runner.build_command(test, config);
-        if (test.phase == 0) {
+        if (test.started_us == 0) {
             test.started_us = __djinn_now_us();
         }
+        test.ran = test.ran | test.path;
         test.process = __djinn_process_start(command, "", 0);
         if (test.process == null) {
             test.state = 2;
@@ -358,29 +412,16 @@ struct Runner {
         return reason.cstr();
     }
 
-    public static unsafe void check_diagnostic(TestCase* test, i32 exit_code) {
+    public static unsafe void check_diagnostics(TestCase* test, i32 exit_code) {
         Expected* expected = test.expected;
         ptr<i8> output = Runner.output_text(test.process);
-        if (!expected.is_warning && exit_code == 0) {
-            test.reason = "expected a compile error";
+        if (exit_code < 0) {
+            test.reason = Runner.with_snippet("the compiler crashed", output);
             return;
         }
-        ByteBuffer* needle = ByteBuffer.create();
-        if (expected.is_warning) {
-            needle.append("\"severity\":\"warning\"");
-        } else {
-            needle.append("\"severity\":\"error\"");
-        }
-        if (expected.code != 0) {
-            needle.append(",\"code\":\"E");
-            needle.append_int((i64)expected.code);
-            needle.append("\",");
-        }
-        if (strstr(output, needle.cstr()) == null) {
-            ByteBuffer* reason = ByteBuffer.create();
-            reason.append("expected diagnostic ");
-            reason.append(needle.cstr());
-            test.reason = Runner.with_snippet(reason.cstr(), output);
+        test.reason = DiagnosticComparer.compare(expected, DiagnosticReader.read(output), test.source);
+        if (test.reason == null && exit_code != 0 && !expected.wants_error()) {
+            test.reason = Runner.with_snippet("expected no errors", output);
         }
     }
 
@@ -432,11 +473,10 @@ struct Runner {
     public static unsafe void finish(TestCase* test, Config* config) {
         i32 exit_code = __djinn_process_exit_code(test.process);
         test.state = 2;
-        if (test.kind == Kind.ERROR) {
-            Runner.check_diagnostic(test, exit_code);
-        } else if (test.kind == Kind.CLEAN) {
-            if (exit_code != 0) {
-                test.reason = Runner.with_snippet("expected no errors", Runner.output_text(test.process));
+        if (test.kind == Kind.ERROR || test.kind == Kind.CLEAN) {
+            Runner.check_diagnostics(test, exit_code);
+            if (test.path == TestPath.IR) {
+                Runner.remove_ir(test);
             }
         } else if (test.kind == Kind.SELFTEST) {
             if (exit_code != 0) {
@@ -456,7 +496,7 @@ struct Runner {
             } else {
                 Runner.check_run(test, exit_code);
             }
-        } else if (test.phase == 0 && Runner.links(test, config)) {
+        } else if (test.phase == 0 && test.path == TestPath.LINK) {
             if (exit_code != 0) {
                 test.reason = Runner.with_snippet("compile failed", Runner.output_text(test.process));
             } else {
@@ -472,6 +512,14 @@ struct Runner {
             Runner.check_output(test);
         } else {
             Runner.check_run(test, exit_code);
+            if (test.reason == null && test.path == TestPath.JIT && (test.requires & TestPath.LINK) != 0) {
+                __djinn_process_free(test.process);
+                test.process = null;
+                test.path = TestPath.LINK;
+                test.phase = 0;
+                Runner.start(test, config);
+                return;
+            }
         }
         test.elapsed_us = __djinn_now_us() - test.started_us;
         test.passed = test.reason == null;
@@ -482,7 +530,75 @@ struct Runner {
             test.reason = null;
             test.phase = 0;
             test.state = 0;
+            test.started_us = 0;
+            test.path = Runner.first_path(test);
         }
+    }
+
+    public static unsafe void remove_ir(TestCase* test) {
+        ByteBuffer* path = ByteBuffer.create();
+        path.append(test.binary);
+        path.append(".ll");
+        remove(path.cstr());
+    }
+
+    public static unsafe void add_orphans(Verify* verify, PointerList* cases, Config* config, ptr<i8> directory) {
+        ptr<i8> listing = __djinn_list_files(directory, ".djinn");
+        if (listing == null) {
+            return;
+        }
+        i32 length = strlen(listing);
+        mut i32 start = 0;
+        for (mut i32 i = 0; i < length; i = i + 1) {
+            if (listing[i] != 10) {
+                continue;
+            }
+            ptr<i8> path = Strings.duplicate(listing + start, i - start);
+            start = i + 1;
+            if (verify.uses(path)) {
+                continue;
+            }
+            ByteBuffer* name = ByteBuffer.create();
+            name.append("orphans/");
+            name.append(path);
+            if (config.filter == null || strstr(name.cstr(), config.filter) != null) {
+                TestCase* test = Runner.new_case(config, name.cstr(), path, Kind.CLEAN);
+                test.state = 2;
+                test.reason = "no test uses this source";
+                cases.push((ptr)test);
+            }
+        }
+    }
+
+    public static unsafe ptr<i8> path_names(i32 paths) {
+        ByteBuffer* names = ByteBuffer.create();
+        if ((paths & TestPath.CHECK) != 0) {
+            names.append("Check ");
+        }
+        if ((paths & TestPath.IR) != 0) {
+            names.append("IR ");
+        }
+        if ((paths & TestPath.JIT) != 0) {
+            names.append("JIT ");
+        }
+        if ((paths & TestPath.LINK) != 0) {
+            names.append("Link ");
+        }
+        if (names.length > 0) {
+            names.length = names.length - 1;
+        }
+        return names.cstr();
+    }
+
+    public static unsafe i32 count_path(PointerList* cases, i32 path) {
+        mut i32 count = 0;
+        for (mut i32 i = 0; i < cases.length; i = i + 1) {
+            TestCase* test = (TestCase*)cases.get(i);
+            if ((test.ran & path) != 0) {
+                count = count + 1;
+            }
+        }
+        return count;
     }
 
     public static unsafe void print_result(TestCase* test) {
@@ -504,7 +620,15 @@ struct Runner {
         json.append_int((i64)cases.length);
         json.append(",\"passed\":");
         json.append_int((i64)passed);
-        json.append(",\"cases\":[");
+        json.append(",\"paths\":{\"check\":");
+        json.append_int((i64)Runner.count_path(cases, TestPath.CHECK));
+        json.append(",\"ir\":");
+        json.append_int((i64)Runner.count_path(cases, TestPath.IR));
+        json.append(",\"jit\":");
+        json.append_int((i64)Runner.count_path(cases, TestPath.JIT));
+        json.append(",\"link\":");
+        json.append_int((i64)Runner.count_path(cases, TestPath.LINK));
+        json.append("},\"cases\":[");
         for (mut i32 i = 0; i < cases.length; i = i + 1) {
             TestCase* test = (TestCase*)cases.get(i);
             if (i > 0) {
@@ -522,6 +646,8 @@ struct Runner {
                 json.append(",\"retries\":");
                 json.append_int((i64)test.retries);
             }
+            json.append(",\"paths\":");
+            json.append_json_string(Runner.path_names(test.ran));
             json.append(",\"elapsed_ms\":");
             json.append_int(test.elapsed_us / 1000);
             if (test.reason != null) {
@@ -610,6 +736,10 @@ struct Runner {
             }
         }
         printf("%d passed, %d failed, %d total\n", passed, total - passed, total);
+        printf("paths: Check %d, IR %d, JIT %d, Link %d\n", Runner.count_path(cases, TestPath.CHECK), Runner.count_path(cases, TestPath.IR), Runner.count_path(cases, TestPath.JIT), Runner.count_path(cases, TestPath.LINK));
+        if (config.skipped_links > 0) {
+            printf("%d link runs skipped: they need --out\n", config.skipped_links);
+        }
         if (config.report != null) {
             Runner.write_report(cases, config, passed);
         }
@@ -624,12 +754,14 @@ i32 main() {
     Config* config = Runner.parse_config();
     if (!config.ok) {
         printf("usage: runner --compiler <djinnc> --runtime-lib <lib> [--runtime-dir <dir>] [--std-dir <dir>]\n");
-        printf("              [--link] [--link-debug] [--crash] [--debug] [--library] [--out <absolute dir> [--lld]] [--filter <text>] [--jobs <n>] [--report <file>]\n");
+        printf("              [--require Check|IR|JIT|Link] [--link-debug] [--crash] [--debug] [--library] [--out <absolute dir> [--lld]] [--filter <text>] [--jobs <n>] [--report <file>]\n");
         return 2;
     }
     PointerList* cases = PointerList.create();
     Verify* verify = Verify.create(cases, config);
     verify.test("selftest").selftest();
     Suites.register(verify);
+    Runner.add_orphans(verify, cases, config, "tests/djinnc");
+    Runner.add_orphans(verify, cases, config, "tests/conformance/cases");
     return Runner.run(cases, config);
 }
