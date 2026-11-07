@@ -120,18 +120,30 @@ djinnc --selftest
 
 ### Samples and error cases
 
-[tests/djinnc/run.sh](../tests/djinnc/run.sh) runs the selftest, compiles and runs every file in
-`tests/djinnc/samples` (the expected exit code is in the matching `.exit`; an optional `.stdout` is compared too, ignoring `
-`) and checks that every file in
-`tests/djinnc/errors` fails with an `error:` diagnostic.
+The conformance runner holds these tests, with the source inline in `tests/conformance/suites/samples.djinn` and
+`errors.djinn`. Build it and run it from the repository root:
 
 ```bash
-tests/djinnc/run.sh <djinnc> <runtime dir> [runtime lib]
-DJINN_USE_LLD=1 tests/djinnc/run.sh <djinnc> <runtime dir> <runtime lib>   # through --lld
+DJINN_USE_LLD=1 bash tests/conformance/build.sh <djinnc> <runtime lib> build/runner
+build/runner --compiler <absolute djinnc> --runtime-lib <runtime lib> --filter SamplesTests
 ```
 
-To add a sample, drop `name.djinn` and `name.exit` (the exit code of `main`) into `tests/djinnc/samples`, plus `name.stdout` when the program prints. To add an
-error case, add a file to `tests/djinnc/errors` that must be rejected.
+To add a test, add a method to `SamplesTests` or `ErrorsTests`:
+
+```djinn
+[Test]
+void returns_three() {
+    str source = """
+i32 main() {
+    return 3;
+}
+""";
+    Verify.source(source).runs(Expected.exit(3));
+}
+```
+
+An error case uses `Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.USE_AFTER_MOVE).at(3, 9))`. Any
+diagnostic that is missing or extra fails the test.
 
 ### Fixpoint
 

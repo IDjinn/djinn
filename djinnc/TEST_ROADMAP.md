@@ -386,7 +386,7 @@ checado como um inicializador do struct declarado em `attribute Stage { i32 mask
 - A reflexão ganhou `AttributeInfo.payload`, um ponteiro para o struct do atributo, como o `GetCustomAttribute<T>` do C#:
   `Stage* stage = (Stage*)typeof(target).attrs[0].payload;`. `AttributeInfo.value` continua com o texto do literal único.
 - O parser agora registra o nome de um `attribute X { ... }` como tipo, para o cast acima funcionar.
-- Testes: `samples/attribute_payload.djinn` e `errors/attribute_payload_*.djinn`.
+- Testes: `SamplesTests.attribute_payload` e `ErrorsTests.attribute_payload_*`.
 - **Layout:** `AttributeInfo` passou de 2 para 3 campos em `runtime/core/type_info.djinn` e `std/types/types.djinn`. O stage0
   em C++ emite o layout antigo e não foi tocado; como ele sai de cena, isso só importa se alguém compilar o std com ele.
 
@@ -426,8 +426,8 @@ build/runner --compiler <djinnc absoluto> --runtime-lib <lib> [--runtime-dir d] 
   cada teste. A source é um `.djinn` puro, em `tests/djinnc/` ou `tests/conformance/cases/`.
 
 ```djinn
-verify.test("samples/add").runs(Sources.file("tests/djinnc/samples/add.djinn"), Expected.exit(3).stdout("3\n"));
-verify.test("errors/moved").diagnostics(Sources.file("tests/djinnc/errors/moved.djinn"), Expected.error(DiagnosticErrors.USE_AFTER_MOVE));
+verify.test("cases/add").runs(Sources.file("tests/conformance/cases/add.djinn"), Expected.exit(3).stdout("3\n"));
+verify.test("cases/moved").diagnostics(Sources.file("tests/conformance/cases/moved.djinn"), Expected.error(DiagnosticErrors.USE_AFTER_MOVE));
 verify.test("types/ok").with_std().compiles(Sources.file("tests/conformance/cases/types/ok.djinn"));
 verify.test("crash/null").crashes(Sources.file("tests/djinnc/crash/null_read.djinn"), Expected.contains("native stack trace"));
 verify.test("debug/locals:8").stops_at(Sources.file("tests/djinnc/debug/locals.djinn"), 8, Expected.contains("a = 3"));
@@ -439,7 +439,7 @@ verify.test("debug/locals:8").stops_at(Sources.file("tests/djinnc/debug/locals.d
 - A comparação de diagnósticos é exata: `verify.diagnostics` e `verify.compiles` reprovam com qualquer diagnóstico que sobre ou falte.
   `.at`, `.at_position(source.find("texto"))`, `.with_message` e `.with_arguments` são opcionais. A mensagem lista o que faltou e o que sobrou.
 - `Sources.text` aceita a source inline, com `"""`. O runner grava o texto em `--out` ou na pasta temporária do sistema.
-  Um bloco `"""` guarda a quebra de linha depois da abertura, então o código começa na linha 2.
+  A quebra de linha logo depois da abertura do bloco é ignorada, então o código começa na linha 1.
 - `[Requires]` limita até onde cada teste vai; sem ele, a máscara é deduzida do método. O console e o `--report` mostram quantos
   casos rodaram em cada caminho. Um `[Requires(Link)]` sem `--out` não roda, e o resumo informa quantos foram pulados.
 - Um `.djinn` em `tests/djinnc` ou `tests/conformance/cases` sem teste registrado reprova como `orphans/<caminho>`.
@@ -460,11 +460,13 @@ i32 main() { return 0; }
 }
 ```
 
+- `SamplesTests` e `ErrorsTests` estão nessa forma, com a source inline. Os testes de `samples` que usam uma source de
+  `tests/djinnc/crash` chamam `Verify.file`, porque `crash` depende do nome do arquivo e da linha.
 - `Verify.source(texto)`, `Verify.file(caminho)` e `Verify.with_source(source)` escolhem a entrada. Mais de uma checagem no mesmo
   método ganha o sufixo `#2`, `#3`. Um `[Test]` com parâmetros, `async` ou sem nenhuma checagem reprova.
 - Um `[Test]` só registra casos: cada caso roda depois em um processo próprio. Não há `Expect` dentro do método (item 2 da Fase 3).
 - **Falta:** `libs/testing` e a sublib (os itens 1 e 3 acima; hoje tudo são fontes em `tests/conformance`), migrar os testes
-  registrados à mão, uma lista global de structs de teste (hoje cada uma entra com `verify.suite`), `.at_range` (o JSON ainda não
+  que ainda são registrados à mão (`tests/conformance/cases`, `std`, `crash`, `debug`, `library`), uma lista global de structs de teste (hoje cada uma entra com `verify.suite`), `.at_range` (o JSON ainda não
   traz o fim do intervalo) e o grafo.
 
 ### Fase 2: migração do gtest
