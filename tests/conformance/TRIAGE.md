@@ -5,7 +5,7 @@ resultado. Os grupos que falharam foram revisados à mão; os que passaram não 
 
 | Decisão | Testes | O que significa |
 |---|---|---|
-| Portar | 439 | Passa no djinnc; está em `tests/conformance/cases`. |
+| Portar | 439 | Passa no djinnc; está em `tests/conformance/suites`, como `[Test]`. |
 | Reescrever | 87 | O comportamento importa, mas o teste precisa de outra forma. |
 | Bloqueado | 154 | O djinnc não reproduz o comportamento; falta decidir se implementa ou se o recurso sai. |
 | Descartar | 43 | Interno do stage0 ou duplicado. |

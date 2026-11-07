@@ -10,7 +10,6 @@ import concurrent.futures
 import glob
 import os
 import re
-import shutil
 import subprocess
 import tempfile
 import textwrap
@@ -222,10 +221,19 @@ def shape(source):
     return " ".join(re.sub(r"//[^\n]*", "", source).split())
 
 
+def written_tests():
+    for area, owner in (("samples", "SamplesTests"), ("errors", "ErrorsTests"), ("floats", "FloatIeeeTests")):
+        text = open(os.path.join(SUITES, area + ".djinn"), encoding="utf-8").read()
+        for name, source in re.findall(r'void (\w+)[(][)] [{]\n +str source = """\n(.*?)\n""";', text, re.S):
+            yield source, "%s.%s" % (owner, name)
+
+
 def mark_duplicates(cases):
     seen = {}
     for path in glob.glob("tests/djinnc/*/*.djinn"):
         seen.setdefault(shape(open(path, errors="replace", encoding="utf-8").read()), path.replace(os.sep, "/"))
+    for source, name in written_tests():
+        seen.setdefault(shape(source), name)
     for case in cases:
         if case["decision"] != "Portar" or not case["source"]:
             continue
@@ -250,12 +258,13 @@ def literal(text):
     return text.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\t", "\\t")
 
 
-def write_suite(area, lines):
+def write_suite(area, groups):
     name = "".join(part.capitalize() for part in area.split("_")) + "Suite"
     os.makedirs(SUITES, exist_ok=True)
-    body = "".join("        " + line + "\n" for line in lines)
+    structs = "".join("struct %sTests {\n%s}\n\n" % (group, "\n".join(methods)) for group, methods in groups.items())
+    calls = "".join("        verify.suite(typeof(%sTests));\n" % group for group in groups)
     with open(os.path.join(SUITES, area + ".djinn"), "w", encoding="utf-8", newline="\n") as stream:
-        stream.write("namespace djinnc;\n\nstruct %s {\n    public static unsafe void register(Verify* verify) {\n%s    }\n}\n" % (name, body))
+        stream.write("namespace djinnc;\n\n%sstruct %s {\n    public static unsafe void register(Verify* verify) {\n%s    }\n}\n" % (structs, name, calls))
 
 
 def write_registry():
@@ -265,36 +274,35 @@ def write_registry():
         stream.write("namespace djinnc;\n\nstruct Suites {\n    public static unsafe void register(Verify* verify) {\n%s    }\n}\n" % calls)
 
 
-def statement(case, path, names):
-    test = 'verify.test("%s/%s")' % (case["area"], case["id"])
-    if case["std"]:
-        test += ".with_std()"
-    source = 'Sources.file("%s")' % path
+def check(case, names):
+    std = ".with_std()" if case["std"] else ""
     if case["reason"].startswith("erro"):
-        return '%s.diagnostics(%s, Expected.error(%s));' % (test, source, names.get(case["code"], case["code"]))
+        return "%s.diagnostics(Expected.error(%s))" % (std, names.get(case["code"], case["code"]))
     if case["reason"].startswith("aviso"):
-        return '%s.diagnostics(%s, Expected.warning(%s));' % (test, source, names.get(case["warning"], case["warning"]))
+        return "%s.diagnostics(Expected.warning(%s))" % (std, names.get(case["warning"], case["warning"]))
     if "ran" in case:
         expected = "Expected.failure()" if case["exit"] is None and case["exit_nonzero"] else "Expected.exit(%d)" % (case["exit"] or 0)
-        return "%s.runs(%s, %s);" % (test, source, expected)
-    return "%s.compiles(%s);" % (test, source)
+        return "%s.runs(%s)" % (std, expected)
+    return "%s.compiles()" % std
 
 
-def write_cases(cases, root):
-    shutil.rmtree(root, ignore_errors=True)
+def test_method(case, names):
+    name = case["id"].split(".", 1)[1]
+    if name[0].isdigit():
+        name = "test_" + name
+    source = case["source"].rstrip("\n")
+    assert '"""' not in source, case["id"]
+    return '    [Test]\n    void %s() {\n        str source = """\n%s\n""";\n        Verify.source(source)%s;\n    }\n' % (name, source, check(case, names))
+
+
+def write_tests(cases):
     names = diagnostic_names()
-    areas = collections.defaultdict(list)
+    areas = collections.defaultdict(lambda: collections.defaultdict(list))
     for case in cases:
-        if case["decision"] != "Portar":
-            continue
-        folder = os.path.join(root, case["area"])
-        os.makedirs(folder, exist_ok=True)
-        path = "%s/%s/%s.djinn" % (root, case["area"], case["id"])
-        with open(path, "w", encoding="utf-8", newline="\n") as stream:
-            stream.write(case["source"])
-        areas[case["area"]].append(statement(case, path, names))
-    for area, lines in areas.items():
-        write_suite(area, lines)
+        if case["decision"] == "Portar":
+            areas[case["area"]][case["suite"]].append(test_method(case, names))
+    for area, groups in areas.items():
+        write_suite(area, groups)
     write_registry()
 
 
@@ -305,7 +313,7 @@ def write_report(cases, path):
              "Gerado por `tests/conformance/port_gtests.py`: cada `TEST` foi extraído e executado no djinnc, e a decisão sai do",
              "resultado. Os grupos que falharam foram revisados à mão; os que passaram não tiveram a intenção lida um a um.", "",
              "| Decisão | Testes | O que significa |", "|---|---|---|",
-             "| Portar | %d | Passa no djinnc; está em `tests/conformance/cases`. |" % totals["Portar"],
+             "| Portar | %d | Passa no djinnc; está em `tests/conformance/suites`, como `[Test]`. |" % totals["Portar"],
              "| Reescrever | %d | O comportamento importa, mas o teste precisa de outra forma. |" % totals["Reescrever"],
              "| Bloqueado | %d | O djinnc não reproduz o comportamento; falta decidir se implementa ou se o recurso sai. |" % totals["Bloqueado"],
              "| Descartar | %d | Interno do stage0 ou duplicado. |" % totals["Descartar"], "",
@@ -334,7 +342,7 @@ def main():
     for case in cases:
         case["decision"], case["reason"] = decide(case)
     mark_duplicates(cases)
-    write_cases(cases, "tests/conformance/cases")
+    write_tests(cases)
     write_report(cases, "tests/conformance/TRIAGE.md")
 
 

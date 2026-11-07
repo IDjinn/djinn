@@ -1,35 +1,584 @@
 namespace djinnc;
 
+struct GenericConstraintsTests {
+    [Test]
+    void ParseWhereClauseSingleConstraint() {
+        str source = """
+interface IHashable {
+    i32 hash();
+}
+
+struct Set<K> where K : IHashable {
+    K key;
+}
+""";
+        Verify.source(source).compiles();
+    }
+
+    [Test]
+    void ParseWhereClauseMultipleConstraintsSameParam() {
+        str source = """
+interface IHashable {
+    i32 hash();
+}
+
+interface IEquatable {
+    i32 equals();
+}
+
+struct Set<K> where K : IHashable, IEquatable {
+    K key;
+}
+""";
+        Verify.source(source).compiles();
+    }
+
+    [Test]
+    void ParseWhereClauseMultipleParams() {
+        str source = """
+interface IHashable {
+    i32 hash();
+}
+
+interface ISerializable {
+    i32 serialize();
+}
+
+struct Map<K, V> where K : IHashable; where V : ISerializable {
+    K key;
+    V value;
+}
+""";
+        Verify.source(source).compiles();
+    }
+
+    [Test]
+    void ParseWhereClauseOnInterface() {
+        str source = """
+interface IEquatable {
+    i32 equals();
+}
+
+interface ISortable<T> where T : IEquatable {
+    void sort();
+}
+""";
+        Verify.source(source).compiles();
+    }
+
+    [Test]
+    void ConstraintSatisfied() {
+        str source = """
+interface IValue {
+    i32 getValue();
+}
+
+struct Container<T> where T : IValue {
+    T item;
+}
+
+struct MyItem : IValue {
+    i32 data;
+
+    i32 getValue() {
+        return this.data;
+    }
+}
+
+i32 main() {
+    MyItem item = { .data = 42 };
+    Container<MyItem> c = { .item = item };
+    return 0;
+}
+""";
+        Verify.source(source).runs(Expected.exit(0));
+    }
+
+    [Test]
+    void ConstraintViolated() {
+        str source = """
+interface IValue {
+    i32 getValue();
+}
+
+struct Container<T> where T : IValue {
+    T item;
+}
+
+struct PlainStruct {
+    i32 data;
+}
+
+i32 main() {
+    PlainStruct item = { .data = 10 };
+    Container<PlainStruct> c = { .item = item };
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.INTERFACE_NOT_IMPLEMENTED));
+    }
+
+    [Test]
+    void NoConstraintNoValidation() {
+        str source = """
+struct Container<T> {
+    T item;
+}
+
+struct Anything {
+    i32 x;
+}
+
+i32 main() {
+    Anything a = { .x = 55 };
+    Container<Anything> c = { .item = a };
+    return 0;
+}
+""";
+        Verify.source(source).runs(Expected.exit(0));
+    }
+
+    [Test]
+    void MultipleConstraintsSatisfied() {
+        str source = """
+interface IReadable {
+    i32 read();
+}
+
+interface IWritable {
+    void write(i32 val);
+}
+
+struct Store<T> where T : IReadable, IWritable {
+    T backend;
+}
+
+struct MemBackend : IReadable, IWritable {
+    i32 value;
+
+    i32 read() {
+        return this.value;
+    }
+
+    void write(i32 val) {
+        this.value = val;
+    }
+}
+
+i32 main() {
+    MemBackend b = { .value = 99 };
+    Store<MemBackend> s = { .backend = b };
+    return 0;
+}
+""";
+        Verify.source(source).runs(Expected.exit(0));
+    }
+
+    [Test]
+    void MultipleConstraintsPartiallyViolated() {
+        str source = """
+interface IReadable {
+    i32 read();
+}
+
+interface IWritable {
+    void write(i32 val);
+}
+
+struct Store<T> where T : IReadable, IWritable {
+    T backend;
+}
+
+struct ReadOnly : IReadable {
+    i32 value;
+
+    i32 read() {
+        return this.value;
+    }
+}
+
+i32 main() {
+    ReadOnly r = { .value = 10 };
+    Store<ReadOnly> s = { .backend = r };
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.INTERFACE_NOT_IMPLEMENTED));
+    }
+
+    [Test]
+    void WhereClauseWithImplements() {
+        str source = """
+interface IContainer {
+    i32 size();
+}
+
+interface IValue {
+    i32 getValue();
+}
+
+struct TypedBox<T> where T : IValue : IContainer {
+    T item;
+    i32 count;
+
+    i32 size() {
+        return this.count;
+    }
+}
+
+struct MyVal : IValue {
+    i32 data;
+
+    i32 getValue() {
+        return this.data;
+    }
+}
+
+i32 main() {
+    MyVal v = { .data = 33 };
+    TypedBox<MyVal> box = { .item = v, .count = 1 };
+    return box.count;
+}
+""";
+        Verify.source(source).runs(Expected.exit(1));
+    }
+}
+
+struct FullCompilationTests {
+    [Test]
+    void StructGeneric() {
+        str source = """
+struct Array<T> { T data; i32 size; }
+
+void main() {
+    Array<i32> arr;
+    return;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(0));
+    }
+}
+
+struct GenericStructTests {
+    [Test]
+    void TwoParameters() {
+        str source = """
+struct Pair<K, V> {
+    K key;
+    V value;
+}
+
+i32 main() {
+    Pair<i32, i64> p;
+    return 0;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(0));
+    }
+
+    [Test]
+    void ThreeParameters() {
+        str source = """
+struct Triple<A, B, C> {
+    A first;
+    B second;
+    C third;
+}
+
+i32 main() {
+    Triple<i32, i64, f64> t;
+    return 0;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(0));
+    }
+
+    [Test]
+    void FourParameters() {
+        str source = """
+struct Quad<A, B, C, D> {
+    A a;
+    B b;
+    C c;
+    D d;
+}
+
+i32 main() {
+    Quad<i8, i16, i32, i64> q;
+    return 0;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(0));
+    }
+
+    [Test]
+    void MapEntry() {
+        str source = """
+struct MapEntry<K, V> {
+    K key;
+    V value;
+    i32 hash;
+}
+
+i32 main() {
+    MapEntry<i8*, i32> entry;
+    return 0;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(0));
+    }
+
+    [Test]
+    void TwoParametersWithInit() {
+        str source = """
+struct Pair<K, V> {
+    K key;
+    V value;
+}
+
+i32 main() {
+    Pair<i32, i32> p = { 10, 20 };
+    return 0;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(0));
+    }
+
+    [Test]
+    void TwoParametersFieldAccess() {
+        str source = """
+struct Pair<K, V> {
+    K key;
+    V value;
+}
+
+i32 main() {
+    Pair<i32, i32> p = { .key = 42, .value = 100 };
+    return p.key;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(42));
+    }
+
+    [Test]
+    void TwoParametersSecondFieldAccess() {
+        str source = """
+struct Pair<K, V> {
+    K key;
+    V value;
+}
+
+i32 main() {
+    Pair<i32, i32> p = { .key = 10, .value = 99 };
+    return p.value;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(99));
+    }
+
+    [Test]
+    void MixedTypes() {
+        str source = """
+struct Mixed<A, B> {
+    A a;
+    B b;
+}
+
+i32 main() {
+    Mixed<i32, f64> m = { .a = 50, .b = 3.14 };
+    return m.a;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(50));
+    }
+
+    [Test]
+    void PointerTypes() {
+        str source = """
+struct Container<T, U> {
+    T* first;
+    U* second;
+}
+
+i32 main() {
+    Container<i32, i64> c;
+    return 0;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(0));
+    }
+
+    [Test]
+    void MultipleInstantiations() {
+        str source = """
+struct Pair<K, V> {
+    K key;
+    V value;
+}
+
+i32 main() {
+    Pair<i32, i32> p1;
+    Pair<i32, i64> p2;
+    Pair<i64, i32> p3;
+    Pair<f32, f64> p4;
+    Pair<i8*, i32> p5;
+    return 0;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(0));
+    }
+
+    [Test]
+    void NestedGenericStruct() {
+        str source = """
+struct Pair<K, V> {
+    K key;
+    V value;
+}
+
+struct Wrapper<T> {
+    T data;
+    i32 id;
+}
+
+i32 main() {
+    Wrapper<Pair<i32, i32>> w;
+    return 0;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(0));
+    }
+
+    [Test]
+    void FunctionReturningGenericStruct() {
+        str source = """
+struct Pair<K, V> {
+    K key;
+    V value;
+}
+
+Pair<i32, i32> makePair(i32 k, i32 v) {
+    return { .key = k, .value = v };
+}
+
+i32 main() {
+    auto p = makePair(5, 10);
+    return p.key + p.value;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(15));
+    }
+
+    [Test]
+    void GenericStructAsParameter() {
+        str source = """
+struct Pair<K, V> {
+    K key;
+    V value;
+}
+
+i32 getKey(Pair<i32, i32> p) {
+    return p.key;
+}
+
+i32 main() {
+    Pair<i32, i32> p = { .key = 77, .value = 88 };
+    return getKey(p);
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(77));
+    }
+
+    [Test]
+    void ThreeParametersFieldSum() {
+        str source = """
+struct Triple<A, B, C> {
+    A first;
+    B second;
+    C third;
+}
+
+i32 main() {
+    Triple<i32, i32, i32> t = { .first = 10, .second = 20, .third = 30 };
+    return t.first + t.second + t.third;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(60));
+    }
+}
+
+struct InterfaceTests {
+    [Test]
+    void BasicDefinition() {
+        str source = """
+interface ICounter {
+    i32 getCount();
+    void increment();
+}
+""";
+        Verify.source(source).with_std().compiles();
+    }
+
+    [Test]
+    void GenericInterface() {
+        str source = """
+interface IComparable<T> {
+    i32 compareTo(T other);
+}
+""";
+        Verify.source(source).with_std().compiles();
+    }
+
+    [Test]
+    void StructImplementsInterface() {
+        str source = """
+interface IValue {
+    i32 getValue();
+}
+
+struct Counter : interface IValue {
+    i32 count;
+
+    i32 getValue() {
+        return this.count;
+    }
+}
+""";
+        Verify.source(source).with_std().compiles();
+    }
+
+    [Test]
+    void StructImplementsMultipleInterfaces() {
+        str source = """
+interface IReadable {
+    i32 read();
+}
+
+interface IWritable {
+    void write(i32 value);
+}
+
+struct Buffer : interface IReadable, interface IWritable {
+    i32 data;
+
+    i32 read() {
+        return this.data;
+    }
+
+    void write(i32 value) {
+        this.data = value;
+    }
+}
+""";
+        Verify.source(source).with_std().compiles();
+    }
+}
+
 struct GenericsSuite {
     public static unsafe void register(Verify* verify) {
-        verify.test("generics/GenericConstraints.ParseWhereClauseSingleConstraint").compiles(Sources.file("tests/conformance/cases/generics/GenericConstraints.ParseWhereClauseSingleConstraint.djinn"));
-        verify.test("generics/GenericConstraints.ParseWhereClauseMultipleConstraintsSameParam").compiles(Sources.file("tests/conformance/cases/generics/GenericConstraints.ParseWhereClauseMultipleConstraintsSameParam.djinn"));
-        verify.test("generics/GenericConstraints.ParseWhereClauseMultipleParams").compiles(Sources.file("tests/conformance/cases/generics/GenericConstraints.ParseWhereClauseMultipleParams.djinn"));
-        verify.test("generics/GenericConstraints.ParseWhereClauseOnInterface").compiles(Sources.file("tests/conformance/cases/generics/GenericConstraints.ParseWhereClauseOnInterface.djinn"));
-        verify.test("generics/GenericConstraints.ConstraintSatisfied").runs(Sources.file("tests/conformance/cases/generics/GenericConstraints.ConstraintSatisfied.djinn"), Expected.exit(0));
-        verify.test("generics/GenericConstraints.ConstraintViolated").diagnostics(Sources.file("tests/conformance/cases/generics/GenericConstraints.ConstraintViolated.djinn"), Expected.error(DiagnosticErrors.INTERFACE_NOT_IMPLEMENTED));
-        verify.test("generics/GenericConstraints.NoConstraintNoValidation").runs(Sources.file("tests/conformance/cases/generics/GenericConstraints.NoConstraintNoValidation.djinn"), Expected.exit(0));
-        verify.test("generics/GenericConstraints.MultipleConstraintsSatisfied").runs(Sources.file("tests/conformance/cases/generics/GenericConstraints.MultipleConstraintsSatisfied.djinn"), Expected.exit(0));
-        verify.test("generics/GenericConstraints.MultipleConstraintsPartiallyViolated").diagnostics(Sources.file("tests/conformance/cases/generics/GenericConstraints.MultipleConstraintsPartiallyViolated.djinn"), Expected.error(DiagnosticErrors.INTERFACE_NOT_IMPLEMENTED));
-        verify.test("generics/GenericConstraints.WhereClauseWithImplements").runs(Sources.file("tests/conformance/cases/generics/GenericConstraints.WhereClauseWithImplements.djinn"), Expected.exit(1));
-        verify.test("generics/FullCompilation.StructGeneric").with_std().runs(Sources.file("tests/conformance/cases/generics/FullCompilation.StructGeneric.djinn"), Expected.exit(0));
-        verify.test("generics/GenericStruct.TwoParameters").with_std().runs(Sources.file("tests/conformance/cases/generics/GenericStruct.TwoParameters.djinn"), Expected.exit(0));
-        verify.test("generics/GenericStruct.ThreeParameters").with_std().runs(Sources.file("tests/conformance/cases/generics/GenericStruct.ThreeParameters.djinn"), Expected.exit(0));
-        verify.test("generics/GenericStruct.FourParameters").with_std().runs(Sources.file("tests/conformance/cases/generics/GenericStruct.FourParameters.djinn"), Expected.exit(0));
-        verify.test("generics/GenericStruct.MapEntry").with_std().runs(Sources.file("tests/conformance/cases/generics/GenericStruct.MapEntry.djinn"), Expected.exit(0));
-        verify.test("generics/GenericStruct.TwoParametersWithInit").with_std().runs(Sources.file("tests/conformance/cases/generics/GenericStruct.TwoParametersWithInit.djinn"), Expected.exit(0));
-        verify.test("generics/GenericStruct.TwoParametersFieldAccess").with_std().runs(Sources.file("tests/conformance/cases/generics/GenericStruct.TwoParametersFieldAccess.djinn"), Expected.exit(42));
-        verify.test("generics/GenericStruct.TwoParametersSecondFieldAccess").with_std().runs(Sources.file("tests/conformance/cases/generics/GenericStruct.TwoParametersSecondFieldAccess.djinn"), Expected.exit(99));
-        verify.test("generics/GenericStruct.MixedTypes").with_std().runs(Sources.file("tests/conformance/cases/generics/GenericStruct.MixedTypes.djinn"), Expected.exit(50));
-        verify.test("generics/GenericStruct.PointerTypes").with_std().runs(Sources.file("tests/conformance/cases/generics/GenericStruct.PointerTypes.djinn"), Expected.exit(0));
-        verify.test("generics/GenericStruct.MultipleInstantiations").with_std().runs(Sources.file("tests/conformance/cases/generics/GenericStruct.MultipleInstantiations.djinn"), Expected.exit(0));
-        verify.test("generics/GenericStruct.NestedGenericStruct").with_std().runs(Sources.file("tests/conformance/cases/generics/GenericStruct.NestedGenericStruct.djinn"), Expected.exit(0));
-        verify.test("generics/GenericStruct.FunctionReturningGenericStruct").with_std().runs(Sources.file("tests/conformance/cases/generics/GenericStruct.FunctionReturningGenericStruct.djinn"), Expected.exit(15));
-        verify.test("generics/GenericStruct.GenericStructAsParameter").with_std().runs(Sources.file("tests/conformance/cases/generics/GenericStruct.GenericStructAsParameter.djinn"), Expected.exit(77));
-        verify.test("generics/GenericStruct.ThreeParametersFieldSum").with_std().runs(Sources.file("tests/conformance/cases/generics/GenericStruct.ThreeParametersFieldSum.djinn"), Expected.exit(60));
-        verify.test("generics/Interface.BasicDefinition").with_std().compiles(Sources.file("tests/conformance/cases/generics/Interface.BasicDefinition.djinn"));
-        verify.test("generics/Interface.GenericInterface").with_std().compiles(Sources.file("tests/conformance/cases/generics/Interface.GenericInterface.djinn"));
-        verify.test("generics/Interface.StructImplementsInterface").with_std().compiles(Sources.file("tests/conformance/cases/generics/Interface.StructImplementsInterface.djinn"));
-        verify.test("generics/Interface.StructImplementsMultipleInterfaces").with_std().compiles(Sources.file("tests/conformance/cases/generics/Interface.StructImplementsMultipleInterfaces.djinn"));
+        verify.suite(typeof(GenericConstraintsTests));
+        verify.suite(typeof(FullCompilationTests));
+        verify.suite(typeof(GenericStructTests));
+        verify.suite(typeof(InterfaceTests));
     }
 }
