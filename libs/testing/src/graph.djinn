@@ -5,11 +5,16 @@ import std::types;
 import std::libc;
 import std::io;
 
+unsafe static mut i64 watch_deadline = 0;
+unsafe static mut ptr<i8> watch_name = null;
+unsafe static mut bool watch_started = false;
+
 struct NodeState {
     const i32 PENDING = 0;
     const i32 PASSED = 1;
     const i32 FAILED = 2;
     const i32 BLOCKED = 3;
+    const i32 SKIPPED = 4;
 }
 
 struct GraphNode {
@@ -259,6 +264,64 @@ struct TestGraph {
         return null;
     }
 
+    static unsafe TypeInfo* type_info(i32 id) {
+        for (mut i32 i = 0; i < Reflection.type_count(); i = i + 1) {
+            TypeInfo* info = Reflection.type_at(i);
+            if (info.id == id) {
+                return info;
+            }
+        }
+        return (TypeInfo*)0;
+    }
+
+    public unsafe ptr<i8> skip_reason(GraphNode* node) {
+        if (node.state == NodeState.SKIPPED) {
+            return node.blocker;
+        }
+        ptr skip = TestMethods.attribute(node.entry.method, "Skip");
+        if (skip != null) {
+            Skip* values = (Skip*)skip;
+            return (ptr<i8>)values.reason;
+        }
+        ItemList* inputs = node.inputs;
+        for (mut i32 i = 0; i < inputs.length; i = i + 1) {
+            GraphNode* input = (GraphNode*)inputs.get(i);
+            if (this.skip_reason(input) != null) {
+                TextBuffer* reason = TextBuffer.create();
+                reason.append("skipped with ");
+                reason.append(input.name);
+                return reason.cstr();
+            }
+        }
+        return null;
+    }
+
+    unsafe void teardown() {
+        ItemList* nodes = this.nodes;
+        mut i32 at = nodes.length - 1;
+        while (at >= 0) {
+            GraphNode* node = (GraphNode*)nodes.get(at);
+            at = at - 1;
+            if (node.value == null || node.state != NodeState.PASSED) {
+                continue;
+            }
+            TypeInfo* type = TestGraph.type_info(node.entry.method.returnTypeId);
+            if (type == null) {
+                continue;
+            }
+            TypeInfoExt* ext = Reflection.ext(type);
+            if (ext == null) {
+                continue;
+            }
+            for (mut i32 m = 0; m < (i32)ext.methodCount; m = m + 1) {
+                MethodInfo* method = &ext.methods[m];
+                if (TestMethods.has_attribute(method, "Teardown")) {
+                    TestMethods.invoke_on(method, node.value, null, null);
+                }
+            }
+        }
+    }
+
     static unsafe bool mutates(ParamInfo* param) {
         for (mut i32 i = 0; i < (i32)param.attrCount; i = i + 1) {
             if (Text.same((ptr<i8>)param.attrs[i].name, "Mutates")) {
@@ -275,6 +338,15 @@ struct TestGraph {
 
     unsafe void bind(GraphNode* node) {
         MethodInfo* method = node.entry.method;
+        if (node.entry.case_values != null) {
+            if (method.paramCount > 4) {
+                TextBuffer* message = TextBuffer.create();
+                message.append(node.name);
+                message.append(": a [Case] fills at most 4 parameters");
+                this.report(message.cstr());
+            }
+            return;
+        }
         ItemList* nodes = this.nodes;
         ItemList* inputs = node.inputs;
         for (mut i32 p = 0; p < (i32)method.paramCount; p = p + 1) {
@@ -284,7 +356,7 @@ struct TestGraph {
             mut i32 matches = 0;
             for (mut i32 c = 0; c < nodes.length; c = c + 1) {
                 GraphNode* candidate = (GraphNode*)nodes.get(c);
-                if (candidate.entry.method.returnTypeId != param.typeId) {
+                if (candidate.entry.method.returnTypeId != param.typeId || candidate.entry.case_values != null || candidate.entry.bench) {
                     continue;
                 }
                 if (wanted != null && !Text.same(TestGraph.simple_name(candidate.entry.name), wanted) && !Text.same(candidate.entry.name, wanted)) {
@@ -455,6 +527,39 @@ struct TestGraph {
         }
     }
 
+    unsafe ptr<ptr> case_arguments(GraphNode* node) {
+        MethodInfo* method = node.entry.method;
+        ptr<ptr> arguments = (ptr<ptr>)Allocator.zeroed(8 * (u64)(method.paramCount + 1));
+        for (mut i32 p = 0; p < (i32)method.paramCount && p < 4; p = p + 1) {
+            ptr<i64> cell = (ptr<i64>)Allocator.zeroed(16);
+            cell[0] = TestMethods.case_value(node.entry.case_values, p);
+            arguments[p] = (ptr)cell;
+        }
+        return arguments;
+    }
+
+    public unsafe void prepare(GraphNode* node) {
+        ItemList* inputs = node.inputs;
+        for (mut i32 i = 0; i < inputs.length; i = i + 1) {
+            this.execute((GraphNode*)inputs.get(i));
+        }
+    }
+
+    public unsafe i64 time_once(GraphNode* node) {
+        MethodInfo* method = node.entry.method;
+        ptr<ptr> arguments = this.arguments_of(node);
+        ptr out = Allocator.zeroed((u64)TestGraph.type_size(method.returnTypeId) + 16);
+        i64 started = __djinn_now_us();
+        TestMethods.invoke(node.entry.type, method, (ptr)arguments, out);
+        return __djinn_now_us() - started;
+    }
+
+    public unsafe void call_case(GraphNode* node) {
+        ptr<ptr> arguments = this.case_arguments(node);
+        ptr out = Allocator.zeroed((u64)TestGraph.type_size(node.entry.method.returnTypeId) + 16);
+        TestMethods.invoke(node.entry.type, node.entry.method, (ptr)arguments, out);
+    }
+
     unsafe ptr<ptr> arguments_of(GraphNode* node) {
         MethodInfo* method = node.entry.method;
         ItemList* inputs = node.inputs;
@@ -478,6 +583,32 @@ struct TestGraph {
         return copy;
     }
 
+    static unsafe void watch_loop(ptr unused) {
+        while (true) {
+            __djinn_thread_sleep(5);
+            i64 limit = watch_deadline;
+            if (limit != 0 && __djinn_now_us() > limit) {
+                printf("TIMEOUT %s\n", watch_name);
+                fflush((ptr)0);
+                exit(124);
+            }
+        }
+    }
+
+    static unsafe void arm(ptr<i8> name, i32 milliseconds) {
+        if (!watch_started) {
+            watch_started = true;
+            ptr thread = __djinn_thread_create((ptr)typeof(TestGraph.watch_loop).funcPtr, null);
+            __djinn_thread_start(thread);
+        }
+        watch_name = name;
+        watch_deadline = __djinn_now_us() + (i64)milliseconds * 1000;
+    }
+
+    static unsafe void disarm() {
+        watch_deadline = 0;
+    }
+
     unsafe void execute(GraphNode* node) {
         if (node.value != null || node.state == NodeState.PASSED) {
             return;
@@ -492,7 +623,15 @@ struct TestGraph {
         printf("RUN %s\n", node.name);
         fflush((ptr)0);
         i64 started = __djinn_now_us();
+        ptr policy = TestMethods.attribute(method, "TestPolicy");
+        if (policy != null) {
+            TestPolicy* limits = (TestPolicy*)policy;
+            if (limits.timeout > 0) {
+                TestGraph.arm(node.name, limits.timeout);
+            }
+        }
         TestMethods.invoke(node.entry.type, method, (ptr)arguments, node.value);
+        TestGraph.disarm();
         node.state = NodeState.PASSED;
         printf("OK %s %d\n", node.name, (i32)((__djinn_now_us() - started) / 1000));
         fflush((ptr)0);
@@ -512,5 +651,6 @@ struct TestGraph {
                 start = at + 1;
             }
         }
+        this.teardown();
     }
 }

@@ -37,6 +37,10 @@ struct TestMethods {
         return false;
     }
 
+    public static unsafe bool is_bench(MethodInfo* method) {
+        return TestMethods.has_attribute(method, "Bench");
+    }
+
     public static unsafe bool is_test(MethodInfo* method) {
         for (mut i32 i = 0; i < (i32)method.attrCount; i = i + 1) {
             if (Text.same((ptr<i8>)method.attrs[i].name, "Test")) {
@@ -49,7 +53,7 @@ struct TestMethods {
     public static unsafe bool has_tests(TypeInfo* type) {
         TypeInfoExt* info = Reflection.ext(type);
         for (mut i32 i = 0; i < (i32)info.methodCount; i = i + 1) {
-            if (TestMethods.is_test(&info.methods[i])) {
+            if (TestMethods.is_test(&info.methods[i]) || TestMethods.is_bench(&info.methods[i])) {
                 return true;
             }
         }
@@ -58,6 +62,61 @@ struct TestMethods {
 
     public static bool can_call(MethodInfo* method) {
         return (i32)method.paramCount == 0;
+    }
+
+    public static unsafe void invoke_on(MethodInfo* method, ptr target, ptr args, ptr out) {
+        ptr thunk = __djinn_invoke_lookup((ptr)method.funcPtr);
+        if (thunk == null) {
+            printf("no invoke thunk for %s\n", (ptr<i8>)method.name);
+            exit(2);
+        }
+        __djinn_invoke_call(thunk, target, args, out);
+    }
+
+    public static unsafe ptr nth_attribute(MethodInfo* method, ptr<i8> name, i32 position) {
+        mut i32 seen = 0;
+        for (mut i32 i = 0; i < (i32)method.attrCount; i = i + 1) {
+            if (Text.same((ptr<i8>)method.attrs[i].name, name)) {
+                if (seen == position) {
+                    return (ptr)method.attrs[i].payload;
+                }
+                seen = seen + 1;
+            }
+        }
+        return null;
+    }
+
+    public static unsafe i64 case_value(ptr values, i32 position) {
+        Case* chosen = (Case*)values;
+        if (position == 0) {
+            return chosen.first;
+        }
+        if (position == 1) {
+            return chosen.second;
+        }
+        if (position == 2) {
+            return chosen.third;
+        }
+        return chosen.fourth;
+    }
+
+    public static unsafe i32 count_attribute(MethodInfo* method, ptr<i8> name) {
+        mut i32 seen = 0;
+        for (mut i32 i = 0; i < (i32)method.attrCount; i = i + 1) {
+            if (Text.same((ptr<i8>)method.attrs[i].name, name)) {
+                seen = seen + 1;
+            }
+        }
+        return seen;
+    }
+
+    public static unsafe bool has_attribute(MethodInfo* method, ptr<i8> name) {
+        for (mut i32 i = 0; i < (i32)method.attrCount; i = i + 1) {
+            if (Text.same((ptr<i8>)method.attrs[i].name, name)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     public static unsafe void invoke(TypeInfo* type, MethodInfo* method, ptr args, ptr out) {

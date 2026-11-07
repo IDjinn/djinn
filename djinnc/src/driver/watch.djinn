@@ -1,0 +1,76 @@
+namespace djinnc;
+
+extern "C" {
+    void __djinn_thread_sleep(i64 milliseconds);
+}
+
+struct Watch {
+    static unsafe u64 fingerprint(Options* options) {
+        mut u64 hash = 14695981039346656037;
+        PointerList* inputs = options.inputs;
+        for (mut i32 i = 0; i < inputs.length; i = i + 1) {
+            ptr<i8> path = (ptr<i8>)inputs.get(i);
+            if (Strings.same(path, Project.generated_entry())) {
+                continue;
+            }
+            ptr<i8> text = Files.read_all(path);
+            if (text == null) {
+                continue;
+            }
+            i32 length = strlen(text);
+            for (mut i32 at = 0; at < length; at = at + 1) {
+                hash = (hash ^ (u64)(u8)text[at]) * 1099511628211;
+            }
+            hash = hash ^ (u64)length;
+        }
+        return hash;
+    }
+
+    static unsafe ptr<i8> command_line() {
+        ByteBuffer* command = ByteBuffer.create();
+        if (Linker.is_windows()) {
+            command.append("\"");
+        }
+        i32 count = Process.argc();
+        for (mut i32 i = 0; i < count; i = i + 1) {
+            ptr<i8> argument = Process.argv_or(i, "");
+            if (i > 0 && Strings.same(argument, "--watch")) {
+                continue;
+            }
+            if (i > 0) {
+                command.append(" ");
+            }
+            command.append("\"");
+            command.append(argument);
+            command.append("\"");
+        }
+        if (Linker.is_windows()) {
+            command.append("\"");
+        }
+        return command.cstr();
+    }
+
+    public static unsafe i32 run(Options* options) {
+        ptr<i8> command = Watch.command_line();
+        mut u64 seen = Watch.fingerprint(options);
+        mut i32 runs = 0;
+        while (true) {
+            Process.run(command);
+            runs = runs + 1;
+            if (options.watch_runs > 0 && runs >= options.watch_runs) {
+                return 0;
+            }
+            printf("watch: waiting for changes\n");
+            mut bool changed = false;
+            while (!changed) {
+                __djinn_thread_sleep(300);
+                u64 current = Watch.fingerprint(Options.parse());
+                if (current != seen) {
+                    seen = current;
+                    changed = true;
+                }
+            }
+        }
+        return 0;
+    }
+}

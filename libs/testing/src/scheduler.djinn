@@ -29,6 +29,8 @@ struct TestNode {
     bool passed;
     bool hidden;
     bool blocked;
+    bool skipped;
+    ptr<i8> resource;
     bool reported;
     bool timed_out;
     i32 retries;
@@ -44,6 +46,12 @@ struct TestNode {
 
     public void fail(ptr<i8> reason) {
         this.reason = reason;
+        this.state = TestState.DONE;
+    }
+
+    public void skip(ptr<i8> reason) {
+        this.reason = reason;
+        this.skipped = true;
         this.state = TestState.DONE;
     }
 
@@ -77,7 +85,7 @@ struct Scheduler {
         ItemList* nodes = this.nodes;
         node.state = TestState.DONE;
         node.reported = true;
-        node.passed = node.reason == null && !node.blocked;
+        node.passed = node.reason == null && !node.blocked && !node.skipped;
         nodes.push((ptr)node);
         this.finished = this.finished + 1;
         TestReport.print_node(node);
@@ -145,10 +153,27 @@ struct Scheduler {
         return skipped;
     }
 
+    unsafe bool resource_busy(TestNode* node) {
+        if (node.resource == null) {
+            return false;
+        }
+        ItemList* nodes = this.nodes;
+        for (mut i32 i = 0; i < this.next; i = i + 1) {
+            TestNode* other = (TestNode*)nodes.get(i);
+            if (other.state == TestState.RUNNING && other.resource != null && Text.same(other.resource, node.resource)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     unsafe void start_pending() {
         ItemList* nodes = this.nodes;
         while (this.running < this.jobs && this.next < nodes.length) {
             TestNode* node = (TestNode*)nodes.get(this.next);
+            if (node.state != TestState.DONE && this.resource_busy(node)) {
+                break;
+            }
             this.next = this.next + 1;
             if (node.state == TestState.DONE) {
                 if (!node.reported) {

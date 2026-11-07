@@ -144,4 +144,88 @@ summary "$out/compilation.log" | grep -Eq "^6 passed, 0 failed, 6 total" || { ca
 [ "$(grep -c "^PASS Hello.seven" "$out/compilation.log")" = 1 ] || fail "compilation: the source must be compiled once for its three checks"
 grep -q "^PASS Hello.exits_with_seven" "$out/compilation.log" || fail "compilation: the run check must pass"
 
+# Phase 5: [Skip], [Resource], [Teardown], --junit and --seed.
+export FEATURES_TEARDOWN="$out/features_teardown.log" FEATURES_LOCK="$out/features.lock"
+rm -f "$FEATURES_TEARDOWN" "$FEATURES_LOCK"
+"$compiler" test tests/features -o "$out/features_tests$exe" "${flags[@]}" -- --junit "$out/features.xml" > "$out/features.log" 2>&1 || { grep -v "^djinnc:" "$out/features.log" | head -30; fail "features: the run must pass"; }
+expect_line "$out/features.log" "^11 passed, 0 failed, 3 skipped, 14 total" "features: the summary must count 3 skipped"
+expect_line "$out/features.log" "^SKIP Skipping.later: not written yet" "features: [Skip] must carry its reason"
+expect_line "$out/features.log" "^SKIP Skipping.needs_base: skipped with Skipping.base_value" "features: a dependent of a skipped test must be skipped"
+expect_line "$out/features.log" "^PASS Parameterized.sum(10,20,30)" "features: every [Case] must run as its own test"
+expect_line "$out/features.log" "^PASS Parameterized.sum(-5,5,0)" "features: a negative [Case] value must work"
+expect_line "$out/features.log" "^PASS Parameterized.flag(0)" "features: a bool [Case] must work"
+[ -f "$FEATURES_TEARDOWN" ] || fail "features: [Teardown] must run after the component"
+grep -q '<testsuite name="tests" tests="14" failures="0" skipped="3">' "$out/features.xml" || { cat "$out/features.xml"; fail "features: junit header"; }
+grep -q '<skipped message="not written yet"/>' "$out/features.xml" || fail "features: junit must mark skipped tests"
+features_exe="$out/features_tests$exe"
+"$features_exe" --jobs 1 --seed 5 > "$out/features_seed_a.log"
+"$features_exe" --jobs 1 --seed 5 > "$out/features_seed_b.log"
+order() { grep -E "^(PASS|SKIP) " "$1" | sed -E 's/^(PASS|SKIP) ([^ :]*).*//'; }
+[ "$(order "$out/features_seed_a.log")" = "$(order "$out/features_seed_b.log")" ] || fail "seed: the same seed must give the same order"
+expect_line "$out/features_seed_a.log" "^seed: 5" "seed: the seed must be printed"
+
+# Phase 6: [Bench] runs alone, in series, after preparing its inputs through the graph.
+"$compiler" test tests/bench -o "$out/bench_tests$exe" "${flags[@]}" > "$out/bench_tests.log" 2>&1 || { grep -v "^djinnc:" "$out/bench_tests.log" | head -20; fail "bench: the normal run must pass"; }
+expect_line "$out/bench_tests.log" "^2 passed, 0 failed, 2 total" "bench: a normal run must skip the benchmarks"
+grep -q "^BENCH " "$out/bench_tests.log" && fail "bench: a normal run must not measure"
+bench_exe="$out/bench_tests$exe"
+"$bench_exe" --bench --bench-out "$out/bench.json" > "$out/bench.log" || { cat "$out/bench.log"; fail "bench: --bench must pass"; }
+expect_line "$out/bench.log" "^BENCH Spin.spin: median [0-9]* us (min [0-9]*, mean [0-9]*, 5 runs)" "bench: spin must be measured with its iterations"
+expect_line "$out/bench.log" "^BENCH Spin.tiny: median [0-9]* us (min [0-9]*, mean [0-9]*, 3 runs)" "bench: tiny must be measured"
+grep -q "ordinary" "$out/bench.log" && fail "bench: tests must not run in bench mode"
+grep -q '"name":"Spin.spin","min_us":' "$out/bench.json" || fail "bench: the JSON must list spin"
+"$bench_exe" --bench --bench-ref "$out/bench.json" --bench-tolerance 1000 > "$out/bench_ok.log" || { cat "$out/bench_ok.log"; fail "bench: a result within tolerance must pass"; }
+printf '{"benchmarks":[{"name":"Spin.spin","min_us":1,"median_us":1,"mean_us":1,"iterations":5}]}' > "$out/bench_ref.json"
+"$bench_exe" --bench --bench-ref "$out/bench_ref.json" > "$out/bench_bad.log" && fail "bench: a regression must fail the run"
+expect_line "$out/bench_bad.log" "^REGRESSION Spin.spin: median 1 us ->" "bench: the regression must be reported"
+
+# Phase 5: a per-node timeout inside a component fails only that node.
+"$compiler" test tests/timeouts -o "$out/timeouts_tests$exe" "${flags[@]}" > "$out/timeouts.log" 2>&1 && fail "timeouts: the slow node must fail the run"
+expect_line "$out/timeouts.log" "^FAIL Limits.slow: timeout" "timeouts: slow must time out"
+expect_line "$out/timeouts.log" "^PASS Limits.fine" "timeouts: the sibling must still pass after the restart"
+expect_line "$out/timeouts.log" "^BLOCKED Limits.after_slow: blocked by Limits.slow" "timeouts: the dependent must be blocked"
+expect_line "$out/timeouts.log" "1 blocked" "timeouts: the summary must count the blocked node"
+
+# djinnc test --watch rebuilds and reruns when a source changes.
+watch_dir="$out/watch_project"
+rm -rf "$watch_dir"
+mkdir -p "$watch_dir/src"
+cp tests/workflow/djinn.proj "$watch_dir/djinn.proj"
+printf 'import testing;
+
+struct Watched {
+    [Test]
+    void first() {
+        Expect.equal(1, 1);
+    }
+}
+' > "$watch_dir/src/watched_test.djinn"
+"$compiler" test "$watch_dir" -o "$out/watch_tests$exe" "${flags[@]}" --watch --watch-runs 2 > "$out/watch.log" 2>&1 &
+watch_pid=$!
+for attempt in $(seq 1 120); do
+    grep -q "^watch: waiting for changes" "$out/watch.log" 2>/dev/null && break
+    sleep 1
+done
+grep -q "^1 passed, 0 failed, 1 total" "$out/watch.log" || { kill "$watch_pid" 2>/dev/null; cat "$out/watch.log"; fail "watch: the first run must pass"; }
+printf 'import testing;
+
+struct Watched {
+    [Test]
+    void first() {
+        Expect.equal(1, 1);
+    }
+
+    [Test]
+    void second() {
+        Expect.equal(2, 2);
+    }
+}
+' > "$watch_dir/src/watched_test.djinn"
+for attempt in $(seq 1 120); do
+    kill -0 "$watch_pid" 2>/dev/null || break
+    sleep 1
+done
+kill "$watch_pid" 2>/dev/null || true
+grep -q "^2 passed, 0 failed, 2 total" "$out/watch.log" || { cat "$out/watch.log"; fail "watch: the change must trigger a second run with both tests"; }
+
 echo "graph: ok"

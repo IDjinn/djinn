@@ -9,6 +9,16 @@ struct TestEntry {
     TypeInfo* type;
     MethodInfo* method;
     ptr<i8> name;
+    ptr case_values;
+    bool bench;
+}
+
+struct BenchResult {
+    ptr<i8> name;
+    i64 min_us;
+    i64 median_us;
+    i64 mean_us;
+    i32 iterations;
 }
 
 struct TestOptions {
@@ -18,6 +28,12 @@ struct TestOptions {
     ptr<i8> workflow;
     ptr<i8> graph;
     ptr<i8> graph_file;
+    ptr<i8> junit;
+    ptr<i8> bench_ref;
+    ptr<i8> bench_out;
+    i32 bench_tolerance;
+    bool bench;
+    i32 seed;
     bool fail_fast;
     i32 jobs;
     bool ok;
@@ -41,11 +57,28 @@ struct TestProgram {
         if (Text.same(mode, "--run")) {
             return TestProgram.run_one(graph, Environment.argument(2));
         }
+        if (Text.same(mode, "--bench-run")) {
+            return TestProgram.bench_one(graph, Environment.argument(2));
+        }
         if (Text.same(mode, "--nodes")) {
             graph.run_wanted(Environment.argument(2));
             return 0;
         }
         return TestProgram.run_all(plan, graph);
+    }
+
+    static unsafe ptr<i8> case_name(MethodInfo* method, ptr values) {
+        TextBuffer* name = TextBuffer.create();
+        name.append((ptr<i8>)method.name);
+        name.append("(");
+        for (mut i32 p = 0; p < (i32)method.paramCount && p < 4; p = p + 1) {
+            if (p > 0) {
+                name.append(",");
+            }
+            name.append_int(TestMethods.case_value(values, p));
+        }
+        name.append(")");
+        return name.cstr();
     }
 
     static unsafe ItemList* collect() {
@@ -58,14 +91,28 @@ struct TestProgram {
             TypeInfoExt* info = Reflection.ext(type);
             for (mut i32 m = 0; m < (i32)info.methodCount; m = m + 1) {
                 MethodInfo* method = &info.methods[m];
-                if (!TestMethods.is_test(method)) {
+                bool is_bench = TestMethods.is_bench(method);
+                if (!TestMethods.is_test(method) && !is_bench) {
                     continue;
                 }
-                TestEntry* entry = (TestEntry*)Allocator.zeroed(sizeof(TestEntry));
-                entry.type = type;
-                entry.method = method;
-                entry.name = (ptr<i8>)method.name;
-                entries.push((ptr)entry);
+                i32 cases = TestMethods.count_attribute(method, "Case");
+                if (cases == 0) {
+                    TestEntry* entry = (TestEntry*)Allocator.zeroed(sizeof(TestEntry));
+                    entry.type = type;
+                    entry.method = method;
+                    entry.name = (ptr<i8>)method.name;
+                    entry.bench = is_bench;
+                    entries.push((ptr)entry);
+                    continue;
+                }
+                for (mut i32 c = 0; c < cases; c = c + 1) {
+                    TestEntry* entry = (TestEntry*)Allocator.zeroed(sizeof(TestEntry));
+                    entry.type = type;
+                    entry.method = method;
+                    entry.case_values = TestMethods.nth_attribute(method, "Case", c);
+                    entry.name = TestProgram.case_name(method, entry.case_values);
+                    entries.push((ptr)entry);
+                }
             }
         }
         return entries;
@@ -90,6 +137,10 @@ struct TestProgram {
             printf("no test named %s\n", name);
             return 3;
         }
+        if (node.entry.case_values != null) {
+            graph.call_case(node);
+            return 0;
+        }
         if (!TestMethods.can_call(node.entry.method)) {
             printf("a [Test] takes no parameters yet\n");
             return 2;
@@ -101,12 +152,18 @@ struct TestProgram {
     static unsafe TestOptions* parse_options() {
         TestOptions* options = (TestOptions*)Allocator.zeroed(sizeof(TestOptions));
         options.jobs = 8;
+        options.bench_tolerance = 10;
         options.ok = true;
         mut i32 index = 1;
         while (index < Process.argc()) {
             ptr<i8> argument = Environment.argument(index);
             ptr<i8> value = Environment.argument(index + 1);
             if (Text.same(argument, "--list")) {
+                index = index + 1;
+                continue;
+            }
+            if (Text.same(argument, "--bench")) {
+                options.bench = true;
                 index = index + 1;
                 continue;
             }
@@ -117,6 +174,16 @@ struct TestProgram {
             }
             if (Text.same(argument, "--filter")) {
                 options.filter = value;
+            } else if (Text.same(argument, "--bench-ref")) {
+                options.bench_ref = value;
+            } else if (Text.same(argument, "--bench-out")) {
+                options.bench_out = value;
+            } else if (Text.same(argument, "--bench-tolerance")) {
+                options.bench_tolerance = Text.parse_integer(value, (i32)strlen(value));
+            } else if (Text.same(argument, "--junit")) {
+                options.junit = value;
+            } else if (Text.same(argument, "--seed")) {
+                options.seed = Text.parse_integer(value, (i32)strlen(value));
             } else if (Text.same(argument, "--graph")) {
                 options.graph = value;
             } else if (Text.same(argument, "--graph-file")) {
@@ -185,6 +252,292 @@ struct TestProgram {
         }
         command.append("\"");
         return command.cstr();
+    }
+
+    static unsafe ptr<i8> resource_of(MethodInfo* method) {
+        ptr resource = TestMethods.attribute(method, "Resource");
+        if (resource == null) {
+            return null;
+        }
+        Resource* values = (Resource*)resource;
+        return (ptr<i8>)values.name;
+    }
+
+    static unsafe i64 component_timeout(TestGraph* graph, i32 component) {
+        ItemList* nodes = graph.nodes;
+        mut i64 total = 0;
+        for (mut i32 i = 0; i < nodes.length; i = i + 1) {
+            GraphNode* node = (GraphNode*)nodes.get(i);
+            if (node.component != component) {
+                continue;
+            }
+            mut i64 limit = 60000000;
+            ptr policy = TestMethods.attribute(node.entry.method, "TestPolicy");
+            if (policy != null) {
+                TestPolicy* values = (TestPolicy*)policy;
+                if (values.timeout > 0) {
+                    limit = (i64)values.timeout * 1000 + 30000000;
+                }
+            }
+            total = total + limit;
+        }
+        return total;
+    }
+
+    static unsafe ptr<i8> component_resource(TestGraph* graph, i32 component) {
+        ItemList* nodes = graph.nodes;
+        for (mut i32 i = 0; i < nodes.length; i = i + 1) {
+            GraphNode* node = (GraphNode*)nodes.get(i);
+            if (node.component == component && node.wanted) {
+                ptr<i8> resource = TestProgram.resource_of(node.entry.method);
+                if (resource != null) {
+                    return resource;
+                }
+            }
+        }
+        return null;
+    }
+
+    static unsafe void apply_skips(Scheduler* pool, TestGraph* graph) {
+        ItemList* nodes = graph.nodes;
+        for (mut i32 i = 0; i < nodes.length; i = i + 1) {
+            GraphNode* node = (GraphNode*)nodes.get(i);
+            if (!node.wanted || node.state != NodeState.PENDING) {
+                continue;
+            }
+            ptr<i8> reason = graph.skip_reason(node);
+            if (reason == null) {
+                continue;
+            }
+            node.state = NodeState.SKIPPED;
+            node.blocker = reason;
+            TestNode* result = TestNode.create(node.name, 0);
+            result.tags = "Skipped";
+            result.skip(reason);
+            node.recorded = true;
+            pool.record(result);
+        }
+    }
+
+    static unsafe void shuffle(ItemList* queue, i32 seed) {
+        mut u64 state = (u64)seed * 6364136223846793005 + 1442695040888963407;
+        mut i32 at = queue.length - 1;
+        while (at > 0) {
+            state = state * 6364136223846793005 + 1442695040888963407;
+            i32 pick = (i32)((state >> 33) % (u64)(at + 1));
+            ptr held = queue.get(at);
+            queue.set(at, queue.get(pick));
+            queue.set(pick, held);
+            at = at - 1;
+        }
+    }
+
+    static unsafe void sort_samples(ptr<i64> samples, i32 count) {
+        for (mut i32 i = 1; i < count; i = i + 1) {
+            i64 held = samples[i];
+            mut i32 at = i - 1;
+            while (at >= 0 && samples[at] > held) {
+                samples[at + 1] = samples[at];
+                at = at - 1;
+            }
+            samples[at + 1] = held;
+        }
+    }
+
+    static unsafe i32 bench_one(TestGraph* graph, ptr<i8> name) {
+        GraphNode* node = graph.find(name);
+        if (node == null) {
+            printf("no benchmark named %s\n", name);
+            return 3;
+        }
+        mut i32 warmup = 3;
+        mut i32 iterations = 20;
+        ptr config = TestMethods.attribute(node.entry.method, "Bench");
+        if (config != null) {
+            Bench* values = (Bench*)config;
+            if (values.warmup > 0) {
+                warmup = values.warmup;
+            }
+            if (values.iterations > 0) {
+                iterations = values.iterations;
+            }
+        }
+        graph.prepare(node);
+        for (mut i32 w = 0; w < warmup; w = w + 1) {
+            graph.time_once(node);
+        }
+        ptr<i64> samples = (ptr<i64>)Allocator.zeroed(8 * (u64)iterations);
+        mut i64 total = 0;
+        for (mut i32 i = 0; i < iterations; i = i + 1) {
+            samples[i] = graph.time_once(node);
+            total = total + samples[i];
+        }
+        TestProgram.sort_samples(samples, iterations);
+        TextBuffer* line = TextBuffer.create();
+        line.append("BENCH ");
+        line.append_int(samples[0]);
+        line.append(" ");
+        line.append_int(samples[iterations / 2]);
+        line.append(" ");
+        line.append_int(total / (i64)iterations);
+        line.append(" ");
+        line.append_int((i64)iterations);
+        printf("%s\n", line.cstr());
+        return 0;
+    }
+
+    static unsafe i64 field_after(ptr<i8> text, ptr<i8> marker) {
+        ptr<i8> at = strstr(text, marker);
+        if (at == null) {
+            return 0;
+        }
+        mut ptr<i8> digits = at + (i32)strlen(marker);
+        mut i64 value = 0;
+        while (Text.is_digit((i32)digits[0])) {
+            value = value * 10 + (i64)digits[0] - 48;
+            digits = digits + 1;
+        }
+        return value;
+    }
+
+    static unsafe void read_bench(TestNode* node, BenchResult* result) {
+        ptr<i8> text = node.stdout_text;
+        ptr<i8> at = strstr(text, "BENCH ");
+        if (at == null) {
+            return;
+        }
+        mut ptr<i8> cursor = at + 6;
+        ptr<i64> numbers = (ptr<i64>)Allocator.zeroed(32);
+        for (mut i32 n = 0; n < 4; n = n + 1) {
+            mut i64 value = 0;
+            while (Text.is_digit((i32)cursor[0])) {
+                value = value * 10 + (i64)cursor[0] - 48;
+                cursor = cursor + 1;
+            }
+            numbers[n] = value;
+            if (cursor[0] == 32) {
+                cursor = cursor + 1;
+            }
+        }
+        result.min_us = numbers[0];
+        result.median_us = numbers[1];
+        result.mean_us = numbers[2];
+        result.iterations = (i32)numbers[3];
+    }
+
+    static unsafe i32 run_bench(TestPlan* plan, TestGraph* graph, TestOptions* options) {
+        Scheduler* pool = Scheduler.create(1);
+        ItemList* results = ItemList.create();
+        ItemList* all = graph.nodes;
+        for (mut i32 i = 0; i < all.length; i = i + 1) {
+            GraphNode* graph_node = (GraphNode*)all.get(i);
+            if (!graph_node.entry.bench) {
+                continue;
+            }
+            if (options.filter != null && !Text.contains(graph_node.name, options.filter)) {
+                continue;
+            }
+            if (options.tag != null && !TestMethods.has_tag(graph_node.entry.method, options.tag)) {
+                continue;
+            }
+            TestNode* node = TestNode.create(graph_node.name, 600000000);
+            BenchResult* result = (BenchResult*)Allocator.zeroed(sizeof(BenchResult));
+            result.name = graph_node.name;
+            node.data = (ptr)result;
+            node.tags = "Bench";
+            TextBuffer* command = TextBuffer.create();
+            command.append("\"");
+            command.append(Environment.argument(0));
+            command.append("\" --bench-run \"");
+            command.append(graph_node.name);
+            command.append("\"");
+            node.command = command.cstr();
+            pool.add(node);
+            results.push((ptr)result);
+        }
+        mut ptr next = pool.wait();
+        while (next != null) {
+            TestNode* node = (TestNode*)next;
+            mut ptr<i8> reason = null;
+            if (node.exit_code != 0) {
+                reason = TestProgram.failure_reason(node);
+            } else {
+                TestProgram.read_bench(node, (BenchResult*)node.data);
+            }
+            pool.complete(node, reason);
+            next = pool.wait();
+        }
+        TestReport.print_summary(pool);
+        mut bool regressed = false;
+        mut ptr<i8> reference = null;
+        if (options.bench_ref != null) {
+            reference = TextFiles.read(options.bench_ref);
+        }
+        TextBuffer* json = TextBuffer.create();
+        json.append("{\"benchmarks\":[");
+        for (mut i32 r = 0; r < results.length; r = r + 1) {
+            BenchResult* result = (BenchResult*)results.get(r);
+            TextBuffer* line = TextBuffer.create();
+            line.append("BENCH ");
+            line.append(result.name);
+            line.append(": median ");
+            line.append_int(result.median_us);
+            line.append(" us (min ");
+            line.append_int(result.min_us);
+            line.append(", mean ");
+            line.append_int(result.mean_us);
+            line.append(", ");
+            line.append_int((i64)result.iterations);
+            line.append(" runs)");
+            printf("%s\n", line.cstr());
+            if (r > 0) {
+                json.append(",");
+            }
+            json.append("{\"name\":");
+            json.append_json_string(result.name);
+            json.append(",\"min_us\":");
+            json.append_int(result.min_us);
+            json.append(",\"median_us\":");
+            json.append_int(result.median_us);
+            json.append(",\"mean_us\":");
+            json.append_int(result.mean_us);
+            json.append(",\"iterations\":");
+            json.append_int((i64)result.iterations);
+            json.append("}");
+            if (reference != null) {
+                TextBuffer* key = TextBuffer.create();
+                key.append("\"name\":");
+                key.append_json_string(result.name);
+                key.append(",\"min_us\":");
+                ptr<i8> entry = strstr(reference, key.cstr());
+                if (entry != null) {
+                    i64 old = TestProgram.field_after(entry, "\"median_us\":");
+                    if (old > 0 && result.median_us * 100 > old * (i64)(100 + options.bench_tolerance)) {
+                        TextBuffer* message = TextBuffer.create();
+                        message.append("REGRESSION ");
+                        message.append(result.name);
+                        message.append(": median ");
+                        message.append_int(old);
+                        message.append(" us -> ");
+                        message.append_int(result.median_us);
+                        message.append(" us (more than ");
+                        message.append_int((i64)options.bench_tolerance);
+                        message.append("%)");
+                        printf("%s\n", message.cstr());
+                        regressed = true;
+                    }
+                }
+            }
+        }
+        json.append("]}\n");
+        if (options.bench_out != null) {
+            TextFiles.write(options.bench_out, json.cstr(), json.length);
+        }
+        ItemList* nodes = pool.nodes;
+        if (regressed || !TestReport.succeeded(nodes)) {
+            return 1;
+        }
+        return 0;
     }
 
     static unsafe i32 pending_in(TestGraph* graph, i32 component) {
@@ -287,7 +640,7 @@ struct TestProgram {
             running = (GraphNode*)0;
             reason = "the worker finished without running it";
         }
-        if (job.timed_out) {
+        if (job.timed_out || Text.contains(job.stdout_text, "\nTIMEOUT ")) {
             reason = "timeout";
         } else if (job.exit_code < 0 && Text.contains(job.output, "runtime error: panic")) {
             job.exit_code = 1;
@@ -326,7 +679,7 @@ struct TestProgram {
     static unsafe i32 run_all(TestPlan* plan, TestGraph* graph) {
         TestOptions* options = TestProgram.parse_options();
         if (!options.ok) {
-            printf("usage: <tests> [--list | --run <name> | --filter <text> --tag <tag> --workflow <name> --graph <dot|json> --graph-file <file> --fail-fast --jobs <n> --report <file>]\n");
+            printf("usage: <tests> [--list | --run <name> | --filter <text> --tag <tag> --workflow <name> --graph <dot|json> --graph-file <file> --junit <file> --seed <n> --bench --bench-out <file> --bench-ref <file> --bench-tolerance <percent> --fail-fast --jobs <n> --report <file>]\n");
             return 2;
         }
         if (options.workflow != null) {
@@ -337,12 +690,16 @@ struct TestProgram {
             }
             graph.select(chosen);
         }
+        if (options.bench) {
+            return TestProgram.run_bench(plan, graph, options);
+        }
         Scheduler* pool = Scheduler.create(options.jobs);
+        ItemList* queue = ItemList.create();
         ItemList* all = graph.nodes;
         for (mut i32 i = 0; i < all.length; i = i + 1) {
             GraphNode* graph_node = (GraphNode*)all.get(i);
             TestEntry* entry = graph_node.entry;
-            if (options.workflow != null && !graph_node.member) {
+            if (entry.bench || (options.workflow != null && !graph_node.member)) {
                 continue;
             }
             if (options.filter != null && !Text.contains(graph_node.name, options.filter)) {
@@ -355,7 +712,16 @@ struct TestProgram {
                 graph.mark_needed(graph_node);
                 continue;
             }
+            ptr<i8> skip_reason = graph.skip_reason(graph_node);
+            if (skip_reason != null) {
+                TestNode* skipped_node = TestNode.create(graph_node.name, 0);
+                skipped_node.tags = "Skipped";
+                skipped_node.skip(skip_reason);
+                queue.push((ptr)skipped_node);
+                continue;
+            }
             TestNode* node = TestNode.create(graph_node.name, 60000000);
+            node.resource = TestProgram.resource_of(entry.method);
             ptr policy = TestMethods.attribute(entry.method, "TestPolicy");
             if (policy != null) {
                 TestPolicy* values = (TestPolicy*)policy;
@@ -367,17 +733,26 @@ struct TestProgram {
             node.tags = "Run";
             node.command = TestProgram.command_for(graph_node.name);
             node.data = (ptr)graph_node;
-            pool.add(node);
+            queue.push((ptr)node);
         }
+        TestProgram.apply_skips(pool, graph);
         for (mut i32 c = 0; c < graph.components; c = c + 1) {
             if (TestProgram.pending_in(graph, c) == 0) {
                 continue;
             }
-            TestNode* job = TestNode.create("graph", 60000000 * (i64)graph.component_size(c));
+            TestNode* job = TestNode.create("graph", TestProgram.component_timeout(graph, c));
             job.hidden = true;
             job.data = (ptr)c;
             job.command = TestProgram.graph_command(graph, c);
-            pool.add(job);
+            job.resource = TestProgram.component_resource(graph, c);
+            queue.push((ptr)job);
+        }
+        if (options.seed != 0) {
+            printf("seed: %d\n", options.seed);
+            TestProgram.shuffle(queue, options.seed);
+        }
+        for (mut i32 q = 0; q < queue.length; q = q + 1) {
+            pool.add((TestNode*)queue.get(q));
         }
         mut bool stopped = false;
         mut i32 skipped = 0;
@@ -419,6 +794,9 @@ struct TestProgram {
         if (options.report != null) {
             TestReport.write_json(pool, options.report);
         }
+        if (options.junit != null) {
+            TestReport.write_junit(pool, options.junit);
+        }
         if (options.graph != null) {
             i32 written = GraphView.emit(graph, options.graph, options.graph_file);
             if (written != 0) {
@@ -426,7 +804,7 @@ struct TestProgram {
             }
         }
         ItemList* nodes = pool.nodes;
-        if (TestReport.passed(nodes) == TestReport.total(nodes)) {
+        if (TestReport.succeeded(nodes)) {
             return 0;
         }
         return 1;

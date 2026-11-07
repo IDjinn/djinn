@@ -1,0 +1,105 @@
+import std::libc;
+import testing;
+
+extern "C" {
+    i32 remove(i8* path);
+    void __djinn_thread_sleep(i64 milliseconds);
+}
+
+struct Base {
+    i32 value;
+}
+
+struct Handle {
+    i32 id;
+
+    [Teardown]
+    void close() {
+        TextFiles.write(Environment.variable("FEATURES_TEARDOWN", "build/unit/features_teardown.log"), "closed", 6);
+    }
+}
+
+struct Shared {
+    static unsafe void exclusive() {
+        ptr<i8> path = Environment.variable("FEATURES_LOCK", "build/unit/features.lock");
+        Artifact lock = Artifact.at(path);
+        Expect.is_false(lock.exists(), "two tests of the same [Resource] ran at once");
+        TextFiles.write(path, "x", 1);
+        __djinn_thread_sleep(300);
+        remove((i8*)path);
+    }
+
+    [Test]
+    [Resource("db")]
+    void db_a() {
+        Shared.exclusive();
+    }
+
+    [Test]
+    [Resource("db")]
+    void db_b() {
+        Shared.exclusive();
+    }
+
+    [Test]
+    [Resource("db")]
+    void db_c() {
+        Shared.exclusive();
+    }
+}
+
+struct Skipping {
+    [Test]
+    [Skip("not written yet")]
+    void later() {
+        Expect.fail("a skipped test must not run");
+    }
+
+    [Test]
+    [Skip("the base is not ready")]
+    Base base_value() {
+        Expect.fail("a skipped producer must not run");
+        Base base = { .value = 1 };
+        return base;
+    }
+
+    [Test]
+    void needs_base(Base base) {
+        Expect.fail("a test that needs a skipped producer must not run");
+    }
+
+    [Test]
+    void plain() {
+        Expect.equal(1, 1);
+    }
+}
+
+struct Lifecycle {
+    [Test]
+    Handle opened() {
+        Handle handle = { .id = 7 };
+        return handle;
+    }
+
+    [Test]
+    void uses_handle(Handle handle) {
+        Expect.equal(7, (i64)handle.id);
+    }
+}
+
+struct Parameterized {
+    [Test]
+    [Case(1, 2, 3)]
+    [Case(10, 20, 30)]
+    [Case(-5, 5, 0)]
+    void sum(i32 left, i32 right, i32 expected) {
+        Expect.equal((i64)expected, (i64)(left + right));
+    }
+
+    [Test]
+    [Case(1)]
+    [Case(0)]
+    void flag(bool on) {
+        Expect.is_true(on || !on);
+    }
+}

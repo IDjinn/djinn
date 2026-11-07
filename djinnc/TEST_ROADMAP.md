@@ -523,15 +523,25 @@ e mostra `Blocked` quando ele falha.
 
 ### Fase 5: ergonomia
 
-Por ordem de valor: timeout por nó e `[Skip]`/`[Tag]`; setup e teardown (nó que devolve recurso com `destroy`); snapshots
-de stdout, AST e diagnósticos com `--update-snapshots`; testes parametrizados; JUnit XML; `[Resource("db")]` para
-serializar quem disputa o mesmo recurso externo; `--seed`; `--watch`.
+Estado: feita, menos snapshots (motivo abaixo).
+
+- **`[Skip("motivo")]`:** o teste não roda e aparece como `SKIP nome: motivo`; o resumo conta `N skipped` e o código de saída segue 0. Quem depende de um teste pulado é pulado também (`skipped with <nó>`). `[Tag]` já existia (Fase 3).
+- **Timeout por nó:** `[TestPolicy(retry, timeout)]` vale para teste isolado e também dentro de um componente: o worker arma uma thread vigia (uma por processo) antes de cada nó com `timeout`; se o prazo estoura, imprime `TIMEOUT <nó>` e sai, o runner marca só aquele nó como `FAIL ...: timeout`, bloqueia os dependentes e relança outro worker para o resto (`tests/timeouts`). O timeout do processo do componente passa a ser a soma dos prazos dos nós (60 s para quem não declara). `retry` continua valendo só para teste isolado.
+- **Teardown:** um tipo devolvido por um nó pode ter um método `[Teardown]`; no fim do worker o runner o chama sobre cada valor devolvido, do último nó para o primeiro (`tests/features`, `Handle.close`). Não roda se o processo morre.
+- **Parametrizados:** `[Case(a, b, c, d)]` repetido no método; cada `[Case]` vira um teste `Nome(a,b)` e preenche os parâmetros em ordem (inteiros e `bool`, até 4). Um método com `[Case]` não liga parâmetros pelo grafo.
+- **JUnit:** `--junit <arquivo>` escreve `<testsuite>` com `failure` (com `type="blocked"` para bloqueados) e `skipped`.
+- **`[Resource("nome")]`:** testes com o mesmo recurso nunca rodam ao mesmo tempo (o agendador não inicia um nó enquanto outro do mesmo recurso roda). Um componente usa o primeiro recurso que algum de seus nós declara.
+- **`--seed <n>`:** embaralha a ordem de agendamento de forma determinística e imprime a semente; a mesma semente repete a ordem.
+- **`djinnc test <dir> --watch`:** roda `djinnc test` com os mesmos argumentos (sem `--watch`), espera mudar o conteúdo de qualquer arquivo do projeto (a lista de arquivos é relida, então arquivo novo também conta) e roda de novo; `--watch-runs <n>` encerra depois de n execuções (usado no teste). Mora no driver (`djinnc/src/driver/watch.djinn`), não na biblioteca de testes.
+- **Não feito:** snapshots (`--update-snapshots`) precisam de arquivos guardados ao lado do código, o que contraria a regra de expectativas como código; fica para decisão.
 
 ### Fase 6: benchmarks nativos
 
-`[Bench]` no mesmo grafo: uma saída de teste pode preparar a entrada do benchmark. Aquecimento, repetições, relatório
-JSON e comparação com referência. Substitui o passo 5 do `bootstrap.sh` e o `tools/bench_scale.sh`. Benchmarks rodam em
-série, nunca junto com testes, para não medir ruído.
+Estado: feita para benchmarks de funções da própria suíte; falta trocar o passo 5 do `bootstrap.sh` e o `tools/bench_scale.sh`.
+
+`[Bench(warmup, iterations)]` marca um método no mesmo grafo: os parâmetros ligam a nós `[Test]` (a saída de um teste prepara a entrada, rodando uma vez), o runner roda `warmup` chamadas sem medir e `iterations` medidas. `--bench` roda só benchmarks, um processo por vez e em série (nunca junto com testes; uma execução normal ignora os `[Bench]`), e imprime `BENCH nome: median X us (min, mean, runs)`. `--bench-out <arquivo>` grava o JSON; `--bench-ref <arquivo>` compara a mediana com um JSON anterior e falha com `REGRESSION` acima de `--bench-tolerance <percentual>` (10 por padrão). Cobertura: `tests/bench` e `tests/features` em `tests/djinnc/graph.sh`.
+
+**Falta:** o passo 5 do `bootstrap.sh` mede o compilador compilando a si mesmo (`--stats`), o que pede um nó que rode o stage2 e um `[Bench]` sobre esse processo; `tools/bench_scale.sh` não foi migrado.
 
 ## Depois, se fizer falta
 
