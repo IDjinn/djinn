@@ -357,7 +357,7 @@ static int djinn_render_frames(char* buf, int used, const djinn_frame_t* frames,
     return used;
 }
 
-static void djinn_native_stack(void);
+static void djinn_native_stack(int skip);
 
 static int djinn_append_stack_trace(char* buf, int used)
 {
@@ -396,7 +396,7 @@ void __djinn_runtime_error(const djinn_error_info_t* info)
 
     fputs(report, stderr);
     fflush(stderr);
-    if (djinn_shadow_stack.depth == 0) djinn_native_stack();
+    if (djinn_shadow_stack.depth == 0) djinn_native_stack(2);
     abort();
 }
 
@@ -496,6 +496,7 @@ void __djinn_panic(const char* message, const char* file, const uint32_t line)
     used = djinn_render_frames(report, used, djinn_shadow_stack.frames, djinn_shadow_stack.depth);
     fputs(report, stderr);
     fflush(stderr);
+    if (djinn_shadow_stack.depth == 0) djinn_native_stack(2);
     abort();
 }
 
@@ -509,10 +510,10 @@ void __djinn_panic(const char* message, const char* file, const uint32_t line)
 #include <dbghelp.h>
 #pragma comment(lib, "dbghelp.lib")
 
-static void djinn_native_stack(void)
+__attribute__((noinline)) static void djinn_native_stack(const int skip)
 {
     void* addresses[64];
-    const USHORT count = CaptureStackBackTrace(1, 64, addresses, NULL);
+    const USHORT count = CaptureStackBackTrace((ULONG)skip, 64, addresses, NULL);
     const HANDLE process = GetCurrentProcess();
     static int initialized;
     if (!initialized)
@@ -560,7 +561,7 @@ static LONG WINAPI djinn_crash_filter(EXCEPTION_POINTERS* info)
     }
     if (record->NumberParameters >= 2)
         fprintf(stderr, "  access type %llu address %p\n", (unsigned long long)record->ExceptionInformation[0], (void*)record->ExceptionInformation[1]);
-    djinn_native_stack();
+    djinn_native_stack(1);
     if (djinn_previous_filter != NULL) return djinn_previous_filter(info);
     return EXCEPTION_CONTINUE_SEARCH;
 }
@@ -577,7 +578,7 @@ __attribute__((constructor)) static void djinn_install_crash_trace(void)
 
 extern const Elf64_Ehdr __ehdr_start;
 
-static void djinn_native_stack(void)
+__attribute__((noinline)) static void djinn_native_stack(const int skip)
 {
     void* addresses[64];
     const int count = backtrace(addresses, 64);
@@ -588,7 +589,7 @@ static void djinn_native_stack(void)
     const ssize_t executable_length = readlink("/proc/self/exe", executable, sizeof executable - 1);
     executable[executable_length > 0 ? executable_length : 0] = ' ';
     int used = snprintf(command, sizeof command, "addr2line -f -C -p -e '%s'", executable);
-    for (int i = 1; i < count && used < (int)sizeof command - 32; i++)
+    for (int i = skip; i < count && used < (int)sizeof command - 32; i++)
     {
         Dl_info info;
         uintptr_t address = (uintptr_t)addresses[i] - 1;
@@ -609,14 +610,14 @@ static void djinn_native_stack(void)
         }
         pclose(pipe);
     }
-    if (!printed) backtrace_symbols_fd(addresses + 1, count - 1, 2);
+    if (!printed) backtrace_symbols_fd(addresses + skip, count - skip, 2);
     fflush(stderr);
 }
 
 static void djinn_crash_signal(const int signal_number)
 {
     fprintf(stderr, "djinn crash: signal %d\n", signal_number);
-    djinn_native_stack();
+    djinn_native_stack(1);
     signal(signal_number, SIG_DFL);
     raise(signal_number);
 }
