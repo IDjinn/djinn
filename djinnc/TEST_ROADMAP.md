@@ -242,7 +242,8 @@ struct GoodOne {}
   devolve a posição da primeira ocorrência e evita isso. Os dois formatos valem.
 - **A comparação é exata:** um diagnóstico não previsto também reprova, e a ordem não importa. A mensagem do `Verify` lista
   o que faltou e o que sobrou, com o código e a posição de cada um.
-- **IR e AST:** `verify.ir_contains(source, "sdiv")` e `verify.ast_matches(source, snapshot)`.
+- **IR:** `Verify.source(texto).emits_ir(Expected.ir_contains("sdiv").and_ir_lacks("div.zero").in_function("work"))`. `in_function` restringe a busca ao corpo de uma função, porque o módulo leva o std inteiro. `.optimized(n)` passa `-On` e `.with_debug_info()` passa `-g`. A AST ainda não tem asserção (`ast_matches`).
+- **Vários arquivos:** `Verify.source(principal).and_file(outro)` escreve o segundo arquivo ao lado e passa os dois ao compilador.
 - **Exit code:** em POSIX compara os 8 bits baixos (a regra de `DJINN_EXIT` em `tests/TestHelpers.h`). Sinal e abort são estados próprios.
 - **Sem sidecars:** `.exit`, `.stdout`, `.code`, `.expect` e `.debug` não existem mais. Toda expectativa está em `tests/conformance/suites/`.
 
@@ -472,12 +473,12 @@ como `contracts are not supported yet`, e essa lista fica no script.
   linguagem e descartar os testes.
 - **Descartar:** interno do stage0 (mangler, `DiagnosticEngine`) ou duplicado.
 
-Próximos passos:
+Estado:
 
-1. Decidir cada lacuna da tabela de `TRIAGE.md`.
-2. Congelar `tests/**/*.cpp`: teste novo só em Djinn.
-3. Reescrever os casos marcados, o que depende de `ir_contains` e de um caso multiarquivo.
-4. Trocar os casos que só compilam por expectativas mais fortes, aos poucos.
+1. **Adiado por decisão:** as lacunas da tabela de `TRIAGE.md` ficam para quando os recursos existirem; os 175 casos seguem listados lá.
+2. **Feito:** `tests/**/*.cpp` está congelado. `tests/frozen_cpp_tests.txt` guarda cada arquivo e o número de `TEST`; `tools/check_frozen_cpp_tests.py` reprova arquivo novo ou caso a mais, e o CTest o roda como `djinn_cpp_tests_frozen`. `--update` regrava o manifesto depois de migrar ou apagar casos.
+3. **Feito:** os 87 casos de "reescrever" viraram 66 `[Test]` (IR, avaliação de constantes, pilha de chamadas, vários arquivos; destino de cada um em `tests/conformance/rewritten.txt`) e 21 bloqueados com o motivo na triagem (interpolação de string, modos de overflow, tipos non-zero, modo release, `throws`). `port_gtests.py` não reescreve mais as suítes: elas são editadas à mão (`--write-suites` volta ao comportamento antigo).
+4. **Em andamento:** 44 dos casos que só compilavam agora também rodam e conferem o exit code ou a saída. Sobram os que só declaram interfaces ou usam sufixos de overflow e tipos non-zero, que o djinnc aceita sem aplicar.
 
 Pronto quando: todo `TEST` tem decisão na triagem e o gtest deixa de ser necessário para validar o djinnc. O stage0 pode manter o dele até ser aposentado.
 

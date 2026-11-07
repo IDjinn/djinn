@@ -17,6 +17,8 @@ struct Verify {
     i32 timeout;
     i32 required;
     i32 checks;
+    i32 optimize;
+    bool debug_info;
     Source* pending;
 
     public static unsafe Verify* create(Config* config) {
@@ -33,6 +35,8 @@ struct Verify {
         this.timeout = 0;
         this.required = 0;
         this.checks = 0;
+        this.optimize = 0;
+        this.debug_info = false;
         return this;
     }
 
@@ -100,6 +104,16 @@ struct Verify {
         return config.filter == null || Text.contains(name, config.filter);
     }
 
+    public unsafe Verify* optimized(i32 level) {
+        this.optimize = level;
+        return this;
+    }
+
+    public unsafe Verify* with_debug_info() {
+        this.debug_info = true;
+        return this;
+    }
+
     public unsafe Verify* with_std() {
         this.std = true;
         return this;
@@ -163,7 +177,10 @@ struct Verify {
             source.path = Runner.output_path(config, name, ".djinn");
         }
         TestCase* test = Runner.new_case(config, name, source.path, kind);
+        this.add_extra_files(test, source, name);
         test.std = this.std;
+        test.optimize = this.optimize;
+        test.debug_info = this.debug_info;
         test.expected = expected;
         TestNode* node = test.node;
         if (kind != Kind.CRASH) {
@@ -180,6 +197,44 @@ struct Verify {
             this.select(test);
         }
         return test;
+    }
+
+    unsafe void add_extra_files(TestCase* test, Source* source, ptr<i8> name) {
+        if (source.extra_text == null) {
+            return;
+        }
+        Config* config = this.config;
+        ItemList* texts = source.extra_text;
+        test.extra = ItemList.create();
+        ItemList* paths = test.extra;
+        for (mut i32 i = 0; i < texts.length; i = i + 1) {
+            TextBuffer* suffix = TextBuffer.create();
+            suffix.append("_file");
+            suffix.append_int((i64)(i + 1));
+            suffix.append(".djinn");
+            ptr<i8> path = Runner.output_path(config, name, suffix.cstr());
+            ptr<i8> text = (ptr<i8>)texts.get(i);
+            if (this.selected(name)) {
+                TextFiles.write(path, text, (i32)strlen(text));
+            }
+            paths.push((ptr)path);
+        }
+    }
+
+    public unsafe Verify* and_file(str text) {
+        Source* source = this.pending;
+        if (source.extra_text == null) {
+            source.extra_text = ItemList.create();
+        }
+        ItemList* texts = source.extra_text;
+        texts.push((ptr)Sources.text(Reflection.terminated_view(text)).text);
+        return this;
+    }
+
+    public unsafe Verify* emits_ir(Expected* expected) {
+        this.checks = this.checks + 1;
+        this.add(this.pending, Kind.IR, expected, TestPath.IR);
+        return this;
     }
 
     public unsafe Verify* runs(Expected* expected) {

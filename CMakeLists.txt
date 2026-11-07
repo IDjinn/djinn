@@ -306,6 +306,15 @@ if (DJINNC_SEED AND DJINN_BASH)
             LABELS conformance RESOURCE_LOCK djinn_conformance TIMEOUT 3600)
 endif ()
 
+# C++ tests are frozen: new tests are written in Djinn under tests/conformance.
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if (Python3_Interpreter_FOUND)
+    add_test(NAME djinn_cpp_tests_frozen
+            COMMAND ${Python3_EXECUTABLE} tools/check_frozen_cpp_tests.py
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    set_tests_properties(djinn_cpp_tests_frozen PROPERTIES LABELS conformance)
+endif ()
+
 add_custom_target(clean_djinn_build
         COMMAND ${CMAKE_COMMAND} -E rm -rf "$ENV{TEMP}/djinn_build"
         COMMENT "Cleaning djinn_build temp directory"

@@ -14,6 +14,7 @@ struct Kind {
     const i32 DEBUG = 5;
     const i32 LIBRARY = 6;
     const i32 CLEAN = 7;
+    const i32 IR = 8;
 }
 
 struct Config {
@@ -44,6 +45,9 @@ struct TestCase {
     i32 kind;
     Expected* expected;
     ptr<i8> library;
+    ItemList* extra;
+    i32 optimize;
+    bool debug_info;
     i32 phase;
     bool std;
     i32 line;
@@ -156,6 +160,9 @@ struct Runner {
                 return TestPath.JIT;
             }
             return paths & TestPath.LINK;
+        }
+        if (test.kind == Kind.IR) {
+            return paths & TestPath.IR;
         }
         if (test.kind == Kind.ERROR) {
             if ((paths & TestPath.CODEGEN) != 0) {
@@ -288,8 +295,21 @@ struct Runner {
             return command.cstr();
         }
         Runner.quote(command, test.source);
+        if (test.extra != null) {
+            ItemList* extra = test.extra;
+            for (mut i32 i = 0; i < extra.length; i = i + 1) {
+                Runner.quote(command, (ptr<i8>)extra.get(i));
+            }
+        }
         if (test.kind == Kind.ERROR || test.kind == Kind.CLEAN) {
             command.append(" --diagnostics-format=json");
+        }
+        if (test.debug_info && test.path == TestPath.IR) {
+            command.append(" -g");
+        }
+        if (test.optimize > 0) {
+            command.append(" -O");
+            command.append_int((i64)test.optimize);
         }
         if (test.path == TestPath.CHECK) {
             command.append(" --check --runtime-dir");
@@ -425,6 +445,9 @@ struct Runner {
             if (test.path == TestPath.IR) {
                 Runner.remove_ir(test);
             }
+        } else if (test.kind == Kind.IR) {
+            reason = Runner.check_ir(test);
+            Runner.remove_ir(test);
         } else if (test.kind == Kind.SELFTEST) {
             if (node.exit_code != 0) {
                 reason = Runner.with_snippet("selftest failed", node.output);
@@ -455,6 +478,67 @@ struct Runner {
             test.phase = 0;
             test.path = Runner.first_path(test);
         }
+    }
+
+    public static unsafe ptr<i8> function_ir(ptr<i8> ir, ptr<i8> name) {
+        TextBuffer* marker = TextBuffer.create();
+        marker.append("@");
+        marker.append(name);
+        marker.append("(");
+        i32 length = (i32)strlen(ir);
+        mut i32 start = 0;
+        while (start < length) {
+            mut i32 end = start;
+            while (end < length && ir[end] != 10) {
+                end = end + 1;
+            }
+            ptr<i8> line = Text.duplicate(ir + start, end - start);
+            if (Text.contains(line, "define") && Text.contains(line, marker.cstr())) {
+                mut i32 stop = end;
+                while (stop < length && !(ir[stop] == 10 && ir[stop + 1] == 125)) {
+                    stop = stop + 1;
+                }
+                return Text.duplicate(ir + start, stop - start);
+            }
+            start = end + 1;
+        }
+        return null;
+    }
+
+    public static unsafe ptr<i8> check_ir(TestCase* test) {
+        TestNode* node = test.node;
+        if (node.exit_code != 0) {
+            return Runner.with_snippet("compile failed", node.output);
+        }
+        TextBuffer* path = TextBuffer.create();
+        path.append(test.binary);
+        path.append(".ll");
+        mut ptr<i8> ir = TextFiles.read(path.cstr());
+        if (ir == null) {
+            return "the compiler wrote no IR";
+        }
+        Expected* expected = test.expected;
+        if (expected.ir_function != null) {
+            ir = Runner.function_ir(ir, expected.ir_function);
+            if (ir == null) {
+                return Runner.with_snippet("no function in the IR named", expected.ir_function);
+            }
+        }
+        ItemList* wanted = expected.ir_has;
+        for (mut i32 i = 0; i < wanted.length; i = i + 1) {
+            ptr<i8> pattern = (ptr<i8>)wanted.get(i);
+            if (!Text.contains(ir, pattern)) {
+                return Runner.with_snippet("missing in the IR", pattern);
+            }
+        }
+        ItemList* unwanted = expected.ir_lacks;
+        for (mut i32 i = 0; i < unwanted.length; i = i + 1) {
+            ptr<i8> pattern = (ptr<i8>)unwanted.get(i);
+            if (Text.contains(ir, pattern)) {
+                return Runner.with_snippet("unexpected in the IR", pattern);
+            }
+        }
+        return null;
     }
 
     public static unsafe void remove_ir(TestCase* test) {

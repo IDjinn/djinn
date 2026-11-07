@@ -93,6 +93,42 @@ GAP_BY_SUITE = {
     "Object": "`object` e `...args` com `str`",
     "IsExpression": "`object` e `...args` com `str`",
 }
+BLOCKED_AFTER_REWRITE = {
+    "RuntimeErrors.ReleaseModeTrapUsesMinimalCall": "modo release (`__djinn_runtime_error_min`)",
+    "Overflow.TrappedEmitsOverflowCheck": "modos de overflow",
+    "Overflow.CheckedWithThrowsSetsErrorFlag": "modos de overflow",
+    "Overflow.SaturatingUsesSatIntrinsic": "modos de overflow",
+    "NonZero.SameRepresentationAsBaseType": "tipos non-zero (`i32n`)",
+    "NonZero.DivisionByNonZeroParamSkipsCheckAndChecksEntry": "tipos non-zero (`i32n`)",
+    "StringInterpolation.SimpleIdentifier": "interpolação de string (`{nome}` vira `{0}`)",
+    "StringInterpolation.MultipleArgs": "interpolação de string (`{nome}` vira `{0}`)",
+    "StringInterpolation.MixedWithExplicitPositional": "interpolação de string (`{nome}` vira `{0}`)",
+    "StringInterpolation.FieldAccessInsideBraces": "interpolação de string (`{nome}` vira `{0}`)",
+    "StringInterpolation.BlockStringTripleQuoted": "interpolação de string (`{nome}` vira `{0}`)",
+    "StringInterpolation.ArithmeticExpressionInsideBraces": "interpolação de string (`{nome}` vira `{0}`)",
+    "StringInterpolation.FunctionCallExpandsAsArgument": "interpolação de string (`{nome}` vira `{0}`)",
+    "StringInterpolation.RepeatedExpressionEvaluatedTwice": "interpolação de string (`{nome}` vira `{0}`)",
+    "RuntimeErrors.TrappedOverflowReportHasLocationValuesAndTrace": "modos de overflow",
+    "RuntimeErrors.NegateOverflowReport": "modos de overflow",
+    "RuntimeErrors.VariableHistoryShowsLastAssignments": "modos de overflow",
+    "RuntimeErrors.NormalRunHasEmptyReport": "modos de overflow",
+    "RuntimeErrors.UncaughtExceptionEscapingMainReportsAndAborts": "tipos de erro em `throws`",
+    "RuntimeErrors.UncaughtExceptionReleaseReportHasNoStackTrace": "tipos de erro em `throws`",
+    "RuntimeErrors.ReleaseModeTrapReportKeepsLocationAndValues": "modo release",
+}
+REWRITTEN_FILE = "tests/conformance/rewritten.txt"
+
+
+def load_rewritten():
+    found = {}
+    for line in open(REWRITTEN_FILE, encoding="utf-8"):
+        if line.strip():
+            target, _, note = line.partition(" # ")
+            identifier, _, destination = target.partition(" -> ")
+            found[identifier.strip()] = (destination.strip(), note.strip())
+    return found
+
+
 def extract(path):
     text = open(path, errors="replace", encoding="utf-8").read()
     marks = list(re.finditer(r"^[ ]*TEST(?:_F|_P)?[(]([A-Za-z0-9_]+),[ ]*([A-Za-z0-9_]+)[)]", text, re.M))
@@ -179,6 +215,11 @@ def gap_of(case):
 
 def decide(case):
     file = case["file"]
+    if case["id"] in REWRITTEN:
+        destination, note = REWRITTEN[case["id"]]
+        return "Reescrito", "`%s`" % destination + ("; " + note if note else "")
+    if case["id"] in BLOCKED_AFTER_REWRITE:
+        return "Bloqueado", BLOCKED_AFTER_REWRITE[case["id"]]
     if case["id"] in SUPERSEDED:
         return "Descartar", SUPERSEDED[case["id"]]
     if file in INTERNAL_FILES:
@@ -229,6 +270,9 @@ def written_tests():
         text = open(os.path.join(SUITES, area + ".djinn"), encoding="utf-8").read()
         for name, source in re.findall(r'void (\w+)[(][)] [{]\n +str source = """\n(.*?)\n""";', text, re.S):
             yield source, "%s.%s" % (owner, name)
+
+
+REWRITTEN = load_rewritten()
 
 
 def mark_duplicates(cases):
@@ -305,7 +349,8 @@ def write_report(cases, path):
              "resultado. Os grupos que falharam foram revisados à mão; os que passaram não tiveram a intenção lida um a um.", "",
              "| Decisão | Testes | O que significa |", "|---|---|---|",
              "| Portar | %d | Passa no djinnc; está em `tests/conformance/src/suites`, como `[Test]`. |" % totals["Portar"],
-             "| Reescrever | %d | O comportamento importa, mas o teste precisa de outra forma. |" % totals["Reescrever"],
+             "| Reescrito | %d | O comportamento importa e o teste foi reescrito à mão (IR, avaliação constante, pilha, vários arquivos); o destino está no motivo. |" % totals["Reescrito"],
+             "| Reescrever | %d | O comportamento importa, mas o teste ainda precisa de outra forma. |" % totals["Reescrever"],
              "| Bloqueado | %d | O djinnc não reproduz o comportamento; falta decidir se implementa ou se o recurso sai. |" % totals["Bloqueado"],
              "| Descartar | %d | Interno do stage0 ou duplicado. |" % totals["Descartar"], "",
              "## O que bloqueia", "", "| Lacuna | Testes |", "|---|---|"]
@@ -325,6 +370,7 @@ def main():
     parser.add_argument("--runtime-dir", default="runtime")
     parser.add_argument("--std-dir", default="std")
     parser.add_argument("--jobs", type=int, default=8)
+    parser.add_argument("--write-suites", action="store_true", help="overwrite the Portar suites; they are edited by hand now, so this is off")
     options = parser.parse_args()
     paths = [path for path in sorted(glob.glob("tests/**/*.cpp", recursive=True)) if "djinnc" not in path and "conformance" not in path]
     cases = [describe(*found) for path in paths for found in extract(path)]
@@ -333,7 +379,8 @@ def main():
     for case in cases:
         case["decision"], case["reason"] = decide(case)
     mark_duplicates(cases)
-    write_tests(cases)
+    if options.write_suites:
+        write_tests(cases)
     write_report(cases, "tests/conformance/TRIAGE.md")
 
 

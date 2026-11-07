@@ -6,20 +6,22 @@ resultado. Os grupos que falharam foram revisados à mão; os que passaram não 
 | Decisão | Testes | O que significa |
 |---|---|---|
 | Portar | 439 | Passa no djinnc; está em `tests/conformance/src/suites`, como `[Test]`. |
-| Reescrever | 87 | O comportamento importa, mas o teste precisa de outra forma. |
-| Bloqueado | 154 | O djinnc não reproduz o comportamento; falta decidir se implementa ou se o recurso sai. |
+| Reescrito | 66 | O comportamento importa e o teste foi reescrito à mão (IR, avaliação constante, pilha, vários arquivos); o destino está no motivo. |
+| Reescrever | 0 | O comportamento importa, mas o teste ainda precisa de outra forma. |
+| Bloqueado | 175 | O djinnc não reproduz o comportamento; falta decidir se implementa ou se o recurso sai. |
 | Descartar | 43 | Interno do stage0 ou duplicado. |
 
 ## O que bloqueia
 
 | Lacuna | Testes |
 |---|---|
-| tipos de erro em `throws` | 30 |
-| modos de overflow | 23 |
+| tipos de erro em `throws` | 32 |
+| modos de overflow | 30 |
 | contratos | 20 |
 | `sizeof`/`typeof`/`alignof` de expressão | 18 |
 | `switch` com bloco e `yield` | 10 |
-| tipos non-zero | 8 |
+| tipos non-zero | 10 |
+| interpolação de string | 8 |
 | tipos anuláveis | 7 |
 | `object` e `...args` com `str` | 6 |
 | desestruturação | 4 |
@@ -29,6 +31,7 @@ resultado. Os grupos que falharam foram revisados à mão; os que passaram não 
 | tipos nativos | 3 |
 | `const` local | 2 |
 | o djinnc rejeita: struct does not define this operator | 2 |
+| modo release | 2 |
 | o djinnc rejeita: an enum cannot carry a payload: declare it as a union | 2 |
 | o djinnc rejeita: struct does not define operator get[] | 1 |
 | o djinnc rejeita: a struct initializer needs a struct type from its context | 1 |
@@ -159,12 +162,12 @@ resultado. Os grupos que falharam foram revisados à mão; os que passaram não 
 | Numbers.MultipleNumbersDeclaration | Portar | compila sem erros |
 | Numbers.CompileTimeOverflowCheck | Descartar | aceitava literais fora da faixa, que agora são erro; coberto por `errors/literal_out_of_range` |
 | Overflow.SuffixDeclarationsCompile | Portar | compila sem erros |
-| Overflow.WrappedIsPlainAdd | Reescrever | confere IR; depende de `ir_contains` |
-| Overflow.TrappedEmitsOverflowCheck | Reescrever | confere IR; depende de `ir_contains` |
+| Overflow.WrappedIsPlainAdd | Reescrito | `OverflowIrTests.WrappedIsPlainAdd` |
+| Overflow.TrappedEmitsOverflowCheck | Bloqueado | modos de overflow |
 | Overflow.TrappedRuntimeOverflowAborts | Bloqueado | modos de overflow (o erro atual tem outro motivo) |
 | Overflow.CheckedRequiresThrows | Bloqueado | modos de overflow |
-| Overflow.CheckedWithThrowsSetsErrorFlag | Reescrever | confere IR; depende de `ir_contains` |
-| Overflow.SaturatingUsesSatIntrinsic | Reescrever | confere IR; depende de `ir_contains` |
+| Overflow.CheckedWithThrowsSetsErrorFlag | Bloqueado | modos de overflow |
+| Overflow.SaturatingUsesSatIntrinsic | Bloqueado | modos de overflow |
 | Overflow.SaturatingRuntimeAddClampsToMax | Bloqueado | modos de overflow (esperado 2, veio 0) |
 | Overflow.SaturatingLiteralClampsAtCompileTime | Bloqueado | modos de overflow |
 | Overflow.TrappedLiteralOutOfRangeIsCompileError | Portar | erro E3051 |
@@ -222,11 +225,11 @@ resultado. Os grupos que falharam foram revisados à mão; os que passaram não 
 | Async.Yield_BasicYield | Bloqueado | `switch` com bloco e `yield` |
 | Async.Yield_MultipleYields | Bloqueado | `switch` com bloco e `yield` |
 | Async.Yield_WithComputation | Bloqueado | `switch` com bloco e `yield` |
-| Spawn.BasicSpawnParse | Reescrever | confere IR; depende de `ir_contains` |
-| EventLoop.AsyncMainGeneratesRuntimeCalls | Reescrever | confere IR; depende de `ir_contains` |
-| EventLoop.CoroWrappersGenerated | Reescrever | confere IR; depende de `ir_contains` |
+| Spawn.BasicSpawnParse | Reescrito | `SpawnIrTests.BasicSpawnParse` |
+| EventLoop.AsyncMainGeneratesRuntimeCalls | Reescrito | `EventLoopIrTests.AsyncMainGeneratesRuntimeCalls` |
+| EventLoop.CoroWrappersGenerated | Reescrito | `EventLoopIrTests.CoroWrappersGenerated` |
 | Async.NonAsyncMainStillWorks | Portar | exit code 77 |
-| Async.NonAsyncMainWithRuntime | Reescrever | confere IR; depende de `ir_contains` |
+| Async.NonAsyncMainWithRuntime | Reescrito | `AsyncIrTests.NonAsyncMainWithRuntime` |
 | Spawn.MultipleSpawnsParse | Portar | compila sem erros |
 | Spawn.WithYieldParse | Bloqueado | `switch` com bloco e `yield` |
 
@@ -234,58 +237,58 @@ resultado. Os grupos que falharam foram revisados à mão; os que passaram não 
 
 | Teste | Decisão | Motivo |
 |---|---|---|
-| Attributes.ForceInlineGeneratesAlwaysInline | Reescrever | confere IR; depende de `ir_contains` |
-| Attributes.NoInlineGeneratesNoInline | Reescrever | confere IR; depende de `ir_contains` |
-| Attributes.NoReturnAttribute | Reescrever | confere IR; depende de `ir_contains` |
-| Attributes.ColdAttribute | Reescrever | confere IR; depende de `ir_contains` |
+| Attributes.ForceInlineGeneratesAlwaysInline | Reescrito | `AttributesIrTests.ForceInlineGeneratesAlwaysInline` |
+| Attributes.NoInlineGeneratesNoInline | Reescrito | `AttributesIrTests.NoInlineGeneratesNoInline` |
+| Attributes.NoReturnAttribute | Reescrito | `AttributesIrTests.NoReturnAttribute` |
+| Attributes.ColdAttribute | Reescrito | `AttributesIrTests.ColdAttribute` |
 | Attributes.ParameterizedAttributeParses | Portar | compila sem erros |
 | Attributes.NamedParameterAttributeParses | Portar | compila sem erros |
-| Attributes.MultipleAttributesOnMethod | Reescrever | confere IR; depende de `ir_contains` |
-| Attributes.ImplicitNounwindOnAllFunctions | Reescrever | confere IR; depende de `ir_contains` |
-| Attributes.LlvmEscapeHatch | Reescrever | confere IR; depende de `ir_contains` |
+| Attributes.MultipleAttributesOnMethod | Reescrito | `AttributesIrTests.MultipleAttributesOnMethod` |
+| Attributes.ImplicitNounwindOnAllFunctions | Reescrito | `AttributesIrTests.ImplicitNounwindOnAllFunctions` |
+| Attributes.LlvmEscapeHatch | Reescrito | `AttributesIrTests.LlvmEscapeHatch` |
 | Attributes.ErrorOnUnknownAttribute | Portar | erro E8002 |
 | Attributes.ErrorOnUnknownStructAttribute | Portar | erro E8002 |
 | Attributes.WarningWhenFunctionAttributeOnStruct | Portar | aviso E8001 |
 | Attributes.WarningWhenStructAttributeOnMethod | Bloqueado | o djinnc não reproduz o comportamento |
 | Attributes.NoWarningWhenAttributeOnValidTarget | Portar | compila sem erros |
 | Attributes.DeprecatedValidOnAnyTarget | Portar | compila sem erros |
-| ConstEvalVM.IntegerLiteral | Reescrever | usa a API C++ do avaliador de constantes; vira um caso constexpr em Djinn |
-| ConstEvalVM.FloatLiteral | Reescrever | usa a API C++ do avaliador de constantes; vira um caso constexpr em Djinn |
-| ConstEvalVM.BooleanLiteral | Reescrever | usa a API C++ do avaliador de constantes; vira um caso constexpr em Djinn |
-| ConstEvalVM.BooleanFalseLiteral | Reescrever | usa a API C++ do avaliador de constantes; vira um caso constexpr em Djinn |
-| ConstEvalVM.HexLiteral | Reescrever | usa a API C++ do avaliador de constantes; vira um caso constexpr em Djinn |
-| ConstEvalVM.BinaryLiteral | Reescrever | usa a API C++ do avaliador de constantes; vira um caso constexpr em Djinn |
-| ConstEvalVM.SeparatorLiteral | Reescrever | usa a API C++ do avaliador de constantes; vira um caso constexpr em Djinn |
-| ConstEvalVM.TickSeparatorLiteral | Reescrever | usa a API C++ do avaliador de constantes; vira um caso constexpr em Djinn |
-| ConstEvalVM.NegativeZero | Reescrever | usa a API C++ do avaliador de constantes; vira um caso constexpr em Djinn |
-| ConstEvalVM.Addition | Reescrever | usa a API C++ do avaliador de constantes; vira um caso constexpr em Djinn |
-| ConstEvalVM.Subtraction | Reescrever | usa a API C++ do avaliador de constantes; vira um caso constexpr em Djinn |
-| ConstEvalVM.Multiplication | Reescrever | usa a API C++ do avaliador de constantes; vira um caso constexpr em Djinn |
-| ConstEvalVM.Division | Reescrever | usa a API C++ do avaliador de constantes; vira um caso constexpr em Djinn |
-| ConstEvalVM.Modulo | Reescrever | usa a API C++ do avaliador de constantes; vira um caso constexpr em Djinn |
-| ConstEvalVM.DivisionByZero | Reescrever | usa a API C++ do avaliador de constantes; vira um caso constexpr em Djinn |
-| ConstEvalVM.ModuloByZero | Reescrever | usa a API C++ do avaliador de constantes; vira um caso constexpr em Djinn |
-| ConstEvalVM.UnaryNegate | Reescrever | usa a API C++ do avaliador de constantes; vira um caso constexpr em Djinn |
-| ConstEvalVM.DoubleNegate | Reescrever | usa a API C++ do avaliador de constantes; vira um caso constexpr em Djinn |
-| ConstEvalVM.NestedArithmetic | Reescrever | usa a API C++ do avaliador de constantes; vira um caso constexpr em Djinn |
-| ConstEvalVM.ComplexNestedArithmetic | Reescrever | usa a API C++ do avaliador de constantes; vira um caso constexpr em Djinn |
-| ConstEvalVM.LessThan | Reescrever | usa a API C++ do avaliador de constantes; vira um caso constexpr em Djinn |
-| ConstEvalVM.LessThanFalse | Reescrever | usa a API C++ do avaliador de constantes; vira um caso constexpr em Djinn |
-| ConstEvalVM.GreaterThan | Reescrever | usa a API C++ do avaliador de constantes; vira um caso constexpr em Djinn |
-| ConstEvalVM.LessEqual | Reescrever | usa a API C++ do avaliador de constantes; vira um caso constexpr em Djinn |
-| ConstEvalVM.GreaterEqual | Reescrever | usa a API C++ do avaliador de constantes; vira um caso constexpr em Djinn |
-| ConstEvalVM.Equality | Reescrever | usa a API C++ do avaliador de constantes; vira um caso constexpr em Djinn |
-| ConstEvalVM.Inequality | Reescrever | usa a API C++ do avaliador de constantes; vira um caso constexpr em Djinn |
-| ConstEvalVM.LogicAnd | Reescrever | usa a API C++ do avaliador de constantes; vira um caso constexpr em Djinn |
-| ConstEvalVM.LogicOr | Reescrever | usa a API C++ do avaliador de constantes; vira um caso constexpr em Djinn |
-| ConstEvalVM.LogicalNot | Reescrever | usa a API C++ do avaliador de constantes; vira um caso constexpr em Djinn |
-| ConstEvalVM.LogicalNotFalse | Reescrever | usa a API C++ do avaliador de constantes; vira um caso constexpr em Djinn |
-| ConstEvalVM.NamedConstant | Reescrever | usa a API C++ do avaliador de constantes; vira um caso constexpr em Djinn |
-| ConstEvalVM.NamedConstantInExpression | Reescrever | usa a API C++ do avaliador de constantes; vira um caso constexpr em Djinn |
-| ConstEvalVM.MultipleNamedConstants | Reescrever | usa a API C++ do avaliador de constantes; vira um caso constexpr em Djinn |
-| ConstEvalVM.UnknownIdentifierReturnsError | Reescrever | usa a API C++ do avaliador de constantes; vira um caso constexpr em Djinn |
-| ConstEvalVM.MaxIterationsExceeded | Reescrever | usa a API C++ do avaliador de constantes; vira um caso constexpr em Djinn |
-| ConstEvalVM.StackOverflowProtection | Reescrever | usa a API C++ do avaliador de constantes; vira um caso constexpr em Djinn |
+| ConstEvalVM.IntegerLiteral | Reescrito | `ConstEvalVMTests.IntegerLiteral` |
+| ConstEvalVM.FloatLiteral | Reescrito | `ConstEvalVMTests.FloatLiteral` |
+| ConstEvalVM.BooleanLiteral | Reescrito | `ConstEvalVMTests.BooleanLiteral` |
+| ConstEvalVM.BooleanFalseLiteral | Reescrito | `ConstEvalVMTests.BooleanFalseLiteral` |
+| ConstEvalVM.HexLiteral | Reescrito | `ConstEvalVMTests.HexLiteral` |
+| ConstEvalVM.BinaryLiteral | Reescrito | `ConstEvalVMTests.BinaryLiteral` |
+| ConstEvalVM.SeparatorLiteral | Reescrito | `ConstEvalVMTests.SeparatorLiteral` |
+| ConstEvalVM.TickSeparatorLiteral | Reescrito | `ConstEvalVMTests.TickSeparatorLiteral` |
+| ConstEvalVM.NegativeZero | Reescrito | `ConstEvalVMTests.NegativeZero` |
+| ConstEvalVM.Addition | Reescrito | `ConstEvalVMTests.Addition` |
+| ConstEvalVM.Subtraction | Reescrito | `ConstEvalVMTests.Subtraction` |
+| ConstEvalVM.Multiplication | Reescrito | `ConstEvalVMTests.Multiplication` |
+| ConstEvalVM.Division | Reescrito | `ConstEvalVMTests.Division` |
+| ConstEvalVM.Modulo | Reescrito | `ConstEvalVMTests.Modulo` |
+| ConstEvalVM.DivisionByZero | Reescrito | `ConstEvalVMTests.DivisionByZero` |
+| ConstEvalVM.ModuloByZero | Reescrito | `ConstEvalVMTests.ModuloByZero` |
+| ConstEvalVM.UnaryNegate | Reescrito | `ConstEvalVMTests.UnaryNegate`; só o link: no JIT, `X == -42` com `constexpr i32 X = -42` dá falso (o link dá verdadeiro) |
+| ConstEvalVM.DoubleNegate | Reescrito | `ConstEvalVMTests.DoubleNegate` |
+| ConstEvalVM.NestedArithmetic | Reescrito | `ConstEvalVMTests.NestedArithmetic` |
+| ConstEvalVM.ComplexNestedArithmetic | Reescrito | `ConstEvalVMTests.ComplexNestedArithmetic` |
+| ConstEvalVM.LessThan | Reescrito | `ConstEvalVMTests.LessThan` |
+| ConstEvalVM.LessThanFalse | Reescrito | `ConstEvalVMTests.LessThanFalse` |
+| ConstEvalVM.GreaterThan | Reescrito | `ConstEvalVMTests.GreaterThan` |
+| ConstEvalVM.LessEqual | Reescrito | `ConstEvalVMTests.LessEqual` |
+| ConstEvalVM.GreaterEqual | Reescrito | `ConstEvalVMTests.GreaterEqual` |
+| ConstEvalVM.Equality | Reescrito | `ConstEvalVMTests.Equality` |
+| ConstEvalVM.Inequality | Reescrito | `ConstEvalVMTests.Inequality` |
+| ConstEvalVM.LogicAnd | Reescrito | `ConstEvalVMTests.LogicAnd` |
+| ConstEvalVM.LogicOr | Reescrito | `ConstEvalVMTests.LogicOr` |
+| ConstEvalVM.LogicalNot | Reescrito | `ConstEvalVMTests.LogicalNot` |
+| ConstEvalVM.LogicalNotFalse | Reescrito | `ConstEvalVMTests.LogicalNotFalse` |
+| ConstEvalVM.NamedConstant | Reescrito | `ConstEvalVMTests.NamedConstant` |
+| ConstEvalVM.NamedConstantInExpression | Reescrito | `ConstEvalVMTests.NamedConstantInExpression` |
+| ConstEvalVM.MultipleNamedConstants | Reescrito | `ConstEvalVMTests.MultipleNamedConstants` |
+| ConstEvalVM.UnknownIdentifierReturnsError | Reescrito | `ConstEvalVMTests.UnknownIdentifierReturnsError` |
+| ConstEvalVM.MaxIterationsExceeded | Reescrito | `ConstEvalVMTests.MaxIterationsExceeded` |
+| ConstEvalVM.StackOverflowProtection | Reescrito | `ConstEvalVMTests.StackOverflowProtection` |
 | ConstExpr.SimpleConstExprVariable | Portar | exit code 42 |
 | ConstExpr.ConstExprDependingOnLaterDeclaration | Portar | exit code 41 |
 | ConstExpr.ConstExprWithArithmetic | Portar | exit code 35 |
@@ -411,7 +414,7 @@ resultado. Os grupos que falharam foram revisados à mão; os que passaram não 
 | BootstrapSubset.NullableLinkedListTraversal | Bloqueado | o djinnc rejeita: struct does not define this operator |
 | BootstrapSubset.LogicalOperatorsShortCircuit | Bloqueado | o djinnc rejeita: struct does not define this operator |
 | BootstrapSubset.PointerArrayOfStructPointers | Portar | exit code 6 |
-| BootstrapSubset.StructTypesVisibleAcrossFiles | Reescrever | compila vários arquivos pela API C++; vira um caso multiarquivo |
+| BootstrapSubset.StructTypesVisibleAcrossFiles | Reescrito | `BootstrapSubsetFilesTests.StructTypesVisibleAcrossFiles`; sem `namespace`: um tipo de namespace de outro arquivo ainda não resolve (E3001) |
 | Diagnostics.BasicError | Descartar | testa a formatação do DiagnosticEngine do stage0 |
 | Diagnostics.ErrorWithHelp | Descartar | testa a formatação do DiagnosticEngine do stage0 |
 | Diagnostics.MultipleErrors | Descartar | testa a formatação do DiagnosticEngine do stage0 |
@@ -470,7 +473,7 @@ resultado. Os grupos que falharam foram revisados à mão; os que passaram não 
 | Object.VariadicWithNormalParams | Portar | exit code 2 |
 | Object.VariadicAccessTypeInfo | Portar | exit code 4 |
 | Object.SyncPrintIntViaVariadic | Portar | exit code 42 |
-| Object.BoxingIRContainsKind | Reescrever | confere IR; depende de `ir_contains` |
+| Object.BoxingIRContainsKind | Reescrito | `ObjectIrTests.BoxingIRContainsKind` |
 | Object.AutoBoxPrimitiveToObject | Portar | exit code 0 |
 | Object.AutoBoxStringToObject | Bloqueado | `object` e `...args` com `str` (esperado 5, veio 2) |
 | Object.AutoBoxStructToObject | Portar | exit code 8 |
@@ -571,18 +574,18 @@ resultado. Os grupos que falharam foram revisados à mão; os que passaram não 
 | ErrorHandling.SwitchBlockArmYieldContinuesAfterSwitch | Bloqueado | `switch` com bloco e `yield` |
 | ErrorHandling.SwitchBlockArmYieldAfterStatements | Bloqueado | `switch` com bloco e `yield` |
 | ErrorHandling.YieldWithValueOutsideSwitchArmDiagnostic | Bloqueado | `switch` com bloco e `yield` (o erro atual tem outro motivo) |
-| RuntimeErrors.TrappedOverflowReportHasLocationValuesAndTrace | Reescrever | confere o texto do relatório de erro, que no djinnc não mostra operandos nem histórico |
-| RuntimeErrors.DivisionByZeroReportShowsOperands | Reescrever | confere o texto do relatório de erro, que no djinnc não mostra operandos nem histórico |
-| RuntimeErrors.NegateOverflowReport | Reescrever | confere o texto do relatório de erro, que no djinnc não mostra operandos nem histórico |
-| RuntimeErrors.VariableHistoryShowsLastAssignments | Reescrever | confere o texto do relatório de erro, que no djinnc não mostra operandos nem histórico |
-| RuntimeErrors.StackTraceShowsIntermediateFrames | Reescrever | confere o texto do relatório de erro, que no djinnc não mostra operandos nem histórico |
-| RuntimeErrors.ShadowStackCallsAppearInIr | Reescrever | confere IR; depende de `ir_contains` |
-| RuntimeErrors.NormalRunHasEmptyReport | Reescrever | confere o texto do relatório de erro, que no djinnc não mostra operandos nem histórico |
-| RuntimeErrors.UncaughtExceptionEscapingMainReportsAndAborts | Reescrever | confere o texto do relatório de erro, que no djinnc não mostra operandos nem histórico |
-| RuntimeErrors.UncaughtExceptionReleaseReportHasNoStackTrace | Reescrever | confere o texto do relatório de erro, que no djinnc não mostra operandos nem histórico |
-| RuntimeErrors.ReleaseModeOmitsShadowStackAndVarTracking | Reescrever | confere IR; depende de `ir_contains` |
-| RuntimeErrors.ReleaseModeTrapUsesMinimalCall | Reescrever | confere IR; depende de `ir_contains` |
-| RuntimeErrors.ReleaseModeTrapReportKeepsLocationAndValues | Reescrever | confere o texto do relatório de erro, que no djinnc não mostra operandos nem histórico |
+| RuntimeErrors.TrappedOverflowReportHasLocationValuesAndTrace | Bloqueado | modos de overflow |
+| RuntimeErrors.DivisionByZeroReportShowsOperands | Reescrito | `CrashTests.DivisionByZeroReportShowsOperands`; o djinnc não mostra os operandos; confere a causa, o local e a pilha |
+| RuntimeErrors.NegateOverflowReport | Bloqueado | modos de overflow |
+| RuntimeErrors.VariableHistoryShowsLastAssignments | Bloqueado | modos de overflow |
+| RuntimeErrors.StackTraceShowsIntermediateFrames | Reescrito | `CrashTests.StackTraceShowsIntermediateFrames`; com divisão por zero no lugar de `i32t` |
+| RuntimeErrors.ShadowStackCallsAppearInIr | Reescrito | `RuntimeErrorsIrTests.ShadowStackCallsAppearInIr`; com `-g`; o djinnc não emite `__djinn_frame_set_line` nem `__djinn_var_track` |
+| RuntimeErrors.NormalRunHasEmptyReport | Bloqueado | modos de overflow |
+| RuntimeErrors.UncaughtExceptionEscapingMainReportsAndAborts | Bloqueado | tipos de erro em `throws` |
+| RuntimeErrors.UncaughtExceptionReleaseReportHasNoStackTrace | Bloqueado | tipos de erro em `throws` |
+| RuntimeErrors.ReleaseModeOmitsShadowStackAndVarTracking | Reescrito | `RuntimeErrorsIrTests.ReleaseModeOmitsShadowStackAndVarTracking`; sem `-g`, o IR não leva a pilha de chamadas nem o rastreio de variáveis |
+| RuntimeErrors.ReleaseModeTrapUsesMinimalCall | Bloqueado | modo release (`__djinn_runtime_error_min`) |
+| RuntimeErrors.ReleaseModeTrapReportKeepsLocationAndValues | Bloqueado | modo release |
 
 ## functions
 
@@ -694,8 +697,8 @@ resultado. Os grupos que falharam foram revisados à mão; os que passaram não 
 | Extern.PrintfHelloWorld | Portar | compila sem erros; as asserções sobre a AST do stage0 não valem para o djinnc |
 | Extern.BlockSyntax | Portar | compila sem erros; as asserções sobre a AST do stage0 não valem para o djinnc |
 | Extern.MultipleExternBlocks | Portar | compila sem erros; as asserções sobre a AST do stage0 não valem para o djinnc |
-| Extern.StdImportNoDuplicateExternSymbols | Reescrever | confere IR; depende de `ir_contains` |
-| Extern.ExternNotRemovedByOptimizer | Reescrever | confere IR; depende de `ir_contains` |
+| Extern.StdImportNoDuplicateExternSymbols | Reescrito | `ExternIrTests.StdImportNoDuplicateExternSymbols` |
+| Extern.ExternNotRemovedByOptimizer | Reescrito | `ExternIrTests.ExternNotRemovedByOptimizer` |
 | Import.BasicImport | Portar | compila sem erros; as asserções sobre a AST do stage0 não valem para o djinnc |
 | Import.QualifiedImport | Portar | compila sem erros; as asserções sobre a AST do stage0 não valem para o djinnc |
 | Import.MultipleImports | Portar | compila sem erros; as asserções sobre a AST do stage0 não valem para o djinnc |
@@ -713,18 +716,18 @@ resultado. Os grupos que falharam foram revisados à mão; os que passaram não 
 
 | Teste | Decisão | Motivo |
 |---|---|---|
-| StringInterpolation.SimpleIdentifier | Reescrever | confere IR; depende de `ir_contains` |
-| StringInterpolation.MultipleArgs | Reescrever | confere IR; depende de `ir_contains` |
-| StringInterpolation.MixedWithExplicitPositional | Reescrever | confere IR; depende de `ir_contains` |
-| StringInterpolation.NoInterpolationLeavesStringUnchanged | Reescrever | confere IR; depende de `ir_contains` |
-| StringInterpolation.FieldAccessInsideBraces | Reescrever | confere IR; depende de `ir_contains` |
-| StringInterpolation.BlockStringTripleQuoted | Reescrever | confere IR; depende de `ir_contains` |
-| StringInterpolation.BlockStringNoEscapes | Reescrever | confere IR; depende de `ir_contains` |
-| StringInterpolation.ArithmeticExpressionInsideBraces | Reescrever | confere IR; depende de `ir_contains` |
-| StringInterpolation.FunctionCallExpandsAsArgument | Reescrever | confere IR; depende de `ir_contains` |
-| StringInterpolation.RepeatedExpressionEvaluatedTwice | Reescrever | confere IR; depende de `ir_contains` |
-| StringInterpolation.EmptyBracesPreserved | Reescrever | confere IR; depende de `ir_contains` |
-| StringInterpolation.NonCallStringLiteralNotInterpolated | Reescrever | confere IR; depende de `ir_contains` |
+| StringInterpolation.SimpleIdentifier | Bloqueado | interpolação de string (`{nome}` vira `{0}`) |
+| StringInterpolation.MultipleArgs | Bloqueado | interpolação de string (`{nome}` vira `{0}`) |
+| StringInterpolation.MixedWithExplicitPositional | Bloqueado | interpolação de string (`{nome}` vira `{0}`) |
+| StringInterpolation.NoInterpolationLeavesStringUnchanged | Reescrito | `StringInterpolationIrTests.NoInterpolationLeavesStringUnchanged` |
+| StringInterpolation.FieldAccessInsideBraces | Bloqueado | interpolação de string (`{nome}` vira `{0}`) |
+| StringInterpolation.BlockStringTripleQuoted | Bloqueado | interpolação de string (`{nome}` vira `{0}`) |
+| StringInterpolation.BlockStringNoEscapes | Reescrito | `StringInterpolationIrTests.BlockStringNoEscapes` |
+| StringInterpolation.ArithmeticExpressionInsideBraces | Bloqueado | interpolação de string (`{nome}` vira `{0}`) |
+| StringInterpolation.FunctionCallExpandsAsArgument | Bloqueado | interpolação de string (`{nome}` vira `{0}`) |
+| StringInterpolation.RepeatedExpressionEvaluatedTwice | Bloqueado | interpolação de string (`{nome}` vira `{0}`) |
+| StringInterpolation.EmptyBracesPreserved | Reescrito | `StringInterpolationIrTests.EmptyBracesPreserved` |
+| StringInterpolation.NonCallStringLiteralNotInterpolated | Reescrito | `StringInterpolationIrTests.NonCallStringLiteralNotInterpolated` |
 
 ## types
 
@@ -760,14 +763,14 @@ resultado. Os grupos que falharam foram revisados à mão; os que passaram não 
 | IsExpression.NegatedIsExpression | Portar | exit code 1 |
 | IsExpression.ErrorOnNonObjectOperand | Portar | erro E3036 |
 | IsExpression.MultipleTypeChecks | Bloqueado | `object` e `...args` com `str` (esperado 3, veio 0) |
-| IsExpression.IRContainsIsCheck | Reescrever | confere IR; depende de `ir_contains` |
+| IsExpression.IRContainsIsCheck | Reescrito | `IsExpressionIrTests.IRContainsIsCheck`; o IR do djinnc nomeia a comparação `is.match` |
 | IsExpression.BindingExtractsI32Value | Portar | exit code 42 |
 | IsExpression.BindingNotUsedWhenTypeMismatch | Portar | exit code -1 |
 | IsExpression.BindingWithDifferentTypes | Portar | exit code 99 |
 | NativeTypes.DeclarationsCompile | Portar | compila sem erros |
 | NativeTypes.NintIsPointerSized | Bloqueado | `sizeof`/`typeof`/`alignof` de expressão |
-| NativeTypes.NfloatIsF32 | Reescrever | confere IR; depende de `ir_contains` |
-| NativeTypes.NdoubleIsF64 | Reescrever | confere IR; depende de `ir_contains` |
+| NativeTypes.NfloatIsF32 | Reescrito | `NativeTypesIrTests.NfloatIsF32` |
+| NativeTypes.NdoubleIsF64 | Reescrito | `NativeTypesIrTests.NdoubleIsF64` |
 | NativeTypes.NintMixesWithI64 | Portar | compila sem erros |
 | NativeTypes.TypeofShowsNativeName | Bloqueado | `sizeof`/`typeof`/`alignof` de expressão |
 | NativeTypes.NintMaxValueConstant | Bloqueado | tipos nativos (`nint`) |
@@ -779,7 +782,7 @@ resultado. Os grupos que falharam foram revisados à mão; os que passaram não 
 | NativeTypes.NintAsFunctionSignature | Portar | exit code 42 |
 | NativeTypes.NfloatNdoubleArithmetic | Portar | compila sem erros |
 | NonZero.DeclarationsCompile | Portar | compila sem erros |
-| NonZero.SameRepresentationAsBaseType | Reescrever | confere IR; depende de `ir_contains` |
+| NonZero.SameRepresentationAsBaseType | Bloqueado | tipos non-zero (`i32n`) |
 | NonZero.RejectsZeroLiteral | Bloqueado | tipos non-zero (`i32n`) |
 | NonZero.RejectsZeroLiteralVariants | Bloqueado | tipos non-zero (`i32n`) |
 | NonZero.RejectsImplicitConversionFromPlainType | Bloqueado | tipos non-zero (`i32n`) |
@@ -791,9 +794,9 @@ resultado. Os grupos que falharam foram revisados à mão; os que passaram não 
 | NonZero.CombinesWithOverflowSuffix | Portar | compila sem erros |
 | NonZero.RejectsSuffixOnFloatType | Bloqueado | modos de overflow (o erro atual tem outro motivo) |
 | NonZero.DivisionByNonZeroRuns | Portar | exit code 10 |
-| NonZero.DivisionByConstantSkipsZeroCheck | Reescrever | confere IR; depende de `ir_contains` |
-| NonZero.DivisionByUnknownStillChecked | Reescrever | confere IR; depende de `ir_contains` |
-| NonZero.DivisionByNonZeroParamSkipsCheckAndChecksEntry | Reescrever | confere IR; depende de `ir_contains` |
+| NonZero.DivisionByConstantSkipsZeroCheck | Reescrito | `NonZeroIrTests.DivisionByConstantSkipsZeroCheck`; o IR do djinnc nomeia o teste `div.zero` |
+| NonZero.DivisionByUnknownStillChecked | Reescrito | `NonZeroIrTests.DivisionByUnknownStillChecked`; o IR do djinnc nomeia o teste `div.zero` |
+| NonZero.DivisionByNonZeroParamSkipsCheckAndChecksEntry | Bloqueado | tipos non-zero (`i32n`) |
 | NonZero.RequireNonZeroDedupsEntryCheck | Bloqueado | contratos (`require`/`ensure`) |
 | NonZero.RequireProvesParamNonZeroForAssignments | Bloqueado | contratos (`require`/`ensure`) |
 | NonZero.CompileTimeViolationForNonZeroParam | Bloqueado | tipos non-zero (`i32n`) |
