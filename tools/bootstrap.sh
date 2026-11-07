@@ -75,7 +75,7 @@ if [ -z "$runner_lib" ]; then
     bash "$root/tools/build_runtime.sh" --out "$out/runtime" >"$out/runtime.log" 2>&1
     runner_lib="$absolute_out/runtime/djinn_runtime.lib"
 fi
-runner_flags=(--runtime-lib "$runner_lib" --runtime-dir "$runtime" --require Link --filter samples/ --out "$absolute_out/samples")
+runner_flags=(--runtime-lib "$runner_lib" --runtime-dir "$runtime" --require Link --filter SamplesTests --out "$absolute_out/samples")
 [ "$use_lld" = 1 ] && runner_flags+=(--lld)
 DJINN_USE_LLD="${use_lld/#0/}" bash "$root/tests/conformance/build.sh" "$absolute_out/stage2/djinnc$ext" "$runner_lib" "$out/runner$ext" "$runtime"
 for stage in stage1 stage2 stage3; do
