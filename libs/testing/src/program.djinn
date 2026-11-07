@@ -1,0 +1,434 @@
+namespace testing;
+
+import std::sys;
+import std::types;
+import std::libc;
+import std::io;
+
+struct TestEntry {
+    TypeInfo* type;
+    MethodInfo* method;
+    ptr<i8> name;
+}
+
+struct TestOptions {
+    ptr<i8> filter;
+    ptr<i8> report;
+    ptr<i8> tag;
+    ptr<i8> workflow;
+    ptr<i8> graph;
+    ptr<i8> graph_file;
+    bool fail_fast;
+    i32 jobs;
+    bool ok;
+}
+
+struct TestProgram {
+    public static unsafe i32 run() {
+        return TestProgram.run_plan(TestPlan.discover());
+    }
+
+    public static unsafe i32 run_plan(TestPlan* plan) {
+        ptr<i8> mode = Environment.argument(1);
+        TestGraph* graph = TestGraph.build(plan);
+        if (!graph.valid()) {
+            graph.print_errors();
+            return 2;
+        }
+        if (Text.same(mode, "--list")) {
+            return TestProgram.list(graph);
+        }
+        if (Text.same(mode, "--run")) {
+            return TestProgram.run_one(graph, Environment.argument(2));
+        }
+        if (Text.same(mode, "--nodes")) {
+            graph.run_wanted(Environment.argument(2));
+            return 0;
+        }
+        return TestProgram.run_all(plan, graph);
+    }
+
+    static unsafe ItemList* collect() {
+        ItemList* entries = ItemList.create();
+        for (mut i32 i = 0; i < Reflection.type_count(); i = i + 1) {
+            TypeInfo* type = Reflection.type_at(i);
+            if (!TestMethods.has_tests(type)) {
+                continue;
+            }
+            TypeInfoExt* info = Reflection.ext(type);
+            for (mut i32 m = 0; m < (i32)info.methodCount; m = m + 1) {
+                MethodInfo* method = &info.methods[m];
+                if (!TestMethods.is_test(method)) {
+                    continue;
+                }
+                TestEntry* entry = (TestEntry*)Allocator.zeroed(sizeof(TestEntry));
+                entry.type = type;
+                entry.method = method;
+                entry.name = (ptr<i8>)method.name;
+                entries.push((ptr)entry);
+            }
+        }
+        return entries;
+    }
+
+    static unsafe i32 list(TestGraph* graph) {
+        TestOptions* options = TestProgram.parse_options();
+        if (options.graph != null) {
+            return GraphView.emit(graph, options.graph, options.graph_file);
+        }
+        ItemList* nodes = graph.nodes;
+        for (mut i32 i = 0; i < nodes.length; i = i + 1) {
+            GraphNode* node = (GraphNode*)nodes.get(i);
+            printf("%s\n", node.name);
+        }
+        return 0;
+    }
+
+    static unsafe i32 run_one(TestGraph* graph, ptr<i8> name) {
+        GraphNode* node = graph.find(name);
+        if (node == null) {
+            printf("no test named %s\n", name);
+            return 3;
+        }
+        if (!TestMethods.can_call(node.entry.method)) {
+            printf("a [Test] takes no parameters yet\n");
+            return 2;
+        }
+        TestMethods.call(node.entry.type, node.entry.method);
+        return 0;
+    }
+
+    static unsafe TestOptions* parse_options() {
+        TestOptions* options = (TestOptions*)Allocator.zeroed(sizeof(TestOptions));
+        options.jobs = 8;
+        options.ok = true;
+        mut i32 index = 1;
+        while (index < Process.argc()) {
+            ptr<i8> argument = Environment.argument(index);
+            ptr<i8> value = Environment.argument(index + 1);
+            if (Text.same(argument, "--list")) {
+                index = index + 1;
+                continue;
+            }
+            if (Text.same(argument, "--fail-fast")) {
+                options.fail_fast = true;
+                index = index + 1;
+                continue;
+            }
+            if (Text.same(argument, "--filter")) {
+                options.filter = value;
+            } else if (Text.same(argument, "--graph")) {
+                options.graph = value;
+            } else if (Text.same(argument, "--graph-file")) {
+                options.graph_file = value;
+            } else if (Text.same(argument, "--workflow")) {
+                options.workflow = value;
+            } else if (Text.same(argument, "--tag")) {
+                options.tag = value;
+            } else if (Text.same(argument, "--report")) {
+                options.report = value;
+            } else if (Text.same(argument, "--jobs")) {
+                options.jobs = Text.parse_integer(value, (i32)strlen(value));
+            } else {
+                options.ok = false;
+            }
+            index = index + 2;
+        }
+        if (options.jobs < 1) {
+            options.ok = false;
+        }
+        return options;
+    }
+
+    static unsafe ptr<i8> command_for(ptr<i8> name) {
+        TextBuffer* command = TextBuffer.create();
+        command.append("\"");
+        command.append(Environment.argument(0));
+        command.append("\" --run \"");
+        command.append(name);
+        command.append("\"");
+        return command.cstr();
+    }
+
+    static unsafe ptr<i8> failure_reason(TestNode* node) {
+        TextBuffer* reason = TextBuffer.create();
+        reason.append("exit ");
+        reason.append_int((i64)node.exit_code);
+        mut i32 length = (i32)strlen(node.output);
+        if (length > 0) {
+            reason.append(": ");
+            if (length > 600) {
+                length = 600;
+            }
+            reason.append_slice(node.output, length);
+        }
+        return reason.cstr();
+    }
+
+    static unsafe ptr<i8> graph_command(TestGraph* graph, i32 component) {
+        TextBuffer* command = TextBuffer.create();
+        command.append("\"");
+        command.append(Environment.argument(0));
+        command.append("\" --nodes \"");
+        ItemList* nodes = graph.nodes;
+        mut bool first = true;
+        for (mut i32 i = 0; i < nodes.length; i = i + 1) {
+            GraphNode* node = (GraphNode*)nodes.get(i);
+            if (node.component != component || !node.wanted || node.state != NodeState.PENDING) {
+                continue;
+            }
+            if (!first) {
+                command.append(",");
+            }
+            first = false;
+            command.append(node.name);
+        }
+        command.append("\"");
+        return command.cstr();
+    }
+
+    static unsafe i32 pending_in(TestGraph* graph, i32 component) {
+        ItemList* nodes = graph.nodes;
+        mut i32 count = 0;
+        for (mut i32 i = 0; i < nodes.length; i = i + 1) {
+            GraphNode* node = (GraphNode*)nodes.get(i);
+            if (node.component == component && node.wanted && node.state == NodeState.PENDING) {
+                count = count + 1;
+            }
+        }
+        return count;
+    }
+
+    static unsafe TestNode* result_node(GraphNode* node, ptr<i8> reason, i64 elapsed_us) {
+        TestNode* result = TestNode.create(node.name, 0);
+        result.elapsed_us = elapsed_us;
+        result.tags = "Run";
+        result.reason = reason;
+        node.recorded = true;
+        return result;
+    }
+
+    static unsafe void record_blocked(Scheduler* pool, TestGraph* graph, i32 component) {
+        ItemList* nodes = graph.nodes;
+        for (mut i32 i = 0; i < nodes.length; i = i + 1) {
+            GraphNode* node = (GraphNode*)nodes.get(i);
+            if (node.component != component || !node.wanted || node.state != NodeState.BLOCKED || node.recorded) {
+                continue;
+            }
+            TextBuffer* reason = TextBuffer.create();
+            reason.append("blocked by ");
+            reason.append(node.blocker);
+            TestNode* result = TestProgram.result_node(node, reason.cstr(), 0);
+            result.tags = "Blocked";
+            result.block(reason.cstr());
+            pool.record(result);
+        }
+    }
+
+    static unsafe ptr<i8> line_value(ptr<i8> text, i32 from, i32 to) {
+        return Text.duplicate(text + from, to - from);
+    }
+
+    static unsafe ptr<i8> without_protocol(ptr<i8> text) {
+        TextBuffer* kept = TextBuffer.create();
+        i32 length = (i32)strlen(text);
+        mut i32 start = 0;
+        for (mut i32 at = 0; at <= length; at = at + 1) {
+            if (at != length && text[at] != 10) {
+                continue;
+            }
+            bool run_line = at - start > 4 && text[start] == 82 && text[start + 1] == 85 && text[start + 2] == 78 && text[start + 3] == 32;
+            bool ok_line = at - start > 3 && text[start] == 79 && text[start + 1] == 75 && text[start + 2] == 32;
+            if (at > start && !run_line && !ok_line) {
+                kept.append_slice(text + start, at - start);
+                kept.append("
+");
+            }
+            start = at + 1;
+        }
+        return kept.cstr();
+    }
+
+    static unsafe void read_worker(Scheduler* pool, TestGraph* graph, TestNode* job, i32 component) {
+        ptr<i8> text = job.stdout_text;
+        i32 length = (i32)strlen(text);
+        mut GraphNode* running = (GraphNode*)0;
+        mut i32 start = 0;
+        for (mut i32 at = 0; at <= length; at = at + 1) {
+            if (at != length && text[at] != 10) {
+                continue;
+            }
+            if (at > start) {
+                ptr<i8> line = TestProgram.line_value(text, start, at);
+                if (Text.contains(line, "RUN ") && line[0] == 82) {
+                    running = graph.find(line + 4);
+                } else if (line[0] == 79 && line[1] == 75 && line[2] == 32) {
+                    mut i32 end = (i32)strlen(line);
+                    mut i32 space = end;
+                    while (space > 3 && line[space - 1] != 32) {
+                        space = space - 1;
+                    }
+                    ptr<i8> name = Text.duplicate(line + 3, space - 4);
+                    GraphNode* done = graph.find(name);
+                    if (done != null && done.state == NodeState.PENDING) {
+                        done.state = NodeState.PASSED;
+                        i64 millis = (i64)Text.parse_integer(line + space, end - space);
+                        pool.record(TestProgram.result_node(done, null, millis * 1000));
+                    }
+                    running = (GraphNode*)0;
+                }
+            }
+            start = at + 1;
+        }
+        job.output = TestProgram.without_protocol(job.output);
+        bool failed = job.exit_code != 0 || job.timed_out;
+        mut ptr<i8> reason = TestProgram.failure_reason(job);
+        if (!failed) {
+            running = (GraphNode*)0;
+            reason = "the worker finished without running it";
+        }
+        if (job.timed_out) {
+            reason = "timeout";
+        } else if (job.exit_code < 0 && Text.contains(job.output, "runtime error: panic")) {
+            job.exit_code = 1;
+            reason = TestProgram.failure_reason(job);
+        }
+        if (running != null) {
+            running.state = NodeState.FAILED;
+            pool.record(TestProgram.result_node(running, reason, 0));
+            graph.block_dependents(running, running.name);
+            TestProgram.record_blocked(pool, graph, component);
+            return;
+        }
+        ItemList* nodes = graph.nodes;
+        for (mut i32 i = 0; i < nodes.length; i = i + 1) {
+            GraphNode* node = (GraphNode*)nodes.get(i);
+            if (node.component == component && node.wanted && node.state == NodeState.PENDING) {
+                node.state = NodeState.FAILED;
+                pool.record(TestProgram.result_node(node, reason, 0));
+            }
+        }
+        TestProgram.record_blocked(pool, graph, component);
+    }
+
+    static unsafe void finish_job(Scheduler* pool, TestGraph* graph, TestNode* job) {
+        i32 component = (i32)job.data;
+        TestProgram.read_worker(pool, graph, job, component);
+        if (TestProgram.pending_in(graph, component) > 0 && job.retries < 1000) {
+            job.retries = job.retries + 1;
+            job.timed_out = false;
+            pool.relaunch(job, TestProgram.graph_command(graph, component));
+            return;
+        }
+        pool.complete(job, null);
+    }
+
+    static unsafe i32 run_all(TestPlan* plan, TestGraph* graph) {
+        TestOptions* options = TestProgram.parse_options();
+        if (!options.ok) {
+            printf("usage: <tests> [--list | --run <name> | --filter <text> --tag <tag> --workflow <name> --graph <dot|json> --graph-file <file> --fail-fast --jobs <n> --report <file>]\n");
+            return 2;
+        }
+        if (options.workflow != null) {
+            Workflow* chosen = plan.find_workflow(options.workflow);
+            if (chosen == null) {
+                printf("no workflow named %s\n", options.workflow);
+                return 3;
+            }
+            graph.select(chosen);
+        }
+        Scheduler* pool = Scheduler.create(options.jobs);
+        ItemList* all = graph.nodes;
+        for (mut i32 i = 0; i < all.length; i = i + 1) {
+            GraphNode* graph_node = (GraphNode*)all.get(i);
+            TestEntry* entry = graph_node.entry;
+            if (options.workflow != null && !graph_node.member) {
+                continue;
+            }
+            if (options.filter != null && !Text.contains(graph_node.name, options.filter)) {
+                continue;
+            }
+            if (options.tag != null && !TestMethods.has_tag(entry.method, options.tag)) {
+                continue;
+            }
+            if (graph.component_size(graph_node.component) > 1) {
+                graph.mark_needed(graph_node);
+                continue;
+            }
+            TestNode* node = TestNode.create(graph_node.name, 60000000);
+            ptr policy = TestMethods.attribute(entry.method, "TestPolicy");
+            if (policy != null) {
+                TestPolicy* values = (TestPolicy*)policy;
+                node.max_retries = values.retry;
+                if (values.timeout > 0) {
+                    node.timeout_us = (i64)values.timeout * 1000;
+                }
+            }
+            node.tags = "Run";
+            node.command = TestProgram.command_for(graph_node.name);
+            node.data = (ptr)graph_node;
+            pool.add(node);
+        }
+        for (mut i32 c = 0; c < graph.components; c = c + 1) {
+            if (TestProgram.pending_in(graph, c) == 0) {
+                continue;
+            }
+            TestNode* job = TestNode.create("graph", 60000000 * (i64)graph.component_size(c));
+            job.hidden = true;
+            job.data = (ptr)c;
+            job.command = TestProgram.graph_command(graph, c);
+            pool.add(job);
+        }
+        mut bool stopped = false;
+        mut i32 skipped = 0;
+        mut ptr next = pool.wait();
+        while (next != null) {
+            TestNode* node = (TestNode*)next;
+            if (node.hidden) {
+                TestProgram.finish_job(pool, graph, node);
+                next = pool.wait();
+                continue;
+            }
+            mut ptr<i8> reason = null;
+            if (node.exit_code != 0) {
+                if (node.exit_code < 0 && (Text.contains(node.output, "runtime error: panic") || Text.contains(node.output, "uncaught exception"))) {
+                    node.exit_code = 1;
+                }
+                reason = TestProgram.failure_reason(node);
+            }
+            bool retrying = pool.complete(node, reason);
+            if (!retrying && node.data != null) {
+                GraphNode* finished = (GraphNode*)node.data;
+                if (reason == null) {
+                    finished.state = NodeState.PASSED;
+                } else {
+                    finished.state = NodeState.FAILED;
+                }
+            }
+            if (!retrying && reason != null && options.fail_fast && !stopped) {
+                stopped = true;
+                skipped = pool.stop_scheduling();
+            }
+            next = pool.wait();
+        }
+        TestReport.print_summary(pool);
+        if (skipped > 0) {
+            printf("stopped at the first failure: %d not run
+", skipped);
+        }
+        if (options.report != null) {
+            TestReport.write_json(pool, options.report);
+        }
+        if (options.graph != null) {
+            i32 written = GraphView.emit(graph, options.graph, options.graph_file);
+            if (written != 0) {
+                return written;
+            }
+        }
+        ItemList* nodes = pool.nodes;
+        if (TestReport.passed(nodes) == TestReport.total(nodes)) {
+            return 0;
+        }
+        return 1;
+    }
+}

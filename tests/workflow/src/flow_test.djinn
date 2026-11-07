@@ -1,0 +1,102 @@
+import std::libc;
+import testing;
+
+extern "C" {
+    i64 __djinn_now_us();
+}
+
+struct Session {
+    i64 id;
+    i32 level;
+}
+
+struct Receipt {
+    i64 id;
+    i32 level;
+}
+
+struct Flow {
+    [Test]
+    Session login() {
+        Session session = { .id = __djinn_now_us(), .level = 1 };
+        return session;
+    }
+
+    [Test]
+    Session login_admin() {
+        Expect.is_false(Text.same(Environment.variable("WF_FAIL", ""), "login_admin"), "login_admin was told to fail");
+        Session session = { .id = __djinn_now_us(), .level = 9 };
+        return session;
+    }
+
+    [Test]
+    Receipt edit(Session session) {
+        Receipt receipt = { .id = session.id, .level = session.level };
+        return receipt;
+    }
+
+    [Test]
+    void audit(Receipt receipt, Session session) {
+        Expect.equal((i64)session.level, (i64)receipt.level, "the receipt must come from the same session");
+    }
+
+    [Test]
+    void user_only(Session session) {
+        Expect.equal(1, (i64)session.level);
+    }
+
+    [Test]
+    void admin_only(Session session) {
+        Expect.equal(9, (i64)session.level);
+    }
+
+    [Test]
+    void compare(Session session, Receipt receipt) {
+        Expect.equal(session.id, receipt.id, "one login must serve every workflow");
+    }
+
+    [Test]
+    void alone() {
+        Expect.equal(1, 1);
+    }
+}
+
+struct Cell {
+    ptr<i32> value;
+}
+
+struct Shared {
+    [Test]
+    unsafe Cell cell() {
+        ptr<i32> memory = (ptr<i32>)Allocator.zeroed(4);
+        memory[0] = 1;
+        Cell cell = { .value = memory };
+        return cell;
+    }
+
+    [Test]
+    unsafe void bump([Mutates] Cell cell) {
+        cell.value[0] = 100;
+        Expect.equal(100, (i64)cell.value[0]);
+    }
+
+    [Test]
+    unsafe void still_one(Cell cell) {
+        Expect.equal(1, (i64)cell.value[0], "a [Mutates] consumer must not change what the others read");
+    }
+}
+
+struct Files {
+    [Test]
+    Artifact write_file() {
+        Artifact artifact = Artifact.at("build/unit/workflow_artifact.txt");
+        TextFiles.write(artifact.path, "hello", 5);
+        return artifact;
+    }
+
+    [Test]
+    void read_file(Artifact file) {
+        file.must_exist();
+        Expect.is_true(Text.same(file.read_text(), "hello"), "the artifact must hold what the producer wrote");
+    }
+}

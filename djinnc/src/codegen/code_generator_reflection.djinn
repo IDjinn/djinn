@@ -8,7 +8,7 @@ impl CodeGenerator {
             return named;
         }
         if (!Types.is_struct(type)) {
-            return null;
+            return (StructInfo*)0;
         }
         return symbols.struct_at(Types.struct_index(type));
     }
@@ -33,6 +33,161 @@ impl CodeGenerator {
             return true;
         }
         return Attributes.has(this.reflection_node(info), "Reflect");
+    }
+
+    unsafe void register_reflected_types() {
+        SymbolTable* symbols = this.symbols;
+        PointerList* structs = symbols.structs;
+        ptr<ptr> values = CodeGenerator.array_of(structs.length + 1);
+        mut i32 count = 0;
+        for (mut i32 i = 0; i < structs.length; i = i + 1) {
+            StructInfo* info = (StructInfo*)structs.get(i);
+            u32 type = Types.structure((u32)i);
+            if (info.origin == null && !info.is_enum && this.is_reflected(type)) {
+                values[count] = this.type_info_of(type);
+                count = count + 1;
+            }
+        }
+        if (count == 0) {
+            return;
+        }
+        ptr pointer_llvm = LLVMPointerTypeInContext(this.context, 0);
+        ptr i32_type = LLVMIntTypeInContext(this.context, 32);
+        ptr<ptr> params = CodeGenerator.array_of(2);
+        params[0] = pointer_llvm;
+        params[1] = i32_type;
+        ptr<ptr> args = CodeGenerator.array_of(2);
+        args[0] = this.constant_array(pointer_llvm, values, count, "__djinn_reflected_types");
+        args[1] = LLVMConstInt(i32_type, (u64)count, 0);
+        this.call_runtime("__djinn_reflect_register", LLVMVoidTypeInContext(this.context), params, args, 2);
+        this.register_invoke_thunks();
+    }
+
+    unsafe void register_invoke_thunks() {
+        PointerList* functions = this.invoke_functions;
+        if (functions == null || functions.length == 0) {
+            return;
+        }
+        PointerList* thunks = this.invoke_thunks;
+        ptr pointer_llvm = LLVMPointerTypeInContext(this.context, 0);
+        ptr i32_type = LLVMIntTypeInContext(this.context, 32);
+        ptr<ptr> values = CodeGenerator.array_of(functions.length * 2);
+        for (mut i32 i = 0; i < functions.length; i = i + 1) {
+            FunctionInfo* function = (FunctionInfo*)functions.get(i);
+            values[i * 2] = function.function;
+            values[i * 2 + 1] = thunks.get(i);
+        }
+        ptr<ptr> params = CodeGenerator.array_of(2);
+        params[0] = pointer_llvm;
+        params[1] = i32_type;
+        ptr<ptr> args = CodeGenerator.array_of(2);
+        args[0] = this.constant_array(pointer_llvm, values, functions.length * 2, "__djinn_invoke_table");
+        args[1] = LLVMConstInt(i32_type, (u64)functions.length, 0);
+        this.call_runtime("__djinn_invoke_register", LLVMVoidTypeInContext(this.context), params, args, 2);
+    }
+
+    unsafe bool can_invoke(FunctionInfo* function) {
+        if (function.function == null || function.node == null || function.is_template || function.is_variadic || function.is_extern || function.is_async || function.generics != null) {
+            return false;
+        }
+        PointerList* uses = Attributes.of(function.node);
+        return uses.length > 0;
+    }
+
+    unsafe void store_invoke_result(ptr thunk, ptr out, ptr value) {
+        ptr i64_type = LLVMIntTypeInContext(this.context, 64);
+        ptr address = LLVMBuildPtrToInt(this.builder, out, i64_type, "out.address");
+        ptr has_out = LLVMBuildICmp(this.builder, LlvmConst.INT_NE, address, LLVMConstInt(i64_type, 0, 0), "out.present");
+        ptr store_block = LLVMAppendBasicBlockInContext(this.context, thunk, "invoke.store");
+        ptr done_block = LLVMAppendBasicBlockInContext(this.context, thunk, "invoke.done");
+        LLVMBuildCondBr(this.builder, has_out, store_block, done_block);
+        LLVMPositionBuilderAtEnd(this.builder, store_block);
+        LLVMBuildStore(this.builder, value, out);
+        LLVMBuildBr(this.builder, done_block);
+        LLVMPositionBuilderAtEnd(this.builder, done_block);
+    }
+
+    unsafe void add_invoke_thunk(FunctionInfo* function) {
+        if (this.invoke_functions == null) {
+            this.invoke_functions = PointerList.create();
+            this.invoke_thunks = PointerList.create();
+        }
+        PointerList* functions = this.invoke_functions;
+        PointerList* thunks = this.invoke_thunks;
+        for (mut i32 i = 0; i < functions.length; i = i + 1) {
+            if (functions.get(i) == (ptr)function) {
+                return;
+            }
+        }
+        ptr pointer_llvm = LLVMPointerTypeInContext(this.context, 0);
+        ptr i64_type = LLVMIntTypeInContext(this.context, 64);
+        ptr void_type = LLVMVoidTypeInContext(this.context);
+        ptr<ptr> params = CodeGenerator.array_of(3);
+        params[0] = pointer_llvm;
+        params[1] = pointer_llvm;
+        params[2] = pointer_llvm;
+        ptr thunk_type = LLVMFunctionType(void_type, params, 3, 0);
+        ByteBuffer* name = ByteBuffer.create();
+        name.append(function.name);
+        name.append("$invoke");
+        ptr thunk = LLVMAddFunction(this.module, name.cstr(), thunk_type);
+        LLVMSetLinkage(thunk, LlvmConst.LINKAGE_INTERNAL);
+        functions.push((ptr)function);
+        thunks.push(thunk);
+
+        ptr saved = LLVMGetInsertBlock(this.builder);
+        ptr entry = LLVMAppendBasicBlockInContext(this.context, thunk, "entry");
+        LLVMPositionBuilderAtEnd(this.builder, entry);
+        IdList* types = function.param_types;
+        mut i32 offset = 0;
+        if (function.is_instance) {
+            offset = 1;
+        }
+        ptr<ptr> call_args = CodeGenerator.array_of(types.length + 1);
+        for (mut i32 i = 0; i < types.length; i = i + 1) {
+            if (i < offset) {
+                ptr this_type = this.llvm_type(types.get(i));
+                if (LLVMGetTypeKind(this_type) == LlvmConst.TYPE_POINTER) {
+                    call_args[i] = LLVMGetParam(thunk, 0);
+                } else {
+                    call_args[i] = LLVMBuildLoad2(this.builder, this_type, LLVMGetParam(thunk, 0), "this.value");
+                }
+            } else {
+                ptr<ptr> index = CodeGenerator.array_of(1);
+                index[0] = LLVMConstInt(i64_type, (u64)(i - offset), 0);
+                ptr slot = LLVMBuildGEP2(this.builder, pointer_llvm, LLVMGetParam(thunk, 1), index, 1, "arg.slot");
+                ptr address = LLVMBuildLoad2(this.builder, pointer_llvm, slot, "arg.address");
+                call_args[i] = LLVMBuildLoad2(this.builder, this.llvm_type(types.get(i)), address, "arg");
+            }
+        }
+        ptr out = LLVMGetParam(thunk, 2);
+        bool returns_value = !Types.is_void(function.return_type);
+        if (function.has_throws) {
+            ptr record = LLVMBuildCall2(this.builder, function.function_type, function.function, call_args, (u32)types.length, "invoke.record");
+            ptr slot = LLVMBuildAlloca(this.builder, function.result_type, "invoke.slot");
+            LLVMBuildStore(this.builder, record, slot);
+            ptr tag = this.record_tag(function, slot);
+            ptr failed = LLVMBuildICmp(this.builder, LlvmConst.INT_NE, tag, LLVMConstInt(LLVMIntTypeInContext(this.context, 32), 0, 0), "invoke.failed");
+            ptr fail_block = LLVMAppendBasicBlockInContext(this.context, thunk, "invoke.uncaught");
+            ptr ok_block = LLVMAppendBasicBlockInContext(this.context, thunk, "invoke.clean");
+            LLVMBuildCondBr(this.builder, failed, fail_block, ok_block);
+            LLVMPositionBuilderAtEnd(this.builder, fail_block);
+            this.emit_uncaught(thunk, slot, function, tag);
+            LLVMPositionBuilderAtEnd(this.builder, ok_block);
+            if (returns_value) {
+                ptr value = LLVMBuildLoad2(this.builder, this.llvm_type(function.return_type), this.record_field(function, slot, 1, "invoke.value.ptr"), "invoke.value");
+                this.store_invoke_result(thunk, out, value);
+            }
+        } else if (returns_value) {
+            ptr value = LLVMBuildCall2(this.builder, function.function_type, function.function, call_args, (u32)types.length, "invoke.value");
+            this.store_invoke_result(thunk, out, value);
+        } else {
+            LLVMBuildCall2(this.builder, function.function_type, function.function, call_args, (u32)types.length, "");
+        }
+        LLVMBuildRetVoid(this.builder);
+        if (saved != null) {
+            LLVMPositionBuilderAtEnd(this.builder, saved);
+        }
     }
 
     ptr null_pointer() {
@@ -68,6 +223,36 @@ impl CodeGenerator {
         return "";
     }
 
+    unsafe ptr attribute_payload(AttributeUse* use, ptr<i8> name) {
+        if (use.payload == null || use.payload_type == 0) {
+            return this.null_pointer();
+        }
+        SymbolTable* symbols = this.symbols;
+        StructInfo* info = symbols.struct_at(Types.struct_index(use.payload_type));
+        PointerList* fields = info.fields;
+        Node* payload = use.payload;
+        ptr<ptr> values = CodeGenerator.array_of(fields.length);
+        for (mut i32 f = 0; f < fields.length; f = f + 1) {
+            FieldInfo* field = (FieldInfo*)fields.get(f);
+            mut ptr value = LLVMConstNull(this.llvm_type(field.type));
+            for (mut i32 a = 0; a < payload.count(); a = a + 1) {
+                Node* init = payload.child(a);
+                bool named = init.text() != null;
+                if ((named && init.name() == field.name_atom) || (!named && a == f)) {
+                    Value* constant = this.gen_expression(init.first());
+                    value = constant.ref;
+                }
+            }
+            values[f] = value;
+        }
+        ptr struct_type = this.llvm_type(use.payload_type);
+        ptr global = LLVMAddGlobal(this.module, struct_type, name);
+        LLVMSetInitializer(global, LLVMConstNamedStruct(struct_type, values, (u32)fields.length));
+        LLVMSetGlobalConstant(global, 1);
+        LLVMSetLinkage(global, LlvmConst.LINKAGE_INTERNAL);
+        return global;
+    }
+
     unsafe ptr attribute_table(Node* target, ptr<i8> owner_name) {
         PointerList* uses = Attributes.of(target);
         if (uses.length == 0) {
@@ -78,10 +263,11 @@ impl CodeGenerator {
         ptr<ptr> entries = CodeGenerator.array_of(uses.length);
         for (mut i32 i = 0; i < uses.length; i = i + 1) {
             AttributeUse* use = (AttributeUse*)uses.get(i);
-            ptr<ptr> values = CodeGenerator.array_of(2);
+            ptr<ptr> values = CodeGenerator.array_of(3);
             values[0] = LLVMBuildGlobalStringPtr(this.builder, use.name, "attr.name");
             values[1] = LLVMBuildGlobalStringPtr(this.builder, this.attribute_text(use), "attr.value");
-            entries[i] = LLVMConstNamedStruct(info_llvm, values, 2);
+            values[2] = this.attribute_payload(use, this.table_name(owner_name, ".payload", ""));
+            entries[i] = LLVMConstNamedStruct(info_llvm, values, 3);
         }
         return this.constant_array(info_llvm, entries, uses.length, owner_name);
     }
@@ -94,7 +280,7 @@ impl CodeGenerator {
                 return member;
             }
         }
-        return null;
+        return (Node*)0;
     }
 
     unsafe ptr field_table(StructInfo* info, u32 type, ptr<i8> prefix) {
@@ -184,6 +370,9 @@ impl CodeGenerator {
     }
 
     ptr function_entry(FunctionInfo* function, ptr<i8> prefix) {
+        if (this.can_invoke(function)) {
+            this.add_invoke_thunk(function);
+        }
         IdList* types = function.param_types;
         mut i32 offset = 0;
         mut u64 flags = 0;
@@ -210,6 +399,10 @@ impl CodeGenerator {
 
     unsafe bool is_reflected_method(FunctionInfo* method, StructInfo* info) {
         if (method.owner != info || method.is_template || method.node == null) {
+            return false;
+        }
+        Node* declaration = method.node;
+        if (declaration.first() == null && !declaration.is_header()) {
             return false;
         }
         return method.name[0] != 46;
@@ -587,7 +780,7 @@ impl CodeGenerator {
                 }
             }
         }
-        return null;
+        return (FunctionInfo*)0;
     }
 
     unsafe ptr property_list(StructInfo* info, ptr<i8> prefix) {

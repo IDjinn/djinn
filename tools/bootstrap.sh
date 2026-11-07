@@ -3,7 +3,7 @@ set -eu
 
 usage() {
     echo "usage: bootstrap.sh --seed <djinnc executable> --runtime-dir <dir> [--runtime-lib <lib>] [--lld] [--out <dir>]"
-    echo "                    [--bench-ref <file>] [--update-ref]"
+    echo "                    [--bench-ref <file>] [--update-ref] [--driver <current djinnc>]"
     exit 2
 }
 
@@ -15,6 +15,7 @@ use_lld=0
 out="$root/build/bootstrap"
 bench_ref="$root/tools/bench.reference.json"
 update_ref=0
+driver=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -25,6 +26,7 @@ while [ $# -gt 0 ]; do
         --out) out="$2"; shift 2 ;;
         --bench-ref) bench_ref="$2"; shift 2 ;;
         --update-ref) update_ref=1; shift ;;
+        --driver) driver="$2"; shift 2 ;;
         *) usage ;;
     esac
 done
@@ -49,8 +51,23 @@ rm -rf "$out"
 mkdir -p "$out/stage1" "$out/stage2" "$out/stage3" "$out/samples"
 cd "$root"
 
+if [ -n "$driver" ]; then
+    echo "== workflow: seed -> stage1 -> stage2 -> stage3 -> fixpoint (tests/bootstrap, driven by $driver)"
+    driver="$(cd "$(dirname "$driver")" && pwd)/$(basename "$driver")"
+    mkdir -p "$out/libs"
+    workflow_out="$(cd "$out" && pwd)"
+    workflow_flags=(--lib-dir "$out/libs" --std-dir "$root/std" --runtime-dir "$runtime" ${link_flags[@]+"${link_flags[@]}"})
+    bash "$root/tools/seed_source.sh" "$out/seed_src"
+    "$driver" libs/testing -o "$out/libs/testing.djlib" "${workflow_flags[@]}" >"$out/driver.log" 2>&1 \
+        || { cat "$out/driver.log"; echo "FAIL the testing library did not build"; exit 1; }
+    BOOTSTRAP_SEED="$seed" BOOTSTRAP_OUT="$workflow_out" BOOTSTRAP_SEED_SOURCE="$workflow_out/seed_src" BOOTSTRAP_RUNTIME_DIR="$runtime" BOOTSTRAP_RUNTIME_LIB="$runtime_lib" BOOTSTRAP_LLD="$use_lld" \
+        "$driver" test tests/bootstrap -o "$out/bootstrap_workflow$ext" "${workflow_flags[@]}" >"$out/workflow.log" 2>&1 \
+        || { grep -v "^djinnc:" "$out/workflow.log"; echo "FAIL bootstrap workflow"; exit 1; }
+    grep -v "^djinnc:" "$out/workflow.log"
+else
 echo "== seed -> stage1"
-"$seed" djinnc -o "$out/stage1/djinnc$ext" --runtime-dir "$runtime" "${opt_flags[@]}" ${link_flags[@]+"${link_flags[@]}"} >"$out/stage1.log" 2>&1 \
+bash "$root/tools/seed_source.sh" "$out/seed_src"
+"$seed" "$out/seed_src" -o "$out/stage1/djinnc$ext" --runtime-dir "$runtime" "${opt_flags[@]}" ${link_flags[@]+"${link_flags[@]}"} >"$out/stage1.log" 2>&1 \
     || { echo "FAIL stage1 not produced (see $out/stage1.log)"; exit 1; }
 
 echo "== stage1 -> stage2"
@@ -67,56 +84,24 @@ else
     diff "$out/stage2/djinnc$ext.ll" "$out/stage3/djinnc$ext.ll" | head -20 || true
     exit 1
 fi
+fi
 
 echo "== samples on stage1, stage2 and stage3"
-failed=0
-for source in "$root"/tests/djinnc/samples/*.djinn; do
-    name="$(basename "$source" .djinn)"
-    expected="$(cat "$root/tests/djinnc/samples/$name.exit")"
-    expected_stdout="$root/tests/djinnc/samples/$name.stdout"
-    reference=""
-    for stage in stage1 stage2 stage3; do
-        binary="$out/samples/$name.$stage$ext"
-        if ! "$out/$stage/djinnc$ext" "$source" -o "$binary" --runtime-dir "$runtime" ${link_flags[@]+"${link_flags[@]}"} >"$out/samples/$name.$stage.log" 2>&1; then
-            echo "FAIL $name ($stage compile)"
-            failed=1
-            continue
-        fi
-        set +e
-        "$binary" >"$out/samples/$name.$stage.stdout"
-        code=$?
-        set -e
-        tr -d '\r' <"$out/samples/$name.$stage.stdout" >"$out/samples/$name.$stage.stdout.lf"
-        result="$code:$(cat "$out/samples/$name.$stage.stdout.lf")"
-        if [ "$code" != "$expected" ]; then
-            echo "FAIL $name ($stage exit $code, expected $expected)"
-            failed=1
-        elif [ -f "$expected_stdout" ] && ! cmp -s "$out/samples/$name.$stage.stdout.lf" "$expected_stdout"; then
-            echo "FAIL $name ($stage stdout differs from $name.stdout)"
-            failed=1
-        elif [ -n "$reference" ] && [ "$result" != "$reference" ]; then
-            echo "FAIL $name ($stage disagrees with stage1)"
-            failed=1
-        fi
-        [ -z "$reference" ] && reference="$result"
-    done
-    debug_binary="$out/samples/$name.debug$ext"
-    if ! "$out/stage2/djinnc$ext" "$source" -g -o "$debug_binary" --runtime-dir "$runtime" ${link_flags[@]+"${link_flags[@]}"} >"$out/samples/$name.debug.log" 2>&1; then
-        echo "FAIL $name (-g compile)"
-        failed=1
-    else
-        set +e
-        "$debug_binary" >/dev/null
-        code=$?
-        set -e
-        if [ "$code" != "$expected" ]; then
-            echo "FAIL $name (-g exit $code, expected $expected)"
-            failed=1
-        fi
-    fi
-    echo "done $name"
+absolute_out="$(cd "$out" && pwd)"
+runner_lib="$runtime_lib"
+if [ -z "$runner_lib" ]; then
+    bash "$root/tools/build_runtime.sh" --out "$out/runtime" >"$out/runtime.log" 2>&1
+    runner_lib="$absolute_out/runtime/djinn_runtime.lib"
+fi
+runner_flags=(--runtime-lib "$runner_lib" --runtime-dir "$runtime" --require Link --filter SamplesTests --out "$absolute_out/samples")
+[ "$use_lld" = 1 ] && runner_flags+=(--lld)
+DJINN_USE_LLD="${use_lld/#0/}" bash "$root/tests/conformance/build.sh" "$absolute_out/stage2/djinnc$ext" "$runner_lib" "$out/runner$ext" "$runtime"
+for stage in stage1 stage2 stage3; do
+    "$out/runner$ext" --compiler "$absolute_out/$stage/djinnc$ext" "${runner_flags[@]}" >"$out/samples.$stage.log" || { grep FAIL "$out/samples.$stage.log"; exit 1; }
+    echo "PASS samples on $stage"
 done
-[ "$failed" = 0 ] || exit 1
+"$out/runner$ext" --compiler "$absolute_out/stage2/djinnc$ext" "${runner_flags[@]}" --link-debug >"$out/samples.debug.log" || { grep FAIL "$out/samples.debug.log"; exit 1; }
+echo "PASS samples with -g"
 
 echo "== benchmark (stage2 compiling djinnc, best of 3)"
 best=0

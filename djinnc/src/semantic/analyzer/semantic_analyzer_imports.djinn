@@ -7,11 +7,11 @@ impl SemanticAnalyzer {
         mut ptr<i8> current_file = null;
         for (mut i32 i = 0; i < program.count(); i = i + 1) {
             Node* declaration = program.child(i);
+            if (current_file == null || !Strings.same(current_file, declaration.file_name())) {
+                this.add_pending_imports(0, pending);
+                current_file = declaration.file_name();
+            }
             if (declaration.kind() == NodeKind::IMPORT) {
-                if (current_file == null || !Strings.same(current_file, declaration.file_name())) {
-                    pending.truncate(0);
-                    current_file = declaration.file_name();
-                }
                 pending.push((ptr)declaration);
                 continue;
             }
@@ -19,12 +19,7 @@ impl SemanticAnalyzer {
                 continue;
             }
             u32 target = symbols.enter_namespace(0, declaration.text_atom());
-            if (current_file != null && Strings.same(current_file, declaration.file_name())) {
-                for (mut i32 p = 0; p < pending.length; p = p + 1) {
-                    this.add_import(target, (Node*)pending.get(p));
-                }
-            }
-            pending.truncate(0);
+            this.add_pending_imports(target, pending);
             for (mut i32 c = 0; c < declaration.count(); c = c + 1) {
                 Node* inner = declaration.child(c);
                 if (inner.kind() == NodeKind::IMPORT) {
@@ -32,11 +27,16 @@ impl SemanticAnalyzer {
                 }
             }
         }
-        for (mut i32 p = 0; p < pending.length; p = p + 1) {
-            this.add_import(0, (Node*)pending.get(p));
-        }
+        this.add_pending_imports(0, pending);
         this.link_std_namespaces();
         this.link_core_to_std_types();
+    }
+
+    unsafe void add_pending_imports(u32 owner, PointerList* pending) {
+        for (mut i32 p = 0; p < pending.length; p = p + 1) {
+            this.add_import(owner, (Node*)pending.get(p));
+        }
+        pending.truncate(0);
     }
 
     void link_core_to_std_types() {

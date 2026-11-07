@@ -20,16 +20,13 @@ unsafe i32 run_compiler() {
         return 2;
     }
 
+    Diagnostics.set_json(options.diagnostics_json);
     Target.init(options.target);
     Target.set_debug(options.debug);
     ObjectWriter.set_target(options.cpu, options.features);
 
     if (options.inspect_path != null) {
         return Library.inspect(options.inspect_path, null);
-    }
-
-    if (options.self_test) {
-        return SelfTest.run();
     }
 
     PerformanceMonitor* monitor = PerformanceMonitor.create("djinnc", options.stats);
@@ -40,7 +37,7 @@ unsafe i32 run_compiler() {
     mut i64 total_bytes = 0;
     for (mut i32 i = 0; i < inputs.length; i = i + 1) {
         ptr<i8> path = (ptr<i8>)inputs.get(i);
-        ptr<i8> source = Files.read_all(path);
+        ptr<i8> source = Project.read_input(path);
         if (source == null) {
             logger_error(Log.get(), "djinnc: cannot read '%s'", path);
             return 1;
@@ -149,8 +146,17 @@ unsafe i32 run_compiler() {
     SymbolTable* inspect_symbols = gen.symbols;
     inspect_symbols.generate_disabled = options.no_generate;
     gen.library_mode = options.library;
+    gen.keep_frames = options.run;
     if (options.debug) {
         gen.enable_debug((ptr<i8>)inputs.get(0), options.optimize, options.emit_asm || options.emit_ir);
+    }
+    if (options.check_only) {
+        if (!gen.check(program)) {
+            return 1;
+        }
+        monitor.lap("check");
+        monitor.finish();
+        return 0;
     }
     if (!gen.generate(program)) {
         return 1;
@@ -249,5 +255,26 @@ unsafe i32 run_compiler() {
     }
     logger_info(Log.get(), "djinnc: done '%s'", options.output);
     monitor.finish();
+    if (options.test_command) {
+        ByteBuffer* program = ByteBuffer.create();
+        if (Linker.is_windows()) {
+            program.append("\"");
+        }
+        program.append("\"");
+        ptr<i8> executable = options.output;
+        for (mut i32 at = 0; executable[at] != 0; at = at + 1) {
+            if (Linker.is_windows() && executable[at] == 47) {
+                program.append_char(92);
+            } else {
+                program.append_char(executable[at]);
+            }
+        }
+        program.append("\"");
+        program.append(options.program_args.cstr());
+        if (Linker.is_windows()) {
+            program.append("\"");
+        }
+        return Process.run(program.cstr());
+    }
     return 0;
 }

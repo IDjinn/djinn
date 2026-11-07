@@ -1,0 +1,41 @@
+namespace testing;
+
+import std::sys;
+import std::types;
+import std::libc;
+
+struct CommandResult {
+    i32 code;
+    ptr<i8> output;
+    ptr<i8> stdout_text;
+}
+
+struct Command {
+    public static unsafe CommandResult* capture(ptr<i8> command) {
+        CommandResult* result = (CommandResult*)Allocator.zeroed(sizeof(CommandResult));
+        result.code = -1;
+        result.output = "";
+        result.stdout_text = "";
+        ptr process = Scheduler.start_process(command);
+        if (process == null) {
+            return result;
+        }
+        __djinn_process_wait(process, 3600000);
+        result.code = __djinn_process_exit_code(process);
+        result.stdout_text = Text.without_carriage_returns((ptr<i8>)__djinn_process_stdout_data(process), __djinn_process_stdout_length(process));
+        TextBuffer* output = TextBuffer.create();
+        output.append(result.stdout_text);
+        output.append(Text.without_carriage_returns((ptr<i8>)__djinn_process_stderr_data(process), __djinn_process_stderr_length(process)));
+        result.output = output.cstr();
+        __djinn_process_free(process);
+        return result;
+    }
+
+    public static unsafe i32 run(ptr<i8> command, ptr<i8> log_path) {
+        CommandResult* result = Command.capture(command);
+        if (log_path != null) {
+            TextFiles.write(log_path, result.output, (i32)strlen(result.output));
+        }
+        return result.code;
+    }
+}

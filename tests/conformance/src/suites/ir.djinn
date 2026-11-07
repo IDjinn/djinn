@@ -1,0 +1,412 @@
+namespace conformance;
+
+import testing;
+import djinnc::testing;
+import djinnc;
+
+struct OverflowIrTests {
+    [Test]
+    void WrappedIsPlainAdd() {
+        str source = """
+i32 main() {
+    i32w a = 1000w;
+    i32w b = 23w;
+    i32w c = a + b;
+    return c;
+}
+""";
+        Verify.source(source).with_std().emits_ir(Expected.ir_contains("add i32").and_ir_lacks("with.overflow"));
+    }
+}
+
+struct SpawnIrTests {
+    [Test]
+    void BasicSpawnParse() {
+        str source = """
+async i32 compute(i32 x) {
+    return x * 2;
+}
+
+async i32 main() {
+    spawn compute(10);
+    return 0;
+}
+""";
+        Verify.source(source).with_std().emits_ir(Expected.ir_contains("__djinn_spawn").and_ir_contains("__djinn_event_loop"));
+    }
+}
+
+struct EventLoopIrTests {
+    [Test]
+    void AsyncMainGeneratesRuntimeCalls() {
+        str source = """
+async i32 get_value() {
+    return 42;
+}
+
+async i32 main() {
+    i32 val = await get_value();
+    return val;
+}
+""";
+        Verify.source(source).with_std().emits_ir(Expected.ir_contains("__djinn_runtime_init").and_ir_contains("__djinn_runtime_shutdown"));
+    }
+
+    [Test]
+    void CoroWrappersGenerated() {
+        str source = """
+async i32 compute() {
+    return 1;
+}
+
+async i32 main() {
+    i32 r = await compute();
+    return r;
+}
+""";
+        Verify.source(source).with_std().emits_ir(Expected.ir_contains("__djinn_coro_resume").and_ir_contains("__djinn_coro_done").and_ir_contains("__djinn_coro_destroy").and_ir_contains("__djinn_coro_promise"));
+    }
+}
+
+struct AsyncIrTests {
+    [Test]
+    void NonAsyncMainWithRuntime() {
+        str source = """
+async i32 compute() {
+    return 1;
+}
+
+i32 main() {
+    i32 result = await compute();
+    return result;
+}
+""";
+        Verify.source(source).with_std().emits_ir(Expected.ir_contains("__djinn_runtime_init").and_ir_contains("__djinn_event_loop_run").and_ir_contains("__djinn_sync_main"));
+    }
+}
+
+struct AttributesIrTests {
+    [Test]
+    void ForceInlineGeneratesAlwaysInline() {
+        str source = """
+struct Math {
+    [ForceInline]
+    public static i32 add(i32 a, i32 b) {
+        return a + b;
+    }
+}
+
+i32 main() {
+    return Math.add(1, 2);
+}
+""";
+        Verify.source(source).with_std().emits_ir(Expected.ir_contains("alwaysinline"));
+    }
+
+    [Test]
+    void NoInlineGeneratesNoInline() {
+        str source = """
+struct Math {
+    [NoInline]
+    public static i32 add(i32 a, i32 b) {
+        return a + b;
+    }
+}
+
+i32 main() {
+    return Math.add(1, 2);
+}
+""";
+        Verify.source(source).with_std().emits_ir(Expected.ir_contains("noinline"));
+    }
+
+    [Test]
+    void NoReturnAttribute() {
+        str source = """
+struct Util {
+    [NoReturn]
+    public static void abort() {
+        while (true) {}
+    }
+}
+
+i32 main() {
+    return 0;
+}
+""";
+        Verify.source(source).with_std().emits_ir(Expected.ir_contains("noreturn"));
+    }
+
+    [Test]
+    void ColdAttribute() {
+        str source = """
+struct Util {
+    [Cold]
+    public static i32 rare_path() {
+        return -1;
+    }
+}
+
+i32 main() {
+    return 0;
+}
+""";
+        Verify.source(source).with_std().emits_ir(Expected.ir_contains("cold"));
+    }
+
+    [Test]
+    void MultipleAttributesOnMethod() {
+        str source = """
+struct Math {
+    [ForceInline]
+    [Hot]
+    public static i32 add(i32 a, i32 b) {
+        return a + b;
+    }
+}
+
+i32 main() {
+    return Math.add(1, 2);
+}
+""";
+        Verify.source(source).with_std().emits_ir(Expected.ir_contains("alwaysinline").and_ir_contains("hot"));
+    }
+
+    [Test]
+    void ImplicitNounwindOnAllFunctions() {
+        str source = """
+struct Math {
+    public static i32 add(i32 a, i32 b) {
+        return a + b;
+    }
+}
+
+i32 main() {
+    return Math.add(1, 2);
+}
+""";
+        Verify.source(source).with_std().emits_ir(Expected.ir_contains("nounwind"));
+    }
+
+    [Test]
+    void LlvmEscapeHatch() {
+        str source = """
+struct Util {
+    [Llvm("mustprogress")]
+    public static i32 compute(i32 x) {
+        return x * 2;
+    }
+}
+
+i32 main() {
+    return Util.compute(21);
+}
+""";
+        Verify.source(source).with_std().emits_ir(Expected.ir_contains("mustprogress"));
+    }
+}
+
+struct ObjectIrTests {
+    [Test]
+    void BoxingIRContainsKind() {
+        str source = """
+struct Inspector {
+    public static i32 check(...args) {
+        object first = args[0];
+        return (i32)first.type.kind;
+    }
+}
+
+i32 main() {
+    return Inspector.check(42);
+}
+""";
+        Verify.source(source).with_std().emits_ir(Expected.ir_contains("__typeinfo_i32"));
+    }
+}
+
+struct RuntimeErrorsIrTests {
+    [Test]
+    void ShadowStackCallsAppearInIr() {
+        str source = """
+i32 helper(i32t v) {
+    return v;
+}
+i32 main() {
+    return helper(1t);
+}
+""";
+        Verify.source(source).with_std().with_debug_info().emits_ir(Expected.ir_contains("__djinn_frame_push").and_ir_contains("__djinn_frame_pop"));
+    }
+
+    [Test]
+    void ReleaseModeOmitsShadowStackAndVarTracking() {
+        str source = """
+i32 helper(i32t v) {
+    return v;
+}
+i32 main() {
+    mut i32t x = 1t;
+    x = 2t;
+    return helper(x);
+}
+""";
+        Verify.source(source).with_std().emits_ir(Expected.create().and_ir_lacks("__djinn_frame_push").and_ir_lacks("__djinn_frame_pop").and_ir_lacks("__djinn_frame_set_line").and_ir_lacks("__djinn_var_track"));
+    }
+}
+
+struct ExternIrTests {
+    [Test]
+    void StdImportNoDuplicateExternSymbols() {
+        str source = """
+import std::types;
+import std::sys;
+import std::libc;
+import std::collections;
+
+namespace test_extern;
+
+i32 main() {
+    printf("hello %d\n", 42);
+    return 0;
+}
+""";
+        Verify.source(source).with_std().emits_ir(Expected.ir_contains("@printf").and_ir_contains("@malloc").and_ir_lacks("@printf.").and_ir_lacks("@malloc.").and_ir_lacks("@free.").and_ir_lacks("@strlen.").and_ir_lacks("@realloc."));
+    }
+
+    [Test]
+    void ExternNotRemovedByOptimizer() {
+        str source = """
+extern i32 printf(i8* format, ...);
+
+i32 main() {
+    return 0;
+}
+""";
+        Verify.source(source).optimized(3).emits_ir(Expected.ir_contains("declare").and_ir_contains("@printf").and_ir_contains("call"));
+    }
+}
+
+struct StringInterpolationIrTests {
+    [Test]
+    void NoInterpolationLeavesStringUnchanged() {
+        str source = """
+extern i32 printf(i8* format, ...);
+
+i32 main() {
+    printf("plain string\n");
+    return 0;
+}
+""";
+        Verify.source(source).emits_ir(Expected.ir_contains("plain string"));
+    }
+
+    [Test]
+    void BlockStringNoEscapes() {
+        str source = "extern i32 printf(i8* format, ...);\n\ni32 main() {\n    printf(\"\"\"path: C:\\Users\\foo\"\"\");\n    return 0;\n}";
+        Verify.source(source).emits_ir(Expected.ir_contains("C:\\\\Users\\\\foo"));
+    }
+
+    [Test]
+    void EmptyBracesPreserved() {
+        str source = """
+extern i32 printf(i8* format, ...);
+
+i32 main() {
+    printf("nothing {} here\n");
+    return 0;
+}
+""";
+        Verify.source(source).emits_ir(Expected.ir_contains("nothing {} here"));
+    }
+
+    [Test]
+    void NonCallStringLiteralNotInterpolated() {
+        str source = """
+i32 main() {
+    i32 name = 7;
+    str s = "hello {name}";
+    return 0;
+}
+""";
+        Verify.source(source).with_std().emits_ir(Expected.ir_contains("hello {name}"));
+    }
+}
+
+struct IsExpressionIrTests {
+    [Test]
+    void IRContainsIsCheck() {
+        str source = """
+struct Inspector {
+    public static i32 check(...args) {
+        object first = args[0];
+        if (first is i32) {
+            return 1;
+        }
+        return 0;
+    }
+}
+
+i32 main() {
+    return Inspector.check(42);
+}
+""";
+        Verify.source(source).with_std().emits_ir(Expected.ir_contains("is.match"));
+    }
+}
+
+struct NativeTypesIrTests {
+    [Test]
+    void NfloatIsF32() {
+        str source = """
+i32 main() {
+    nfloat a = 1.5;
+    f32 b = a + 2.5;
+    return 0;
+}
+""";
+        Verify.source(source).with_std().emits_ir(Expected.ir_contains("float"));
+    }
+
+    [Test]
+    void NdoubleIsF64() {
+        str source = """
+i32 main() {
+    ndouble a = 1.5;
+    f64 b = a + 2.5;
+    return 0;
+}
+""";
+        Verify.source(source).with_std().emits_ir(Expected.ir_contains("double"));
+    }
+}
+
+struct NonZeroIrTests {
+    [Test]
+    void DivisionByConstantSkipsZeroCheck() {
+        str source = """
+i32 work(i32 a) {
+    return a / 10;
+}
+
+i32 main() {
+    return work(100);
+}
+""";
+        Verify.source(source).with_std().emits_ir(Expected.ir_contains("sdiv").and_ir_lacks("div.zero").in_function("work"));
+    }
+
+    [Test]
+    void DivisionByUnknownStillChecked() {
+        str source = """
+i32 work(i32 b) {
+    return 100 / b;
+}
+
+i32 main() {
+    return work(7);
+}
+""";
+        Verify.source(source).with_std().emits_ir(Expected.ir_contains("div.zero").in_function("work"));
+    }
+}

@@ -1,0 +1,92 @@
+namespace djinnc::testing;
+
+import std::sys;
+import std::types;
+import std::libc;
+import std::io;
+import testing;
+
+struct Compilation {
+    ptr<i8> name;
+    ptr<i8> source;
+    ptr<i8> binary;
+    ptr<i8> output;
+    i32 exit_code;
+
+    static unsafe ptr<i8> path_in(ptr<i8> directory, ptr<i8> name, ptr<i8> extension) {
+        TextBuffer* path = TextBuffer.create();
+        path.append(directory);
+        path.append("/");
+        path.append(name);
+        path.append(extension);
+        return path.cstr();
+    }
+
+    public static unsafe Compilation of(ptr<i8> name, str text) {
+        ptr<i8> directory = Environment.variable("COMPILATION_DIR", "build/compilations");
+        Source* contents = Sources.text(Reflection.terminated_view(text));
+        Compilation compilation = { .name = name, .source = Compilation.path_in(directory, name, ".djinn"), .binary = Compilation.path_in(directory, name, ".exe") };
+        TextFiles.write(compilation.source, contents.text, (i32)strlen(contents.text));
+        TextBuffer* command = TextBuffer.create();
+        command.append("\"");
+        command.append(Environment.variable("COMPILATION_COMPILER", "djinnc"));
+        command.append("\" \"");
+        command.append(compilation.source);
+        command.append("\" --diagnostics-format=json --keep-ir -o \"");
+        command.append(compilation.binary);
+        command.append("\" --runtime-lib \"");
+        command.append(Environment.variable("COMPILATION_RUNTIME_LIB", ""));
+        command.append("\" --runtime-dir \"");
+        command.append(Environment.variable("COMPILATION_RUNTIME_DIR", "runtime"));
+        command.append("\"");
+        if (Text.same(Environment.variable("COMPILATION_LLD", ""), "1")) {
+            command.append(" --lld");
+        }
+        CommandResult* result = Command.capture(command.cstr());
+        compilation.output = result.output;
+        compilation.exit_code = result.code;
+        return compilation;
+    }
+
+    unsafe TestCase* view(i32 kind, Expected* expected) {
+        TestCase* test = (TestCase*)Allocator.zeroed(sizeof(TestCase));
+        test.node = TestNode.create(this.name, 0);
+        test.source = this.source;
+        test.binary = this.binary;
+        test.kind = kind;
+        test.expected = expected;
+        TestNode* node = test.node;
+        node.output = this.output;
+        node.exit_code = this.exit_code;
+        return test;
+    }
+
+    static unsafe void judge(ptr<i8> reason) {
+        if (reason != null) {
+            Expect.fail(reason);
+        }
+    }
+
+    public unsafe void diagnostics(Expected* expected) {
+        Compilation.judge(Runner.check_diagnostics(this.view(Kind.ERROR, expected)));
+    }
+
+    public unsafe void ir(Expected* expected) {
+        Compilation.judge(Runner.check_ir(this.view(Kind.IR, expected)));
+    }
+
+    public unsafe void runs(Expected* expected) {
+        Expect.equal(0, (i64)this.exit_code, "the compilation must have succeeded to run it");
+        TextBuffer* command = TextBuffer.create();
+        command.append("\"");
+        command.append(this.binary);
+        command.append("\"");
+        CommandResult* result = Command.capture(command.cstr());
+        TestCase* test = this.view(Kind.RUN, expected);
+        TestNode* node = test.node;
+        node.output = result.output;
+        node.stdout_text = result.stdout_text;
+        node.exit_code = result.code;
+        Compilation.judge(Runner.check_run(test));
+    }
+}

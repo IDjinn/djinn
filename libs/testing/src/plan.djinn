@@ -1,0 +1,80 @@
+namespace testing;
+
+import std::sys;
+import std::types;
+import std::libc;
+
+struct Workflow {
+    ptr<i8> name;
+    ItemList* steps;
+    ItemList* nodes;
+
+    public unsafe Workflow* step(MethodInfo* method) {
+        ItemList* steps = this.steps;
+        steps.push((ptr)method);
+        return this;
+    }
+}
+
+struct TestPlan {
+    ItemList* entries;
+    ItemList* workflows;
+
+    public static unsafe TestPlan* discover() {
+        TestPlan* plan = (TestPlan*)Allocator.zeroed(sizeof(TestPlan));
+        plan.entries = TestProgram.collect();
+        plan.workflows = ItemList.create();
+        return plan;
+    }
+
+    public unsafe Workflow* workflow(ptr<i8> name) {
+        Workflow* created = (Workflow*)Allocator.zeroed(sizeof(Workflow));
+        created.name = name;
+        created.steps = ItemList.create();
+        created.nodes = ItemList.create();
+        ItemList* workflows = this.workflows;
+        workflows.push((ptr)created);
+        return created;
+    }
+
+    public unsafe i32 run() {
+        return TestProgram.run_plan(this);
+    }
+
+    unsafe TestEntry* entry_of(MethodInfo* method) {
+        ItemList* entries = this.entries;
+        for (mut i32 i = 0; i < entries.length; i = i + 1) {
+            TestEntry* entry = (TestEntry*)entries.get(i);
+            if (entry.method.funcPtr == method.funcPtr) {
+                return entry;
+            }
+        }
+        return (TestEntry*)0;
+    }
+
+    unsafe bool uses(MethodInfo* method) {
+        ItemList* workflows = this.workflows;
+        for (mut i32 w = 0; w < workflows.length; w = w + 1) {
+            Workflow* workflow = (Workflow*)workflows.get(w);
+            ItemList* steps = workflow.steps;
+            for (mut i32 s = 0; s < steps.length; s = s + 1) {
+                MethodInfo* step = (MethodInfo*)steps.get(s);
+                if (step.funcPtr == method.funcPtr) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    unsafe Workflow* find_workflow(ptr<i8> name) {
+        ItemList* workflows = this.workflows;
+        for (mut i32 w = 0; w < workflows.length; w = w + 1) {
+            Workflow* workflow = (Workflow*)workflows.get(w);
+            if (Text.same(workflow.name, name)) {
+                return workflow;
+            }
+        }
+        return (Workflow*)0;
+    }
+}

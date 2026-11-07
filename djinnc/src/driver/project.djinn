@@ -1,9 +1,68 @@
 namespace djinnc;
 
+struct ProjectList {
+    const i32 NONE = 0;
+    const i32 LIBS = 1;
+    const i32 SOURCES = 2;
+    const i32 IGNORED = 3;
+}
+
 struct Project {
     public static unsafe bool is_source_file(ptr<i8> path) {
         i32 length = strlen(path);
         return length > 6 && Strings.equals(path + length - 6, 6, ".djinn");
+    }
+
+    public static unsafe bool is_test_file(ptr<i8> path) {
+        i32 length = strlen(path);
+        return length > 11 && Strings.equals(path + length - 11, 11, "_test.djinn");
+    }
+
+    public static ptr<i8> generated_entry() {
+        return "<generated test entry>";
+    }
+
+    public static unsafe ptr<i8> read_input(ptr<i8> path) {
+        if (Strings.same(path, Project.generated_entry())) {
+            ptr<i8> text = "import testing;
+
+i32 main() {
+    return TestProgram.run();
+}
+";
+            return Strings.duplicate(text, strlen(text));
+        }
+        return Files.read_all(path);
+    }
+
+    static unsafe bool defines_main(Options* options) {
+        PointerList* inputs = options.inputs;
+        for (mut i32 i = 0; i < inputs.length; i = i + 1) {
+            ptr<i8> path = (ptr<i8>)inputs.get(i);
+            if (!Project.is_test_file(path)) {
+                continue;
+            }
+            ptr<i8> text = Files.read_all(path);
+            if (text == null) {
+                continue;
+            }
+            i32 length = strlen(text);
+            for (mut i32 at = 0; at + 9 <= length; at = at + 1) {
+                if (Strings.equals(text + at, 9, "i32 main(") && (at == 0 || text[at - 1] == 10)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    public static unsafe bool has_base_name(ptr<i8> path, ptr<i8> name) {
+        i32 length = strlen(path);
+        i32 base = strlen(name);
+        if (length <= base || !Strings.same(path + length - base, name)) {
+            return false;
+        }
+        return path[length - base - 1] == 47 || path[length - base - 1] == 92;
     }
 
     public static bool apply(Options* options, ptr<i8> directory) {
@@ -15,7 +74,7 @@ struct Project {
             logger_error(Log.get(), "djinnc: cannot read '%s'", manifest_path.cstr());
             return false;
         }
-        Project.read_manifest(options, manifest);
+        Project.read_manifest(options, manifest, directory);
 
         ByteBuffer* source_root = ByteBuffer.create();
         source_root.append(directory);
@@ -26,6 +85,10 @@ struct Project {
             return false;
         }
         Project.add_listed_files(options, listing);
+        if (options.test_command && !Project.defines_main(options)) {
+            PointerList* inputs = options.inputs;
+            inputs.push((ptr)Project.generated_entry());
+        }
         return options.inputs.length > 0;
     }
 
@@ -36,7 +99,11 @@ struct Project {
         for (mut i32 i = 0; i <= length; i = i + 1) {
             if (i == length || listing[i] == 10) {
                 if (i > start) {
-                    inputs.push((ptr)Strings.duplicate(listing + start, i - start));
+                    ptr<i8> path = Strings.duplicate(listing + start, i - start);
+                    bool is_entry = options.include_tests && options.entry_file != null && Project.has_base_name(path, options.entry_file);
+                    if (!is_entry && (options.include_tests || !Project.is_test_file(path))) {
+                        inputs.push((ptr)path);
+                    }
                 }
                 start = i + 1;
             }
@@ -44,16 +111,36 @@ struct Project {
         options.input = (ptr<i8>)inputs.get(0);
     }
 
-    static unsafe void read_manifest(Options* options, ptr<i8> manifest) {
+    static unsafe void read_manifest(Options* options, ptr<i8> manifest, ptr<i8> directory) {
         i32 length = strlen(manifest);
         mut ptr<i8> output_file = (ptr<i8>)0;
         mut ptr<i8> output_directory = (ptr<i8>)0;
         mut i32 start = 0;
+        mut i32 open_list = ProjectList.NONE;
         for (mut i32 i = 0; i <= length; i = i + 1) {
             if (i == length || manifest[i] == 10) {
                 i32 first = Project.skip_blanks(manifest, start, i);
-                if (Strings.starts_with(manifest, first, i, "libs:")) {
-                    options.use_std = Project.lists_std(manifest, first, i);
+                if (open_list != ProjectList.NONE) {
+                    open_list = Project.read_items(options, manifest, first, i, open_list, directory);
+                } else if (Strings.starts_with(manifest, first, i, "libs:")) {
+                    options.use_std = false;
+                    open_list = Project.read_items(options, manifest, first + 5, i, ProjectList.LIBS, directory);
+                } else if (Strings.starts_with(manifest, first, i, "test-libs:")) {
+                    mut i32 kind = ProjectList.IGNORED;
+                    if (options.include_tests) {
+                        kind = ProjectList.LIBS;
+                    }
+                    open_list = Project.read_items(options, manifest, first + 10, i, kind, directory);
+                } else if (Strings.starts_with(manifest, first, i, "entry:")) {
+                    options.entry_file = Project.read_value(manifest, first + 6, i);
+                } else if (Strings.starts_with(manifest, first, i, "sources:")) {
+                    open_list = Project.read_items(options, manifest, first + 8, i, ProjectList.SOURCES, directory);
+                } else if (Strings.starts_with(manifest, first, i, "library-mode:")) {
+                    options.library = Strings.same(Project.read_value(manifest, first + 13, i), "true");
+                } else if (Strings.starts_with(manifest, first, i, "reflection-mode:")) {
+                    if (Strings.same(Project.read_value(manifest, first + 16, i), "all")) {
+                        options.reflect_mode = ReflectionMode.ALL;
+                    }
                 } else if (Strings.starts_with(manifest, first, i, "generate:")) {
                     options.no_generate = Strings.same(Project.read_value(manifest, first + 9, i), "false");
                 } else if (Strings.starts_with(manifest, first, i, "file:")) {
@@ -91,13 +178,49 @@ struct Project {
         }
     }
 
-    static unsafe bool lists_std(ptr<i8> text, i32 from, i32 to) {
-        for (mut i32 i = from; i + 3 <= to; i = i + 1) {
-            if (Strings.starts_with(text, i, to, "std") && (i + 3 == to || text[i + 3] == 39 || text[i + 3] == 34)) {
-                return i > from && (text[i - 1] == 39 || text[i - 1] == 34);
+    static unsafe i32 read_items(Options* options, ptr<i8> text, i32 from, i32 to, i32 list, ptr<i8> directory) {
+        mut i32 position = from;
+        while (position < to) {
+            i32 c = (i32)text[position];
+            if (c == 93) {
+                return ProjectList.NONE;
+            }
+            position = position + 1;
+            if (c == 39 || c == 34) {
+                i32 item = position;
+                while (position < to && (i32)text[position] != c) {
+                    position = position + 1;
+                }
+                Project.add_item(options, Strings.duplicate(text + item, position - item), list, directory);
+                position = position + 1;
             }
         }
-        return false;
+        return list;
+    }
+
+    static unsafe void add_item(Options* options, ptr<i8> item, i32 list, ptr<i8> directory) {
+        if (list == ProjectList.IGNORED) {
+            return;
+        }
+        if (list == ProjectList.LIBS && Strings.same(item, "std")) {
+            options.use_std = true;
+            return;
+        }
+        ByteBuffer* path = ByteBuffer.create();
+        if (list == ProjectList.LIBS) {
+            path.append(options.library_dir);
+            path.append("/");
+            path.append(item);
+            path.append(".djlib");
+            PointerList* libraries = options.libraries;
+            libraries.push((ptr)path.cstr());
+            return;
+        }
+        path.append(directory);
+        path.append("/");
+        path.append(item);
+        PointerList* inputs = options.inputs;
+        inputs.push((ptr)path.cstr());
     }
 
     static unsafe i32 skip_blanks(ptr<i8> text, i32 from, i32 to) {

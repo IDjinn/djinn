@@ -143,10 +143,9 @@ lsp/          Language Server Protocol implementation
 lib/          .djlib library format (writer/reader)
 std/          Standard library (.djinn sources)
 runtime/      C runtime (event loop, thread pool, coroutine wrappers)
-tests/        GoogleTest suite (~640 cases), grouped by language area:
-              arithmetic, types, aggregates, functions, generics,
-              compile_time, control_flow, memory, async, modules,
-              strings, and compiler internals (binder, diagnostics, mangler)
+tests/        GoogleTest suite of the stage0 compiler (frozen: no new C++ tests,
+              see tools/check_frozen_cpp_tests.py) and tests/conformance,
+              the Djinn test suite for djinnc where every new test goes
 docs/         Fumadocs documentation site
 ```
 
