@@ -1,0 +1,115 @@
+import std::libc;
+import testing;
+
+struct Bootstrap {
+    static unsafe ptr<i8> out() {
+        return Environment.variable("BOOTSTRAP_OUT", "build/bootstrap");
+    }
+
+    static unsafe ptr<i8> extension(ptr<i8> path) {
+        i32 length = (i32)strlen(path);
+        if (length > 4 && Text.same(path + length - 4, ".exe")) {
+            return ".exe";
+        }
+        return "";
+    }
+
+    static unsafe ptr<i8> stage_path(ptr<i8> stage, ptr<i8> seed) {
+        TextBuffer* path = TextBuffer.create();
+        path.append(Bootstrap.out());
+        path.append("/");
+        path.append(stage);
+        path.append("/djinnc");
+        path.append(Bootstrap.extension(seed));
+        return path.cstr();
+    }
+
+    static unsafe ptr<i8> log_path(ptr<i8> stage) {
+        TextBuffer* path = TextBuffer.create();
+        path.append(Bootstrap.out());
+        path.append("/");
+        path.append(stage);
+        path.append(".log");
+        return path.cstr();
+    }
+
+    static unsafe Artifact compile(Artifact compiler, ptr<i8> input, ptr<i8> stage, bool keep_ir) {
+        ptr<i8> output = Bootstrap.stage_path(stage, Environment.variable("BOOTSTRAP_SEED", ""));
+        TextBuffer* command = TextBuffer.create();
+        command.append("\"");
+        command.append(compiler.path);
+        command.append("\" ");
+        command.append(input);
+        command.append(" -o \"");
+        command.append(output);
+        command.append("\" --runtime-dir \"");
+        command.append(Environment.variable("BOOTSTRAP_RUNTIME_DIR", "runtime"));
+        command.append("\" -O2");
+        ptr<i8> runtime_lib = Environment.variable("BOOTSTRAP_RUNTIME_LIB", "");
+        if (strlen(runtime_lib) > 0) {
+            command.append(" --runtime-lib \"");
+            command.append(runtime_lib);
+            command.append("\"");
+            if (Text.same(Environment.variable("BOOTSTRAP_LLD", ""), "1")) {
+                command.append(" --lld");
+            }
+        }
+        if (keep_ir) {
+            command.append(" --keep-ir");
+        }
+        i32 code = Command.run(command.cstr(), Bootstrap.log_path(stage));
+        Expect.equal(0, (i64)code, "the compiler must produce the next stage; see the stage log");
+        Artifact produced = Artifact.at(output);
+        produced.must_exist();
+        return produced;
+    }
+
+    [Test]
+    Artifact seed() {
+        Artifact seed = Artifact.at(Environment.variable("BOOTSTRAP_SEED", ""));
+        seed.must_exist();
+        return seed;
+    }
+
+    [Test]
+    Artifact stage1(Artifact seed) {
+        TextBuffer* source = TextBuffer.create();
+        source.append(Bootstrap.out());
+        source.append("/seed_src");
+        TextBuffer* input = TextBuffer.create();
+        input.append("\"");
+        input.append(Environment.variable("BOOTSTRAP_SEED_SOURCE", source.cstr()));
+        input.append("\"");
+        return Bootstrap.compile(seed, input.cstr(), "stage1", false);
+    }
+
+    [Test]
+    Artifact stage2(Artifact compiler) {
+        return Bootstrap.compile(compiler, "djinnc", "stage2", true);
+    }
+
+    [Test]
+    Artifact stage3(Artifact compiler) {
+        return Bootstrap.compile(compiler, "djinnc", "stage3", true);
+    }
+
+    [Test]
+    void fixpoint([From("stage2")] Artifact second, [From("stage3")] Artifact third) {
+        TextBuffer* second_ir = TextBuffer.create();
+        second_ir.append(second.path);
+        second_ir.append(".ll");
+        TextBuffer* third_ir = TextBuffer.create();
+        third_ir.append(third.path);
+        third_ir.append(".ll");
+        ptr<i8> left = TextFiles.read(second_ir.cstr());
+        ptr<i8> right = TextFiles.read(third_ir.cstr());
+        Expect.is_true(left != null && right != null, "both stages must keep their IR");
+        Expect.is_true(Text.same(left, right), "stage2 and stage3 must emit the same IR");
+    }
+}
+
+i32 main() {
+    TestPlan* plan = TestPlan.discover();
+    plan.workflow("bootstrap").step(typeof(Bootstrap.seed)).step(typeof(Bootstrap.stage1)).step(typeof(Bootstrap.stage2)).step(typeof(Bootstrap.stage3)).step(typeof(Bootstrap.fixpoint));
+    return plan.run();
+}

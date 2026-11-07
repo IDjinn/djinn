@@ -259,6 +259,15 @@ struct TestGraph {
         return null;
     }
 
+    static unsafe bool mutates(ParamInfo* param) {
+        for (mut i32 i = 0; i < (i32)param.attrCount; i = i + 1) {
+            if (Text.same((ptr<i8>)param.attrs[i].name, "Mutates")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     unsafe void report(ptr<i8> text) {
         ItemList* errors = this.errors;
         errors.push((ptr)text);
@@ -446,6 +455,29 @@ struct TestGraph {
         }
     }
 
+    unsafe ptr<ptr> arguments_of(GraphNode* node) {
+        MethodInfo* method = node.entry.method;
+        ItemList* inputs = node.inputs;
+        ptr<ptr> arguments = (ptr<ptr>)Allocator.zeroed(8 * (u64)(inputs.length + 1));
+        for (mut i32 i = 0; i < inputs.length; i = i + 1) {
+            GraphNode* input = (GraphNode*)inputs.get(i);
+            if (TestGraph.mutates(&method.params[i])) {
+                arguments[i] = this.private_copy(input);
+            } else {
+                arguments[i] = input.value;
+            }
+        }
+        return arguments;
+    }
+
+    unsafe ptr private_copy(GraphNode* node) {
+        MethodInfo* method = node.entry.method;
+        ptr<ptr> arguments = this.arguments_of(node);
+        ptr copy = Allocator.zeroed((u64)TestGraph.type_size(method.returnTypeId) + 16);
+        TestMethods.invoke(node.entry.type, method, (ptr)arguments, copy);
+        return copy;
+    }
+
     unsafe void execute(GraphNode* node) {
         if (node.value != null || node.state == NodeState.PASSED) {
             return;
@@ -455,11 +487,7 @@ struct TestGraph {
             this.execute((GraphNode*)inputs.get(i));
         }
         MethodInfo* method = node.entry.method;
-        ptr<ptr> arguments = (ptr<ptr>)Allocator.zeroed(8 * (u64)(inputs.length + 1));
-        for (mut i32 i = 0; i < inputs.length; i = i + 1) {
-            GraphNode* input = (GraphNode*)inputs.get(i);
-            arguments[i] = input.value;
-        }
+        ptr<ptr> arguments = this.arguments_of(node);
         node.value = Allocator.zeroed((u64)TestGraph.type_size(method.returnTypeId) + 16);
         printf("RUN %s\n", node.name);
         fflush((ptr)0);

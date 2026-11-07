@@ -16,6 +16,8 @@ struct TestOptions {
     ptr<i8> report;
     ptr<i8> tag;
     ptr<i8> workflow;
+    ptr<i8> graph;
+    ptr<i8> graph_file;
     bool fail_fast;
     i32 jobs;
     bool ok;
@@ -39,7 +41,7 @@ struct TestProgram {
         if (Text.same(mode, "--run")) {
             return TestProgram.run_one(graph, Environment.argument(2));
         }
-        if (Text.same(mode, "--graph")) {
+        if (Text.same(mode, "--nodes")) {
             graph.run_wanted(Environment.argument(2));
             return 0;
         }
@@ -70,6 +72,10 @@ struct TestProgram {
     }
 
     static unsafe i32 list(TestGraph* graph) {
+        TestOptions* options = TestProgram.parse_options();
+        if (options.graph != null) {
+            return GraphView.emit(graph, options.graph, options.graph_file);
+        }
         ItemList* nodes = graph.nodes;
         for (mut i32 i = 0; i < nodes.length; i = i + 1) {
             GraphNode* node = (GraphNode*)nodes.get(i);
@@ -100,6 +106,10 @@ struct TestProgram {
         while (index < Process.argc()) {
             ptr<i8> argument = Environment.argument(index);
             ptr<i8> value = Environment.argument(index + 1);
+            if (Text.same(argument, "--list")) {
+                index = index + 1;
+                continue;
+            }
             if (Text.same(argument, "--fail-fast")) {
                 options.fail_fast = true;
                 index = index + 1;
@@ -107,6 +117,10 @@ struct TestProgram {
             }
             if (Text.same(argument, "--filter")) {
                 options.filter = value;
+            } else if (Text.same(argument, "--graph")) {
+                options.graph = value;
+            } else if (Text.same(argument, "--graph-file")) {
+                options.graph_file = value;
             } else if (Text.same(argument, "--workflow")) {
                 options.workflow = value;
             } else if (Text.same(argument, "--tag")) {
@@ -155,7 +169,7 @@ struct TestProgram {
         TextBuffer* command = TextBuffer.create();
         command.append("\"");
         command.append(Environment.argument(0));
-        command.append("\" --graph \"");
+        command.append("\" --nodes \"");
         ItemList* nodes = graph.nodes;
         mut bool first = true;
         for (mut i32 i = 0; i < nodes.length; i = i + 1) {
@@ -312,7 +326,7 @@ struct TestProgram {
     static unsafe i32 run_all(TestPlan* plan, TestGraph* graph) {
         TestOptions* options = TestProgram.parse_options();
         if (!options.ok) {
-            printf("usage: <tests> [--list | --run <name> | --filter <text> --tag <tag> --workflow <name> --fail-fast --jobs <n> --report <file>]\n");
+            printf("usage: <tests> [--list | --run <name> | --filter <text> --tag <tag> --workflow <name> --graph <dot|json> --graph-file <file> --fail-fast --jobs <n> --report <file>]\n");
             return 2;
         }
         if (options.workflow != null) {
@@ -352,6 +366,7 @@ struct TestProgram {
             }
             node.tags = "Run";
             node.command = TestProgram.command_for(graph_node.name);
+            node.data = (ptr)graph_node;
             pool.add(node);
         }
         for (mut i32 c = 0; c < graph.components; c = c + 1) {
@@ -382,6 +397,14 @@ struct TestProgram {
                 reason = TestProgram.failure_reason(node);
             }
             bool retrying = pool.complete(node, reason);
+            if (!retrying && node.data != null) {
+                GraphNode* finished = (GraphNode*)node.data;
+                if (reason == null) {
+                    finished.state = NodeState.PASSED;
+                } else {
+                    finished.state = NodeState.FAILED;
+                }
+            }
             if (!retrying && reason != null && options.fail_fast && !stopped) {
                 stopped = true;
                 skipped = pool.stop_scheduling();
@@ -395,6 +418,12 @@ struct TestProgram {
         }
         if (options.report != null) {
             TestReport.write_json(pool, options.report);
+        }
+        if (options.graph != null) {
+            i32 written = GraphView.emit(graph, options.graph, options.graph_file);
+            if (written != 0) {
+                return written;
+            }
         }
         ItemList* nodes = pool.nodes;
         if (TestReport.passed(nodes) == TestReport.total(nodes)) {

@@ -3,7 +3,7 @@ set -eu
 
 usage() {
     echo "usage: bootstrap.sh --seed <djinnc executable> --runtime-dir <dir> [--runtime-lib <lib>] [--lld] [--out <dir>]"
-    echo "                    [--bench-ref <file>] [--update-ref]"
+    echo "                    [--bench-ref <file>] [--update-ref] [--driver <current djinnc>]"
     exit 2
 }
 
@@ -15,6 +15,7 @@ use_lld=0
 out="$root/build/bootstrap"
 bench_ref="$root/tools/bench.reference.json"
 update_ref=0
+driver=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -25,6 +26,7 @@ while [ $# -gt 0 ]; do
         --out) out="$2"; shift 2 ;;
         --bench-ref) bench_ref="$2"; shift 2 ;;
         --update-ref) update_ref=1; shift ;;
+        --driver) driver="$2"; shift 2 ;;
         *) usage ;;
     esac
 done
@@ -49,6 +51,20 @@ rm -rf "$out"
 mkdir -p "$out/stage1" "$out/stage2" "$out/stage3" "$out/samples"
 cd "$root"
 
+if [ -n "$driver" ]; then
+    echo "== workflow: seed -> stage1 -> stage2 -> stage3 -> fixpoint (tests/bootstrap, driven by $driver)"
+    driver="$(cd "$(dirname "$driver")" && pwd)/$(basename "$driver")"
+    mkdir -p "$out/libs"
+    workflow_out="$(cd "$out" && pwd)"
+    workflow_flags=(--lib-dir "$out/libs" --std-dir "$root/std" --runtime-dir "$runtime" ${link_flags[@]+"${link_flags[@]}"})
+    bash "$root/tools/seed_source.sh" "$out/seed_src"
+    "$driver" libs/testing -o "$out/libs/testing.djlib" "${workflow_flags[@]}" >"$out/driver.log" 2>&1 \
+        || { cat "$out/driver.log"; echo "FAIL the testing library did not build"; exit 1; }
+    BOOTSTRAP_SEED="$seed" BOOTSTRAP_OUT="$workflow_out" BOOTSTRAP_SEED_SOURCE="$workflow_out/seed_src" BOOTSTRAP_RUNTIME_DIR="$runtime" BOOTSTRAP_RUNTIME_LIB="$runtime_lib" BOOTSTRAP_LLD="$use_lld" \
+        "$driver" test tests/bootstrap -o "$out/bootstrap_workflow$ext" "${workflow_flags[@]}" >"$out/workflow.log" 2>&1 \
+        || { grep -v "^djinnc:" "$out/workflow.log"; echo "FAIL bootstrap workflow"; exit 1; }
+    grep -v "^djinnc:" "$out/workflow.log"
+else
 echo "== seed -> stage1"
 bash "$root/tools/seed_source.sh" "$out/seed_src"
 "$seed" "$out/seed_src" -o "$out/stage1/djinnc$ext" --runtime-dir "$runtime" "${opt_flags[@]}" ${link_flags[@]+"${link_flags[@]}"} >"$out/stage1.log" 2>&1 \
@@ -67,6 +83,7 @@ else
     echo "FAIL fixpoint (stage2 and stage3 IR differ)"
     diff "$out/stage2/djinnc$ext.ll" "$out/stage3/djinnc$ext.ll" | head -20 || true
     exit 1
+fi
 fi
 
 echo "== samples on stage1, stage2 and stage3"

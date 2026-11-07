@@ -1,0 +1,129 @@
+namespace testing;
+
+import std::sys;
+import std::types;
+import std::libc;
+
+struct GraphView {
+    static unsafe ptr<i8> state_name(GraphNode* node) {
+        if (node.state == NodeState.PASSED) {
+            return "passed";
+        }
+        if (node.state == NodeState.FAILED) {
+            return "failed";
+        }
+        if (node.state == NodeState.BLOCKED) {
+            return "blocked";
+        }
+        return "not run";
+    }
+
+    static unsafe ptr<i8> color(GraphNode* node) {
+        if (node.state == NodeState.PASSED) {
+            return "palegreen";
+        }
+        if (node.state == NodeState.FAILED) {
+            return "salmon";
+        }
+        if (node.state == NodeState.BLOCKED) {
+            return "gold";
+        }
+        return "lightgray";
+    }
+
+    static unsafe i32 largest(TestGraph* graph) {
+        mut i32 best = 0;
+        for (mut i32 c = 0; c < graph.components; c = c + 1) {
+            i32 size = graph.component_size(c);
+            if (size > best) {
+                best = size;
+            }
+        }
+        return best;
+    }
+
+    public static unsafe ptr<i8> json(TestGraph* graph) {
+        TextBuffer* out = TextBuffer.create();
+        out.append("{\"components\":");
+        out.append_int((i64)graph.components);
+        out.append(",\"largest_component\":");
+        out.append_int((i64)GraphView.largest(graph));
+        out.append(",\"nodes\":[");
+        ItemList* nodes = graph.nodes;
+        for (mut i32 i = 0; i < nodes.length; i = i + 1) {
+            GraphNode* node = (GraphNode*)nodes.get(i);
+            if (i > 0) {
+                out.append(",");
+            }
+            out.append("{\"name\":");
+            out.append_json_string(node.name);
+            out.append(",\"component\":");
+            out.append_int((i64)node.component);
+            out.append(",\"state\":");
+            out.append_json_string(GraphView.state_name(node));
+            out.append(",\"inputs\":[");
+            ItemList* inputs = node.inputs;
+            for (mut i32 k = 0; k < inputs.length; k = k + 1) {
+                if (k > 0) {
+                    out.append(",");
+                }
+                GraphNode* input = (GraphNode*)inputs.get(k);
+                out.append_json_string(input.name);
+            }
+            out.append("]");
+            if (node.blocker != null) {
+                out.append(",\"blocked_by\":");
+                out.append_json_string(node.blocker);
+            }
+            out.append("}");
+        }
+        out.append("]}\n");
+        return out.cstr();
+    }
+
+    public static unsafe ptr<i8> dot(TestGraph* graph) {
+        TextBuffer* out = TextBuffer.create();
+        out.append("digraph tests {\n  rankdir=LR;\n  node [shape=box, style=filled];\n");
+        ItemList* nodes = graph.nodes;
+        for (mut i32 i = 0; i < nodes.length; i = i + 1) {
+            GraphNode* node = (GraphNode*)nodes.get(i);
+            out.append("  ");
+            out.append_json_string(node.name);
+            out.append(" [fillcolor=");
+            out.append_json_string(GraphView.color(node));
+            out.append("];\n");
+            ItemList* inputs = node.inputs;
+            for (mut i32 k = 0; k < inputs.length; k = k + 1) {
+                GraphNode* input = (GraphNode*)inputs.get(k);
+                out.append("  ");
+                out.append_json_string(input.name);
+                out.append(" -> ");
+                out.append_json_string(node.name);
+                out.append(";\n");
+            }
+        }
+        out.append("}\n");
+        return out.cstr();
+    }
+
+    public static unsafe i32 emit(TestGraph* graph, ptr<i8> format, ptr<i8> path) {
+        mut ptr<i8> text = null;
+        if (Text.same(format, "json")) {
+            text = GraphView.json(graph);
+        } else if (Text.same(format, "dot")) {
+            text = GraphView.dot(graph);
+        } else {
+            printf("unknown graph format %s (use dot or json)\n", format);
+            return 2;
+        }
+        if (path == null) {
+            printf("%s", text);
+            return 0;
+        }
+        if (!TextFiles.write(path, text, (i32)strlen(text))) {
+            printf("could not write %s\n", path);
+            return 2;
+        }
+        return 0;
+    }
+}
