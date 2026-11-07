@@ -485,7 +485,7 @@ Pronto quando: todo `TEST` tem decisão na triagem e o gtest deixa de ser necess
 
 `[Test]` já existe no runner de conformidade, por reflexão (veja o estado da Fase 1). O que segue é para testes de projeto, com `djinnc test`.
 
-1. Em modo teste, o compilador emite uma tabela de descritores (nome, arquivo, linha, atributos, `MethodInfo*`) e um
+1. **Parcial:** `[Test]` `async` sem parâmetros já roda (o worker chama a função, recebe a corrotina e roda o event loop, via `__djinn_call_entry_handle`/`__djinn_call_method_handle` no runtime). Parâmetros ficam para os testes parametrizados da Fase 5, porque hoje nada fornece os valores, e `[Test]` com `throws` continua de fora. Original: em modo teste, o compilador emite uma tabela de descritores (nome, arquivo, linha, atributos, `MethodInfo*`) e um
    thunk por teste, `void(ptr* args, ptr out)`, porque o runner não pode chamar uma assinatura desconhecida. Thunks de `async` fazem `await`.
 2. **Feito:** `Expect` em `libs/testing` (`is_true`, `is_false`, `equal`, `equal_text`, `contains`, `fail`, com o local do chamador) sobre `__djinn_panic`. Falha de `Expect` aborta com stack trace e não é repetida pelo `[TestPolicy]`; um crash é.
 3. **Feito, com ressalvas:** subcomando `djinnc test [dir]`: compila o projeto incluindo `*_test.djinn`, gera o entrypoint se não houver `main`,

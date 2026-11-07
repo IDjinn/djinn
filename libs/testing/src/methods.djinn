@@ -8,6 +8,9 @@ import std::io;
 extern "C" {
     i32 __djinn_call_entry(ptr address);
     void __djinn_call_method(ptr address, ptr target);
+    ptr __djinn_call_entry_handle(ptr address);
+    ptr __djinn_call_method_handle(ptr address, ptr target);
+    void __djinn_event_loop_run(ptr handle);
 }
 
 struct TestMethods {
@@ -40,11 +43,22 @@ struct TestMethods {
     }
 
     public static bool can_call(MethodInfo* method) {
-        return (i32)method.paramCount == 0 && ((i32)method.flags & Reflection.METHOD_ASYNC) == 0;
+        return (i32)method.paramCount == 0;
     }
 
     public static unsafe void call(TypeInfo* type, MethodInfo* method) {
-        if (((i32)method.flags & Reflection.METHOD_STATIC) != 0) {
+        bool is_static = ((i32)method.flags & Reflection.METHOD_STATIC) != 0;
+        if (((i32)method.flags & Reflection.METHOD_ASYNC) != 0) {
+            mut ptr handle = null;
+            if (is_static) {
+                handle = __djinn_call_entry_handle((ptr)method.funcPtr);
+            } else {
+                handle = __djinn_call_method_handle((ptr)method.funcPtr, Allocator.zeroed((u64)type.size + 1));
+            }
+            __djinn_event_loop_run(handle);
+            return;
+        }
+        if (is_static) {
             __djinn_call_entry((ptr)method.funcPtr);
         } else {
             __djinn_call_method((ptr)method.funcPtr, Allocator.zeroed((u64)type.size + 1));

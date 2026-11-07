@@ -154,6 +154,16 @@ void __djinn_call_method(void* address, void* target)
     ((void (*)(void*))address)(target);
 }
 
+void* __djinn_call_entry_handle(void* address)
+{
+    return ((void* (*)(void))address)();
+}
+
+void* __djinn_call_method_handle(void* address, void* target)
+{
+    return ((void* (*)(void*))address)(target);
+}
+
 static void** reflected_types;
 static int32_t reflected_type_count;
 
