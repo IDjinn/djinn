@@ -10,3 +10,4 @@
 #include "console.c"
 #include "filesystem.c"
 #include "process.c"
+#include "int128.c"
