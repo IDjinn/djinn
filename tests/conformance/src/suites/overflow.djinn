@@ -31,12 +31,133 @@ i32 main() {
     }
 
     [Test]
-    void plain_arithmetic_still_wraps() {
+    void plain_arithmetic_is_checked() {
         str source = """
 i32 main() {
     i32 a = 2147483647;
     i32 b = a + 1;
+    return b;
+}
+""";
+        Verify.source(source).crashes(Expected.contains("integer overflow"));
+    }
+
+    [Test]
+    void plain_arithmetic_throws_when_the_function_lists_overflow() {
+        str source = """
+i32 add(i32 a, i32 b) throws(Overflow) {
+    return a + b;
+}
+
+i32 main() {
+    i32 caught = try add(2147483647, 1) ?: 7;
+    i32 fine = try add(40, 2) ?: 7;
+    if (caught != 7) { return 1; }
+    return fine;
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void plain_negation_and_increment_are_checked() {
+        str negation = """
+i32 negate(i32 value) {
+    return -value;
+}
+
+i32 main() {
+    return negate(0 - 2147483647 - 1);
+}
+""";
+        str increment = """
+i32 main() {
+    mut i32 value = 2147483647;
+    value++;
+    return value;
+}
+""";
+        str subtraction = """
+i32 main() {
+    mut u32 value = 0;
+    value = value - 1;
+    return (i32)value;
+}
+""";
+        Verify.source(negation).crashes(Expected.contains("integer overflow"));
+        Verify.source(increment).crashes(Expected.contains("integer overflow"));
+        Verify.source(subtraction).crashes(Expected.contains("integer overflow"));
+    }
+
+    [Test]
+    void plain_constant_overflow_is_a_compile_error() {
+        str source = """
+constexpr i32 big = 2147483647 + 1;
+
+i32 main() {
+    return big;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.INVALID_CONSTANT_EXPRESSION));
+    }
+
+    [Test]
+    void compile_time_overflow_suggests_a_suffix() {
+        str constant = """
+constexpr i32 big = 2147483647 + 1;
+
+i32 main() {
+    return big;
+}
+""";
+        str literal = """
+i32 main() {
+    u8 x = 300;
+    return 0;
+}
+""";
+        Verify.source(constant).diagnostics(Expected.error(DiagnosticErrors.INVALID_CONSTANT_EXPRESSION).with_message("not a compile-time constant: integer overflow (use the w suffix to wrap or the s suffix to saturate)"));
+        Verify.source(literal).diagnostics(Expected.error(DiagnosticErrors.INVALID_CONSTANT_EXPRESSION).with_message("integer literal does not fit in its type (the w suffix wraps it, the s suffix clamps it)"));
+    }
+
+    [Test]
+    void runtime_overflow_suggests_a_suffix() {
+        str source = """
+i32 main() {
+    i32 a = 2147483647;
+    return a + 1;
+}
+""";
+        Verify.source(source).crashes(Expected.contains("use the w suffix to wrap, the s suffix to saturate or throws(Overflow) to catch it"));
+    }
+
+    [Test]
+    void the_w_suffix_wraps() {
+        str source = """
+i32 main() {
+    i32w a = 2147483647w;
+    i32w b = a + 1;
     if (b > 0) { return 1; }
+    mut u8w small = 255w;
+    small++;
+    if (small != 0) { return 2; }
+    i32w minimum = b;
+    if (-minimum != minimum) { return 3; }
+    return 42;
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void a_negative_literal_is_not_an_overflow() {
+        str source = """
+i32 main() {
+    i8 small = -128;
+    i32 minimum = -2147483648;
+    i64 widest = -9223372036854775808;
+    if (small != -128 || minimum != 0 - 2147483647 - 1) { return 1; }
+    if (widest >= 0) { return 2; }
     return 42;
 }
 """;

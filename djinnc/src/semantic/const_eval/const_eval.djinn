@@ -512,13 +512,13 @@ struct ConstEval {
             } else {
                 OverflowMode mode = node.mode();
                 bool minimum = (shape & ConstEval.SIGNED) != 0 && this.ri == ConstEval.minimum(shape);
-                if (minimum && (mode == OverflowMode::TRAPPED || mode == OverflowMode::CHECKED)) {
+                if (minimum && mode.detects_overflow()) {
                     return this.fail(node, "integer overflow");
                 }
                 if (minimum && mode == OverflowMode::SATURATING) {
                     this.ri = ConstEval.maximum(shape);
                 } else {
-                    this.ri = ConstEval.wrap(0 - this.ri, shape);
+                    this.ri = ConstEval.wrap(0w - this.ri, shape);
                 }
             }
             return true;
@@ -654,7 +654,7 @@ struct ConstEval {
         return (shape & 255) == 64 && (shape & ConstEval.SIGNED) == 0;
     }
 
-    bool int_operation(Node* node, TokenKind op, i64 a, i64 b, i32 left_shape, i32 right_shape) {
+    bool int_operation(Node* node, TokenKind op, i64w a, i64w b, i32 left_shape, i32 right_shape) {
         if (TypeChecker.is_comparison(op)) {
             bool unsigned_compare = ConstEval.is_wide_unsigned(left_shape) || ConstEval.is_wide_unsigned(right_shape);
             this.ri = ConstEval.compare(op, a, b, unsigned_compare);
@@ -663,7 +663,7 @@ struct ConstEval {
 
         i32 shape = this.shape_of(node.value_type());
         bool wide_unsigned = ConstEval.is_wide_unsigned(shape);
-        mut i64 value = 0;
+        mut i64w value = 0;
         if (op == TokenKind::PLUS) {
             value = a + b;
         } else if (op == TokenKind::MINUS) {
@@ -685,7 +685,7 @@ struct ConstEval {
                     if ((shape & ConstEval.SIGNED) != 0 && a == ConstEval.minimum(shape)) {
                         return this.fail(node, "integer overflow: the minimum value divided by -1");
                     }
-                    value = 0 - a;
+                    value = 0w - a;
                 }
             } else if (op == TokenKind::SLASH) {
                 value = a / b;
@@ -717,7 +717,7 @@ struct ConstEval {
         }
         bool arithmetic = op == TokenKind::PLUS || op == TokenKind::MINUS || op == TokenKind::STAR;
         OverflowMode mode = node.mode();
-        if (arithmetic && mode != OverflowMode::NONE && mode != OverflowMode::WRAPPED) {
+        if (arithmetic && mode != OverflowMode::WRAPPED) {
             bool wide = (shape & 255) >= 64;
             mut bool overflowed = false;
             if (wide) {
@@ -727,7 +727,7 @@ struct ConstEval {
             }
             if (overflowed) {
                 if (mode != OverflowMode::SATURATING) {
-                    return this.fail(node, "integer overflow");
+                    return this.fail(node, "integer overflow (use the w suffix to wrap or the s suffix to saturate)");
                 }
                 if (wide) {
                     value = ConstEval.saturated_wide(op, a, b, (shape & ConstEval.SIGNED) != 0);

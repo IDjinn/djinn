@@ -354,7 +354,7 @@ impl CodeGenerator {
     // x % -1 is always 0, but srem of the minimum value by -1 is undefined and traps on x86, while x % 1 is also 0.
     ptr remainder_divisor(ptr rhs) {
         ptr type = LLVMTypeOf(rhs);
-        ptr minus_one = LLVMConstInt(type, (u64)(0 - 1), 1);
+        ptr minus_one = LLVMBuildNot(this.builder, LLVMConstNull(type), "minus_one");
         ptr is_minus_one = LLVMBuildICmp(this.builder, LlvmConst.INT_EQ, rhs, minus_one, "rem.minus_one");
         return LLVMBuildSelect(this.builder, is_minus_one, LLVMConstInt(type, 1, 0), rhs, "rem.divisor");
     }
@@ -473,14 +473,14 @@ impl CodeGenerator {
 
     unsafe void check_division_overflow(Node* node, u32 common, ptr lhs, ptr rhs) {
         ptr type = LLVMTypeOf(rhs);
-        ptr is_minus_one = LLVMBuildICmp(this.builder, LlvmConst.INT_EQ, rhs, LLVMConstInt(type, (u64)(0 - 1), 1), "div.minus_one");
+        ptr is_minus_one = LLVMBuildICmp(this.builder, LlvmConst.INT_EQ, rhs, LLVMBuildNot(this.builder, LLVMConstNull(type), "minus_one"), "div.minus_one");
         if (LLVMIsConstant(is_minus_one) != 0 && LLVMIsNull(is_minus_one) != 0) {
             return;
         }
         ptr minimum = LLVMBuildShl(this.builder, LLVMConstInt(type, 1, 0), LLVMConstInt(type, (u64)Types.bits(common) - 1, 0), "div.minimum");
         ptr is_minimum = LLVMBuildICmp(this.builder, LlvmConst.INT_EQ, lhs, minimum, "div.is_minimum");
         ptr overflow = LLVMBuildAnd(this.builder, is_minus_one, is_minimum, "div.overflow");
-        if (node.mode() == OverflowMode::CHECKED) {
+        if (this.overflow_is_thrown(node)) {
             this.throw_overflow_when(overflow, node);
             return;
         }
