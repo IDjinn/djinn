@@ -1,32 +1,40 @@
 name: Setup Djinn toolchain
-description: Installs LLVM, builds the stage0 compiler (djinn) and the seed djinnc
+description: Installs LLVM, downloads the seed djinnc from the stage0-final release and builds the runtime
 
 inputs:
   llvm-version:
     description: LLVM major version
     default: "21"
+  seed-tag:
+    description: Release tag that holds the seed djinnc
+    default: stage0-final
+  token:
+    description: Token used to download the seed
+    default: ${{ github.token }}
 
 outputs:
   seed:
     description: Path to the seed djinnc
     value: ${{ steps.seed.outputs.seed }}
+  runtime-lib:
+    description: Path to libdjinn_runtime.a
+    value: ${{ steps.runtime.outputs.lib }}
 
 runs:
   using: composite
   steps:
-    - name: Install dependencies
+    - name: Install LLVM
       shell: bash
       run: |
         sudo apt-get update
-        sudo apt-get install -y --no-install-recommends \
-          wget gnupg ca-certificates cmake ninja-build rsync g++-14 libstdc++-14-dev \
-          libxml2-dev zlib1g-dev libzstd-dev libffi-dev python3
+        sudo apt-get install -y --no-install-recommends wget gnupg ca-certificates rsync \
+          libxml2-dev zlib1g-dev libzstd-dev libffi-dev
         wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc >/dev/null
         echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-${{ inputs.llvm-version }} main" | sudo tee /etc/apt/sources.list.d/llvm.list
         sudo apt-get update
         sudo apt-get install -y --no-install-recommends \
-          clang-${{ inputs.llvm-version }} lld-${{ inputs.llvm-version }} \
-          llvm-${{ inputs.llvm-version }}-dev libclang-rt-${{ inputs.llvm-version }}-dev
+          clang-${{ inputs.llvm-version }} lld-${{ inputs.llvm-version }} llvm-${{ inputs.llvm-version }}-dev \
+          libclang-rt-${{ inputs.llvm-version }}-dev
         sudo ln -sf /usr/bin/clang-${{ inputs.llvm-version }} /usr/local/bin/clang
         sudo ln -sf /usr/bin/clang++-${{ inputs.llvm-version }} /usr/local/bin/clang++
         sudo ln -sf /usr/bin/ld.lld-${{ inputs.llvm-version }} /usr/local/bin/ld.lld
@@ -37,25 +45,23 @@ runs:
       run: |
         sed -i "s|'-LC:/dev/llvm-[^']*',|'-L/usr/lib/llvm-${{ inputs.llvm-version }}/lib',|; s|'-lLLVM-C'|'-lLLVM-${{ inputs.llvm-version }}'|" djinnc/djinn.proj
 
-    - name: Build stage0 compiler and runtime
-      shell: bash
-      run: |
-        cmake -S . -B build/cmake -G Ninja -DCMAKE_BUILD_TYPE=Release \
-          -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
-          -DLLVM_DIR=/usr/lib/llvm-${{ inputs.llvm-version }}/lib/cmake/llvm
-        cmake --build build/cmake --target djinn djinn_runtime
-
-    - name: Build seed djinnc
+    - name: Download seed djinnc
       id: seed
       shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
       run: |
         mkdir -p build/seed
-        rm -f djinnc/build/djinnc
-        build/cmake/djinn -r djinnc >build/seed/stage0.log 2>&1 || true
-        if [ ! -f djinnc/build/djinnc ]; then
-          cat build/seed/stage0.log
-          echo "seed djinnc was not produced"
-          exit 1
-        fi
-        cp djinnc/build/djinnc build/seed/djinnc
+        gh release download "${{ inputs.seed-tag }}" --repo "$GITHUB_REPOSITORY" \
+          -p djinnc-linux-x64 -p SHA256SUMS.txt -D build/seed --clobber
+        (cd build/seed && grep ' \*\?djinnc-linux-x64$' SHA256SUMS.txt | sha256sum -c -)
+        mv build/seed/djinnc-linux-x64 build/seed/djinnc
+        chmod +x build/seed/djinnc
         echo "seed=$PWD/build/seed/djinnc" >> "$GITHUB_OUTPUT"
+
+    - name: Build runtime
+      id: runtime
+      shell: bash
+      run: |
+        bash tools/build_runtime.sh --out build/runtime
+        echo "lib=$PWD/build/runtime/libdjinn_runtime.a" >> "$GITHUB_OUTPUT"
