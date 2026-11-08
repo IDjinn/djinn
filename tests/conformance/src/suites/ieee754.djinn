@@ -1,0 +1,303 @@
+namespace conformance;
+
+import testing;
+import djinnc::testing;
+import djinnc;
+
+struct Ieee754Tests {
+    static str arithmetic() {
+        return """
+f64 add(f64 a, f64 b) {
+    return a + b;
+}
+
+i32 main() {
+    return (i32)add(40.0, 2.0);
+}
+""";
+    }
+
+    static str min_max() {
+        return """
+f64 smaller(f64 a, f64 b) {
+    return a.min(b);
+}
+
+i32 main() {
+    return (i32)smaller(42.0, 50.0);
+}
+""";
+    }
+
+    [Test]
+    void the_default_is_ieee754_2019() {
+        Verify.source(Ieee754Tests.arithmetic()).emits_ir(Expected.ir_contains("ieee,ieee").and_ir_lacks("fadd fast").and_ir_lacks("strictfp").and_ir_lacks("constrained"));
+        Verify.source(Ieee754Tests.min_max()).emits_ir(Expected.ir_contains("llvm.minimum").and_ir_lacks("minimumnum").and_ir_lacks("llvm.minnum"));
+        Verify.source(Ieee754Tests.min_max()).with_flag("--ieee754=2019").emits_ir(Expected.ir_contains("llvm.minimum").and_ir_lacks("minimumnum").and_ir_lacks("llvm.minnum"));
+    }
+
+    [Test]
+    void conforming_modes_never_contract_multiply_add() {
+        str source = """
+f64 combine(f64 a, f64 b, f64 c) {
+    return a * b + c;
+}
+
+i32 main() {
+    return (i32)combine(4.0, 10.0, 2.0);
+}
+""";
+        Verify.source(source).optimized(2).emits_ir(Expected.ir_contains("fmul double").and_ir_contains("fadd double").and_ir_lacks("fmul contract").and_ir_lacks("fadd contract").and_ir_lacks("llvm.fma").and_ir_lacks("fmuladd"));
+    }
+
+    [Test]
+    void none_gives_fast_math() {
+        Verify.source(Ieee754Tests.arithmetic()).with_flag("--ieee754=none").emits_ir(Expected.ir_contains("fadd fast").and_ir_contains("preserve-sign,preserve-sign"));
+        Verify.source(Ieee754Tests.arithmetic()).with_flag("--ieee754=none").runs(Expected.exit(42));
+    }
+
+    [Test]
+    void min_and_max_follow_the_revision() {
+        Verify.source(Ieee754Tests.min_max()).with_flag("--ieee754=2008").emits_ir(Expected.ir_contains("llvm.minnum").and_ir_lacks("llvm.minimum"));
+        Verify.source(Ieee754Tests.min_max()).with_flag("--ieee754=1985").emits_ir(Expected.ir_contains("fcmp olt").and_ir_lacks("llvm.minnum").and_ir_lacks("minimumnum"));
+        Verify.source(Ieee754Tests.min_max()).with_flag("--ieee754=1985").runs(Expected.exit(42));
+    }
+
+    [Test]
+    void min_ignores_nan_in_2019_and_2008() {
+        str source = """
+f64 make_nan(f64 zero) {
+    return zero / zero;
+}
+
+i32 main() {
+    f64 nan = make_nan(0.0);
+    f64 one = 1.0;
+    if (nan.min(one) != 1.0) { return 1; }
+    if (one.min(nan) != 1.0) { return 2; }
+    if (nan.max(one) != 1.0) { return 3; }
+    return 42;
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+        Verify.source(source).with_flag("--ieee754=2008").runs(Expected.exit(42));
+    }
+
+    [Test]
+    void min_in_1985_is_compare_and_select() {
+        str source = """
+f64 make_nan(f64 zero) {
+    return zero / zero;
+}
+
+i32 main() {
+    f64 nan = make_nan(0.0);
+    f64 one = 1.0;
+    if (nan.min(one) != 1.0) { return 1; }
+    f64 picked = one.min(nan);
+    if (picked == picked) { return 2; }
+    return 42;
+}
+""";
+        Verify.source(source).with_flag("--ieee754=1985").runs(Expected.exit(42));
+    }
+
+    [Test]
+    void minimum_propagates_nan_and_orders_zeros() {
+        str source = """
+f64 make_nan(f64 zero) {
+    return zero / zero;
+}
+
+i32 main() {
+    f64 zero = 0.0;
+    f64 negative = -zero;
+    f64 nan = make_nan(zero);
+    f64 one = 1.0;
+    f64 low = nan.minimum(one);
+    if (low == low) { return 1; }
+    if (1.0 / zero.minimum(negative) >= 0.0) { return 2; }
+    if (1.0 / negative.maximum(zero) <= 0.0) { return 3; }
+    if (nan.minimum_number(one) != 1.0) { return 4; }
+    if (1.0 / zero.minimum_number(negative) >= 0.0) { return 5; }
+    if (one.maximum_number(nan) != 1.0) { return 6; }
+    return 42;
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+        Verify.source(source).optimized(2).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void f32_has_the_same_operations() {
+        str source = """
+f32 smaller(f32 a, f32 b) {
+    return a.minimum(b);
+}
+
+f32 fused(f32 a, f32 b, f32 c) {
+    return a.fma(b, c);
+}
+
+i32 main() {
+    if (smaller(3.0, 2.0) != 2.0) { return 1; }
+    return (i32)fused(4.0, 10.0, 2.0);
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void fma_rounds_once() {
+        str source = """
+f64 fused(f64 a, f64 b, f64 c) {
+    return a.fma(b, c);
+}
+
+f64 separate(f64 a, f64 b, f64 c) {
+    return a * b + c;
+}
+
+i32 main() {
+    if (separate(0.1, 10.0, 0.0 - 1.0) != 0.0) { return 1; }
+    if (fused(0.1, 10.0, 0.0 - 1.0) == 0.0) { return 2; }
+    return 42;
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+        Verify.source(source).optimized(2).runs(Expected.exit(42));
+        Verify.source(source).with_flag("--ieee754=2008").runs(Expected.exit(42));
+    }
+
+    [Test]
+    void operations_missing_from_a_revision_are_errors() {
+        str minimum = """
+f64 smaller(f64 a, f64 b) {
+    return a.minimum(b);
+}
+
+i32 main() {
+    return (i32)smaller(1.0, 2.0);
+}
+""";
+        str fused = """
+f64 fused(f64 a, f64 b, f64 c) {
+    return a.fma(b, c);
+}
+
+i32 main() {
+    return (i32)fused(1.0, 2.0, 3.0);
+}
+""";
+        Verify.source(minimum).with_flag("--ieee754=2008").diagnostics(Expected.error(DiagnosticErrors.FLOAT_OPERATION_UNAVAILABLE));
+        Verify.source(minimum).with_flag("--ieee754=1985").diagnostics(Expected.error(DiagnosticErrors.FLOAT_OPERATION_UNAVAILABLE));
+        Verify.source(fused).with_flag("--ieee754=1985").diagnostics(Expected.error(DiagnosticErrors.FLOAT_OPERATION_UNAVAILABLE));
+        Verify.source(fused).with_flag("--ieee754=2008").runs(Expected.exit(5));
+    }
+
+    [Test]
+    void a_method_in_an_impl_block_wins() {
+        str source = """
+impl f64 {
+    f64 min(f64 other) {
+        return 7.0;
+    }
+}
+
+i32 main() {
+    f64 a = 1.0;
+    return (i32)a.min(2.0);
+}
+""";
+        Verify.source(source).runs(Expected.exit(7));
+    }
+
+    [Test]
+    void strict_environment_uses_constrained_operations() {
+        str source = """
+f64 divide(f64 a, f64 b) {
+    return a / b;
+}
+
+i32 to_integer(f64 value) {
+    return (i32)value;
+}
+
+bool less(f64 a, f64 b) {
+    return a < b;
+}
+
+i32 main() {
+    if (!less(1.0, 2.0)) { return 1; }
+    return to_integer(divide(84.0, 2.0));
+}
+""";
+        Verify.source(source).with_flag("--fp-env=strict").emits_ir(Expected.ir_contains("llvm.experimental.constrained.fdiv").and_ir_contains("round.dynamic")
+            .and_ir_contains("fpexcept.strict").and_ir_contains("llvm.experimental.constrained.fcmps").and_ir_contains("llvm.experimental.constrained.fptosi")
+            .and_ir_contains("strictfp").and_ir_lacks("fdiv double"));
+        Verify.source(source).with_flag("--fp-env=strict").runs(Expected.exit(42));
+        Verify.source(source).with_flag("--fp-env=strict").optimized(2).runs(Expected.exit(42));
+    }
+
+    static str rounding_program() {
+        return """
+extern "C" {
+    i32 fesetround(i32 mode);
+}
+
+f64 third(f64 a, f64 b) {
+    return a / b;
+}
+
+i32 upward() {
+    if (Platform.Windows) { return 512; }
+    if (Arch.Arm64) { return 4194304; }
+    return 2048;
+}
+
+i32 main() {
+    f64 nearest = third(1.0, 3.0);
+    fesetround(upward());
+    f64 rounded_up = third(1.0, 3.0);
+    fesetround(0);
+    if (rounded_up <= nearest) { return 1; }
+    return 42;
+}
+""";
+    }
+
+    [Test]
+    void strict_environment_honours_the_rounding_mode() {
+        Verify.source(Ieee754Tests.rounding_program()).with_flag("--fp-env=strict").optimized(2).runs(Expected.exit(42));
+        Verify.source(Ieee754Tests.rounding_program()).with_flag("--fp-env=strict").with_flag("--ieee754=2008").optimized(3).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void strict_environment_keeps_exceptions_visible() {
+        str source = """
+extern "C" {
+    i32 feclearexcept(i32 flags);
+    i32 fetestexcept(i32 flags);
+}
+
+f64 divide(f64 a, f64 b) {
+    return a / b;
+}
+
+i32 division_by_zero() {
+    if (Platform.Windows) { return 8; }
+    if (Arch.Arm64) { return 2; }
+    return 4;
+}
+
+i32 main() {
+    feclearexcept(division_by_zero());
+    f64 infinite = divide(1.0, 0.0);
+    if (infinite <= 0.0) { return 2; }
+    if (fetestexcept(division_by_zero()) == 0) { return 1; }
+    return 42;
+}
+""";
+        Verify.source(source).with_flag("--fp-env=strict").optimized(2).runs(Expected.exit(42));
+    }
+}

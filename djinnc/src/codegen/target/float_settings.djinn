@@ -1,0 +1,106 @@
+namespace djinnc;
+
+unsafe static mut ptr active_float_settings = null;
+
+// Which revision of IEEE 754 the generated code follows (--ieee754 / "ieee754:" in djinn.proj).
+// The default is the newest revision, 2019. All three revisions give the same results for + - * / sqrt and
+// conversions (correct rounding, subnormals, NaN and infinities); they differ in which operations exist:
+//   1985: no fused multiply-add and no min/max operation.
+//   2008: adds fusedMultiplyAdd and minNum/maxNum (a quiet NaN operand is ignored).
+//   2019: removes minNum/maxNum (they were not associative with signaling NaN) and adds minimum/maximum
+//         (NaN propagates, -0 < +0) and minimumNumber/maximumNumber (NaN is ignored, -0 < +0).
+// NONE gives up conformance: every float instruction gets LLVM fast-math flags and subnormals may be flushed.
+// References: https://djinn-docs.lucas-romero.com/docs/types/numbers#ieee-754
+//             https://standards.ieee.org/ieee/754/6210/ (IEEE 754-2019, the active revision)
+enum FloatStandard {
+    IEEE754_2019,
+    IEEE754_2008,
+    IEEE754_1985,
+    NONE
+}
+
+impl FloatStandard {
+    bool conforming() {
+        return this != FloatStandard::NONE;
+    }
+
+    // fusedMultiplyAdd (one rounding for a * b + c) was introduced by IEEE 754-2008.
+    bool has_fma() {
+        return this != FloatStandard::IEEE754_1985;
+    }
+
+    // minimum, maximum, minimumNumber and maximumNumber only exist since IEEE 754-2019.
+    bool has_minimum() {
+        return this == FloatStandard::IEEE754_2019 || this == FloatStandard::NONE;
+    }
+
+    ptr<i8> name() {
+        if (this == FloatStandard::IEEE754_2008) { return "2008"; }
+        if (this == FloatStandard::IEEE754_1985) { return "1985"; }
+        if (this == FloatStandard::NONE) { return "none"; }
+        return "2019";
+    }
+}
+
+// strict (--fp-env=strict / "fp-env:" in djinn.proj) gives access to the dynamic attributes of IEEE 754
+// (clause 4.2, rounding direction) and to the status flags (clause 7): the program may change the rounding
+// mode and read the exception flags at run time (fesetround / fetestexcept), so the optimizer may neither
+// assume round-to-nearest nor delete or reorder an operation that can raise a flag.
+// default assumes round-to-nearest-even and that nobody reads the flags, which lets LLVM fold constants.
+struct FloatSettings {
+    FloatStandard standard;
+    bool strict;
+
+    public static unsafe FloatSettings* create() {
+        FloatSettings* settings = (FloatSettings*)Memory.zalloc(sizeof(FloatSettings));
+        settings.standard = FloatStandard::IEEE754_2019;
+        return settings;
+    }
+
+    public static unsafe FloatSettings* current() {
+        if (active_float_settings == null) {
+            active_float_settings = (ptr)FloatSettings.create();
+        }
+        return (FloatSettings*)active_float_settings;
+    }
+
+    public static unsafe void install(FloatSettings* settings) {
+        active_float_settings = (ptr)settings;
+    }
+
+    public bool set_standard(ptr<i8> name) {
+        if (Strings.same(name, "2019") || Strings.same(name, "ieee754-2019")) {
+            this.standard = FloatStandard::IEEE754_2019;
+        } else if (Strings.same(name, "2008") || Strings.same(name, "ieee754-2008")) {
+            this.standard = FloatStandard::IEEE754_2008;
+        } else if (Strings.same(name, "1985") || Strings.same(name, "ieee754-1985")) {
+            this.standard = FloatStandard::IEEE754_1985;
+        } else if (Strings.same(name, "none")) {
+            this.standard = FloatStandard::NONE;
+        } else {
+            logger_error(Log.get(), "djinnc: unknown IEEE 754 revision '%s' (expected 2019, 2008, 1985 or none)", name);
+            return false;
+        }
+        return true;
+    }
+
+    public bool set_environment(ptr<i8> name) {
+        if (Strings.same(name, "default")) {
+            this.strict = false;
+        } else if (Strings.same(name, "strict")) {
+            this.strict = true;
+        } else {
+            logger_error(Log.get(), "djinnc: unknown floating-point environment '%s' (expected default or strict)", name);
+            return false;
+        }
+        return true;
+    }
+
+    public bool validate() {
+        if (this.strict && !this.standard.conforming()) {
+            logger_error(Log.get(), "djinnc: --fp-env=strict needs an IEEE 754 revision; --ieee754=none is not conforming");
+            return false;
+        }
+        return true;
+    }
+}
