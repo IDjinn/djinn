@@ -77,7 +77,7 @@ constexpr and struct layouts stay complete.
 
 ## Std as a library
 
-`--std` (and `libs: ['std']`) loads `<lib dir>/std.djlib` when it exists, so the program does not compile std again; without it, or with `--run`, std is compiled from source. Build it with `tools/build_std.sh <djinnc> <lib dir>/std.djlib [flags]`; the test scripts (`tests/conformance/build.sh`, `tests/djinnc/unit.sh`) do it and the conformance runner takes `--lib-dir`.
+`--std` (and `libs: ['std']`) loads `<lib dir>/std.djlib` when it exists, so the program does not compile std again; without it, std is compiled from source. `--run` and `--check` keep the library object in memory (the JIT adds it as an object file). Build it with `tools/build_std.sh <djinnc> <lib dir>/std.djlib [flags]`; the test scripts (`tests/conformance/build.sh`, `tests/djinnc/unit.sh`) do it and the conformance runner takes `--lib-dir`.
 
 ## Reflection and debug symbols
 
@@ -96,7 +96,7 @@ constexpr and struct layouts stay complete.
 
 - Library depending on other libraries (manifest has no dependency list; header bytes 96..127 are reserved for it).
 - Version policy: reject libraries from an incompatible compiler version, and check the interface hash.
-- Std as a library for `--run` (JIT) and per-function dead stripping: the std object is linked whole.
+- Per-function dead stripping of the std object (it is linked whole).
 - `inline` / `ForceInline` functions across libraries (bodies are stripped, so they are not inlined).
 - Binary AST interface instead of minified source (faster load, smaller files); `.djni` interface-only files.
 - Static variable initializers and global constructors across libraries (header globals are declarations only).

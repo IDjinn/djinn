@@ -56,6 +56,28 @@ struct Jit {
         }
         LLVMOrcJITDylibAddGenerator(dylib, process);
 
+        PointerList* objects = Library.resident();
+        PointerList* sizes = Library.resident_sizes();
+        if (objects.length > 0 && Linker.is_windows()) {
+            u64 target = 0;
+            if (!Jit.check(LLVMOrcLLJITLookup(jit, &target, "_write"), "cannot find '_write'")) {
+                return 1;
+            }
+            ptr<u64> pair = (ptr<u64>)Memory.zalloc(24);
+            pair[0] = (u64)LLVMOrcLLJITMangleAndIntern(jit, "write");
+            pair[1] = target;
+            pair[2] = 3;
+            if (!Jit.check(LLVMOrcJITDylibDefine(dylib, LLVMOrcAbsoluteSymbols((ptr)pair, 1)), "cannot alias 'write'")) {
+                return 1;
+            }
+        }
+        for (mut i32 i = 0; i < objects.length; i = i + 1) {
+            ptr buffer = LLVMCreateMemoryBufferWithMemoryRangeCopy((ptr<i8>)objects.get(i), (u64)sizes.get(i), "library");
+            if (!Jit.check(LLVMOrcLLJITAddObjectFile(jit, dylib, buffer), "cannot add the library object")) {
+                return 1;
+            }
+        }
+
         LLVMSetDataLayout(gen.module, LLVMOrcLLJITGetDataLayoutStr(jit));
         if (Linker.is_windows()) {
             ptr legacy_write = LLVMGetNamedFunction(gen.module, "write");
