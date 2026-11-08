@@ -132,13 +132,23 @@ int64_t __djinn_now_us(void)
     return (int64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
 }
 
+#ifdef __linux__
+extern char* program_invocation_name;
+#endif
+
 int __djinn_argc(void)
 {
+#ifdef __linux__
+    if (djinn_saved_argc == 0) return 1;
+#endif
     return djinn_saved_argc;
 }
 
 char* __djinn_argv(int index)
 {
+#ifdef __linux__
+    if (djinn_saved_argc == 0) return index == 0 ? program_invocation_name : NULL;
+#endif
     if (index < 0 || index >= djinn_saved_argc || !djinn_saved_argv) return NULL;
     return djinn_saved_argv[index];
 }
