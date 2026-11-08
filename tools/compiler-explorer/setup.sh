@@ -22,14 +22,22 @@ fi
 [ -n "$compiler" ] && [ -f "$compiler" ] || { echo "djinnc not found: run tools/bootstrap.sh or set DJINNC" >&2; exit 1; }
 compiler="$(cd "$(dirname "$compiler")" && pwd -W 2>/dev/null || pwd)/$(basename "$compiler")"
 runtime="$(cd "$root/runtime" && pwd -W 2>/dev/null || pwd)"
+runtime_flags="--runtime-dir $runtime"
+for lib in "$root/build/runtime/djinn_runtime.lib" "$root/build/runtime/libdjinn_runtime.a"; do
+    if [ -f "$lib" ]; then
+        lib="$(cd "$(dirname "$lib")" && pwd -W 2>/dev/null || pwd)/$(basename "$lib")"
+        runtime_flags="$runtime_flags --runtime-lib $lib --lld"
+        break
+    fi
+done
 
 cat > "$ce/etc/config/djinn.local.properties" <<PROPS
 compilers=djinnc:djinnclib
 compiler.djinnc.exe=$compiler
-compiler.djinnc.options=--runtime-dir $runtime
+compiler.djinnc.options=--std $runtime_flags
 compiler.djinnclib.exe=$compiler
 compiler.djinnclib.name=djinnc (library view)
-compiler.djinnclib.options=--runtime-dir $runtime --emit-lib-view
+compiler.djinnclib.options=--std $runtime_flags --emit-lib-view
 PROPS
 
 (cd "$ce" && npm install)
