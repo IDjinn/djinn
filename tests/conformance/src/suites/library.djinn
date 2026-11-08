@@ -70,4 +70,272 @@ i32 main() {
 """;
         Verify.source(source).links_library(library, Expected.exit(36));
     }
+
+    [Test]
+    void operators_cross_the_library() {
+        str library = """
+namespace vectors;
+
+struct Vec2 {
+    i32 x;
+    i32 y;
+}
+
+impl Vec2 {
+    operator +(Vec2 left, Vec2 right) -> Vec2 {
+        return { .x = left.x + right.x, .y = left.y + right.y };
+    }
+
+    operator ==(Vec2 left, Vec2 right) -> bool {
+        return left.x == right.x && left.y == right.y;
+    }
+}
+
+public Vec2 make(i32 x, i32 y) {
+    Vec2 value = { .x = x, .y = y };
+    return value;
+}
+""";
+        str source = """
+namespace app;
+import vectors;
+
+i32 main() {
+    Vec2 sum = make(1, 2) + make(3, 4);
+    if (sum == make(4, 6)) {
+        return sum.x * 10 + sum.y;
+    }
+    return 1;
+}
+""";
+        Verify.source(source).links_library(library, Expected.exit(46));
+    }
+
+    [Test]
+    void overflow_modes_cross_the_library() {
+        str library = """
+namespace modes;
+
+public i32w wrap(i32w value) {
+    return value + 1w;
+}
+
+public i32s clamp(i32s value) {
+    return value + 1s;
+}
+
+public i32 add(i32 a, i32 b) throws(Overflow) {
+    return a + b;
+}
+
+public T twice<T>(T value) {
+    return value + value;
+}
+""";
+        str source = """
+namespace app;
+import modes;
+
+i32 main() {
+    if (wrap(2147483647w) != 0 - 2147483647 - 1) { return 1; }
+    if (clamp(2147483647s) != 2147483647s) { return 2; }
+    i32 caught = try add(2147483647, 1) ?: 7;
+    if (caught != 7) { return 3; }
+    if (twice<i32>(21) != 42) { return 4; }
+    return 42;
+}
+""";
+        Verify.source(source).links_library(library, Expected.exit(42));
+    }
+
+    [Test]
+    void interfaces_and_impls_cross_the_library() {
+        str library = """
+namespace shapes;
+
+interface Ranked {
+    i32 rank();
+}
+
+interface Sized {
+    i32 size();
+}
+
+struct Crate {
+    i32 number;
+    i32 volume;
+}
+
+impl Ranked, Sized for Crate {
+    i32 rank() {
+        return this.number;
+    }
+
+    i32 size() {
+        return this.volume;
+    }
+}
+
+struct Holder<T> where T : Ranked {
+    T item;
+
+    public i32 best() {
+        return this.item.rank();
+    }
+}
+
+public Crate make(i32 number, i32 volume) {
+    Crate crate = { .number = number, .volume = volume };
+    return crate;
+}
+""";
+        str source = """
+namespace app;
+import shapes;
+
+struct Pallet {
+    i32 level;
+}
+
+impl Ranked for Pallet {
+    i32 rank() {
+        return this.level;
+    }
+}
+
+i32 main() {
+    Crate crate = make(5, 6);
+    Holder<Crate> holder = { .item = crate };
+    Pallet pallet = { .level = 30 };
+    Holder<Pallet> other = { .item = pallet };
+    return holder.best() + crate.size() + other.best() + 1;
+}
+""";
+        Verify.source(source).links_library(library, Expected.exit(42));
+    }
+
+    [Test]
+    void enums_cross_the_library() {
+        str library = """
+namespace messages;
+
+enum Light {
+    Red(),
+    Green(),
+    Blue()
+}
+
+union Message {
+    Empty(),
+    Number(i32),
+    Pair(i32, i32)
+}
+
+impl Message {
+    i32 weight() {
+        return switch this {
+            Empty -> 1,
+            Number n -> n,
+            Pair a b -> a * b
+        };
+    }
+}
+
+public Message pair(i32 a, i32 b) {
+    return Message::Pair(a, b);
+}
+
+public Light green() {
+    return Light::Green();
+}
+""";
+        str source = """
+namespace app;
+import messages;
+
+i32 main() {
+    Message number = Message::Number(30);
+    Light light = green();
+    i32 shade = switch light {
+        Red -> 0,
+        Green -> 2,
+        Blue -> 3
+    };
+    return pair(2, 5).weight() + number.weight() + shade;
+}
+""";
+        Verify.source(source).links_library(library, Expected.exit(42));
+    }
+
+    [Test]
+    void namespaces_and_imports_cross_the_library() {
+        str library = """
+namespace outer::inner;
+
+struct Point {
+    i32 x;
+    i32 y;
+}
+
+public Point origin(i32 x) {
+    Point point = { .x = x, .y = 2 };
+    return point;
+}
+
+public i32 sum(Point point) {
+    return point.x + point.y;
+}
+""";
+        str source = """
+namespace app;
+import outer::inner;
+
+i32 main() {
+    Point point = origin(40);
+    return sum(point);
+}
+""";
+        Verify.source(source).links_library(library, Expected.exit(42));
+    }
+
+    [Test]
+    void attributes_and_reflection_cross_the_library() {
+        str library = """
+namespace tagged;
+
+attribute Stage(AttributeTarget.All) {
+    i32 mask;
+    i8* label;
+}
+
+[Stage(mask = 3, label = "both")]
+public i32 target() {
+    return 1;
+}
+
+[Reflect]
+struct Record {
+    i32 id;
+    mut i32 count;
+}
+""";
+        str source = """
+namespace app;
+import tagged;
+
+i32 main() {
+    MethodInfo* info = typeof(target);
+    Stage* stage = (Stage*)info.attrs[0].payload;
+    if (stage.mask != 3 || stage.label[0] != 98) {
+        return 1;
+    }
+    TypeInfoExt* record = typeof(Record);
+    if (record.fieldCount != 2) {
+        return 2;
+    }
+    return 42;
+}
+""";
+        Verify.source(source).links_library(library, Expected.exit(42));
+    }
 }

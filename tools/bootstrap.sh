@@ -58,6 +58,7 @@ if [ -n "$driver" ]; then
     workflow_out="$(cd "$out" && pwd)"
     workflow_flags=(--lib-dir "$out/libs" --std-dir "$root/std" --runtime-dir "$runtime" ${link_flags[@]+"${link_flags[@]}"})
     bash "$root/tools/seed_source.sh" "$out/seed_src"
+    bash "$root/tools/build_std.sh" "$driver" "$out/libs/std.djlib" --runtime-dir "$runtime" ${link_flags[@]+"${link_flags[@]}"} >"$out/driver.log" 2>&1 \n        || { cat "$out/driver.log"; echo "FAIL the std library did not build"; exit 1; }
     "$driver" libs/testing -o "$out/libs/testing.djlib" "${workflow_flags[@]}" >"$out/driver.log" 2>&1 \
         || { cat "$out/driver.log"; echo "FAIL the testing library did not build"; exit 1; }
     BOOTSTRAP_SEED="$seed" BOOTSTRAP_OUT="$workflow_out" BOOTSTRAP_SEED_SOURCE="$workflow_out/seed_src" BOOTSTRAP_RUNTIME_DIR="$runtime" BOOTSTRAP_RUNTIME_LIB="$runtime_lib" BOOTSTRAP_LLD="$use_lld" \
