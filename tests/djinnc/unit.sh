@@ -13,6 +13,7 @@ if [ -n "${DJINN_USE_LLD:-}" ]; then
 fi
 exe=""
 case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) exe=".exe" ;; esac
+bash "$root/tools/build_std.sh" "$compiler" "$out/libs/std.djlib" --runtime-dir "$runtime" --runtime-lib "$runtime_lib" ${DJINN_USE_LLD:+--lld}
 "$compiler" libs/testing -o "$out/libs/testing.djlib" "${flags[@]}"
 "$compiler" test libs/testing -o "$out/testing_tests$exe" "${flags[@]}"
 "$compiler" test djinnc -o "$out/djinnc_tests$exe" "${flags[@]}"

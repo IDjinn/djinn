@@ -11,6 +11,7 @@ flags=(--lib-dir "$libs" --std-dir "$root/std" --runtime-dir "$runtime" --runtim
 if [ -n "${DJINN_USE_LLD:-}" ]; then
     flags+=(--lld)
 fi
+bash "$root/tools/build_std.sh" "$compiler" "$libs/std.djlib" --runtime-dir "$runtime" --runtime-lib "$runtime_lib" ${DJINN_USE_LLD:+--lld}
 "$compiler" "$root/libs/testing" -o "$libs/testing.djlib" "${flags[@]}"
 "$compiler" "$root/djinnc/testing" -o "$libs/djinnc_testing.djlib" "${flags[@]}"
 "$compiler" "$root/tests/conformance" -o "$output" "${flags[@]}"

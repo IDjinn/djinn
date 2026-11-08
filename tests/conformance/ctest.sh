@@ -20,5 +20,5 @@ bash tools/seed_source.sh "$out/seed_src"
 "$out/djinnc_seeded" djinnc -o "$out/djinnc" "${flags[@]}"
 bash tests/conformance/build.sh "$out/djinnc" "$runtime_lib" "$out/runner"
 
-"$out/runner" --compiler "$out/djinnc" --runtime-lib "$runtime_lib" --runtime-dir "$root/runtime" \
+"$out/runner" --compiler "$out/djinnc" --lib-dir "$out/libs" --runtime-lib "$runtime_lib" --runtime-dir "$root/runtime" \
     --out "$out/cases" --report "$out/report.json" ${DJINN_USE_LLD:+--lld} "$@"

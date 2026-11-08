@@ -27,6 +27,10 @@ The compiler generates async code by default.
 - A new feature or rule needs tests for it: new cases in `tests/conformance/src/suites/`, a script under
   `tests/djinnc/` when it involves `djinn.proj` or command-line options, and updates to every existing test whose
   expectation the change moves.
+- A new language feature must be checked against the library system (`djinnc/LIBRARY.md`): decide whether a `.djlib`
+  interface, object or loader needs to change for it (macros, operators, attributes, reflection, generics, interfaces,
+  impls, enums, numbers, structs), and add a case to `tests/conformance/src/suites/library.djinn` when it crosses the
+  library boundary. `std` is consumed as `std.djlib`, so a feature that only works from source breaks `--std`.
 - Error reporting uses macros that take a `DiagnosticCode`, message, and source location, then call
   `_diagnostics.emitAndPrint()` which prints the error with file/line info for the user:
   - **Parser**: `PARSER_ERROR(code, msg, location)` / `PARSER_WARNING(code, msg, location)`

@@ -16,6 +16,7 @@ case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) exe=".exe" ;; esac
 
 fail() { echo "FAIL graph: $1"; exit 1; }
 
+bash "$root/tools/build_std.sh" "$compiler" "$out/libs/std.djlib" --runtime-dir "$runtime" --runtime-lib "$runtime_lib" ${DJINN_USE_LLD:+--lld}
 "$compiler" libs/testing -o "$out/libs/testing.djlib" "${flags[@]}"
 
 # Invalid graphs are rejected before any test runs.
