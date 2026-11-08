@@ -18,7 +18,7 @@ grep -q "llvm.experimental.constrained.fdiv" "$out/project.ll" || fail "fp-env: 
 
 # Command-line options win over djinn.proj.
 "$compiler" tests/ieee754_project -o "$out/override" --emit-ir --ieee754=2019 --fp-env=default "${flags[@]}" > "$out/override.log" 2>&1 || { cat "$out/override.log"; fail "the override must compile"; }
-grep -q "llvm.minimumnum" "$out/override.ll" || fail "--ieee754=2019 must win over djinn.proj"
+grep -q "llvm.minimum" "$out/override.ll" || fail "--ieee754=2019 must win over djinn.proj"
 grep -q "constrained" "$out/override.ll" && fail "--fp-env=default must win over djinn.proj"
 
 "$compiler" tests/ieee754_project -o "$out/run" --run "${flags[@]}" > "$out/run.log" 2>&1 && status=0 || status=$?

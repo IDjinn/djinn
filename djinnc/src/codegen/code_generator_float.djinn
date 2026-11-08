@@ -10,13 +10,35 @@ impl CodeGenerator {
         LLVMAddCallSiteAttribute(call, 4294967295, LLVMCreateEnumAttribute(this.context, kind, 0));
     }
 
+    i32 number_base(bool minimum_side) {
+        if (minimum_side) { return FloatBuiltin.MINIMUM; }
+        return FloatBuiltin.MAXIMUM;
+    }
+
+    // minimumNumber/maximumNumber (2019) return the other operand when one is a NaN. llvm.minimumnum orders -0 and
+    // +0 wrongly on some x86 lowerings, so they are built from llvm.minimum/maximum, which propagates NaN and
+    // orders the zeros correctly, plus two selects that drop the NaN.
+    ptr number_result(ptr first, ptr second, ptr combined) {
+        ptr first_is_nan = LLVMBuildFCmp(this.builder, LlvmConst.REAL_UNE, first, first, "float.nan.first");
+        ptr second_is_nan = LLVMBuildFCmp(this.builder, LlvmConst.REAL_UNE, second, second, "float.nan.second");
+        ptr keep_first = LLVMBuildSelect(this.builder, second_is_nan, first, combined, "float.drop.second");
+        return LLVMBuildSelect(this.builder, first_is_nan, second, keep_first, "float.drop.first");
+    }
+
+    bool is_number_operation(i32 builtin, FloatSettings* settings) {
+        if (builtin == FloatBuiltin.MINIMUM_NUMBER || builtin == FloatBuiltin.MAXIMUM_NUMBER) {
+            return true;
+        }
+        return (builtin == FloatBuiltin.MIN || builtin == FloatBuiltin.MAX) && settings.standard == FloatStandard::IEEE754_2019;
+    }
+
     // Maps x.min(y), x.minimum(y), a.fma(b, c)... to the LLVM intrinsic with the semantics of the selected revision:
     //   fma             -> llvm.fma            (2008 fusedMultiplyAdd: a * b + c with a single rounding)
     //   minimum/maximum -> llvm.minimum/maximum (2019: NaN propagates, -0 < +0)
-    //   minimum_number  -> llvm.minimumnum      (2019 minimumNumber: NaN ignored, -0 < +0)
+    //   minimum_number  -> llvm.minimum plus NaN selects (2019 minimumNumber: NaN ignored, -0 < +0)
     //   min/max         -> 2019 minimumNumber, 2008 minNum (llvm.minnum), 1985 a compare and select
     // In the strict environment the experimental.constrained variants keep the operation from being folded or
-    // moved across fesetround/fetestexcept; minimumnum has no constrained variant and stays a strictfp call.
+    // moved across fesetround/fetestexcept.
     ptr<i8> float_builtin_intrinsic(i32 builtin, FloatSettings* settings) {
         bool strict = settings.strict;
         FloatStandard standard = settings.standard;
@@ -35,8 +57,7 @@ impl CodeGenerator {
         bool minimum_side = builtin == FloatBuiltin.MIN || builtin == FloatBuiltin.MINIMUM_NUMBER;
         bool number = builtin == FloatBuiltin.MINIMUM_NUMBER || builtin == FloatBuiltin.MAXIMUM_NUMBER || standard == FloatStandard::IEEE754_2019;
         if (number) {
-            if (minimum_side) { return "llvm.minimumnum"; }
-            return "llvm.maximumnum";
+            return this.float_builtin_intrinsic(this.number_base(minimum_side), settings);
         }
         if (minimum_side) {
             if (strict) { return "llvm.experimental.constrained.minnum"; }
@@ -82,6 +103,9 @@ impl CodeGenerator {
         ptr call = this.coro_intrinsic(name, types, 1, args, count, "float");
         if (settings.strict) {
             this.mark_strict_call(call);
+        }
+        if (this.is_number_operation(builtin, settings)) {
+            return Value.create(this.number_result(args[0], args[1], call), type);
         }
         return Value.create(call, type);
     }
