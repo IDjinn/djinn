@@ -1,8 +1,9 @@
 # Changelog
 
-## [Unreleased]
+## [0.1.1] - 2026-11-08
 
-- Windows x86_64 package in the release workflow, and a Windows job in CI.
+- Windows x86_64 package (`djinn-<tag>-windows-x86_64.zip` with `LLVM-C.dll`) in the release workflow.
+- Windows job in CI: bootstrap, fixpoint, samples and the full conformance suite.
 
 ## [0.1.0] - 2026-11-08
 
@@ -51,3 +52,5 @@ First release of the self-hosted `djinnc` compiler, built from the `stage0-final
 - The conformance runner compares exit codes modulo 256 outside Windows.
 
 [0.1.0]: https://github.com/IDjinn/djinn-lang-v3/releases/tag/v0.1.0
+
+[0.1.1]: https://github.com/IDjinn/djinn-lang-v3/releases/tag/v0.1.1
