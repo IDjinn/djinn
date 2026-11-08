@@ -99,6 +99,80 @@ impl TypeChecker {
         return 0;
     }
 
+    unsafe void extend_span(Node* node, i32 line) {
+        if (node == null) {
+            return;
+        }
+        if (node.line() == line) {
+            if (node.column() < this.span_start) {
+                this.span_start = node.column();
+            }
+            mut i32 end = node.column() + node.length();
+            if (node.kind() == NodeKind::STRING_LITERAL) {
+                end = end + 2;
+            }
+            if (end > this.span_end) {
+                this.span_end = end;
+            }
+        }
+        this.extend_span(node.first(), line);
+        this.extend_span(node.second(), line);
+        this.extend_span(node.third(), line);
+        if (node.kind() == NodeKind::CALL) {
+            for (mut i32 i = 0; i < node.count(); i = i + 1) {
+                this.extend_span(node.child(i), line);
+            }
+        }
+    }
+
+    unsafe void error_over_expression(Node* at, i32 code, ptr<i8> message) {
+        this.span_start = at.column();
+        this.span_end = at.column();
+        this.extend_span(at, at.line());
+        Diagnostics* diagnostics = this.diagnostics;
+        diagnostics.error_span(code, at.file_name(), at.line(), this.span_start, this.span_end - this.span_start, message);
+    }
+
+    unsafe i32 first_unfit_argument(Node* call, IdList* params, IdList* types, i32 offset, i32 fixed) {
+        for (mut i32 i = 0; i < call.count() && i < fixed; i = i + 1) {
+            u32 expected = params.get(i + offset);
+            u32 actual = types.get(i);
+            bool literal = call.child(i).kind() == NodeKind::STRING_LITERAL;
+            bool numbers = (Types.is_integer(actual) || Types.is_float(actual)) && (Types.is_integer(expected) || Types.is_float(expected));
+            bool pointers = Types.is_pointer(actual) && Types.is_pointer(expected) && !literal
+                && (Types.element(actual) == Types.element(expected) || Types.is_void(Types.element(actual)) || Types.is_void(Types.element(expected)));
+            bool text = literal && (expected == this.core_type("str") || expected == this.core_type("string")
+                || (Types.is_pointer(expected) && (Types.element(expected) == Types.element(actual) || Types.is_void(Types.element(expected)))));
+            if (actual != 0 && actual != expected && !numbers && !pointers && !text) {
+                return i;
+            }
+        }
+        return 0 - 1;
+    }
+
+    unsafe void error_unfit_argument(Node* call, FunctionInfo* candidate, IdList* types, i32 index, i32 offset) {
+        SymbolTable* symbols = this.symbols;
+        ByteBuffer* message = ByteBuffer.create();
+        message.append("invalid argument ");
+        message.append_int(index + 1);
+        message.append(": got '");
+        if (call.child(index).kind() == NodeKind::STRING_LITERAL) {
+            message.append("str");
+        } else {
+            symbols.describe_type(types.get(index), message);
+        }
+        message.append("', '");
+        mut i32 base_length = 0;
+        while (candidate.name[base_length] != 0 && candidate.name[base_length] != 36) {
+            base_length = base_length + 1;
+        }
+        message.append_slice(candidate.name, base_length);
+        message.append("' requires '");
+        symbols.describe_type(candidate.param_types.get(index + offset), message);
+        message.append("'");
+        this.error_over_expression(call.child(index), DiagnosticErrors.NO_MATCHING_OVERLOAD, message.cstr());
+    }
+
     unsafe FunctionInfo* pick_overload(FunctionInfo* head, Node* call, i32 offset) {
         IdList* types = IdList.create();
         for (mut i32 i = 0; i < call.count(); i = i + 1) {
@@ -112,6 +186,9 @@ impl TypeChecker {
         mut FunctionInfo* best = (FunctionInfo*)0;
         mut i32 best_score = 0 - 1;
         mut bool ambiguous = false;
+        mut FunctionInfo* sole = (FunctionInfo*)0;
+        mut i32 sole_count = 0;
+        mut i32 sole_bad = 0 - 1;
         mut FunctionInfo* candidate = head;
         while (candidate != null) {
             IdList* params = candidate.param_types;
@@ -129,6 +206,16 @@ impl TypeChecker {
                         } else {
                             fits = false;
                         }
+                    } else if (call.child(i).kind() == NodeKind::STRING_LITERAL) {
+                        if (expected == this.core_type("str")) {
+                            score = score + 5;
+                        } else if (expected == this.core_type("string")) {
+                            score = score + 3;
+                        } else if (Types.is_pointer(expected) && (Types.element(expected) == Types.element(actual) || Types.is_void(Types.element(expected)))) {
+                            score = score + 2;
+                        } else {
+                            fits = false;
+                        }
                     } else if (actual == expected) {
                         score = score + 4;
                     } else if ((Types.is_integer(actual) || Types.is_float(actual)) && (Types.is_integer(expected) || Types.is_float(expected))) {
@@ -136,8 +223,10 @@ impl TypeChecker {
                     } else if (Types.is_pointer(actual) && Types.is_pointer(expected)) {
                         if (Types.element(actual) == Types.element(expected)) {
                             score = score + 3;
-                        } else {
+                        } else if (Types.is_void(Types.element(actual)) || Types.is_void(Types.element(expected))) {
                             score = score + 1;
+                        } else {
+                            fits = false;
                         }
                         if (Types.is_raw_pointer(actual) == Types.is_raw_pointer(expected)) {
                             score = score + 1;
@@ -145,6 +234,11 @@ impl TypeChecker {
                     } else {
                         fits = false;
                     }
+                }
+                if (!fits) {
+                    sole = candidate;
+                    sole_count = sole_count + 1;
+                    sole_bad = this.first_unfit_argument(call, params, types, offset, fixed);
                 }
                 if (fits) {
                     if (candidate.is_extern) {
@@ -162,7 +256,11 @@ impl TypeChecker {
             candidate = candidate.overload;
         }
         if (best == null) {
-            this.error_code(call, DiagnosticErrors.NO_MATCHING_OVERLOAD, "no overload matches these arguments");
+            if (sole_count == 1 && sole_bad >= 0) {
+                this.error_unfit_argument(call, sole, types, sole_bad, offset);
+            } else {
+                this.error_code(call, DiagnosticErrors.NO_MATCHING_OVERLOAD, "no overload matches these arguments");
+            }
             return (FunctionInfo*)0;
         }
         if (ambiguous) {
@@ -235,6 +333,14 @@ impl TypeChecker {
         if (passed_number && Types.is_pointer(wanted) && value.kind() != NodeKind::NULL_LITERAL) {
             this.error_code(value, DiagnosticErrors.IMPLICIT_CONVERSION, "a number does not convert to a pointer implicitly; use an explicit cast");
         }
+        if (Types.is_pointer(passed) && Types.is_pointer(wanted) && Types.element(passed) != Types.element(wanted)
+            && !Types.is_void(Types.element(passed)) && !Types.is_void(Types.element(wanted))) {
+            if (value.kind() == NodeKind::STRING_LITERAL) {
+                this.error_code(value, DiagnosticErrors.IMPLICIT_CONVERSION, "a string literal converts only to str, string, i8* or ptr<i8>");
+            } else {
+                this.error_code(value, DiagnosticErrors.IMPLICIT_CONVERSION, "a pointer does not convert to a pointer of another type implicitly; use an explicit cast");
+            }
+        }
     }
 
     void require_argument_shape(Node* argument, u32 passed, u32 wanted) {
@@ -249,7 +355,7 @@ impl TypeChecker {
         bool passed_scalar = Types.is_integer(passed) || Types.is_float(passed) || Types.is_pointer(passed);
         bool wanted_scalar = Types.is_integer(wanted) || Types.is_float(wanted) || Types.is_pointer(wanted);
         if ((passed_struct && wanted_scalar) || (passed_scalar && wanted_struct)) {
-            this.error_code(argument, DiagnosticErrors.ARGUMENT_TYPE_MISMATCH, "argument type does not match the parameter; a struct and a scalar or pointer are not convertible (use .ptr() to get the text pointer of a str or string)");
+            this.error_code(argument, DiagnosticErrors.ARGUMENT_TYPE_MISMATCH, "argument type does not match the parameter; a struct and a scalar or pointer are not convertible (use .toCString() to get a null-terminated text pointer of a str or string)");
         }
     }
 
