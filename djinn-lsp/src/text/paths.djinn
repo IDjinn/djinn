@@ -1,0 +1,176 @@
+namespace djinnc;
+
+struct Paths {
+    public static unsafe ptr<i8> normalize(ptr<i8> path) {
+        i32 length = strlen(path);
+        ptr<i8> copy = Strings.duplicate(path, length);
+        for (mut i32 i = 0; i < length; i = i + 1) {
+            if (copy[i] == 92) {
+                copy[i] = 47;
+            }
+        }
+        ByteBuffer* out = ByteBuffer.create();
+        mut i32 start = 0;
+        if (length >= 2 && copy[1] == 58 && Strings.is_letter((i32)copy[0])) {
+            mut i32 drive = (i32)copy[0];
+            if (drive >= 65 && drive <= 90) {
+                drive = drive + 32;
+            }
+            out.append_char(drive);
+            out.append_char(58);
+            start = 2;
+        }
+        bool absolute = start < length && copy[start] == 47;
+        if (absolute) {
+            out.append_char(47);
+        }
+        PointerList* segments = PointerList.create();
+        mut i32 position = start;
+        while (position <= length) {
+            mut i32 end = position;
+            while (end < length && copy[end] != 47) {
+                end = end + 1;
+            }
+            i32 size = end - position;
+            if (size == 0 || (size == 1 && copy[position] == 46)) {
+                position = end + 1;
+                continue;
+            }
+            if (size == 2 && copy[position] == 46 && copy[position + 1] == 46) {
+                if (segments.length > 0 && !Strings.same((ptr<i8>)segments.get(segments.length - 1), "..")) {
+                    segments.truncate(segments.length - 1);
+                } else if (!absolute) {
+                    segments.push((ptr)"..");
+                }
+            } else {
+                segments.push((ptr)Strings.duplicate(copy + position, size));
+            }
+            position = end + 1;
+        }
+        for (mut i32 i = 0; i < segments.length; i = i + 1) {
+            if (i > 0) {
+                out.append_char(47);
+            }
+            out.append((ptr<i8>)segments.get(i));
+        }
+        return out.cstr();
+    }
+
+    public static unsafe ptr<i8> directory(ptr<i8> path) {
+        mut i32 last = 0 - 1;
+        i32 length = strlen(path);
+        for (mut i32 i = 0; i < length; i = i + 1) {
+            if (path[i] == 47 || path[i] == 92) {
+                last = i;
+            }
+        }
+        if (last < 0) {
+            return Strings.duplicate(".", 1);
+        }
+        if (last == 0) {
+            return Strings.duplicate("/", 1);
+        }
+        return Strings.duplicate(path, last);
+    }
+
+    public static unsafe ptr<i8> base_name(ptr<i8> path) {
+        mut i32 last = 0 - 1;
+        i32 length = strlen(path);
+        for (mut i32 i = 0; i < length; i = i + 1) {
+            if (path[i] == 47 || path[i] == 92) {
+                last = i;
+            }
+        }
+        return path + last + 1;
+    }
+
+    public static unsafe ptr<i8> join(ptr<i8> left, ptr<i8> right) {
+        ByteBuffer* out = ByteBuffer.create();
+        out.append(left);
+        i32 size = strlen(left);
+        if (size > 0 && left[size - 1] != 47 && left[size - 1] != 92) {
+            out.append_char(47);
+        }
+        out.append(right);
+        return Paths.normalize(out.cstr());
+    }
+
+    public static unsafe bool exists(ptr<i8> path) {
+        ptr file = fopen(path, "rb");
+        if (file == null) {
+            return false;
+        }
+        fclose(file);
+        return true;
+    }
+
+    public static unsafe bool ends_with(ptr<i8> text, ptr<i8> suffix) {
+        i32 length = strlen(text);
+        i32 size = strlen(suffix);
+        if (size > length) {
+            return false;
+        }
+        return memcmp((ptr)(text + length - size), (ptr)suffix, (u64)size) == 0;
+    }
+
+    public static unsafe bool contains(ptr<i8> text, ptr<i8> part) {
+        i32 length = strlen(text);
+        i32 size = strlen(part);
+        for (mut i32 i = 0; i + size <= length; i = i + 1) {
+            if (memcmp((ptr)(text + i), (ptr)part, (u64)size) == 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+}
+
+struct Uri {
+    public static unsafe ptr<i8> to_path(ptr<i8> uri) {
+        i32 length = strlen(uri);
+        mut i32 start = 0;
+        if (Strings.starts_with(uri, 0, length, "file://")) {
+            start = 7;
+        }
+        ByteBuffer* out = ByteBuffer.create();
+        mut i32 i = start;
+        while (i < length) {
+            i32 c = (i32)(u8)uri[i];
+            if (c == 37 && i + 2 < length + 0 && Strings.digit_value((i32)uri[i + 1]) >= 0 && Strings.digit_value((i32)uri[i + 2]) >= 0) {
+                out.append_char(Strings.digit_value((i32)uri[i + 1]) * 16 + Strings.digit_value((i32)uri[i + 2]));
+                i = i + 3;
+            } else {
+                out.append_char(c);
+                i = i + 1;
+            }
+        }
+        mut ptr<i8> decoded = out.cstr();
+        i32 size = strlen(decoded);
+        if (size >= 3 && decoded[0] == 47 && decoded[2] == 58 && Strings.is_letter((i32)decoded[1])) {
+            decoded = decoded + 1;
+        }
+        return Paths.normalize(decoded);
+    }
+
+    public static unsafe ptr<i8> from_path(ptr<i8> path) {
+        ByteBuffer* out = ByteBuffer.create();
+        out.append("file://");
+        i32 length = strlen(path);
+        if (length > 0 && path[0] != 47) {
+            out.append_char(47);
+        }
+        ptr<i8> digits = "0123456789ABCDEF";
+        for (mut i32 i = 0; i < length; i = i + 1) {
+            i32 c = (i32)(u8)path[i];
+            bool plain = Strings.is_letter(c) || Strings.is_digit(c) || c == 45 || c == 95 || c == 46 || c == 126 || c == 47 || c == 58;
+            if (plain) {
+                out.append_char(c);
+            } else {
+                out.append_char(37);
+                out.append_char((i32)digits[c >> 4]);
+                out.append_char((i32)digits[c & 15]);
+            }
+        }
+        return out.cstr();
+    }
+}

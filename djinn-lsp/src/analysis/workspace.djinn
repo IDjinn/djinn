@@ -1,0 +1,254 @@
+namespace djinnc;
+
+unsafe static mut ptr persistent_arena = null;
+unsafe static mut ptr workspace_state = null;
+
+struct Heap {
+    public static unsafe ptr enter_persistent() {
+        if (persistent_arena == null) {
+            persistent_arena = (ptr)Arena.create(65536);
+        }
+        ptr saved = process_arena;
+        process_arena = persistent_arena;
+        return saved;
+    }
+
+    public static unsafe void leave(ptr saved) {
+        process_arena = saved;
+    }
+}
+
+struct Workspace {
+    PointerList* units;
+    PointerList* roots;
+    ptr<i8> runtime_dir;
+    ptr<i8> std_dir;
+    ptr<i8> compiler;
+    bool check_on_change;
+    i32 debounce_ms;
+
+    Arena* index_arena;
+    ptr<ptr<i8>> index_keys;
+    ptr<ptr> index_lists;
+    i32 index_capacity;
+    bool index_dirty;
+
+    public static unsafe Workspace* get() {
+        if (workspace_state == null) {
+            ptr saved = Heap.enter_persistent();
+            Workspace* created = (Workspace*)Memory.zalloc(sizeof(Workspace));
+            created.units = PointerList.create();
+            created.roots = PointerList.create();
+            created.check_on_change = true;
+            created.debounce_ms = 500;
+            created.index_dirty = true;
+            workspace_state = (ptr)created;
+            Heap.leave(saved);
+        }
+        return (Workspace*)workspace_state;
+    }
+
+    public static unsafe Unit* find_path(ptr<i8> path) {
+        Workspace* ws = Workspace.get();
+        for (mut i32 i = 0; i < ws.units.length; i = i + 1) {
+            Unit* unit = (Unit*)ws.units.get(i);
+            if (Strings.same(unit.path, path)) {
+                return unit;
+            }
+        }
+        return (Unit*)0;
+    }
+
+    public static unsafe Unit* find_uri(ptr<i8> uri) {
+        Workspace* ws = Workspace.get();
+        for (mut i32 i = 0; i < ws.units.length; i = i + 1) {
+            Unit* unit = (Unit*)ws.units.get(i);
+            if (Strings.same(unit.uri, uri)) {
+                return unit;
+            }
+        }
+        return Workspace.find_path(Uri.to_path(uri));
+    }
+
+    public static unsafe Unit* ensure_unit(ptr<i8> path, ptr<i8> uri) {
+        Unit* existing = Workspace.find_path(path);
+        if (existing != null) {
+            if (uri != null) {
+                ptr saved = Heap.enter_persistent();
+                existing.uri = Strings.duplicate(uri, strlen(uri));
+                Heap.leave(saved);
+            }
+            return existing;
+        }
+        ptr saved = Heap.enter_persistent();
+        ptr<i8> stored_path = Strings.duplicate(path, strlen(path));
+        mut ptr<i8> stored_uri = null;
+        if (uri != null) {
+            stored_uri = Strings.duplicate(uri, strlen(uri));
+        } else {
+            stored_uri = Uri.from_path(path);
+        }
+        Unit* unit = Unit.create(stored_path, stored_uri);
+        Workspace* ws = Workspace.get();
+        ws.units.push((ptr)unit);
+        Heap.leave(saved);
+        return unit;
+    }
+
+    public static unsafe bool load_from_disk(Unit* unit) {
+        i32 size = 0;
+        ptr<i8> data = Files.read_bytes(unit.path, &size);
+        if (data == null) {
+            return false;
+        }
+        unit.set_text(data, size);
+        unit.dirty = false;
+        Workspace.mark_index_dirty();
+        return true;
+    }
+
+    public static unsafe void mark_index_dirty() {
+        Workspace.get().index_dirty = true;
+    }
+
+    public static unsafe void remove_unit(Unit* unit) {
+        Workspace* ws = Workspace.get();
+        for (mut i32 i = 0; i < ws.units.length; i = i + 1) {
+            if ((Unit*)ws.units.get(i) == unit) {
+                ptr<ptr> data = ws.units.data;
+                for (mut i32 j = i; j + 1 < ws.units.length; j = j + 1) {
+                    data[j] = data[j + 1];
+                }
+                ws.units.truncate(ws.units.length - 1);
+                break;
+            }
+        }
+        if (unit.arena != null) {
+            unit.arena.destroy();
+            free((ptr)unit.arena);
+            unit.arena = (Arena*)0;
+        }
+        unit.syms = (PointerList*)0;
+        Workspace.mark_index_dirty();
+    }
+
+    static bool skipped_directory(ptr<i8> path) {
+        return Paths.contains(path, "/build/") || Paths.contains(path, "/node_modules/") || Paths.contains(path, "/.git/") || Paths.contains(path, "/cmake-build") || Paths.contains(path, "/.scratch/");
+    }
+
+    public static unsafe i32 index_directory(ptr<i8> directory, bool library) {
+        ptr<i8> listing = __djinn_list_files(directory, ".djinn");
+        if (listing == null) {
+            return 0;
+        }
+        Arena* arena = Memory.arena();
+        ArenaMark* mark = arena.mark();
+        i32 length = strlen(listing);
+        mut i32 start = 0;
+        mut i32 loaded = 0;
+        for (mut i32 i = 0; i <= length; i = i + 1) {
+            if (i == length || listing[i] == 10) {
+                if (i > start) {
+                    ptr<i8> path = Paths.normalize(Strings.duplicate(listing + start, i - start));
+                    if (!Workspace.skipped_directory(path) && Workspace.find_path(path) == null) {
+                        Unit* unit = Workspace.ensure_unit(path, null);
+                        unit.library = library;
+                        if (Workspace.load_from_disk(unit)) {
+                            loaded = loaded + 1;
+                        }
+                    }
+                }
+                start = i + 1;
+                arena.reset_to(mark);
+            }
+        }
+        free((ptr)listing);
+        return loaded;
+    }
+
+    public static unsafe void rebuild_index() {
+        Workspace* ws = Workspace.get();
+        if (!ws.index_dirty) {
+            return;
+        }
+        ws.index_dirty = false;
+        ptr saved = process_arena;
+        if (ws.index_arena != null) {
+            ws.index_arena.destroy();
+            free((ptr)ws.index_arena);
+        }
+        ws.index_arena = Arena.create(262144);
+        process_arena = (ptr)ws.index_arena;
+        mut i32 total = 0;
+        for (mut i32 i = 0; i < ws.units.length; i = i + 1) {
+            Unit* unit = (Unit*)ws.units.get(i);
+            if (unit.syms != null) {
+                total = total + unit.syms.length;
+            }
+        }
+        mut i32 capacity = 64;
+        while (capacity < total * 2 + 16) {
+            capacity = capacity * 2;
+        }
+        ws.index_capacity = capacity;
+        ws.index_keys = (ptr<ptr<i8>>)Memory.zalloc((u64)capacity * 8);
+        ws.index_lists = (ptr<ptr>)Memory.zalloc((u64)capacity * 8);
+        for (mut i32 i = 0; i < ws.units.length; i = i + 1) {
+            Unit* unit = (Unit*)ws.units.get(i);
+            if (unit.syms == null) {
+                continue;
+            }
+            for (mut i32 s = 0; s < unit.syms.length; s = s + 1) {
+                Sym* sym = (Sym*)unit.syms.get(s);
+                if (sym.kind == SK.IMPORT || sym.is_local()) {
+                    continue;
+                }
+                Workspace.insert(ws, sym);
+            }
+        }
+        process_arena = saved;
+    }
+
+    static unsafe u64 hash(ptr<i8> text) {
+        mut u64w h = 14695981039346656037;
+        i32 length = strlen(text);
+        for (mut i32 i = 0; i < length; i = i + 1) {
+            h = (h ^ (u64w)(u8)text[i]) * 1099511628211;
+        }
+        return (u64)h;
+    }
+
+    static unsafe void insert(Workspace* ws, Sym* sym) {
+        u64 mask = (u64)(ws.index_capacity - 1);
+        mut u64 slot = Workspace.hash(sym.name) & mask;
+        while (ws.index_keys[(i32)slot] != null) {
+            if (Strings.same(ws.index_keys[(i32)slot], sym.name)) {
+                PointerList* list = (PointerList*)ws.index_lists[(i32)slot];
+                list.push((ptr)sym);
+                return;
+            }
+            slot = (slot + 1) & mask;
+        }
+        PointerList* created = PointerList.create();
+        created.push((ptr)sym);
+        ws.index_keys[(i32)slot] = sym.name;
+        ws.index_lists[(i32)slot] = (ptr)created;
+    }
+
+    public static unsafe PointerList* find(ptr<i8> name) {
+        Workspace.rebuild_index();
+        Workspace* ws = Workspace.get();
+        if (ws.index_capacity == 0) {
+            return (PointerList*)0;
+        }
+        u64 mask = (u64)(ws.index_capacity - 1);
+        mut u64 slot = Workspace.hash(name) & mask;
+        while (ws.index_keys[(i32)slot] != null) {
+            if (Strings.same(ws.index_keys[(i32)slot], name)) {
+                return (PointerList*)ws.index_lists[(i32)slot];
+            }
+            slot = (slot + 1) & mask;
+        }
+        return (PointerList*)0;
+    }
+}

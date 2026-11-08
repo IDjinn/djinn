@@ -1,0 +1,209 @@
+namespace djinnc;
+
+struct ST {
+    const i32 NAMESPACE = 0;
+    const i32 TYPE = 1;
+    const i32 CLASS = 2;
+    const i32 ENUM = 3;
+    const i32 INTERFACE = 4;
+    const i32 STRUCT = 5;
+    const i32 TYPE_PARAMETER = 6;
+    const i32 PARAMETER = 7;
+    const i32 VARIABLE = 8;
+    const i32 PROPERTY = 9;
+    const i32 ENUM_MEMBER = 10;
+    const i32 FUNCTION = 11;
+    const i32 METHOD = 12;
+    const i32 MACRO = 13;
+    const i32 KEYWORD = 14;
+    const i32 DECORATOR = 15;
+}
+
+struct SM {
+    const i32 DECLARATION = 1;
+    const i32 READONLY = 2;
+    const i32 STATIC = 4;
+    const i32 DEFAULT_LIBRARY = 8;
+}
+
+struct Semantic {
+    public static unsafe ptr<i8> legend() {
+        return "{\"tokenTypes\":[\"namespace\",\"type\",\"class\",\"enum\",\"interface\",\"struct\",\"typeParameter\",\"parameter\",\"variable\",\"property\",\"enumMember\",\"function\",\"method\",\"macro\",\"keyword\",\"decorator\"],\"tokenModifiers\":[\"declaration\",\"readonly\",\"static\",\"defaultLibrary\"]}";
+    }
+
+    static unsafe i32 type_for(Sym* sym) {
+        if (sym.kind == SK.STRUCT) {
+            return ST.STRUCT;
+        }
+        if (sym.kind == SK.ENUM) {
+            return ST.ENUM;
+        }
+        if (sym.kind == SK.INTERFACE) {
+            return ST.INTERFACE;
+        }
+        if (sym.kind == SK.NAMESPACE) {
+            return ST.NAMESPACE;
+        }
+        if (sym.kind == SK.FUNCTION) {
+            if ((sym.flags & SF.MACRO) != 0) {
+                return ST.MACRO;
+            }
+            return ST.FUNCTION;
+        }
+        if (sym.kind == SK.METHOD || sym.kind == SK.CONSTRUCTOR || sym.kind == SK.OPERATOR) {
+            return ST.METHOD;
+        }
+        if (sym.kind == SK.FIELD) {
+            return ST.PROPERTY;
+        }
+        if (sym.kind == SK.ENUM_MEMBER) {
+            return ST.ENUM_MEMBER;
+        }
+        if ((sym.flags & SF.PARAM) != 0) {
+            return ST.PARAMETER;
+        }
+        return ST.VARIABLE;
+    }
+
+    static unsafe i32 modifiers_for(Sym* sym, bool declaration) {
+        mut i32 mods = 0;
+        if (declaration) {
+            mods = mods | SM.DECLARATION;
+        }
+        if (sym.kind == SK.CONSTANT || sym.kind == SK.ENUM_MEMBER) {
+            mods = mods | SM.READONLY;
+        }
+        if ((sym.flags & SF.STATIC) != 0) {
+            mods = mods | SM.STATIC;
+        }
+        if (sym.unit.library) {
+            mods = mods | SM.DEFAULT_LIBRARY;
+        }
+        return mods;
+    }
+
+    static unsafe bool is_type_parameter_name(ptr<i8> name) {
+        i32 length = strlen(name);
+        if (length > 2 || length == 0) {
+            return false;
+        }
+        for (mut i32 i = 0; i < length; i = i + 1) {
+            i32 c = (i32)name[i];
+            if (!(c >= 65 && c <= 90) && !(c >= 48 && c <= 57)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    static unsafe i32 classify(Unit* u, i32 raw, i32 c, ptr<i32> mods_out) {
+        mods_out[0] = 0;
+        i32 kind = u.tkind[raw];
+        if (u.tok_sym[raw] != null) {
+            Sym* declared = (Sym*)u.tok_sym[raw];
+            mods_out[0] = Semantic.modifiers_for(declared, true);
+            return Semantic.type_for(declared);
+        }
+        if (kind == Tk.TYPE) {
+            mods_out[0] = SM.DEFAULT_LIBRARY;
+            return ST.TYPE;
+        }
+        if (kind == Tk.KEYWORD) {
+            return 0 - 1;
+        }
+        if (u.tcls[raw] == 1) {
+            return ST.NAMESPACE;
+        }
+        if (c >= 2 && u.is_punct(c - 1, 91) && (u.is_punct(c - 2, 59) || u.is_punct(c - 2, 123) || u.is_punct(c - 2, 125) || u.is_punct(c - 2, 93))) {
+            return ST.DECORATOR;
+        }
+        if (c == 1 && u.is_punct(0, 91)) {
+            return ST.DECORATOR;
+        }
+        bool member = c > 0 && u.is_member_access(c - 1);
+        if (member) {
+            if (u.is_punct(c + 1, 40)) {
+                return ST.METHOD;
+            }
+            return ST.PROPERTY;
+        }
+        ptr<i8> name = u.token_text(raw);
+        bool scoped_left = c > 0 && u.is_scope(c - 1);
+        Sym* function = Resolve.enclosing_callable(u, raw);
+        if (function != null && !scoped_left) {
+            Sym* local = Resolve.local(u, function, name, raw);
+            if (local != null) {
+                return Semantic.type_for(local);
+            }
+        }
+        PointerList* list = Workspace.find(name);
+        if (list != null) {
+            for (mut i32 i = 0; i < list.length; i = i + 1) {
+                Sym* sym = (Sym*)list.get(i);
+                if (sym.is_global() || (sym.parent != null && sym.parent.kind == SK.NAMESPACE) || sym.is_member()) {
+                    if (sym.is_member() && !scoped_left && !(function != null && function.parent != null && Strings.same(function.parent.name, sym.parent.name))) {
+                        continue;
+                    }
+                    mods_out[0] = Semantic.modifiers_for(sym, false);
+                    return Semantic.type_for(sym);
+                }
+            }
+        }
+        if (u.is_scope(c + 1)) {
+            return ST.NAMESPACE;
+        }
+        if (u.is_punct(c + 1, 40)) {
+            return ST.FUNCTION;
+        }
+        if (Semantic.is_type_parameter_name(name)) {
+            return ST.TYPE_PARAMETER;
+        }
+        return 0 - 1;
+    }
+
+    public static unsafe ByteBuffer* tokens(Unit* u) {
+        ByteBuffer* out = ByteBuffer.create();
+        out.append("{\"data\":[");
+        mut i32 previous_line = 0;
+        mut i32 previous_character = 0;
+        mut bool any = false;
+        mut i32 mods = 0;
+        for (mut i32 c = 0; c < u.code_count; c = c + 1) {
+            i32 raw = u.code[c];
+            i32 kind = u.tkind[raw];
+            if (kind != Tk.IDENT && kind != Tk.TYPE) {
+                continue;
+            }
+            i32 type = Semantic.classify(u, raw, c, &mods);
+            if (type < 0) {
+                continue;
+            }
+            i32 start = u.tstart[raw];
+            i32 line = u.line_of(start);
+            i32 character = u.character_of_offset(line, start);
+            i32 length = u.character_of_offset(line, u.tend[raw]) - character;
+            mut i32 delta_line = line - previous_line;
+            mut i32 delta_start = character;
+            if (delta_line == 0) {
+                delta_start = character - previous_character;
+            }
+            if (any) {
+                out.append(",");
+            }
+            any = true;
+            out.append_int((i64)delta_line);
+            out.append(",");
+            out.append_int((i64)delta_start);
+            out.append(",");
+            out.append_int((i64)length);
+            out.append(",");
+            out.append_int((i64)type);
+            out.append(",");
+            out.append_int((i64)mods);
+            previous_line = line;
+            previous_character = character;
+        }
+        out.append("]}");
+        return out;
+    }
+}

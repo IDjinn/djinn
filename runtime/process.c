@@ -299,3 +299,59 @@ void __djinn_process_free(djinn_process_t* process)
     free(process);
 }
 
+
+// ── Raw stdio for protocol servers (the language server speaks over stdin/stdout) ──
+
+#ifdef _WIN32
+#include <io.h>
+#include <fcntl.h>
+#else
+#include <poll.h>
+#include <unistd.h>
+#endif
+
+void __djinn_stdio_binary(void)
+{
+#ifdef _WIN32
+    _setmode(0, _O_BINARY);
+    _setmode(1, _O_BINARY);
+#endif
+}
+
+int32_t __djinn_stdin_pending(void)
+{
+#ifdef _WIN32
+    HANDLE input = GetStdHandle(STD_INPUT_HANDLE);
+    DWORD available = 0;
+    if (!PeekNamedPipe(input, NULL, 0, NULL, &available, NULL)) return 0;
+    return available > 0 ? 1 : 0;
+#else
+    struct pollfd descriptor = {0, POLLIN, 0};
+    return poll(&descriptor, 1, 0) > 0 ? 1 : 0;
+#endif
+}
+
+int32_t __djinn_stdin_read(void* buffer, int32_t capacity)
+{
+#ifdef _WIN32
+    return _read(0, buffer, (unsigned int)capacity);
+#else
+    return (int32_t)read(0, buffer, (size_t)capacity);
+#endif
+}
+
+int32_t __djinn_stdout_write(const void* data, int32_t length)
+{
+    int32_t written = 0;
+    while (written < length)
+    {
+#ifdef _WIN32
+        int32_t count = _write(1, (const char*)data + written, (unsigned int)(length - written));
+#else
+        int32_t count = (int32_t)write(1, (const char*)data + written, (size_t)(length - written));
+#endif
+        if (count <= 0) return written;
+        written += count;
+    }
+    return written;
+}

@@ -415,6 +415,12 @@ const char* __djinn_process_stderr_data(djinn_process_t* process);
 int32_t __djinn_process_stderr_length(djinn_process_t* process);
 void __djinn_process_free(djinn_process_t* process);
 
+// Raw stdin/stdout for protocol servers: binary mode, non-blocking readiness probe, blocking read, full write.
+void __djinn_stdio_binary(void);
+int32_t __djinn_stdin_pending(void);
+int32_t __djinn_stdin_read(void* buffer, int32_t capacity);
+int32_t __djinn_stdout_write(const void* data, int32_t length);
+
 int64_t __djinn_console_write(const char* str, void* coro);
 int64_t __djinn_console_error(const char* str, void* coro);
 int64_t __djinn_console_read_line(char* buf, int64_t max, void* coro);

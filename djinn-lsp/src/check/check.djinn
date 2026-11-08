@@ -1,0 +1,405 @@
+namespace djinnc;
+
+extern "C" {
+    ptr __djinn_process_start(ptr<i8> command, ptr<i8> input, i32 input_length);
+    i32 __djinn_process_poll(ptr process);
+    void __djinn_process_kill(ptr process);
+    i32 __djinn_process_exit_code(ptr process);
+    ptr<i8> __djinn_process_stdout_data(ptr process);
+    i32 __djinn_process_stdout_length(ptr process);
+    ptr<i8> __djinn_process_stderr_data(ptr process);
+    i32 __djinn_process_stderr_length(ptr process);
+    void __djinn_process_free(ptr process);
+}
+
+struct CDiag {
+    i32 severity;
+    ptr<i8> code;
+    ptr<i8> message;
+    i32 line;
+    i32 column;
+    i32 end_line;
+    i32 end_column;
+}
+
+unsafe static mut i64 check_stamp = 0;
+unsafe static mut i32 check_counter = 0;
+
+struct Check {
+    static unsafe ptr<i8> temp_directory() {
+        mut ptr<i8> dir = getenv("TEMP");
+        if (dir == null) {
+            dir = getenv("TMPDIR");
+        }
+        if (dir == null) {
+            dir = "/tmp";
+        }
+        return Paths.normalize(dir);
+    }
+
+    static unsafe void quote(ByteBuffer* command, ptr<i8> value) {
+        command.append_char(34);
+        command.append(value);
+        command.append_char(34);
+    }
+
+    static unsafe bool wants_std(Unit* doc) {
+        return Paths.contains(doc.text, "import std") || Paths.contains(doc.text, "std::");
+    }
+
+    static unsafe PointerList* collect_files(Unit* doc, ProjectInfo* project, bool* use_std, bool* library) {
+        PointerList* files = PointerList.create();
+        if (project == null) {
+            files.push((ptr)doc.path);
+            use_std[0] = Check.wants_std(doc);
+            return files;
+        }
+        library[0] = project.library;
+        use_std[0] = project.std;
+        bool with_tests = ProjectInfo.is_test_file(doc.path);
+        ptr<i8> source_root = Paths.join(project.directory, "src");
+        ptr<i8> listing = __djinn_list_files(source_root, ".djinn");
+        if (listing != null) {
+            i32 length = strlen(listing);
+            mut i32 start = 0;
+            for (mut i32 i = 0; i <= length; i = i + 1) {
+                if (i == length || listing[i] == 10) {
+                    if (i > start) {
+                        ptr<i8> path = Paths.normalize(Strings.duplicate(listing + start, i - start));
+                        bool test = ProjectInfo.is_test_file(path);
+                        bool is_entry = project.entry != null && with_tests && Strings.same(Paths.base_name(path), project.entry);
+                        if (!is_entry && (with_tests || !test)) {
+                            files.push((ptr)path);
+                        }
+                    }
+                    start = i + 1;
+                }
+            }
+            free((ptr)listing);
+        }
+        for (mut i32 i = 0; i < project.sources.length; i = i + 1) {
+            files.push(project.sources.get(i));
+        }
+        if (!files.contains_string(doc.path)) {
+            files.push((ptr)doc.path);
+        }
+        return files;
+    }
+
+    static unsafe ptr<i8> overlay_path(Unit* unit) {
+        ByteBuffer* name = ByteBuffer.create();
+        name.append(Check.temp_directory());
+        name.append("/djinn-lsp-");
+        name.append_int(check_stamp);
+        name.append("-");
+        name.append_int((i64)check_counter);
+        name.append("-");
+        name.append(Paths.base_name(unit.path));
+        check_counter = check_counter + 1;
+        return name.cstr();
+    }
+
+    public static unsafe bool run(Unit* doc) {
+        Workspace* ws = Workspace.get();
+        if (check_stamp == 0) {
+            check_stamp = __djinn_now_us();
+        }
+        ProjectInfo* project = ProjectInfo.find(doc.path);
+        mut bool use_std = false;
+        mut bool library = false;
+        PointerList* files = Check.collect_files(doc, project, &use_std, &library);
+
+        PointerList* overlays = PointerList.create();
+        PointerList* overlay_units = PointerList.create();
+        ByteBuffer* command = ByteBuffer.create();
+        command.append_char(34);
+        command.append(ws.compiler);
+        command.append_char(34);
+        for (mut i32 i = 0; i < files.length; i = i + 1) {
+            ptr<i8> path = (ptr<i8>)files.get(i);
+            Unit* unit = Workspace.find_path(path);
+            mut ptr<i8> argument = path;
+            if (unit != null && unit.open && unit.dirty) {
+                ptr<i8> temporary = Check.overlay_path(unit);
+                Files.write_bytes(temporary, unit.text, unit.length);
+                overlays.push((ptr)temporary);
+                overlay_units.push((ptr)unit);
+                argument = temporary;
+            }
+            command.append_char(32);
+            Check.quote(command, argument);
+        }
+        command.append(" --check --diagnostics-format=json --runtime-dir ");
+        Check.quote(command, ws.runtime_dir);
+        if (use_std) {
+            command.append(" --std");
+            if (ws.std_dir != null) {
+                command.append(" --std-dir ");
+                Check.quote(command, ws.std_dir);
+            }
+        }
+        if (library) {
+            command.append(" --library");
+        }
+        if (project != null) {
+            for (mut i32 i = 0; i < project.libs.length; i = i + 1) {
+                ptr<i8> lib = Paths.join(Paths.join(project.directory, "build/libs"), (ptr<i8>)project.libs.get(i));
+                ByteBuffer* file = ByteBuffer.create();
+                file.append(lib);
+                file.append(".djlib");
+                if (Paths.exists(file.cstr())) {
+                    command.append(" --lib ");
+                    Check.quote(command, file.cstr());
+                }
+            }
+        }
+
+        ptr process = __djinn_process_start(command.cstr(), null, 0);
+        mut bool completed = false;
+        if (process != null) {
+            i64 deadline = __djinn_now_us() + 120000000;
+            completed = true;
+            while (__djinn_process_poll(process) == 0) {
+                if (Transport.has_pending() || __djinn_now_us() > deadline) {
+                    __djinn_process_kill(process);
+                    completed = false;
+                    break;
+                }
+                Transport.sleep(4);
+            }
+        } else {
+            Rpc.log(1, "djinn-lsp: could not start the compiler; set djinn.compilerPath");
+        }
+        if (completed) {
+            Check.consume(process, files, overlays, overlay_units, doc);
+            ByteBuffer* note = ByteBuffer.create();
+            note.append("djinn-lsp: checked ");
+            note.append_int((i64)files.length);
+            note.append(" file(s) with exit code ");
+            note.append_int((i64)__djinn_process_exit_code(process));
+            Rpc.log(4, note.cstr());
+        }
+        if (process != null) {
+            __djinn_process_free(process);
+        }
+        for (mut i32 i = 0; i < overlays.length; i = i + 1) {
+            remove((ptr<i8>)overlays.get(i));
+        }
+        return completed;
+    }
+
+    static unsafe void report_failure(ptr process) {
+        ByteBuffer* note = ByteBuffer.create();
+        note.append("djinn-lsp: the compiler exited with code ");
+        note.append_int((i64)__djinn_process_exit_code(process));
+        note.append(" without diagnostics; is it a recent djinnc with --check? ");
+        ptr<i8> text = __djinn_process_stderr_data(process);
+        mut i32 length = __djinn_process_stderr_length(process);
+        if (length > 600) {
+            length = 600;
+        }
+        note.append_slice(text, length);
+        Rpc.log(2, note.cstr());
+    }
+
+    static unsafe Unit* resolve_file(ptr<i8> reported, PointerList* overlays, PointerList* overlay_units) {
+        ptr<i8> path = Paths.normalize(reported);
+        for (mut i32 i = 0; i < overlays.length; i = i + 1) {
+            if (Strings.same(Paths.normalize((ptr<i8>)overlays.get(i)), path)) {
+                return (Unit*)overlay_units.get(i);
+            }
+        }
+        return Workspace.find_path(path);
+    }
+
+    static unsafe void reset_diagnostics(Unit* unit) {
+        if (unit.diag_arena != null) {
+            unit.diag_arena.destroy();
+            free((ptr)unit.diag_arena);
+            unit.diag_arena = (Arena*)0;
+        }
+        unit.diags = (PointerList*)0;
+    }
+
+    static unsafe void consume(ptr process, PointerList* files, PointerList* overlays, PointerList* overlay_units, Unit* doc) {
+        Workspace* ws = Workspace.get();
+        PointerList* touched = PointerList.create();
+        for (mut i32 i = 0; i < files.length; i = i + 1) {
+            Unit* unit = Workspace.find_path((ptr<i8>)files.get(i));
+            if (unit != null) {
+                Check.reset_diagnostics(unit);
+                unit.checked = true;
+                touched.push((ptr)unit);
+            }
+        }
+        i32 reported_count = Check.parse_stream(__djinn_process_stdout_data(process), __djinn_process_stdout_length(process), overlays, overlay_units, touched);
+        i32 stderr_count = Check.parse_stream(__djinn_process_stderr_data(process), __djinn_process_stderr_length(process), overlays, overlay_units, touched);
+        if (reported_count + stderr_count == 0 && __djinn_process_exit_code(process) != 0) {
+            Check.report_failure(process);
+        }
+        for (mut i32 i = 0; i < ws.units.length; i = i + 1) {
+            Unit* unit = (Unit*)ws.units.get(i);
+            bool reported = unit.diags != null && unit.diags.length > 0;
+            if (unit.published || (touched.contains((ptr)unit) && (unit.open || reported))) {
+                Publisher.publish(unit);
+            }
+        }
+    }
+
+    static unsafe i32 parse_stream(ptr<i8> data, i32 length, PointerList* overlays, PointerList* overlay_units, PointerList* touched) {
+        mut i32 start = 0;
+        mut i32 parsed = 0;
+        for (mut i32 i = 0; i <= length; i = i + 1) {
+            if (i == length || data[i] == 10) {
+                if (i - start > 12 && Strings.starts_with(data, start, length, "{\"severity\"")) {
+                    mut i32 end = i;
+                    if (data[end - 1] == 13) {
+                        end = end - 1;
+                    }
+                    Check.parse_line(data + start, end - start, overlays, overlay_units, touched);
+                    parsed = parsed + 1;
+                }
+                start = i + 1;
+            }
+        }
+        return parsed;
+    }
+
+    static unsafe void parse_line(ptr<i8> line, i32 length, PointerList* overlays, PointerList* overlay_units, PointerList* touched) {
+        JsonValue* value = Json.parse(line, length);
+        if (value == null || value.kind != JsonKind.OBJECT) {
+            return;
+        }
+        ptr<i8> file = value.field_string("file");
+        if (file == null) {
+            return;
+        }
+        Unit* unit = Check.resolve_file(file, overlays, overlay_units);
+        if (unit == null || unit.library) {
+            return;
+        }
+        if (!touched.contains((ptr)unit)) {
+            Check.reset_diagnostics(unit);
+            unit.checked = true;
+            touched.push((ptr)unit);
+        }
+        ptr saved = process_arena;
+        if (unit.diag_arena == null) {
+            unit.diag_arena = Arena.create(8192);
+        }
+        process_arena = (ptr)unit.diag_arena;
+        if (unit.diags == null) {
+            unit.diags = PointerList.create();
+        }
+        CDiag* diag = (CDiag*)Memory.zalloc(sizeof(CDiag));
+        diag.severity = 2;
+        ptr<i8> severity = value.field_string("severity");
+        if (severity != null && Strings.same(severity, "error")) {
+            diag.severity = 1;
+        }
+        mut ptr<i8> code = value.field_string("code");
+        if (code == null) {
+            code = "";
+        }
+        diag.code = Strings.duplicate(code, strlen(code));
+        ByteBuffer* message = ByteBuffer.create();
+        ptr<i8> text = value.field_string("message");
+        if (text != null) {
+            message.append(text);
+        }
+        JsonValue* args = value.get("args");
+        if (args != null && args.length() > 0) {
+            message.append(": ");
+            for (mut i32 i = 0; i < args.length(); i = i + 1) {
+                if (i > 0) {
+                    message.append(", ");
+                }
+                message.append_char(39);
+                message.append(args.at(i).string_or(""));
+                message.append_char(39);
+            }
+        }
+        ptr<i8> found = value.field_string("found");
+        if (found != null) {
+            message.append(" (found '");
+            message.append(found);
+            message.append("')");
+        }
+        diag.message = message.cstr();
+        diag.line = (i32)value.field_int("line", 1);
+        diag.column = (i32)value.field_int("column", 1);
+        diag.end_line = (i32)value.field_int("end_line", (i64)diag.line);
+        diag.end_column = (i32)value.field_int("end_column", (i64)(diag.column + 1));
+        unit.diags.push((ptr)diag);
+        process_arena = saved;
+    }
+}
+
+struct Publisher {
+    static unsafe i32 offset_of(Unit* u, i32 line, i32 column) {
+        mut i32 index = line - 1;
+        if (index < 0) {
+            index = 0;
+        }
+        if (index >= u.line_count) {
+            return u.length;
+        }
+        mut i32 offset = u.line_starts[index] + column - 1;
+        if (offset > u.length) {
+            offset = u.length;
+        }
+        if (offset < 0) {
+            offset = 0;
+        }
+        return offset;
+    }
+
+    public static unsafe void publish(Unit* u) {
+        ByteBuffer* out = ByteBuffer.create();
+        out.append("{\"uri\":");
+        out.append_json_string(u.uri);
+        out.append(",\"diagnostics\":[");
+        mut i32 count = 0;
+        if (u.analyzed) {
+            if (u.checked && u.diags != null) {
+                for (mut i32 i = 0; i < u.diags.length; i = i + 1) {
+                    CDiag* diag = (CDiag*)u.diags.get(i);
+                    if (count > 0) {
+                        out.append(",");
+                    }
+                    count = count + 1;
+                    out.append("{\"range\":");
+                    i32 from = Publisher.offset_of(u, diag.line, diag.column);
+                    mut i32 to = Publisher.offset_of(u, diag.end_line, diag.end_column);
+                    if (to <= from) {
+                        to = from + 1;
+                    }
+                    Lsp.range(out, u, from, to);
+                    out.append(",\"severity\":");
+                    out.append_int((i64)diag.severity);
+                    out.append(",\"code\":");
+                    out.append_json_string(diag.code);
+                    out.append(",\"source\":\"djinnc\",\"message\":");
+                    out.append_json_string(diag.message);
+                    out.append("}");
+                }
+            } else if (!u.checked && u.open && u.lint != null) {
+                for (mut i32 i = 0; i < u.lint.length; i = i + 1) {
+                    LintItem* item = (LintItem*)u.lint.get(i);
+                    if (count > 0) {
+                        out.append(",");
+                    }
+                    count = count + 1;
+                    out.append("{\"range\":");
+                    Lsp.token_range(out, u, item.token, item.token);
+                    out.append(",\"severity\":1,\"source\":\"djinn-lsp\",\"message\":");
+                    out.append_json_string(item.message);
+                    out.append("}");
+                }
+            }
+        }
+        out.append("]}");
+        u.published = count > 0;
+        Rpc.notify("textDocument/publishDiagnostics", out);
+    }
+}
