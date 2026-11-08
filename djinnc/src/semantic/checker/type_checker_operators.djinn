@@ -25,6 +25,10 @@ impl TypeChecker {
         if (Types.is_struct(operand) && (op == TokenKind::MINUS || op == TokenKind::TILDE || op == TokenKind::BANG)) {
             return this.check_unary_operator(node, op, operand);
         }
+        if ((op == TokenKind::MINUS || op == TokenKind::TILDE || op == TokenKind::BANG) && this.primitive_operator_disabled(operand, op, 1, 0)) {
+            this.error_disabled_operator(node, op, operand);
+            return operand;
+        }
         if (op == TokenKind::MINUS) {
             if (!Types.is_integer(operand) && !Types.is_float(operand)) {
                 this.error_code(node, DiagnosticErrors.INVALID_OPERATOR_OPERAND, "operator is not valid for this operand");
@@ -108,6 +112,40 @@ impl TypeChecker {
     FunctionInfo* find_operator_named(StructInfo* owner, ptr<i8> name) {
         SymbolTable* symbols = this.symbols;
         return symbols.find_method(owner, Ast.intern_base_name(name, (i32)strlen(name)));
+    }
+
+    void error_disabled_operator(Node* node, TokenKind op, u32 type) {
+        SymbolTable* symbols = this.symbols;
+        ByteBuffer* message = ByteBuffer.create();
+        message.append("operator '");
+        message.append(op.text);
+        message.append("' is disabled for '");
+        symbols.describe_type(type, message);
+        message.append("'");
+        this.error_code(node, DiagnosticErrors.OPERATOR_NOT_DEFINED, message.cstr());
+    }
+
+    // A primitive without an operator declaration keeps the built-in behavior; a bodiless declaration in its impl disables it.
+    unsafe bool primitive_operator_disabled(u32 type, TokenKind op, i32 arity, u32 other) {
+        SymbolTable* symbols = this.symbols;
+        U32Map* map = symbols.primitive_map;
+        if (map.find(type) < 0) {
+            return false;
+        }
+        StructInfo* owner = symbols.primitive_owner(type);
+        mut FunctionInfo* walk = this.find_operator(owner, op);
+        while (walk != null) {
+            IdList* candidate_params = walk.param_types;
+            mut bool same = candidate_params.length == arity && candidate_params.get(0) == type;
+            if (same && arity == 2 && candidate_params.get(1) != other) {
+                same = false;
+            }
+            if (same) {
+                return walk.is_disabled;
+            }
+            walk = walk.overload;
+        }
+        return false;
     }
 
     u32 check_unary_operator(Node* node, TokenKind op, u32 operand) {
@@ -208,6 +246,10 @@ impl TypeChecker {
             this.error_code(node, DiagnosticErrors.OPERATOR_NOT_DEFINED, "operator operands do not match its parameters");
             return method.return_type;
         }
+        if (exact.is_disabled) {
+            this.error_disabled_operator(node, op, left);
+            return method.return_type;
+        }
         method = exact;
         node.set_symbol(kind, (ptr)method);
         return method.return_type;
@@ -272,6 +314,14 @@ impl TypeChecker {
 
         if (Types.is_struct(left)) {
             return this.check_operator(node, op, left, right);
+        }
+
+        if (this.primitive_operator_disabled(left, op, 2, right)) {
+            this.error_disabled_operator(node, op, left);
+            if (TypeChecker.is_comparison(op)) {
+                return Types.bool_type();
+            }
+            return left;
         }
 
         bool numbers = (Types.is_integer(left) || Types.is_float(left)) && (Types.is_integer(right) || Types.is_float(right));
