@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  cpp-tests:
+    name: C++ compiler tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-toolchain
+
+      - name: Build C++ tests
+        run: cmake --build build/cmake --target tests
+
+      - name: Run C++ tests
+        run: ctest --test-dir build/cmake -L aggregate --output-on-failure
+
+      - name: Check frozen C++ tests
+        run: python3 tools/check_frozen_cpp_tests.py
+
+  djinnc:
+    name: djinnc bootstrap and conformance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      DJINN_USE_LLD: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: toolchain
+        uses: ./.github/actions/setup-toolchain
+
+      - name: Bootstrap (seed, stage1, stage2, stage3, fixpoint, samples)
+        run: |
+          tools/bootstrap.sh \
+            --seed "${{ steps.toolchain.outputs.seed }}" \
+            --runtime-dir "$PWD/runtime" \
+            --runtime-lib "$(find build/cmake -maxdepth 2 -name libdjinn_runtime.a | head -1)" \
+            --bench-ref /dev/null \
+            --lld
+
+      - name: Conformance
+        run: bash tests/conformance/ctest.sh "${{ steps.toolchain.outputs.seed }}"
+
+      - name: Conformance (link, crash, library)
+        run: bash tests/conformance/ctest.sh "${{ steps.toolchain.outputs.seed }}" --require Link --crash --library
+
+      - name: djinnc unit tests
+        run: bash tests/djinnc/unit_ctest.sh "${{ steps.toolchain.outputs.seed }}"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: djinnc-logs
+          path: |
+            build/bootstrap/*.log
+            build/conformance/report.json
+            build/seed/stage0.log
+          if-no-files-found: ignore
