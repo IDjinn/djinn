@@ -31,6 +31,7 @@ The compiler generates async code by default.
   interface, object or loader needs to change for it (macros, operators, attributes, reflection, generics, interfaces,
   impls, enums, numbers, structs), and add a case to `tests/conformance/src/suites/library.djinn` when it crosses the
   library boundary. `std` is consumed as `std.djlib`, so a feature that only works from source breaks `--std`.
+- A new language feature or a change to existing behavior must also update the documentation: the `docs` submodule (`docs/content/docs/`) gets the new or changed page in its own commit, and the pull request commits the updated submodule pointer. Do not leave the pointer stale.
 - Error reporting uses macros that take a `DiagnosticCode`, message, and source location, then call
   `_diagnostics.emitAndPrint()` which prints the error with file/line info for the user:
   - **Parser**: `PARSER_ERROR(code, msg, location)` / `PARSER_WARNING(code, msg, location)`
