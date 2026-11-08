@@ -1,0 +1,608 @@
+namespace conformance;
+
+import testing;
+import djinnc::testing;
+import djinnc;
+
+struct OverflowModeTests {
+    [Test]
+    void wrapped_add_goes_negative() {
+        str source = """
+i32 main() {
+    i32w a = 2147483647w;
+    i32w b = a + 1w;
+    if (b != 0 - 2147483647 - 1) { return 1; }
+    return 42;
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void wrapped_literal_truncates() {
+        str source = """
+i32 main() {
+    i32w a = 3000000000w;
+    if (a != 0 - 1294967296) { return 1; }
+    return 42;
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void plain_arithmetic_still_wraps() {
+        str source = """
+i32 main() {
+    i32 a = 2147483647;
+    i32 b = a + 1;
+    if (b > 0) { return 1; }
+    return 42;
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void trapped_add_panics() {
+        str source = """
+i32 main() {
+    i32t a = 2147483647t;
+    i32t b = a + 1t;
+    return 0;
+}
+""";
+        Verify.source(source).crashes(Expected.contains("integer overflow"));
+    }
+
+    [Test]
+    void trapped_in_range_runs() {
+        str source = """
+i32 main() {
+    i32t a = 40t;
+    i32t b = a + 2t;
+    return b;
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void trapped_multiply_panics() {
+        str source = """
+i32 main() {
+    i32t a = 65536t;
+    i32t b = a * a;
+    return 0;
+}
+""";
+        Verify.source(source).crashes(Expected.contains("integer overflow"));
+    }
+
+    [Test]
+    void trapped_unsigned_subtract_panics() {
+        str source = """
+i32 main() {
+    u32t a = 1t;
+    u32t b = a - 2t;
+    return 0;
+}
+""";
+        Verify.source(source).crashes(Expected.contains("integer overflow"));
+    }
+
+    [Test]
+    void trapped_negate_minimum_panics() {
+        str source = """
+i32 main() {
+    i32t a = 0t - 2147483647t - 1t;
+    i32t b = -a;
+    return 0;
+}
+""";
+        Verify.source(source).crashes(Expected.contains("integer overflow"));
+    }
+
+    [Test]
+    void trapped_increment_panics() {
+        str source = """
+i32 main() {
+    mut i32t a = 2147483647t;
+    a++;
+    return 0;
+}
+""";
+        Verify.source(source).crashes(Expected.contains("integer overflow"));
+    }
+
+    [Test]
+    void trapped_compound_assignment_panics() {
+        str source = """
+i32 main() {
+    mut i32t a = 2147483647t;
+    a += 1t;
+    return 0;
+}
+""";
+        Verify.source(source).crashes(Expected.contains("integer overflow"));
+    }
+
+    [Test]
+    void trapped_64_bit_panics() {
+        str source = """
+i32 main() {
+    i64t a = 9223372036854775807t;
+    i64t b = a + 1t;
+    return 0;
+}
+""";
+        Verify.source(source).crashes(Expected.contains("integer overflow"));
+    }
+
+    [Test]
+    void saturating_add_clamps() {
+        str source = """
+i32 main() {
+    i32s a = 2147483647s;
+    i32s b = a + 5s;
+    if (b != 2147483647) { return 1; }
+    return 42;
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void saturating_subtract_clamps_to_minimum() {
+        str source = """
+i32 main() {
+    i32s a = 0s - 2147483647s;
+    i32s b = a - 5s;
+    if (b != 0 - 2147483647 - 1) { return 1; }
+    return 42;
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void saturating_multiply_clamps() {
+        str source = """
+i32 main() {
+    i32s a = 65536s;
+    i32s b = a * a;
+    i32s c = a * (0s - 65536s);
+    if (b != 2147483647) { return 1; }
+    if (c != 0 - 2147483647 - 1) { return 2; }
+    return 42;
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void saturating_unsigned_clamps_both_ends() {
+        str source = """
+i32 main() {
+    u8s a = 250s;
+    u8s b = a + 10s;
+    u8s c = 3s;
+    u8s d = c - 10s;
+    if (b != 255) { return 1; }
+    if (d != 0) { return 2; }
+    return 42;
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void saturating_negate_minimum() {
+        str source = """
+i32 main() {
+    i32s a = 0s - 2147483647s - 1s;
+    i32s b = -a;
+    if (b != 2147483647) { return 1; }
+    return 42;
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void saturating_divide_minimum_by_minus_one() {
+        str source = """
+i32 main() {
+    i32s a = 0s - 2147483647s - 1s;
+    i32s b = 0s - 1s;
+    i32s c = a / b;
+    if (c != 2147483647) { return 1; }
+    return 42;
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void saturating_increment_stays_at_maximum() {
+        str source = """
+i32 main() {
+    mut i32s a = 2147483647s;
+    a++;
+    if (a != 2147483647) { return 1; }
+    return 42;
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void saturating_literal_clamps() {
+        str source = """
+i32 main() {
+    i32s a = 3000000000s;
+    if (a != 2147483647) { return 1; }
+    return 42;
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void saturating_64_bit_clamps() {
+        str source = """
+i32 main() {
+    i64s a = 9223372036854775807s;
+    i64s b = a + 1s;
+    if (b != 9223372036854775807) { return 1; }
+    return 42;
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void saturating_constant_folds() {
+        str source = """
+constexpr i32s big = 2000000000s + 2000000000s;
+
+i32 main() {
+    if (big != 2147483647) { return 1; }
+    return 42;
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void saturating_64_bit_constant_folds() {
+        str source = """
+constexpr i64s big = 9223372036854775807s + 1s;
+
+i32 main() {
+    if (big != 9223372036854775807) { return 1; }
+    return 42;
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void trapped_literal_out_of_range_is_an_error() {
+        str source = """
+i32 main() {
+    i32t a = 3000000000t;
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.INVALID_CONSTANT_EXPRESSION));
+    }
+
+    [Test]
+    void conflicting_modes_are_an_error() {
+        str source = """
+i32 main() {
+    i32t a = 1t;
+    i32s b = 1s;
+    i32 c = a + b;
+    return c;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.CONFLICTING_OVERFLOW_MODES));
+    }
+
+    [Test]
+    void left_operand_mode_wins_over_plain() {
+        str source = """
+i32 main() {
+    i32t a = 2147483647t;
+    i32 b = 1;
+    i32 c = a + b;
+    return 0;
+}
+""";
+        Verify.source(source).crashes(Expected.contains("integer overflow"));
+    }
+
+    [Test]
+    void checked_overflow_is_caught_by_try() {
+        str source = """
+i32 add(i32c a, i32c b) throws(Overflow) {
+    return a + b;
+}
+
+i32 main() {
+    i32 result = try add(2147483647c, 1c) ?: 7;
+    return result;
+}
+""";
+        Verify.source(source).runs(Expected.exit(7));
+    }
+
+    [Test]
+    void checked_in_range_returns_the_value() {
+        str source = """
+i32 add(i32c a, i32c b) throws(Overflow) {
+    return a + b;
+}
+
+i32 main() {
+    i32 result = try add(40c, 2c) ?: 7;
+    return result;
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void checked_overflow_is_matched_by_switch() {
+        str source = """
+i32 multiply(i32c a, i32c b) throws(Overflow) {
+    return a * b;
+}
+
+i32 main() {
+    i32 result = switch multiply(65536c, 65536c) {
+        Overflow e -> 9,
+        Result v -> v
+    };
+    return result;
+}
+""";
+        Verify.source(source).runs(Expected.exit(9));
+    }
+
+    [Test]
+    void checked_with_a_bare_throws() {
+        str source = """
+i32 negate(i32c a) throws {
+    return -a;
+}
+
+i32 main() {
+    i32 minimum = 0 - 2147483647 - 1;
+    i32 result = try negate(minimum) ?: 5;
+    return result;
+}
+""";
+        Verify.source(source).runs(Expected.exit(5));
+    }
+
+    [Test]
+    void checked_division_overflow_is_caught() {
+        str source = """
+i32 divide(i32c a, i32c b) throws(Overflow) {
+    return a / b;
+}
+
+i32 main() {
+    i32 minimum = 0 - 2147483647 - 1;
+    i32 result = try divide(minimum, 0 - 1) ?: 3;
+    return result;
+}
+""";
+        Verify.source(source).runs(Expected.exit(3));
+    }
+
+    [Test]
+    void checked_without_throws_is_an_error() {
+        str source = """
+i32 add(i32c a, i32c b) {
+    return a + b;
+}
+
+i32 main() {
+    return add(1c, 2c);
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.THROWS_TYPE_MISMATCH));
+    }
+
+    [Test]
+    void narrowing_cast_out_of_range_panics() {
+        str source = """
+i32 main() {
+    i32 x = 300;
+    u8 y = (u8)x;
+    return (i32)y;
+}
+""";
+        Verify.source(source).crashes(Expected.contains("does not fit"));
+    }
+
+    [Test]
+    void narrowing_cast_in_range_runs() {
+        str source = """
+i32 main() {
+    i32 x = 42;
+    u8 y = (u8)x;
+    return (i32)y;
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void constant_narrowing_cast_out_of_range_is_an_error() {
+        str source = """
+i32 main() {
+    u8 y = (u8)300;
+    return (i32)y;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.INVALID_CONSTANT_EXPRESSION));
+    }
+
+    [Test]
+    void bool_cast_accepts_zero_and_one() {
+        str source = """
+i32 main() {
+    i32 one = 1;
+    i32 zero = 0;
+    bool yes = (bool)one;
+    bool no = (bool)zero;
+    if (yes && !no) { return 42; }
+    return 1;
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void bool_cast_of_two_panics() {
+        str source = """
+i32 main() {
+    i32 two = 2;
+    bool b = (bool)two;
+    return 0;
+}
+""";
+        Verify.source(source).crashes(Expected.contains("only 0 or 1"));
+    }
+
+    [Test]
+    void constant_bool_cast_of_two_is_an_error() {
+        str source = """
+i32 main() {
+    bool b = (bool)2;
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.INVALID_CONSTANT_EXPRESSION));
+    }
+
+    [Test]
+    void division_by_zero_is_caught_when_the_function_throws_it() {
+        str source = """
+i32 divide(i32 a, i32 b) throws(DivisionByZero) {
+    return a / b;
+}
+
+i32 main() {
+    i32 result = try divide(1, 0) ?: 9;
+    return result;
+}
+""";
+        Verify.source(source).runs(Expected.exit(9));
+    }
+
+    [Test]
+    void division_in_a_throwing_function_still_returns_the_value() {
+        str source = """
+i32 divide(i32 a, i32 b) throws(DivisionByZero) {
+    return a / b;
+}
+
+i32 main() {
+    i32 result = try divide(84, 2) ?: 9;
+    return result;
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void remainder_by_zero_is_caught_by_a_bare_throws() {
+        str source = """
+i32 remainder(i32 a, i32 b) throws {
+    return a % b;
+}
+
+i32 main() {
+    i32 result = try remainder(5, 0) ?: 4;
+    return result;
+}
+""";
+        Verify.source(source).runs(Expected.exit(4));
+    }
+
+    [Test]
+    void division_by_zero_is_matched_by_switch() {
+        str source = """
+i32 divide(u32 a, u32 b) throws(DivisionByZero) {
+    return (i32)(a / b);
+}
+
+i32 main() {
+    i32 result = switch divide(1, 0) {
+        DivisionByZero e -> 6,
+        Result v -> v
+    };
+    return result;
+}
+""";
+        Verify.source(source).runs(Expected.exit(6));
+    }
+
+    [Test]
+    void division_by_zero_panics_when_the_throws_clause_lists_other_errors() {
+        str source = """
+struct Failure {
+    i8* message;
+}
+
+i32 divide(i32 a, i32 b) throws(Failure) {
+    return a / b;
+}
+
+i32 main() {
+    i32 result = try divide(1, 0) ?: 9;
+    return result;
+}
+""";
+        Verify.source(source).crashes(Expected.contains("division by zero"));
+    }
+
+    [Test]
+    void float_division_by_zero_follows_ieee_in_constexpr() {
+        str source = """
+constexpr f64 infinity = 1.0 / 0.0;
+constexpr f64 nothing = 0.0 / 0.0;
+
+i32 main() {
+    if (infinity <= 1.0e300) { return 1; }
+    if (nothing == nothing) { return 2; }
+    return 42;
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void float_division_by_zero_follows_ieee_at_run_time() {
+        str source = """
+f64 divide(f64 left, f64 right) {
+    return left / right;
+}
+
+i32 main() {
+    f64 infinity = divide(1.0, 0.0);
+    f64 negative = divide(0.0 - 1.0, 0.0);
+    if (infinity <= 1.0e300) { return 1; }
+    if (negative >= 0.0 - 1.0e300) { return 2; }
+    return 42;
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+}

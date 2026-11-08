@@ -283,6 +283,11 @@ struct ConstEval {
         NodeKind kind = node.kind();
         if (kind == NodeKind::INT_LITERAL) {
             this.ri = node.int_value();
+            i32 literal_shape = this.shape_of(node.value_type());
+            bool sized = (literal_shape & ConstEval.INTEGER) != 0 && (literal_shape & 255) > 1 && (literal_shape & 255) < 64;
+            if (sized && node.mode() == OverflowMode::SATURATING && !ConstEval.holds(this.ri, false, literal_shape)) {
+                this.ri = ConstEval.limit(this.ri, literal_shape);
+            }
             this.rf = (f64)this.ri;
             return true;
         }
@@ -415,6 +420,15 @@ struct ConstEval {
         if ((from & ConstEval.NUMERIC) == 0 || (to & ConstEval.NUMERIC) == 0) {
             return this.fail(node, "only numeric casts can be evaluated at compile time");
         }
+        if ((to & ConstEval.INTEGER) != 0 && (to & 255) == 1) {
+            mut bool binary = this.ri == 0 || this.ri == 1;
+            if ((from & ConstEval.FLOAT) != 0) {
+                binary = this.rf == 0.0 || this.rf == 1.0;
+            }
+            if (!binary) {
+                return this.fail(node, "only 0 or 1 can be converted to bool");
+            }
+        }
         bool to_number = (to & ConstEval.INTEGER) != 0 && (to & 255) != 1;
         if ((from & ConstEval.FLOAT) != 0 && to_number && !ConstEval.fits(this.rf, to)) {
             return this.fail(node, "float value is out of range for the integer type");
@@ -496,7 +510,16 @@ struct ConstEval {
             if ((shape & ConstEval.FLOAT) != 0) {
                 this.rf = 0.0 - this.rf;
             } else {
-                this.ri = ConstEval.wrap(0 - this.ri, shape);
+                OverflowMode mode = node.mode();
+                bool minimum = (shape & ConstEval.SIGNED) != 0 && this.ri == ConstEval.minimum(shape);
+                if (minimum && (mode == OverflowMode::TRAPPED || mode == OverflowMode::CHECKED)) {
+                    return this.fail(node, "integer overflow");
+                }
+                if (minimum && mode == OverflowMode::SATURATING) {
+                    this.ri = ConstEval.maximum(shape);
+                } else {
+                    this.ri = ConstEval.wrap(0 - this.ri, shape);
+                }
             }
             return true;
         }
@@ -609,9 +632,6 @@ struct ConstEval {
         } else if (op == TokenKind::STAR) {
             value = a * b;
         } else if (op == TokenKind::SLASH) {
-            if (b == 0.0) {
-                return this.fail(node, "division by zero");
-            }
             value = a / b;
         } else {
             return this.fail(node, "operator cannot be evaluated on floating point values");
@@ -695,8 +715,94 @@ struct ConstEval {
         } else {
             return this.fail(node, "operator cannot be evaluated at compile time");
         }
+        bool arithmetic = op == TokenKind::PLUS || op == TokenKind::MINUS || op == TokenKind::STAR;
+        OverflowMode mode = node.mode();
+        if (arithmetic && mode != OverflowMode::NONE && mode != OverflowMode::WRAPPED) {
+            bool wide = (shape & 255) >= 64;
+            mut bool overflowed = false;
+            if (wide) {
+                overflowed = ConstEval.overflows_wide(op, a, b, value, (shape & ConstEval.SIGNED) != 0);
+            } else {
+                overflowed = !ConstEval.holds(value, false, shape);
+            }
+            if (overflowed) {
+                if (mode != OverflowMode::SATURATING) {
+                    return this.fail(node, "integer overflow");
+                }
+                if (wide) {
+                    value = ConstEval.saturated_wide(op, a, b, (shape & ConstEval.SIGNED) != 0);
+                } else {
+                    value = ConstEval.limit(value, shape);
+                }
+            }
+        }
         this.ri = ConstEval.wrap(value, shape);
         return true;
+    }
+
+    // 64-bit operands cannot be widened inside an i64, so the wrapped result is tested instead.
+    static bool overflows_wide(TokenKind op, i64 a, i64 b, i64 wrapped, bool is_signed) {
+        if (is_signed) {
+            if (op == TokenKind::PLUS) {
+                return ((a ^ wrapped) & (b ^ wrapped)) < 0;
+            }
+            if (op == TokenKind::MINUS) {
+                return ((a ^ b) & (a ^ wrapped)) < 0;
+            }
+            if (a == 0) {
+                return false;
+            }
+            if (a == 0 - 1) {
+                return b == ConstEval.minimum(ConstEval.SIGNED | 64);
+            }
+            return wrapped / a != b;
+        }
+        if (op == TokenKind::PLUS) {
+            return (u64)wrapped < (u64)a;
+        }
+        if (op == TokenKind::MINUS) {
+            return (u64)a < (u64)b;
+        }
+        return a != 0 && (u64)wrapped / (u64)a != (u64)b;
+    }
+
+    static i64 saturated_wide(TokenKind op, i64 a, i64 b, bool is_signed) {
+        if (!is_signed) {
+            if (op == TokenKind::MINUS) {
+                return 0;
+            }
+            return 0 - 1;
+        }
+        mut bool upward = a >= 0;
+        if (op == TokenKind::STAR) {
+            upward = (a < 0) == (b < 0);
+        }
+        if (upward) {
+            return 9223372036854775807;
+        }
+        return ConstEval.minimum(ConstEval.SIGNED | 64);
+    }
+
+    static i64 maximum(i32 shape) {
+        i32 bits = shape & 255;
+        if ((shape & ConstEval.SIGNED) != 0) {
+            if (bits >= 64) {
+                return 9223372036854775807;
+            }
+            return ((i64)1 << (bits - 1)) - 1;
+        }
+        return ((i64)1 << bits) - 1;
+    }
+
+    // The nearest limit of the type for a value that does not fit it.
+    static i64 limit(i64 value, i32 shape) {
+        if (value < 0) {
+            if ((shape & ConstEval.SIGNED) == 0) {
+                return 0;
+            }
+            return ConstEval.minimum(shape);
+        }
+        return ConstEval.maximum(shape);
     }
 
     static i64 compare(TokenKind op, i64 a, i64 b, bool unsigned_compare) {

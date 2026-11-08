@@ -1,0 +1,152 @@
+namespace djinnc;
+
+impl TypeChecker {
+    OverflowMode declared_mode(Node* declaration) {
+        if (declaration == null) {
+            return OverflowMode::NONE;
+        }
+        TypeRef* declared = declaration.type();
+        if (declared == null) {
+            return OverflowMode::NONE;
+        }
+        if (declared.kind == TypeKind.AUTO && (declaration.kind() == NodeKind::VAR_DECL || declaration.kind() == NodeKind::STATIC_VAR)) {
+            Node* initial = declaration.first();
+            if (initial != null) {
+                return initial.mode();
+            }
+            return OverflowMode::NONE;
+        }
+        return declared.mode;
+    }
+
+    unsafe OverflowMode callee_mode(Node* callee) {
+        if (callee == null) {
+            return OverflowMode::NONE;
+        }
+        i32 kind = callee.symbol_kind();
+        if (kind != SymbolKind.FUNCTION && kind != SymbolKind.STATIC_METHOD && kind != SymbolKind.INSTANCE_METHOD) {
+            return OverflowMode::NONE;
+        }
+        FunctionInfo* function = (FunctionInfo*)callee.symbol();
+        if (function == null) {
+            return OverflowMode::NONE;
+        }
+        return this.declared_mode(function.node);
+    }
+
+    bool is_arithmetic_operator(TokenKind op) {
+        return op == TokenKind::PLUS || op == TokenKind::MINUS || op == TokenKind::STAR
+            || op == TokenKind::SLASH || op == TokenKind::PERCENT;
+    }
+
+    // A function that lists a core error in its 'throws' clause hands it to the caller instead of stopping the program.
+    unsafe void register_core_error(ptr<i8> name) {
+        u32 type = this.core_type(name);
+        FunctionInfo* current = this.function;
+        if (type == 0 || current == null || !current.has_throws || !current.allows(type)) {
+            return;
+        }
+        StructInfo* error = this.error_struct(type);
+        if (error != null) {
+            SymbolTable* symbols = this.symbols;
+            symbols.register_error(error);
+        }
+    }
+
+    unsafe void reject_checked_mode(Node* node, OverflowMode mode) {
+        if (mode != OverflowMode::CHECKED) {
+            return;
+        }
+        u32 overflow = this.core_type("Overflow");
+        FunctionInfo* current = this.function;
+        if (overflow == 0 || current == null || !current.has_throws || !current.allows(overflow)) {
+            this.error_code(node, DiagnosticErrors.THROWS_TYPE_MISMATCH, "checked arithmetic (c) needs the enclosing function to declare 'throws(Overflow)' or a bare 'throws'");
+            return;
+        }
+        StructInfo* error = this.error_struct(overflow);
+        if (error != null) {
+            SymbolTable* symbols = this.symbols;
+            symbols.register_error(error);
+        }
+    }
+
+    // The operand of '++' and the target of '=' are checked as places, so their own mode is read from the declaration.
+    unsafe OverflowMode place_mode(Node* node) {
+        if (node.kind() == NodeKind::IDENTIFIER) {
+            i32 symbol = node.symbol_kind();
+            if (symbol == SymbolKind.LOCAL || symbol == SymbolKind.GLOBAL) {
+                LocalVariable* variable = (LocalVariable*)node.symbol();
+                if (variable == null) {
+                    return OverflowMode::NONE;
+                }
+                return this.declared_mode(variable.node);
+            }
+        }
+        if (node.kind() == NodeKind::FIELD_ACCESS && node.symbol_kind() == SymbolKind.FIELD) {
+            FieldInfo* field = (FieldInfo*)node.symbol();
+            if (field == null) {
+                return OverflowMode::NONE;
+            }
+            return this.declared_mode(field.node);
+        }
+        return OverflowMode::NONE;
+    }
+
+    unsafe OverflowMode compute_mode(Node* node) {
+        if (!Types.is_integer(node.value_type()) || Types.bits(node.value_type()) == 1) {
+            return OverflowMode::NONE;
+        }
+        NodeKind kind = node.kind();
+        switch (kind) {
+            case INT_LITERAL:
+                return node.mode();
+            case IDENTIFIER:
+                return this.place_mode(node);
+            case FIELD_ACCESS:
+                return this.place_mode(node);
+            case CALL:
+                return this.callee_mode(node.first());
+            case CAST:
+                TypeRef* target = node.type();
+                if (target == null) {
+                    return OverflowMode::NONE;
+                }
+                return target.mode;
+            case ASSIGN:
+                return this.place_mode(node.first());
+            case UNARY:
+                TokenKind unary = node.op_kind();
+                if (unary == TokenKind::MINUS || unary == TokenKind::TILDE || unary == TokenKind::PLUS_PLUS || unary == TokenKind::MINUS_MINUS) {
+                    mut OverflowMode inherited = node.first().mode();
+                    if (unary == TokenKind::PLUS_PLUS || unary == TokenKind::MINUS_MINUS) {
+                        inherited = this.place_mode(node.first());
+                    }
+                    if (unary != TokenKind::TILDE && unary != TokenKind::PLUS) {
+                        this.reject_checked_mode(node, inherited);
+                    }
+                    return inherited;
+                }
+                return OverflowMode::NONE;
+            case BINARY:
+                TokenKind op = node.op_kind();
+                if (TypeChecker.is_comparison(op) || op == TokenKind::AND_AND || op == TokenKind::OR_OR) {
+                    return OverflowMode::NONE;
+                }
+                if (op == TokenKind::SLASH || op == TokenKind::PERCENT) {
+                    this.register_core_error("DivisionByZero");
+                }
+                OverflowMode left = node.first().mode();
+                OverflowMode right = node.second().mode();
+                if (left.conflicts(right)) {
+                    this.error_code(node, DiagnosticErrors.CONFLICTING_OVERFLOW_MODES, "operands have conflicting overflow modes");
+                    return left;
+                }
+                OverflowMode merged = left.merge(right);
+                if (this.is_arithmetic_operator(op)) {
+                    this.reject_checked_mode(node, merged);
+                }
+                return merged;
+        }
+        return OverflowMode::NONE;
+    }
+}
