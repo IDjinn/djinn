@@ -1,0 +1,62 @@
+name: Setup Djinn toolchain (Windows)
+description: Installs LLVM, downloads the seed djinnc from the stage0-final release and builds the runtime
+
+inputs:
+  llvm-version:
+    description: LLVM version installed through Chocolatey
+    default: "21.1.1"
+  seed-tag:
+    description: Release tag that holds the seed djinnc
+    default: stage0-final
+  token:
+    description: Token used to download the seed
+    default: ${{ github.token }}
+
+outputs:
+  seed:
+    description: Path to the seed djinnc.exe
+    value: ${{ steps.seed.outputs.seed }}
+  runtime-lib:
+    description: Path to djinn_runtime.lib
+    value: ${{ steps.runtime.outputs.lib }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install LLVM
+      shell: bash
+      run: |
+        choco install llvm --version=${{ inputs.llvm-version }} --allow-downgrade -y --no-progress
+        ls "/c/Program Files/LLVM/lib/LLVM-C.lib" "/c/Program Files/LLVM/bin/LLVM-C.dll"
+        echo "C:\Program Files\LLVM\bin" >> "$GITHUB_PATH"
+
+    - name: Set up the MSVC environment
+      uses: ilammy/msvc-dev-cmd@v1
+      with:
+        arch: x64
+
+    - name: Point djinn.proj at the installed LLVM
+      shell: bash
+      run: |
+        sed -i "s|'-LC:/dev/llvm-[^']*',|'-LC:/PROGRA~1/LLVM/lib',|" djinnc/djinn.proj
+        grep -n "LLVM" djinnc/djinn.proj
+
+    - name: Download seed djinnc
+      id: seed
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+      run: |
+        mkdir -p build/seed
+        gh release download "${{ inputs.seed-tag }}" --repo "$GITHUB_REPOSITORY" \
+          -p djinnc-windows-x64.exe -p SHA256SUMS.txt -D build/seed --clobber
+        (cd build/seed && grep ' \*\?djinnc-windows-x64.exe$' SHA256SUMS.txt | sha256sum -c -)
+        mv build/seed/djinnc-windows-x64.exe build/seed/djinnc.exe
+        echo "seed=$PWD/build/seed/djinnc.exe" >> "$GITHUB_OUTPUT"
+
+    - name: Build runtime
+      id: runtime
+      shell: bash
+      run: |
+        bash tools/build_runtime.sh --out build/runtime
+        echo "lib=$PWD/build/runtime/djinn_runtime.lib" >> "$GITHUB_OUTPUT"
