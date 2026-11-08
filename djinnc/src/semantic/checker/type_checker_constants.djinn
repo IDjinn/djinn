@@ -162,6 +162,33 @@ impl TypeChecker {
         }
     }
 
+    bool is_literal_arithmetic(Node* node) {
+        NodeKind kind = node.kind();
+        if (kind == NodeKind::INT_LITERAL) {
+            return true;
+        }
+        if (kind == NodeKind::UNARY) {
+            TokenKind unary = node.op_kind();
+            return (unary == TokenKind::MINUS || unary == TokenKind::TILDE) && this.is_literal_arithmetic(node.first());
+        }
+        if (kind != NodeKind::BINARY) {
+            return false;
+        }
+        TokenKind op = node.op_kind();
+        bool arithmetic = this.is_arithmetic_operator(op) || op == TokenKind::AMPERSAND || op == TokenKind::PIPE
+            || op == TokenKind::CARET || op == TokenKind::LESS_LESS || op == TokenKind::GREATER_GREATER;
+        return arithmetic && this.is_literal_arithmetic(node.first()) && this.is_literal_arithmetic(node.second());
+    }
+
+    // Arithmetic on literals is computed in its own type and only then narrowed, so (u8)(200 + 100) is an error like
+    // (u8)300 instead of wrapping inside u8. Wider targets keep taking their type from the cast.
+    bool narrows_literal_arithmetic(Node* operand, u32 target) {
+        if (operand.kind() == NodeKind::INT_LITERAL || !Types.is_integer(target)) {
+            return false;
+        }
+        return Types.bits(target) > 1 && Types.bits(target) < 32 && this.is_literal_arithmetic(operand);
+    }
+
     void check_constant_cast(Node* node, u32 source, u32 target) {
         if (source == target || !Types.is_integer(target)) {
             return;

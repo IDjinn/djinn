@@ -1,0 +1,165 @@
+namespace conformance;
+
+import testing;
+import djinnc::testing;
+import djinnc;
+
+struct OptimizationTests {
+    static void exits_at_every_level(str source, i32 code) {
+        Verify.source(source).optimized(1).runs(Expected.exit(code));
+        Verify.source(source).optimized(2).runs(Expected.exit(code));
+        Verify.source(source).optimized(3).runs(Expected.exit(code));
+    }
+
+    static void crashes_at_every_level(str source, ptr<i8> text) {
+        Verify.source(source).optimized(1).crashes(Expected.contains(text));
+        Verify.source(source).optimized(2).crashes(Expected.contains(text));
+        Verify.source(source).optimized(3).crashes(Expected.contains(text));
+    }
+
+    [Test]
+    void trapped_arithmetic_is_not_optimized_away() {
+        str source = """
+i32 add(i32t a, i32t b) {
+    return a + b;
+}
+
+i32 main() {
+    return add(2147483647, 1);
+}
+""";
+        OptimizationTests.crashes_at_every_level(source, "integer overflow");
+    }
+
+    [Test]
+    void saturating_arithmetic_keeps_its_limits() {
+        str source = """
+i32 add(i32s a, i32s b) {
+    return a + b;
+}
+
+i32 multiply(i32s a, i32s b) {
+    return a * b;
+}
+
+i32 main() {
+    if (add(2147483647, 5) != 2147483647) { return 1; }
+    if (multiply(65536, 0 - 65536) != 0 - 2147483647 - 1) { return 2; }
+    return 42;
+}
+""";
+        OptimizationTests.exits_at_every_level(source, 42);
+    }
+
+    [Test]
+    void wrapping_arithmetic_keeps_its_result() {
+        str source = """
+i32 add(i32w a, i32w b) {
+    return a + b;
+}
+
+i32 main() {
+    if (add(2147483647, 1) >= 0) { return 1; }
+    return 42;
+}
+""";
+        OptimizationTests.exits_at_every_level(source, 42);
+    }
+
+    [Test]
+    void checked_overflow_is_still_thrown() {
+        str source = """
+i32 add(i32c a, i32c b) throws(Overflow) {
+    return a + b;
+}
+
+i32 main() {
+    i32 caught = try add(2147483647, 1) ?: 7;
+    i32 fine = try add(40, 2) ?: 7;
+    if (caught != 7) { return 1; }
+    return fine;
+}
+""";
+        OptimizationTests.exits_at_every_level(source, 42);
+    }
+
+    [Test]
+    void division_by_zero_is_still_thrown_or_reported() {
+        str thrown = """
+i32 divide(i32 a, i32 b) throws(DivisionByZero) {
+    return a / b;
+}
+
+i32 main() {
+    return try divide(1, 0) ?: 9;
+}
+""";
+        str stopped = """
+i32 divide(i32 a, i32 b) {
+    return a / b;
+}
+
+i32 main() {
+    return divide(1, 0);
+}
+""";
+        OptimizationTests.exits_at_every_level(thrown, 9);
+        OptimizationTests.crashes_at_every_level(stopped, "division by zero");
+    }
+
+    [Test]
+    void minimum_divided_by_minus_one_is_still_reported() {
+        str source = """
+i32 divide(i32 a, i32 b) {
+    return a / b;
+}
+
+i32 main() {
+    return divide(0 - 2147483647 - 1, 0 - 1);
+}
+""";
+        OptimizationTests.crashes_at_every_level(source, "integer overflow");
+    }
+
+    [Test]
+    void narrowing_casts_are_still_checked() {
+        str source = """
+u8 narrow(i32 value) {
+    return (u8)value;
+}
+
+i32 main() {
+    return (i32)narrow(300);
+}
+""";
+        OptimizationTests.crashes_at_every_level(source, "does not fit");
+    }
+
+    [Test]
+    void shift_range_is_still_checked() {
+        str source = """
+i32 shift(i32 value, i32 amount) {
+    return value << amount;
+}
+
+i32 main() {
+    return shift(1, 40);
+}
+""";
+        OptimizationTests.crashes_at_every_level(source, "shift amount");
+    }
+
+    [Test]
+    void float_to_integer_range_is_still_checked() {
+        str source = """
+i32 convert(f64 value) {
+    return (i32)value;
+}
+
+i32 main() {
+    return convert(1.0e20);
+}
+""";
+        OptimizationTests.crashes_at_every_level(source, "out of range");
+    }
+}
