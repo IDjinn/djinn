@@ -576,7 +576,7 @@ __attribute__((constructor)) static void djinn_install_crash_trace(void)
 #include <dlfcn.h>
 #include <elf.h>
 
-extern const Elf64_Ehdr __ehdr_start;
+extern const Elf64_Ehdr __ehdr_start __attribute__((weak));
 
 __attribute__((noinline)) static void djinn_native_stack(const int skip)
 {
@@ -593,7 +593,7 @@ __attribute__((noinline)) static void djinn_native_stack(const int skip)
     {
         Dl_info info;
         uintptr_t address = (uintptr_t)addresses[i] - 1;
-        if (__ehdr_start.e_type == ET_DYN && dladdr(addresses[i], &info) && info.dli_fbase != NULL)
+        if (&__ehdr_start != NULL && __ehdr_start.e_type == ET_DYN && dladdr(addresses[i], &info) && info.dli_fbase != NULL)
             address -= (uintptr_t)info.dli_fbase;
         used += snprintf(command + used, sizeof command - (size_t)used, " 0x%lx", (unsigned long)address);
     }
