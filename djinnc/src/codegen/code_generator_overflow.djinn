@@ -108,9 +108,19 @@ impl CodeGenerator {
         this.throw_core_error_when(failed, node, "Overflow", "integer overflow");
     }
 
+    // 'c' always throws; no suffix throws when the function can hand Overflow to its caller; 't' always stops.
+    unsafe bool overflow_is_thrown(Node* node) {
+        OverflowMode mode = node.mode();
+        return mode == OverflowMode::CHECKED || (mode == OverflowMode::NONE && this.can_throw("Overflow"));
+    }
+
     unsafe void overflow_when(ptr failed, Node* node) {
-        if (node.mode() == OverflowMode::CHECKED) {
+        if (this.overflow_is_thrown(node)) {
             this.throw_overflow_when(failed, node);
+            return;
+        }
+        if (node.mode() == OverflowMode::NONE) {
+            this.stop_when(failed, node, "integer overflow (use the w suffix to wrap, the s suffix to saturate or throws(Overflow) to catch it)");
             return;
         }
         this.stop_when(failed, node, "integer overflow");
@@ -119,7 +129,7 @@ impl CodeGenerator {
     unsafe Value* gen_overflow_arithmetic(Node* node, TokenKind op, u32 common, ptr lhs, ptr rhs) {
         OverflowMode mode = node.mode();
         bool is_signed = Types.is_signed(common);
-        if (mode == OverflowMode::TRAPPED || mode == OverflowMode::CHECKED) {
+        if (mode.detects_overflow()) {
             ptr pair = this.overflow_intrinsic(this.checked_intrinsic_name(op, is_signed), lhs, rhs);
             ptr result = LLVMBuildExtractValue(this.builder, pair, 0, "ovf.result");
             this.overflow_when(LLVMBuildExtractValue(this.builder, pair, 1, "ovf.bit"), node);
@@ -149,12 +159,13 @@ impl CodeGenerator {
         u32 type = operand.type;
         ptr value = operand.ref;
         OverflowMode mode = node.mode();
-        if (!Types.is_signed(type) || mode == OverflowMode::NONE || mode == OverflowMode::WRAPPED) {
+        bool negative_literal = node.first().kind() == NodeKind::INT_LITERAL;
+        if (!Types.is_signed(type) || mode == OverflowMode::WRAPPED || negative_literal) {
             return Value.create(LLVMBuildNeg(this.builder, value, "neg"), type);
         }
         ptr llvm = LLVMTypeOf(value);
         ptr is_minimum = LLVMBuildICmp(this.builder, LlvmConst.INT_EQ, value, this.signed_minimum(llvm), "neg.is_minimum");
-        if (mode == OverflowMode::TRAPPED || mode == OverflowMode::CHECKED) {
+        if (mode.detects_overflow()) {
             this.overflow_when(is_minimum, node);
             return Value.create(LLVMBuildNeg(this.builder, value, "neg"), type);
         }

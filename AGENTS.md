@@ -13,7 +13,20 @@ The compiler generates async code by default.
 - Generated code should be as simple as possible to be easily extensible later.
 - Do NOT write line-by-line comments, unless explaining complex expressions (e.g. math) or something that only
   meaningful variable names could explain. Do NOT document code sections with comments.
-- Do NOT run tests or builds — the user will run them manually.
+- Run the tests related to every edit as soon as you make it, so a regression shows up in minutes. Prefer the
+  narrowest run that covers the change: `--filter <suite or test name>` for the conformance runner, and
+  `tests/djinnc/unit.sh` for `djinnc` unit tests, the dependency graph and the `djinn.proj` scripts.
+- Before opening a pull request, run everything CI runs, in this order, and fix every failure first:
+  1. the stages: build `djinnc` from stage0, then with itself, and confirm the fixpoint (`tests/djinnc/fixpoint.sh`:
+     stage2 IR must equal stage3 IR);
+  2. the complete conformance suite, including crash tests (`tests/conformance/ctest.sh <djinnc> --crash --jobs 8`);
+  3. the unit tests (`tests/djinnc/unit.sh <djinnc> <runtime lib>`).
+  On Windows run them from a Visual Studio developer prompt with `DJINN_USE_LLD=1`. A green filtered run is not
+  enough: a change that passes its own tests can still break the compiler's own source (it compiles itself) or
+  another suite, and CI runs the full set on Linux and Windows.
+- A new feature or rule needs tests for it: new cases in `tests/conformance/src/suites/`, a script under
+  `tests/djinnc/` when it involves `djinn.proj` or command-line options, and updates to every existing test whose
+  expectation the change moves.
 - Error reporting uses macros that take a `DiagnosticCode`, message, and source location, then call
   `_diagnostics.emitAndPrint()` which prints the error with file/line info for the user:
   - **Parser**: `PARSER_ERROR(code, msg, location)` / `PARSER_WARNING(code, msg, location)`
