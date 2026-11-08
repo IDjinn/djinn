@@ -1,0 +1,252 @@
+namespace djinnc;
+
+impl CodeGenerator {
+    ptr float_metadata(ptr<i8> text) {
+        return LLVMMetadataAsValue(this.context, LLVMMDStringInContext2(this.context, text, (u64)strlen(text)));
+    }
+
+    void mark_strict_call(ptr call) {
+        u32 kind = LLVMGetEnumAttributeKindForName("strictfp", 8);
+        LLVMAddCallSiteAttribute(call, 4294967295, LLVMCreateEnumAttribute(this.context, kind, 0));
+    }
+
+    // Maps x.min(y), x.minimum(y), a.fma(b, c)... to the LLVM intrinsic with the semantics of the selected revision:
+    //   fma             -> llvm.fma            (2008 fusedMultiplyAdd: a * b + c with a single rounding)
+    //   minimum/maximum -> llvm.minimum/maximum (2019: NaN propagates, -0 < +0)
+    //   minimum_number  -> llvm.minimumnum      (2019 minimumNumber: NaN ignored, -0 < +0)
+    //   min/max         -> 2019 minimumNumber, 2008 minNum (llvm.minnum), 1985 a compare and select
+    // In the strict environment the experimental.constrained variants keep the operation from being folded or
+    // moved across fesetround/fetestexcept; minimumnum has no constrained variant and stays a strictfp call.
+    ptr<i8> float_builtin_intrinsic(i32 builtin, FloatSettings* settings) {
+        bool strict = settings.strict;
+        FloatStandard standard = settings.standard;
+        if (builtin == FloatBuiltin.FMA) {
+            if (strict) { return "llvm.experimental.constrained.fma"; }
+            return "llvm.fma";
+        }
+        if (builtin == FloatBuiltin.MINIMUM) {
+            if (strict) { return "llvm.experimental.constrained.minimum"; }
+            return "llvm.minimum";
+        }
+        if (builtin == FloatBuiltin.MAXIMUM) {
+            if (strict) { return "llvm.experimental.constrained.maximum"; }
+            return "llvm.maximum";
+        }
+        bool minimum_side = builtin == FloatBuiltin.MIN || builtin == FloatBuiltin.MINIMUM_NUMBER;
+        bool number = builtin == FloatBuiltin.MINIMUM_NUMBER || builtin == FloatBuiltin.MAXIMUM_NUMBER || standard == FloatStandard::IEEE754_2019;
+        if (number) {
+            if (minimum_side) { return "llvm.minimumnum"; }
+            return "llvm.maximumnum";
+        }
+        if (minimum_side) {
+            if (strict) { return "llvm.experimental.constrained.minnum"; }
+            return "llvm.minnum";
+        }
+        if (strict) { return "llvm.experimental.constrained.maxnum"; }
+        return "llvm.maxnum";
+    }
+
+    unsafe Value* gen_float_builtin(Node* node, Node* callee) {
+        i32 builtin = (i32)(u64)callee.symbol();
+        u32 type = node.value_type();
+        ptr<ptr> args = CodeGenerator.array_of(5);
+        args[0] = this.coerce(this.gen_expression(callee.first()), type);
+        mut i32 count = 1;
+        for (mut i32 i = 0; i < node.count(); i = i + 1) {
+            args[count] = this.coerce(this.gen_expression(node.child(i)), type);
+            count = count + 1;
+        }
+        FloatSettings* settings = FloatSettings.current();
+        // IEEE 754-1985 has no min/max operation, so min/max is the usual a < b ? a : b: when a is NaN the
+        // comparison is false and b is returned; when b is NaN, b (the NaN) is returned.
+        if ((builtin == FloatBuiltin.MIN || builtin == FloatBuiltin.MAX) && settings.standard == FloatStandard::IEEE754_1985) {
+            mut i32 predicate = LlvmConst.REAL_OLT;
+            if (builtin == FloatBuiltin.MAX) {
+                predicate = LlvmConst.REAL_OGT;
+            }
+            ptr ordered = LLVMBuildFCmp(this.builder, predicate, args[0], args[1], "float.order");
+            return Value.create(LLVMBuildSelect(this.builder, ordered, args[0], args[1], "float.pick"), type);
+        }
+        ptr<i8> name = this.float_builtin_intrinsic(builtin, settings);
+        bool constrained = Strings.starts_with(name, 0, strlen(name), "llvm.experimental.constrained.");
+        if (constrained) {
+            if (builtin == FloatBuiltin.FMA) {
+                args[count] = this.float_metadata("round.dynamic");
+                count = count + 1;
+            }
+            args[count] = this.float_metadata("fpexcept.strict");
+            count = count + 1;
+        }
+        ptr<ptr> types = CodeGenerator.array_of(1);
+        types[0] = this.llvm_type(type);
+        ptr call = this.coro_intrinsic(name, types, 1, args, count, "float");
+        if (settings.strict) {
+            this.mark_strict_call(call);
+        }
+        return Value.create(call, type);
+    }
+}
+
+// Runs once over the finished module, before verification and optimization, and applies the float settings:
+//   - every defined function gets "denormal-fp-math": "ieee,ieee" tells LLVM that subnormal inputs and results
+//     are kept (IEEE 754 requires gradual underflow); "preserve-sign" lets it treat them as zero (NONE only).
+//   - NONE: every instruction that can carry fast-math flags gets them all (nnan ninf nsz arcp contract afn
+//     reassoc), so LLVM may reassociate, contract a * b + c into an fma and ignore NaN, infinities and -0.
+//   - strict: functions and calls get strictfp and every fadd/fsub/fmul/fdiv/frem/fcmp and float conversion
+//     becomes its llvm.experimental.constrained.* call with "round.dynamic" (use the rounding mode set at run
+//     time) and "fpexcept.strict" (the exception flags it raises are observable).
+// Conforming modes never add "contract": a * b + c is always two roundings unless the program calls fma.
+struct FloatEnvironment {
+    public static unsafe void apply(CodeGenerator* gen) {
+        FloatSettings* settings = FloatSettings.current();
+        FloatStandard standard = settings.standard;
+        bool fast = !standard.conforming();
+        mut ptr<i8> denormal = "ieee,ieee";
+        if (fast) {
+            denormal = "preserve-sign,preserve-sign";
+        }
+        mut ptr function = LLVMGetFirstFunction(gen.module);
+        while (function != null) {
+            if (LLVMIsDeclaration(function) == 0) {
+                FloatEnvironment.add_string_attribute(gen, function, "denormal-fp-math", denormal);
+                FloatEnvironment.add_string_attribute(gen, function, "denormal-fp-math-f32", denormal);
+                if (settings.strict) {
+                    gen.add_function_attribute(function, "strictfp");
+                }
+                FloatEnvironment.rewrite_function(gen, function, fast, settings.strict);
+            }
+            function = LLVMGetNextFunction(function);
+        }
+    }
+
+    static void add_string_attribute(CodeGenerator* gen, ptr function, ptr<i8> key, ptr<i8> value) {
+        ptr attribute = LLVMCreateStringAttribute(gen.context, key, (u32)strlen(key), value, (u32)strlen(value));
+        LLVMAddAttributeAtIndex(function, 4294967295, attribute);
+    }
+
+    static unsafe void rewrite_function(CodeGenerator* gen, ptr function, bool fast, bool strict) {
+        mut ptr block = LLVMGetFirstBasicBlock(function);
+        while (block != null) {
+            mut ptr instruction = LLVMGetFirstInstruction(block);
+            while (instruction != null) {
+                ptr next = LLVMGetNextInstruction(instruction);
+                if (fast && LLVMCanValueUseFastMathFlags(instruction) != 0) {
+                    LLVMSetFastMathFlags(instruction, (u32)LlvmConst.FAST_MATH_ALL);
+                }
+                if (strict) {
+                    if (LLVMGetInstructionOpcode(instruction) == LlvmConst.OP_CALL) {
+                        gen.mark_strict_call(instruction);
+                    } else {
+                        FloatEnvironment.constrain(gen, instruction);
+                    }
+                }
+                instruction = next;
+            }
+            block = LLVMGetNextBasicBlock(block);
+        }
+    }
+
+    static ptr<i8> arithmetic_name(i32 opcode) {
+        if (opcode == LlvmConst.OP_FADD) { return "llvm.experimental.constrained.fadd"; }
+        if (opcode == LlvmConst.OP_FSUB) { return "llvm.experimental.constrained.fsub"; }
+        if (opcode == LlvmConst.OP_FMUL) { return "llvm.experimental.constrained.fmul"; }
+        if (opcode == LlvmConst.OP_FDIV) { return "llvm.experimental.constrained.fdiv"; }
+        if (opcode == LlvmConst.OP_FREM) { return "llvm.experimental.constrained.frem"; }
+        return (ptr<i8>)0;
+    }
+
+    static ptr<i8> conversion_name(i32 opcode) {
+        if (opcode == LlvmConst.OP_SITOFP) { return "llvm.experimental.constrained.sitofp"; }
+        if (opcode == LlvmConst.OP_UITOFP) { return "llvm.experimental.constrained.uitofp"; }
+        if (opcode == LlvmConst.OP_FPTRUNC) { return "llvm.experimental.constrained.fptrunc"; }
+        if (opcode == LlvmConst.OP_FPTOSI) { return "llvm.experimental.constrained.fptosi"; }
+        if (opcode == LlvmConst.OP_FPTOUI) { return "llvm.experimental.constrained.fptoui"; }
+        if (opcode == LlvmConst.OP_FPEXT) { return "llvm.experimental.constrained.fpext"; }
+        return (ptr<i8>)0;
+    }
+
+    // Integer to float and narrowing float conversions round, so they take the rounding mode; float to integer
+    // truncates by definition and fpext is exact, so they only take the exception behaviour.
+    static bool conversion_rounds(i32 opcode) {
+        return opcode == LlvmConst.OP_SITOFP || opcode == LlvmConst.OP_UITOFP || opcode == LlvmConst.OP_FPTRUNC;
+    }
+
+    static ptr<i8> predicate_name(i32 predicate) {
+        if (predicate == 1) { return "oeq"; }
+        if (predicate == 2) { return "ogt"; }
+        if (predicate == 3) { return "oge"; }
+        if (predicate == 4) { return "olt"; }
+        if (predicate == 5) { return "ole"; }
+        if (predicate == 6) { return "one"; }
+        if (predicate == 7) { return "ord"; }
+        if (predicate == 8) { return "uno"; }
+        if (predicate == 9) { return "ueq"; }
+        if (predicate == 10) { return "ugt"; }
+        if (predicate == 11) { return "uge"; }
+        if (predicate == 12) { return "ult"; }
+        if (predicate == 13) { return "ule"; }
+        if (predicate == 14) { return "une"; }
+        return (ptr<i8>)0;
+    }
+
+    // IEEE 754 (clause 5.11) makes <, <=, > and >= signaling comparisons: a quiet NaN operand raises the invalid
+    // flag, so they become constrained.fcmps. == and != are quiet comparisons and become constrained.fcmp.
+    static bool signals(i32 predicate) {
+        return (predicate >= 2 && predicate <= 5) || (predicate >= 10 && predicate <= 13);
+    }
+
+    static unsafe void constrain(CodeGenerator* gen, ptr instruction) {
+        i32 opcode = LLVMGetInstructionOpcode(instruction);
+        ptr<ptr> args = CodeGenerator.array_of(4);
+        ptr<ptr> types = CodeGenerator.array_of(2);
+        mut i32 count = 0;
+        mut u32 type_count = 1;
+        mut ptr<i8> name = FloatEnvironment.arithmetic_name(opcode);
+        if (name != null) {
+            args[0] = LLVMGetOperand(instruction, 0);
+            args[1] = LLVMGetOperand(instruction, 1);
+            args[2] = gen.float_metadata("round.dynamic");
+            args[3] = gen.float_metadata("fpexcept.strict");
+            count = 4;
+            types[0] = LLVMTypeOf(instruction);
+        } else if (opcode == LlvmConst.OP_FCMP) {
+            i32 predicate = LLVMGetFCmpPredicate(instruction);
+            ptr<i8> spelled = FloatEnvironment.predicate_name(predicate);
+            if (spelled == null) {
+                return;
+            }
+            name = "llvm.experimental.constrained.fcmp";
+            if (FloatEnvironment.signals(predicate)) {
+                name = "llvm.experimental.constrained.fcmps";
+            }
+            args[0] = LLVMGetOperand(instruction, 0);
+            args[1] = LLVMGetOperand(instruction, 1);
+            args[2] = gen.float_metadata(spelled);
+            args[3] = gen.float_metadata("fpexcept.strict");
+            count = 4;
+            types[0] = LLVMTypeOf(args[0]);
+        } else {
+            name = FloatEnvironment.conversion_name(opcode);
+            if (name == null) {
+                return;
+            }
+            args[0] = LLVMGetOperand(instruction, 0);
+            count = 1;
+            if (FloatEnvironment.conversion_rounds(opcode)) {
+                args[1] = gen.float_metadata("round.dynamic");
+                count = 2;
+            }
+            args[count] = gen.float_metadata("fpexcept.strict");
+            count = count + 1;
+            types[0] = LLVMTypeOf(instruction);
+            types[1] = LLVMTypeOf(args[0]);
+            type_count = 2;
+        }
+        LLVMPositionBuilderBefore(gen.builder, instruction);
+        LLVMSetCurrentDebugLocation2(gen.builder, LLVMInstructionGetDebugLoc(instruction));
+        ptr replacement = gen.coro_intrinsic(name, types, type_count, args, count, "strict");
+        gen.mark_strict_call(replacement);
+        LLVMReplaceAllUsesWith(instruction, replacement);
+        LLVMInstructionEraseFromParent(instruction);
+    }
+}
