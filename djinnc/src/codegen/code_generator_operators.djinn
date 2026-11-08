@@ -103,7 +103,7 @@ impl CodeGenerator {
             if (Types.is_float(type)) {
                 return Value.create(LLVMBuildFNeg(this.builder, operand.ref, "neg"), type);
             }
-            return Value.create(LLVMBuildNeg(this.builder, operand.ref, "neg"), type);
+            return this.gen_negation(node, operand);
         }
         if (op == TokenKind::TILDE) {
             return Value.create(LLVMBuildNot(this.builder, operand.ref, "not"), type);
@@ -137,11 +137,11 @@ impl CodeGenerator {
             }
         } else {
             ptr one = LLVMConstInt(llvm, 1, 0);
+            mut TokenKind step_operator = TokenKind::MINUS;
             if (increment) {
-                after = LLVMBuildAdd(this.builder, before, one, "count.new");
-            } else {
-                after = LLVMBuildSub(this.builder, before, one, "count.new");
+                step_operator = TokenKind::PLUS;
             }
+            after = this.gen_overflow_arithmetic(node, step_operator, type, before, one).ref;
         }
         ptr count_store = LLVMBuildStore(this.builder, after, address);
         this.mark_volatile(count_store, node.first());
@@ -337,9 +337,9 @@ impl CodeGenerator {
         }
 
         return switch op {
-            PLUS -> Value.create(LLVMBuildAdd(builder, lhs, rhs, "add"), common),
-            MINUS -> Value.create(LLVMBuildSub(builder, lhs, rhs, "sub"), common),
-            STAR -> Value.create(LLVMBuildMul(builder, lhs, rhs, "mul"), common),
+            PLUS -> this.gen_overflow_arithmetic(node, op, common, lhs, rhs),
+            MINUS -> this.gen_overflow_arithmetic(node, op, common, lhs, rhs),
+            STAR -> this.gen_overflow_arithmetic(node, op, common, lhs, rhs),
             AMPERSAND -> Value.create(LLVMBuildAnd(builder, lhs, rhs, "and"), common),
             PIPE -> Value.create(LLVMBuildOr(builder, lhs, rhs, "or"), common),
             CARET -> Value.create(LLVMBuildXor(builder, lhs, rhs, "xor"), common),
@@ -374,6 +374,10 @@ impl CodeGenerator {
 
     void check_divisor(Node* node, ptr rhs) {
         ptr is_zero = LLVMBuildICmp(this.builder, LlvmConst.INT_EQ, rhs, LLVMConstNull(LLVMTypeOf(rhs)), "div.zero");
+        if (this.can_throw("DivisionByZero")) {
+            this.throw_core_error_when(is_zero, node, "DivisionByZero", "division by zero");
+            return;
+        }
         this.stop_when(is_zero, node, "division by zero");
     }
 
@@ -423,6 +427,50 @@ impl CodeGenerator {
         this.stop_when(LLVMBuildNot(this.builder, in_range, "cast.invalid"), node, "float value is out of range for the integer type");
     }
 
+    // A narrowing cast is valid when extending the truncated value back gives the original. Casts that keep or widen the
+    // width are bit reinterpretations and are not checked. Casting to bool accepts only 0 and 1.
+    void check_integer_cast(Node* node, Value* source, u32 target) {
+        u32 from = source.type;
+        if (!Types.is_integer(from) && !Types.is_float(from)) {
+            return;
+        }
+        if (!Types.is_integer(target) || from == target) {
+            return;
+        }
+        ptr value = source.ref;
+        ptr type = LLVMTypeOf(value);
+        if (Types.bits(target) == 1) {
+            if (Types.is_float(from)) {
+                ptr is_zero = LLVMBuildFCmp(this.builder, LlvmConst.REAL_OEQ, value, LLVMConstNull(type), "bool.zero");
+                ptr is_one = LLVMBuildFCmp(this.builder, LlvmConst.REAL_OEQ, value, LLVMConstReal(type, 1.0), "bool.one");
+                ptr binary = LLVMBuildOr(this.builder, is_zero, is_one, "bool.binary");
+                this.stop_when(LLVMBuildNot(this.builder, binary, "bool.invalid"), node, "only 0 or 1 can be converted to bool");
+                return;
+            }
+            if (Types.bits(from) == 1) {
+                return;
+            }
+            ptr two = LLVMConstInt(type, 2, 0);
+            ptr invalid = LLVMBuildICmp(this.builder, LlvmConst.INT_UGE, value, two, "bool.range");
+            this.stop_when(invalid, node, "only 0 or 1 can be converted to bool");
+            return;
+        }
+        if (!Types.is_integer(from) || Types.bits(from) == 1) {
+            return;
+        }
+        bool to_signed = Types.is_signed(target);
+        if (Types.bits(from) > Types.bits(target)) {
+            ptr narrow = LLVMBuildCast(this.builder, LlvmConst.OP_TRUNC, value, this.llvm_type(target), "cast.narrow");
+            mut i32 opcode = LlvmConst.OP_ZEXT;
+            if (to_signed) {
+                opcode = LlvmConst.OP_SEXT;
+            }
+            ptr widened = LLVMBuildCast(this.builder, opcode, narrow, type, "cast.widen");
+            ptr changed = LLVMBuildICmp(this.builder, LlvmConst.INT_NE, widened, value, "cast.changed");
+            this.stop_when(changed, node, "integer value does not fit in the target type");
+        }
+    }
+
     unsafe void check_division_overflow(Node* node, u32 common, ptr lhs, ptr rhs) {
         ptr type = LLVMTypeOf(rhs);
         ptr is_minus_one = LLVMBuildICmp(this.builder, LlvmConst.INT_EQ, rhs, LLVMConstInt(type, (u64)(0 - 1), 1), "div.minus_one");
@@ -432,11 +480,18 @@ impl CodeGenerator {
         ptr minimum = LLVMBuildShl(this.builder, LLVMConstInt(type, 1, 0), LLVMConstInt(type, (u64)Types.bits(common) - 1, 0), "div.minimum");
         ptr is_minimum = LLVMBuildICmp(this.builder, LlvmConst.INT_EQ, lhs, minimum, "div.is_minimum");
         ptr overflow = LLVMBuildAnd(this.builder, is_minus_one, is_minimum, "div.overflow");
+        if (node.mode() == OverflowMode::CHECKED) {
+            this.throw_overflow_when(overflow, node);
+            return;
+        }
         this.stop_when(overflow, node, "integer overflow: the minimum value divided by -1");
     }
 
     Value* gen_division(Node* node, bool is_signed, u32 common, ptr lhs, ptr rhs) {
         this.check_divisor(node, rhs);
+        if (is_signed && node.mode() == OverflowMode::SATURATING) {
+            return this.gen_saturating_division(common, lhs, rhs);
+        }
         if (is_signed) {
             this.check_division_overflow(node, common, lhs, rhs);
             return Value.create(LLVMBuildSDiv(this.builder, lhs, rhs, "sdiv"), common);

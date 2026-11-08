@@ -141,6 +141,16 @@ impl TypeChecker {
 
     void require_literal_fits(Node* node, u32 type, bool negated) {
         if (Types.bits(type) == 1) {
+            mut i64 flag = node.int_value();
+            if (negated) {
+                flag = 0 - flag;
+            }
+            if (flag != 0 && flag != 1) {
+                this.error_code(node, DiagnosticErrors.INVALID_CONSTANT_EXPRESSION, "only 0 or 1 can be converted to bool");
+            }
+            return;
+        }
+        if (node.mode() == OverflowMode::WRAPPED || node.mode() == OverflowMode::SATURATING) {
             return;
         }
         mut i64 value = node.int_value();
@@ -153,12 +163,22 @@ impl TypeChecker {
     }
 
     void check_constant_cast(Node* node, u32 source, u32 target) {
-        if (source == target || !Types.is_integer(target) || Types.bits(target) == 1) {
+        if (source == target || !Types.is_integer(target)) {
             return;
         }
         ConstEval* evaluator = this.const_eval;
         Node* operand = node.first();
         if ((!Types.is_float(source) && !Types.is_integer(source)) || !evaluator.evaluate(operand, source, source)) {
+            return;
+        }
+        if (Types.bits(target) == 1) {
+            if (Types.is_float(source)) {
+                if (evaluator.rf != 0.0 && evaluator.rf != 1.0) {
+                    this.error_code(node, DiagnosticErrors.INVALID_CONSTANT_EXPRESSION, "only 0 or 1 can be converted to bool");
+                }
+            } else if (evaluator.ri != 0 && evaluator.ri != 1) {
+                this.error_code(node, DiagnosticErrors.INVALID_CONSTANT_EXPRESSION, "only 0 or 1 can be converted to bool");
+            }
             return;
         }
         i32 shape = ConstEval.describe(target);

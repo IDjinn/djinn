@@ -1,0 +1,185 @@
+namespace djinnc;
+
+impl CodeGenerator {
+    ptr signed_maximum(ptr type) {
+        ptr all_ones = LLVMBuildNot(this.builder, LLVMConstNull(type), "all_ones");
+        return LLVMBuildLShr(this.builder, all_ones, LLVMConstInt(type, 1, 0), "signed_max");
+    }
+
+    ptr signed_minimum(ptr type) {
+        return LLVMBuildNot(this.builder, this.signed_maximum(type), "signed_min");
+    }
+
+    ptr unsigned_maximum(ptr type) {
+        return LLVMBuildNot(this.builder, LLVMConstNull(type), "unsigned_max");
+    }
+
+    unsafe ptr overflow_intrinsic(ptr<i8> name, ptr lhs, ptr rhs) {
+        ptr<ptr> types = CodeGenerator.array_of(1);
+        types[0] = LLVMTypeOf(lhs);
+        ptr<ptr> args = CodeGenerator.array_of(2);
+        args[0] = lhs;
+        args[1] = rhs;
+        return this.coro_intrinsic(name, types, 1, args, 2, "overflow");
+    }
+
+    ptr<i8> checked_intrinsic_name(TokenKind op, bool is_signed) {
+        if (op == TokenKind::PLUS) {
+            if (is_signed) { return "llvm.sadd.with.overflow"; }
+            return "llvm.uadd.with.overflow";
+        }
+        if (op == TokenKind::MINUS) {
+            if (is_signed) { return "llvm.ssub.with.overflow"; }
+            return "llvm.usub.with.overflow";
+        }
+        if (is_signed) { return "llvm.smul.with.overflow"; }
+        return "llvm.umul.with.overflow";
+    }
+
+    ptr<i8> saturating_intrinsic_name(TokenKind op, bool is_signed) {
+        if (op == TokenKind::PLUS) {
+            if (is_signed) { return "llvm.sadd.sat"; }
+            return "llvm.uadd.sat";
+        }
+        if (is_signed) { return "llvm.ssub.sat"; }
+        return "llvm.usub.sat";
+    }
+
+    ptr plain_arithmetic(TokenKind op, ptr lhs, ptr rhs) {
+        if (op == TokenKind::PLUS) { return LLVMBuildAdd(this.builder, lhs, rhs, "add"); }
+        if (op == TokenKind::MINUS) { return LLVMBuildSub(this.builder, lhs, rhs, "sub"); }
+        return LLVMBuildMul(this.builder, lhs, rhs, "mul");
+    }
+
+    unsafe ptr saturating_multiply(ptr lhs, ptr rhs, bool is_signed) {
+        ptr type = LLVMTypeOf(lhs);
+        mut ptr<i8> name = "llvm.umul.with.overflow";
+        if (is_signed) {
+            name = "llvm.smul.with.overflow";
+        }
+        ptr pair = this.overflow_intrinsic(name, lhs, rhs);
+        ptr product = LLVMBuildExtractValue(this.builder, pair, 0, "mul.result");
+        ptr overflowed = LLVMBuildExtractValue(this.builder, pair, 1, "mul.overflow");
+        if (!is_signed) {
+            return LLVMBuildSelect(this.builder, overflowed, this.unsigned_maximum(type), product, "mul.saturated");
+        }
+        ptr signs = LLVMBuildXor(this.builder, lhs, rhs, "mul.signs");
+        ptr negative = LLVMBuildICmp(this.builder, LlvmConst.INT_SLT, signs, LLVMConstNull(type), "mul.negative");
+        ptr limit = LLVMBuildSelect(this.builder, negative, this.signed_minimum(type), this.signed_maximum(type), "mul.limit");
+        return LLVMBuildSelect(this.builder, overflowed, limit, product, "mul.saturated");
+    }
+
+    // True when the function being generated can hand this core error to its caller.
+    unsafe bool can_throw(ptr<i8> name) {
+        FunctionInfo* current = this.current_function();
+        if (current == null || !current.has_throws) {
+            return false;
+        }
+        u32 type = this.symbols_core_type(name);
+        return type != 0 && current.allows(type);
+    }
+
+    // Leaves the function with a core error ('Overflow', 'DivisionByZero') so the caller can catch it with 'try' or 'switch'.
+    unsafe void throw_core_error_when(ptr failed, Node* node, ptr<i8> name, ptr<i8> text) {
+        if (LLVMIsConstant(failed) != 0 && LLVMIsNull(failed) != 0) {
+            return;
+        }
+        ptr thrown = this.new_block("error.throw");
+        ptr valid = this.new_block("error.valid");
+        LLVMBuildCondBr(this.builder, failed, thrown, valid);
+        LLVMPositionBuilderAtEnd(this.builder, thrown);
+
+        FunctionInfo* current = this.current_function();
+        u32 type = this.symbols_core_type(name);
+        ptr llvm = this.llvm_type(type);
+        ptr slot = LLVMBuildAlloca(this.alloca_builder, llvm, "error.value");
+        LLVMBuildStore(this.builder, this.string_constant(text), LLVMBuildStructGEP2(this.builder, llvm, slot, 0, "error.message"));
+        this.emit_stack_capture(node);
+        if (current.throws_any) {
+            this.emit_exit(this.build_record(current, 1, this.error_value_from(type, slot)));
+        } else {
+            ptr value = LLVMBuildLoad2(this.builder, llvm, slot, "error.load");
+            this.emit_exit(this.build_record(current, (u64)this.member_tag(current, type), value));
+        }
+        LLVMPositionBuilderAtEnd(this.builder, valid);
+    }
+
+    unsafe void throw_overflow_when(ptr failed, Node* node) {
+        this.throw_core_error_when(failed, node, "Overflow", "integer overflow");
+    }
+
+    unsafe void overflow_when(ptr failed, Node* node) {
+        if (node.mode() == OverflowMode::CHECKED) {
+            this.throw_overflow_when(failed, node);
+            return;
+        }
+        this.stop_when(failed, node, "integer overflow");
+    }
+
+    unsafe Value* gen_overflow_arithmetic(Node* node, TokenKind op, u32 common, ptr lhs, ptr rhs) {
+        OverflowMode mode = node.mode();
+        bool is_signed = Types.is_signed(common);
+        if (mode == OverflowMode::TRAPPED || mode == OverflowMode::CHECKED) {
+            ptr pair = this.overflow_intrinsic(this.checked_intrinsic_name(op, is_signed), lhs, rhs);
+            ptr result = LLVMBuildExtractValue(this.builder, pair, 0, "ovf.result");
+            this.overflow_when(LLVMBuildExtractValue(this.builder, pair, 1, "ovf.bit"), node);
+            return Value.create(result, common);
+        }
+        if (mode == OverflowMode::SATURATING) {
+            if (op == TokenKind::STAR) {
+                return Value.create(this.saturating_multiply(lhs, rhs, is_signed), common);
+            }
+            return Value.create(this.overflow_intrinsic(this.saturating_intrinsic_name(op, is_signed), lhs, rhs), common);
+        }
+        return Value.create(this.plain_arithmetic(op, lhs, rhs), common);
+    }
+
+    // The minimum value divided by -1 is not representable: saturating gives the maximum without executing the division.
+    Value* gen_saturating_division(u32 common, ptr lhs, ptr rhs) {
+        ptr type = LLVMTypeOf(rhs);
+        ptr is_minus_one = LLVMBuildICmp(this.builder, LlvmConst.INT_EQ, rhs, LLVMBuildNot(this.builder, LLVMConstNull(type), "minus_one"), "div.minus_one");
+        ptr is_minimum = LLVMBuildICmp(this.builder, LlvmConst.INT_EQ, lhs, this.signed_minimum(type), "div.is_minimum");
+        ptr overflow = LLVMBuildAnd(this.builder, is_minus_one, is_minimum, "div.overflow");
+        ptr divisor = LLVMBuildSelect(this.builder, overflow, LLVMConstInt(type, 1, 0), rhs, "div.divisor");
+        ptr quotient = LLVMBuildSDiv(this.builder, lhs, divisor, "sdiv");
+        return Value.create(LLVMBuildSelect(this.builder, overflow, this.signed_maximum(type), quotient, "div.saturated"), common);
+    }
+
+    unsafe Value* gen_negation(Node* node, Value* operand) {
+        u32 type = operand.type;
+        ptr value = operand.ref;
+        OverflowMode mode = node.mode();
+        if (!Types.is_signed(type) || mode == OverflowMode::NONE || mode == OverflowMode::WRAPPED) {
+            return Value.create(LLVMBuildNeg(this.builder, value, "neg"), type);
+        }
+        ptr llvm = LLVMTypeOf(value);
+        ptr is_minimum = LLVMBuildICmp(this.builder, LlvmConst.INT_EQ, value, this.signed_minimum(llvm), "neg.is_minimum");
+        if (mode == OverflowMode::TRAPPED || mode == OverflowMode::CHECKED) {
+            this.overflow_when(is_minimum, node);
+            return Value.create(LLVMBuildNeg(this.builder, value, "neg"), type);
+        }
+        ptr negated = LLVMBuildNeg(this.builder, value, "neg");
+        return Value.create(LLVMBuildSelect(this.builder, is_minimum, this.signed_maximum(llvm), negated, "neg.saturated"), type);
+    }
+
+    // A literal that does not fit a saturating type clamps to the nearest limit instead of wrapping.
+    i64 saturated_literal(i64 value, u32 type) {
+        u32 bits = Types.bits(type);
+        if (bits >= 64 || bits <= 1) {
+            return value;
+        }
+        mut i64 high = ((i64)1 << (i64)(bits - 1)) - 1;
+        mut i64 low = 0 - high - 1;
+        if (!Types.is_signed(type)) {
+            high = ((i64)1 << (i64)bits) - 1;
+            low = 0;
+        }
+        if (value > high) {
+            return high;
+        }
+        if (value < low) {
+            return low;
+        }
+        return value;
+    }
+}
