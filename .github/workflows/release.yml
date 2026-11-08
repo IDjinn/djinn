@@ -55,9 +55,55 @@ jobs:
             dist/*.tar.gz
             dist/*.sha256
 
+  build-windows:
+    name: Build windows-x86_64
+    runs-on: windows-2025
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+
+      - id: toolchain
+        uses: ./.github/actions/setup-toolchain-windows
+
+      - name: Build djinnc (stage1 -> stage2) and verify fixpoint
+        run: |
+          bash tools/bootstrap.sh \
+            --seed "${{ steps.toolchain.outputs.seed }}" \
+            --runtime-dir "$PWD/runtime" \
+            --runtime-lib "${{ steps.toolchain.outputs.runtime-lib }}" \
+            --bench-ref /dev/null \
+            --lld
+
+      - name: Package
+        run: |
+          name="djinn-${TAG}-windows-x86_64"
+          dist="dist/$name"
+          mkdir -p "$dist/bin" "$dist/lib"
+          cp build/bootstrap/stage2/djinnc.exe "$dist/bin/djinnc.exe"
+          cp "/c/Program Files/LLVM/bin/LLVM-C.dll" "$dist/bin/LLVM-C.dll"
+          cp "${{ steps.toolchain.outputs.runtime-lib }}" "$dist/lib/djinn_runtime.lib"
+          cp -r runtime std "$dist/"
+          cp README.md "$dist/"
+          powershell -NoProfile -Command "Compress-Archive -Path 'dist/$name' -DestinationPath 'dist/$name.zip'"
+          (cd dist && sha256sum "$name.zip" > "$name.zip.sha256")
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-windows-x86_64
+          path: |
+            dist/*.zip
+            dist/*.sha256
+
   publish:
     name: Publish GitHub release
-    needs: build
+    needs: [build, build-windows]
     runs-on: ubuntu-24.04
     env:
       TAG: ${{ github.event.inputs.tag || github.ref_name }}

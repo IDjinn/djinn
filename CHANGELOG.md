@@ -1,5 +1,9 @@
 # Changelog
 
+## [Unreleased]
+
+- Windows x86_64 package in the release workflow, and a Windows job in CI.
+
 ## [0.1.0] - 2026-11-08
 
 First release of the self-hosted `djinnc` compiler, built from the `stage0-final` seed. Linux x86_64 only.
