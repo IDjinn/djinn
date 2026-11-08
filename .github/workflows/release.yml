@@ -1,0 +1,79 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to release (must already exist)
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build linux-x86_64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+
+      - id: toolchain
+        uses: ./.github/actions/setup-toolchain
+
+      - name: Build djinnc (stage1 -> stage2) and verify fixpoint
+        run: |
+          bash tools/bootstrap.sh \
+            --seed "${{ steps.toolchain.outputs.seed }}" \
+            --runtime-dir "$PWD/runtime" \
+            --runtime-lib "${{ steps.toolchain.outputs.runtime-lib }}" \
+            --bench-ref /dev/null \
+            --lld
+
+      - name: Package
+        run: |
+          name="djinn-${TAG}-linux-x86_64"
+          dist="dist/$name"
+          mkdir -p "$dist/bin" "$dist/lib"
+          cp build/bootstrap/stage2/djinnc "$dist/bin/djinnc"
+          cp "${{ steps.toolchain.outputs.runtime-lib }}" "$dist/lib/libdjinn_runtime.a"
+          cp -r runtime std "$dist/"
+          cp README.md "$dist/"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-linux-x86_64
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+
+  publish:
+    name: Publish GitHub release
+    needs: build
+    runs-on: ubuntu-24.04
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create release
+        run: |
+          prerelease=""
+          case "$TAG" in *-*) prerelease="--prerelease" ;; esac
+          gh release create "$TAG" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$TAG" \
+            --generate-notes \
+            $prerelease

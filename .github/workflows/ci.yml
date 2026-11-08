@@ -1,0 +1,80 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  djinnc:
+    name: djinnc bootstrap and conformance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      DJINN_USE_LLD: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: toolchain
+        uses: ./.github/actions/setup-toolchain
+
+      - name: Check frozen C++ tests
+        run: python3 tools/check_frozen_cpp_tests.py
+
+      - name: Bootstrap (seed, stage1, stage2, stage3, fixpoint, samples)
+        run: |
+          bash tools/bootstrap.sh \
+            --seed "${{ steps.toolchain.outputs.seed }}" \
+            --runtime-dir "$PWD/runtime" \
+            --runtime-lib "${{ steps.toolchain.outputs.runtime-lib }}" \
+            --bench-ref /dev/null \
+            --lld
+
+      - name: Diagnose sample compilation
+        if: failure()
+        run: |
+          mkdir -p build/diag
+          printf 'i32 main() {\n    return 3;\n}\n' > build/diag/main.djinn
+          build/bootstrap/stage2/djinnc build/diag/main.djinn -o build/diag/main \
+            --runtime-lib "${{ steps.toolchain.outputs.runtime-lib }}" --runtime-dir "$PWD/runtime" --lld || true
+          build/bootstrap/stage2/djinnc build/diag/main.djinn -o build/diag/main_nolld \
+            --runtime-lib "${{ steps.toolchain.outputs.runtime-lib }}" --runtime-dir "$PWD/runtime" || true
+          ls -la build/diag build/bootstrap/samples | head -40
+
+      - name: Conformance
+        run: bash tests/conformance/ctest.sh "${{ steps.toolchain.outputs.seed }}"
+
+      - name: Conformance (link, crash, library)
+        run: bash tests/conformance/ctest.sh "${{ steps.toolchain.outputs.seed }}" --require Link --crash --library
+
+      - name: djinnc unit tests
+        run: bash tests/djinnc/unit_ctest.sh "${{ steps.toolchain.outputs.seed }}"
+
+      - name: Upload binaries
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: djinnc-binaries
+          path: |
+            build/bootstrap/stage2/djinnc
+            build/bootstrap/runner
+            build/bootstrap/libs
+            build/runtime/libdjinn_runtime.a
+          if-no-files-found: ignore
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: djinnc-logs
+          path: |
+            build/bootstrap/*.log
+            build/conformance/report.json
+          if-no-files-found: ignore
