@@ -1,0 +1,62 @@
+namespace djinnc;
+
+impl TypeChecker {
+    unsafe bool array_use_is_safe(Node* use, Node* parent, LocalVariable* variable) {
+        if (parent == null) {
+            return false;
+        }
+        NodeKind kind = parent.kind();
+        if (kind == NodeKind::INTERPOLATION) {
+            return true;
+        }
+        if (kind == NodeKind::FIELD_ACCESS && parent.first() == use) {
+            return parent.name() == Ast.intern_base_name("length", 6);
+        }
+        if (kind == NodeKind::INDEX && parent.first() == use) {
+            SymbolTable* symbols = this.symbols;
+            StructInfo* info = symbols.struct_at(Types.struct_index(variable.type));
+            IdList* arguments = info.type_args;
+            return !Types.is_struct(arguments.get(0));
+        }
+        return false;
+    }
+
+    unsafe void scan_array_escapes(Node* node, Node* parent) {
+        NodeKind kind = node.kind();
+        PointerList* path = this.scan_path;
+        for (mut i32 p = 0; p < path.length; p = p + 1) {
+            if (path.get(p) == (ptr)node) {
+                return;
+            }
+        }
+        path.push((ptr)node);
+        if (kind == NodeKind::VAR_DECL && node.symbol_kind() == SymbolKind.LOCAL) {
+            Node* initializer = node.first();
+            if (initializer != null && initializer.kind() == NodeKind::ARRAY_LITERAL && this.is_view_type(node.value_type())) {
+                LocalVariable* declared = (LocalVariable*)node.symbol();
+                declared.stack_array = true;
+                initializer.set_flag(true);
+            }
+        }
+        if (kind == NodeKind::IDENTIFIER && node.symbol_kind() == SymbolKind.LOCAL) {
+            LocalVariable* variable = (LocalVariable*)node.symbol();
+            if (variable.stack_array && !this.array_use_is_safe(node, parent, variable)) {
+                variable.stack_array = false;
+                Node* declaration = variable.node;
+                declaration.first().set_flag(false);
+            }
+        }
+        for (mut i32 field = NodeField.FIRST; field <= NodeField.FOURTH; field = field + 1) {
+            u32 stored = node.get_field(field);
+            if (stored != 0) {
+                this.scan_array_escapes(Ast.at((i32)stored), node);
+            }
+        }
+        if (node.has_items()) {
+            for (mut i32 i = 0; i < node.count(); i = i + 1) {
+                this.scan_array_escapes(node.child(i), node);
+            }
+        }
+        path.truncate(path.length - 1);
+    }
+}
