@@ -103,6 +103,7 @@ impl CodeGenerator {
         SymbolTable* symbols = this.symbols;
         StructInfo* info = symbols.struct_at(Types.struct_index(type));
         if (Ownership.is_disposable(info)) {
+            this.dispose_owned_pointee(address, type, info);
             FunctionInfo* method = symbols.find_method(info, Ast.intern_base_name("disposable", 10));
             if (method != null && method.function != null) {
                 ptr<ptr> args = CodeGenerator.array_of(1);
@@ -122,6 +123,27 @@ impl CodeGenerator {
                 this.dispose_value(member, field.type);
             }
         }
+    }
+
+    unsafe void dispose_owned_pointee(ptr address, u32 type, StructInfo* info) {
+        if (info.origin == null || info.fields == null) {
+            return;
+        }
+        StructInfo* origin = info.origin;
+        if (origin.name_atom != Ast.intern_base_name("owner", 5)) {
+            return;
+        }
+        SymbolTable* symbols = this.symbols;
+        PointerList* fields = info.fields;
+        FieldInfo* field = (FieldInfo*)fields.get(0);
+        u32 element = Types.element(field.type);
+        if (!Ownership.needs_dispose(symbols, element)) {
+            return;
+        }
+        ptr pointer_type = LLVMPointerTypeInContext(this.context, 0);
+        ptr slot = LLVMBuildStructGEP2(this.builder, this.llvm_type(type), address, (u32)field.index, "owner.slot");
+        ptr pointee = LLVMBuildLoad2(this.builder, pointer_type, slot, "owner.pointee");
+        this.dispose_value(pointee, element);
     }
 
     unsafe void dispose_before_assign(Node* target) {
