@@ -1,0 +1,134 @@
+namespace djinnc;
+
+impl CodeGenerator {
+    unsafe void track_disposable(LocalVariable* variable, bool initialized) {
+        SymbolTable* symbols = this.symbols;
+        if (!Ownership.needs_dispose(symbols, variable.type)) {
+            return;
+        }
+        variable.tracked = true;
+        if (variable.was_moved || !initialized) {
+            ptr flag_type = LLVMIntTypeInContext(this.context, 1);
+            ptr flag = LLVMBuildAlloca(this.alloca_builder, flag_type, "drop.flag");
+            LLVMBuildStore(this.alloca_builder, LLVMConstInt(flag_type, 0, 0), flag);
+            mut u64 start = 0;
+            if (initialized) {
+                start = 1;
+            }
+            LLVMBuildStore(this.builder, LLVMConstInt(flag_type, start, 0), flag);
+            variable.drop_flag = flag;
+        }
+        FunctionContext* function_context = this.function_context;
+        PointerList* drops = function_context.drops;
+        drops.push((ptr)variable);
+    }
+
+    unsafe LocalVariable* tracked_local(Node* node) {
+        if (node == null || node.kind() != NodeKind::IDENTIFIER || node.symbol_kind() != SymbolKind.LOCAL) {
+            return (LocalVariable*)0;
+        }
+        LocalVariable* variable = (LocalVariable*)node.symbol();
+        if (!variable.tracked) {
+            return (LocalVariable*)0;
+        }
+        return variable;
+    }
+
+    unsafe void set_drop_flag(LocalVariable* variable, u64 value) {
+        if (variable.drop_flag == null) {
+            return;
+        }
+        ptr flag_type = LLVMIntTypeInContext(this.context, 1);
+        LLVMBuildStore(this.builder, LLVMConstInt(flag_type, value, 0), variable.drop_flag);
+    }
+
+    unsafe void release_moved(Node* source) {
+        LocalVariable* variable = this.tracked_local(source);
+        if (variable != null) {
+            this.set_drop_flag(variable, 0);
+        }
+    }
+
+    unsafe i32 drop_mark() {
+        FunctionContext* function_context = this.function_context;
+        PointerList* drops = function_context.drops;
+        return drops.length;
+    }
+
+    unsafe void end_scope(i32 mark) {
+        if (!this.is_terminated()) {
+            this.emit_drops(mark);
+        }
+        FunctionContext* function_context = this.function_context;
+        PointerList* drops = function_context.drops;
+        drops.truncate(mark);
+    }
+
+    unsafe void emit_drops(i32 depth) {
+        FunctionContext* function_context = this.function_context;
+        PointerList* drops = function_context.drops;
+        for (mut i32 i = drops.length - 1; i >= depth; i = i - 1) {
+            this.emit_drop((LocalVariable*)drops.get(i));
+        }
+    }
+
+    unsafe void emit_drop(LocalVariable* variable) {
+        if (variable.drop_flag == null) {
+            this.dispose_value(variable.slot, variable.type);
+            return;
+        }
+        ptr flag_type = LLVMIntTypeInContext(this.context, 1);
+        ptr live = LLVMBuildLoad2(this.builder, flag_type, variable.drop_flag, "drop.live");
+        ptr run_block = this.new_block("drop.run");
+        ptr next_block = this.new_block("drop.next");
+        LLVMBuildCondBr(this.builder, live, run_block, next_block);
+        LLVMPositionBuilderAtEnd(this.builder, run_block);
+        this.dispose_value(variable.slot, variable.type);
+        LLVMBuildBr(this.builder, next_block);
+        LLVMPositionBuilderAtEnd(this.builder, next_block);
+    }
+
+    unsafe void dispose_value(ptr address, u32 type) {
+        SymbolTable* symbols = this.symbols;
+        StructInfo* info = symbols.struct_at(Types.struct_index(type));
+        if (Ownership.is_disposable(info)) {
+            FunctionInfo* method = symbols.find_method(info, Ast.intern_base_name("disposable", 10));
+            if (method != null && method.function != null) {
+                ptr<ptr> args = CodeGenerator.array_of(1);
+                args[0] = address;
+                LLVMBuildCall2(this.builder, method.function_type, method.function, args, 1, "");
+            }
+        }
+        if (info.fields == null) {
+            return;
+        }
+        PointerList* fields = info.fields;
+        ptr llvm = this.llvm_type(type);
+        for (mut i32 i = fields.length - 1; i >= 0; i = i - 1) {
+            FieldInfo* field = (FieldInfo*)fields.get(i);
+            if (Ownership.needs_dispose(symbols, field.type)) {
+                ptr member = LLVMBuildStructGEP2(this.builder, llvm, address, (u32)field.index, "drop.field");
+                this.dispose_value(member, field.type);
+            }
+        }
+    }
+
+    unsafe void dispose_before_assign(Node* target) {
+        LocalVariable* variable = this.tracked_local(target);
+        if (variable != null) {
+            this.emit_drop(variable);
+        }
+    }
+
+    unsafe void revive_after_assign(Node* target, Node* source) {
+        LocalVariable* variable = this.tracked_local(target);
+        if (variable == null) {
+            return;
+        }
+        LocalVariable* origin = this.tracked_local(source);
+        if (origin != variable) {
+            this.release_moved(source);
+        }
+        this.set_drop_flag(variable, 1);
+    }
+}
