@@ -631,4 +631,156 @@ i32 main() {
 """;
         Verify.source(source).with_std().runs(Expected.exit(6));
     }
+
+    [Test]
+    void ArgumentIsMovedAndDisposedByCallee() {
+        str source = """
+import std::types::constraints;
+
+unsafe static mut i32 log = 0;
+
+struct Handle : Disposable {
+    i32 id;
+
+    public void disposable() {
+        log = log * 4 + this.id;
+    }
+}
+
+void consume(Handle h) {
+}
+
+i32 main() {
+    {
+        Handle a = { .id = 3 };
+        consume(a);
+    }
+    return log;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(3));
+    }
+
+    [Test]
+    void UseAfterPassingToFunction() {
+        str source = """
+import std::types::constraints;
+
+unsafe static mut i32 log = 0;
+
+struct Handle : Disposable {
+    i32 id;
+
+    public void disposable() {
+        log = log * 4 + this.id;
+    }
+}
+
+void consume(Handle h) {
+}
+
+i32 main() {
+    Handle a = { .id = 3 };
+    consume(a);
+    return a.id;
+}
+""";
+        Verify.source(source).with_std().diagnostics(Expected.error(DiagnosticErrors.USE_AFTER_MOVE));
+    }
+
+    [Test]
+    void TemporaryArgumentIsDisposedByCallee() {
+        str source = """
+import std::types::constraints;
+
+unsafe static mut i32 log = 0;
+
+struct Handle : Disposable {
+    i32 id;
+
+    public void disposable() {
+        log = log * 4 + this.id;
+    }
+}
+
+Handle make() {
+    Handle h = { .id = 2 };
+    return h;
+}
+
+void consume(Handle h) {
+}
+
+i32 main() {
+    consume(make());
+    return log;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(2));
+    }
+
+    [Test]
+    void ParameterReturnedIsNotDisposed() {
+        str source = """
+import std::types::constraints;
+
+unsafe static mut i32 log = 0;
+
+struct Handle : Disposable {
+    i32 id;
+
+    public void disposable() {
+        log = log * 4 + this.id;
+    }
+}
+
+Handle pass(Handle h) {
+    return h;
+}
+
+i32 main() {
+    {
+        Handle a = { .id = 2 };
+        Handle b = pass(a);
+    }
+    return log;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(2));
+    }
+
+    [Test]
+    void ParameterStoredInFieldIsDisposedOnce() {
+        str source = """
+import std::types::constraints;
+
+unsafe static mut i32 log = 0;
+
+struct Handle : Disposable {
+    i32 id;
+
+    public void disposable() {
+        log = log * 4 + this.id;
+    }
+}
+
+struct Slot {
+    Handle inner;
+
+    public void put(Handle h) {
+        this.inner = h;
+    }
+}
+
+i32 main() {
+    {
+        Slot s = { .inner = { .id = 1 } };
+        Handle h = { .id = 2 };
+        s.put(h);
+    }
+    return log;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(2));
+    }
 }
