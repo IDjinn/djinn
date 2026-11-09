@@ -409,8 +409,9 @@ impl Parser {
         }
 
         this.parse_throws_clause(function);
-        if (this.check(TokenKind::REQUIRE) || this.check(TokenKind::ENSURE)) {
-            this.fail("contracts are not supported yet");
+        PointerList* requires = this.parse_requires();
+        if (this.check(TokenKind::ENSURE)) {
+            this.fail("ensure is not supported yet");
             return function;
         }
 
@@ -421,7 +422,7 @@ impl Parser {
             ret.set_first(this.parse_expression());
             body.add(ret);
             this.expect(TokenKind::SEMICOLON, "expected ';' after expression body");
-            function.set_first(body);
+            function.set_first(this.with_requires(arrow, body, requires));
             return function;
         }
 
@@ -434,8 +435,49 @@ impl Parser {
             return function;
         }
 
-        function.set_first(this.parse_body(function.generics() == null && (function.op() & 7) == 0));
+        i32 open = this.current();
+        function.set_first(this.with_requires(open, this.parse_body(function.generics() == null && (function.op() & 7) == 0), requires));
         return function;
+    }
+
+    unsafe PointerList* parse_requires() {
+        PointerList* checks = PointerList.create();
+        while (this.check(TokenKind::REQUIRE) && !this.failed) {
+            i32 token = this.advance();
+            this.expect(TokenKind::LPAREN, "expected '(' after require");
+            Node* condition = this.parse_expression();
+            this.expect(TokenKind::RPAREN, "expected ')' after the require condition");
+            Node* text = Node.create(NodeKind::STRING_LITERAL, token);
+            text.set_int_value(this.length_of(token));
+            Node* panic = Node.create(NodeKind::INTRINSIC, token);
+            panic.set_op(Intrinsic.PANIC);
+            panic.set_first(text);
+            Node* call = Node.create(NodeKind::EXPR_STMT, token);
+            call.set_first(panic);
+            Node* negated = Node.create(NodeKind::UNARY, token);
+            negated.set_op_kind(TokenKind::BANG);
+            negated.set_first(condition);
+            Node* check = Node.create(NodeKind::IF, token);
+            check.set_first(negated);
+            check.set_second(call);
+            checks.push((ptr)check);
+        }
+        return checks;
+    }
+
+    unsafe Node* with_requires(i32 token, Node* body, PointerList* checks) {
+        if (checks.length == 0 || body == null) {
+            return body;
+        }
+        Node* guarded = Node.create_list(NodeKind::BLOCK, token);
+        guarded.set_op(body.op());
+        for (mut i32 i = 0; i < checks.length; i = i + 1) {
+            guarded.add((Node*)checks.get(i));
+        }
+        for (mut i32 i = 0; i < body.count(); i = i + 1) {
+            guarded.add(body.child(i));
+        }
+        return guarded;
     }
 
     void parse_throws_clause(Node* function) {
