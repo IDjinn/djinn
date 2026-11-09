@@ -11,6 +11,37 @@ struct Jit {
         return false;
     }
 
+    static unsafe bool keeps(ptr value) {
+        u64 length = 0;
+        ptr<i8> name = LLVMGetValueName2(value, &length);
+        if (length >= 5 && name[0] == 108 && name[1] == 108 && name[2] == 118 && name[3] == 109 && name[4] == 46) {
+            return true;
+        }
+        return Strings.same(name, "main")
+            || Strings.same(name, "__djinn_jit")
+            || Strings.same(name, "__djinn_coro_resume")
+            || Strings.same(name, "__djinn_coro_done")
+            || Strings.same(name, "__djinn_coro_destroy")
+            || Strings.same(name, "__djinn_coro_promise");
+    }
+
+    static unsafe void internalize(ptr module) {
+        mut ptr function = LLVMGetFirstFunction(module);
+        while (function != null) {
+            if (LLVMIsDeclaration(function) == 0 && !Jit.keeps(function)) {
+                LLVMSetLinkage(function, LlvmConst.LINKAGE_INTERNAL);
+            }
+            function = LLVMGetNextFunction(function);
+        }
+        mut ptr global = LLVMGetFirstGlobal(module);
+        while (global != null) {
+            if (LLVMIsDeclaration(global) == 0 && !Jit.keeps(global)) {
+                LLVMSetLinkage(global, LlvmConst.LINKAGE_INTERNAL);
+            }
+            global = LLVMGetNextGlobal(global);
+        }
+    }
+
     public static unsafe i32 run(CodeGenerator* gen, Options* options) {
         if (!Target.is_native()) {
             logger_error(Log.get(), "djinnc: --run needs the host target, but the target is '%s'", Target.triple());
@@ -24,14 +55,26 @@ struct Jit {
             return 1;
         }
 
-        ptr<i8> pipeline = ObjectWriter.pipeline(options.opt_level, false, true);
+        PointerList* objects = Library.resident();
+        PointerList* sizes = Library.resident_sizes();
+        bool prune = objects.length == 0;
+        if (prune) {
+            Jit.internalize(gen.module);
+        }
+        ptr<i8> pipeline = ObjectWriter.pipeline(options.opt_level, prune, true);
         if (!ObjectWriter.run_passes(gen.module, null, pipeline)) {
             return 1;
         }
 
         __djinn_link_debug_support();
+        ptr machine = ObjectWriter.jit_machine(options.opt_level);
+        if (machine == null) {
+            return 1;
+        }
+        ptr builder = LLVMOrcCreateLLJITBuilder();
+        LLVMOrcLLJITBuilderSetJITTargetMachineBuilder(builder, LLVMOrcJITTargetMachineBuilderCreateFromTargetMachine(machine));
         ptr jit = (ptr)0;
-        if (!Jit.check(LLVMOrcCreateLLJIT(&jit, null), "cannot create the JIT")) {
+        if (!Jit.check(LLVMOrcCreateLLJIT(&jit, builder), "cannot create the JIT")) {
             return 1;
         }
         ptr dylib = LLVMOrcLLJITGetMainJITDylib(jit);
@@ -56,8 +99,6 @@ struct Jit {
         }
         LLVMOrcJITDylibAddGenerator(dylib, process);
 
-        PointerList* objects = Library.resident();
-        PointerList* sizes = Library.resident_sizes();
         if (objects.length > 0 && Linker.is_windows()) {
             u64 target = 0;
             if (!Jit.check(LLVMOrcLLJITLookup(jit, &target, "_write"), "cannot find '_write'")) {
