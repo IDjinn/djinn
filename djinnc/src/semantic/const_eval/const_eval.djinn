@@ -7,6 +7,7 @@ struct ConstEval {
     const i32 KNOWN = 2048;
     const i32 NUMERIC = 1536;
     const i32 TEXT = 4096;
+    const i32 STRING = 8192;
     const i32 SCALAR = 5632;
     const i32 STEP_LIMIT = 1000000;
     const i32 DEPTH_LIMIT = 512;
@@ -32,6 +33,8 @@ struct ConstEval {
     Node* failure_node;
     i64 evaluations;
     i64 total_steps;
+    u32 str_type;
+    u32 string_type;
 
     public static unsafe ConstEval* create(TypeChecker* checker) {
         Arena* arena = Memory.arena();
@@ -76,6 +79,10 @@ struct ConstEval {
     }
 
     unsafe i32 shape_of(u32 type) {
+        i32 text = this.text_shape(type);
+        if (text != 0) {
+            return text;
+        }
         if (type < (u32)ConstEval.SHAPE_CAPACITY) {
             i32 cached = this.shapes[type];
             if (cached != 0) {
@@ -302,6 +309,9 @@ struct ConstEval {
             this.rf = 0.0;
             return true;
         }
+        if (kind == NodeKind::INTERPOLATION) {
+            return this.eval_interpolation(node);
+        }
         if (kind == NodeKind::INDEX) {
             return this.eval_index(node);
         }
@@ -403,6 +413,9 @@ struct ConstEval {
     }
 
     unsafe bool eval_member(Node* node) {
+        if (node.symbol_kind() == SymbolKind.FIELD) {
+            return this.eval_text_length(node);
+        }
         if (node.symbol_kind() != SymbolKind.CONSTANT) {
             return this.fail(node, "field access cannot be evaluated at compile time");
         }
@@ -556,6 +569,9 @@ struct ConstEval {
 
         i32 left_shape = this.shape_of(left.value_type());
         i32 right_shape = this.shape_of(right.value_type());
+        if ((left_shape & ConstEval.STRING) != 0 && (right_shape & ConstEval.STRING) != 0) {
+            return this.eval_text_binary(node, op);
+        }
         if ((left_shape & ConstEval.TEXT) != 0 && op == TokenKind::PLUS && (right_shape & ConstEval.INTEGER) != 0) {
             if (!this.eval(left)) {
                 return false;
