@@ -597,8 +597,8 @@ Medição (Windows, stage2 compilando os 21 arquivos do djinnc, 37 mil tokens, 2
       - `ptr<T>` é o raw pointer do tamanho da plataforma (8 bytes em x64); `ptr` é `ptr<void>`. Desreferência, aritmética,
         indexação e as conversões que fabricam ponteiro (`ptr<T>` -> `T*`, inteiro -> `ptr<T>`) só em contexto `unsafe`.
       - Nenhuma conversão implícita entre ponteiro e inteiro, nem de `T*` para `ptr<T>`: só cast explícito.
-      - `unsafe` vale por bloco e por função; função `unsafe` só é chamada de contexto `unsafe`. `extern "C"` só exige
-        `unsafe` quando a assinatura usa ponteiros.
+      - `unsafe` vale por bloco e por função; função `unsafe` só é chamada de contexto `unsafe`. Chamar uma função
+        `extern "C"` sempre exige `unsafe` (decidido: função externa é `unsafe` por padrão, qualquer assinatura).
       - Indexação segura é de `arr<T>` e dos tipos com bounds check (`get_unchecked` só em `unsafe`).
       - Async: manter ou usar `T*`/`ptr` vivo através de um suspend é erro de compilação até existir acesso atômico.
       - Fases: (1) `unsafe` como contexto, `ptr<T>` e restrição de aritmética; (2) nicho de `optional<T*>` [feito no djinnc: união com duas variantes, uma vazia e outra com um único ponteiro, vira 8 bytes sem tag e `None` é o nulo; `T?` é açúcar para `optional<T>` (e `T*?` para `optional<T*>`, com nicho) resolvido pelo djinnc quando existe um `optional` genérico no escopo; a reflexão de uniões nicho ainda descreve o layout com tag (valores e offsets de payload das variantes); nenhum leitor de valores em runtime existe hoje, mas o `EnumInfo` precisa de um marcador de nicho antes de haver um]; (3) borrow checker.

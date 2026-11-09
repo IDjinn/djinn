@@ -90,7 +90,7 @@ programa.
 
 | Problema | Alcance | Mecanismo | Premissa / limite |
 |---|---|---|---|
-| TOCTOU em recursos do SO | Elimina a classe path-based; mitiga o resto | API só expõe handles (fd, `openat`, diretório como capability); path vira handle uma vez | O SO precisa oferecer a primitiva (`openat`, `O_NOFOLLOW`, `FILE_FLAG_OPEN_REPARSE_POINT`); diretório pai sob controle do atacante ainda permite troca de nomes |
+| TOCTOU em recursos do SO | **Fora de escopo**: uma biblioteca futura trata do filesystem; o compilador não aplica nada | (ideia original: API só expõe handles (fd, `openat`, diretório como capability); path vira handle uma vez | O SO precisa oferecer a primitiva (`openat`, `O_NOFOLLOW`, `FILE_FLAG_OPEN_REPARSE_POINT`); diretório pai sob controle do atacante ainda permite troca de nomes) |
 | Data race em memória | Detecta (best-effort) no IR; elimina só sob premissa de runtime | `shared`/`exclusive` no IR; estratégia `cooperative` | Hoje coroutines rodam em uma thread; com threads exige capabilities no tipo (v2) |
 | Business race (check-then-act) | Detecta | Validação e escrita dentro da mesma região atômica; update guardado | Só vale dentro do processo; entre processos depende do sistema externo |
 | Deadlock | Detecta ciclos de `ordering` declarados; elimina em locks que o runtime adquire ordenados | Grafo de ordem + aquisição ordenada | Não alcança locks de banco nem de outros processos |
@@ -239,9 +239,10 @@ prova a cláusula, o check some, então o custo é pago só pelo que não se con
 trocar `check` por `ignore` em `ensure`, com o relatório indicando quantas obrigações ficaram sem verificação.
 
 Regras de expressão: cláusulas são **puras** (sem efeitos além de leitura e sem chamadas). O atributo `[Pure]`
-**[existe]**, mas hoje só vira `memory(read)` no LLVM (`djinnc/SUBSET.md:146`) e uma promessa errada é comportamento
-indefinido: ele **não é verificado**. Não serve como base de pureza para cláusulas; uma chamada dentro de cláusula só
-será aceita quando existir um atributo de pureza auditado pelo verificador (inferência de effects, §4.4).
+**[implementado]** e agora é **verificado** (E3057): uma função `[Pure]` só escreve em variáveis locais (e campos de
+structs locais), nunca por ponteiro, índice ou global, e só chama funções `[Pure]` (inclusive `extern` marcado
+`[Pure]` e funções vindas de `.djlib`). Ele continua virando `memory(read)` no LLVM. É a base de pureza para chamadas
+dentro de cláusulas; a inferência de effects (§4.4) generaliza a mesma regra.
 `old(caminho)` captura o valor de entrada e só aceita tipos `TRIVIAL` (copiáveis por bytes), para não ter custo
 escondido.
 
@@ -270,7 +271,7 @@ Vocabulário e como cada conceito se mapeia ao que `djinnc` já tem:
 - **Identidade de recurso externo (qual inode, qual linha): não.** Só dá para exigir versão ou geração e deixar o
   sistema externo comparar.
 
-**Como evitar TOCTOU:** a regra é *decidir e agir sobre o mesmo handle, na mesma operação*. Em prática:
+**Como evitar TOCTOU (fora de escopo do compilador; fica para uma biblioteca de filesystem futura):** a regra é *decidir e agir sobre o mesmo handle, na mesma operação*. Em prática:
 
 1. O std oferece operações destrutivas apenas relativas a uma capability (`Dir.remove(nome)`), e `open` com
    `O_NOFOLLOW`/`FILE_FLAG_OPEN_REPARSE_POINT` como padrão seguro.
@@ -1045,6 +1046,9 @@ void write_atomic(Dir mut dir, str name, Bytes data) throws(IoError)
 
 ### 8.4 Exclusão de arquivos e prevenção de TOCTOU
 
+> **Fora de escopo.** O tratamento de TOCTOU em filesystem será provido por uma biblioteca futura; o compilador não
+> aplica nada disso. O texto abaixo fica apenas como análise do problema.
+
 **Insegura:**
 
 ```c
@@ -1628,7 +1632,7 @@ extern "C" {
 | Valor de sucesso em `return_code`/`out_parameter` | `T` vira `void` quando o retorno é o próprio status; preservado em `errno` e `null` |
 | `last_error` e `exception` | `last_error` entra; `exception` fica para quando existir unwinding |
 | `errno` e assincronia | Async é opt-in e só há suspensão em `await`, `coro.suspend` e inicial/final; **nada** se intercala entre a chamada `extern` e a leitura imediata. O perigo real é código emitido entre os dois (drops): a leitura vem primeiro |
-| Relação com `unsafe` | O checker só chama `require_unsafe` em deref, indexação e aritmética de ponteiro bruto, conversão inteiro→ponteiro e cast de ponteiro (`type_checker_access.djinn`, `type_checker_operators.djinn`, `type_checker_unsafe.djinn`): **chamar `extern` ou função `unsafe` não é barrado hoje**. A regra desejada ("`extern "C"` só exige `unsafe` quando a assinatura usa ponteiros", `SELF_HOSTING_ROADMAP.md:600`) ainda não está implementada. Quando estiver, um `extern` anotado cuja assinatura não usa ponteiros continua chamável em código seguro, e `[NativeError]` não altera isso. Quem adotar o wrapper não esconde `unsafe`: a insegurança que sobra é a dos ponteiros |
+| Relação com `unsafe` | O checker só chama `require_unsafe` em deref, indexação e aritmética de ponteiro bruto, conversão inteiro→ponteiro e cast de ponteiro (`type_checker_access.djinn`, `type_checker_operators.djinn`, `type_checker_unsafe.djinn`): **chamar uma função `extern "C"` agora exige `unsafe`** (E3052, `is_native_extern`): função externa é `unsafe` por padrão, independentemente da assinatura. Funções vindas de `.djlib` não contam como `extern` nativo. Quando estiver, um `extern` anotado cuja assinatura não usa ponteiros continua chamável em código seguro, e `[NativeError]` não altera isso. Quem adotar o wrapper não esconde `unsafe`: a insegurança que sobra é a dos ponteiros |
 | Anotação `@ffi` | Desnecessária: `extern "C"` já diz o ABI. Não criar atributo sem efeito distinto |
 | Composição com `throws`/`try` | Direta: **é** o `throws` |
 | Migração do `libc.djinn` | Primeiros candidatos em `std/sys/io.djinn`: `fopen`, `open`, `close`, `read`, `write`, `lseek`, `remove`, `rename`. Casos especiais: `fread`/`fwrite` sinalizam falha por contagem curta e `fclose`/`fflush` por `EOF`. `malloc` com `null` só se os chamadores aceitarem `try`; `__djinn_malloc` deve continuar infalível |
