@@ -1,0 +1,78 @@
+namespace djinnc;
+
+struct Ownership {
+    const u64 COMPUTED = 1;
+    const u64 TRIVIAL = 2;
+    const u64 VALUE = 4;
+    const u64 DISPOSABLE = 8;
+    const u64 NEEDS_DISPOSE = 16;
+
+    public static unsafe bool is_disposable(StructInfo* info) {
+        if (info.contracts == null) {
+            return false;
+        }
+        PointerList* contracts = info.contracts;
+        u32 disposable = Ast.intern_base_name("Disposable", 10);
+        for (mut i32 i = 0; i < contracts.length; i = i + 1) {
+            InterfaceInfo* contract = (InterfaceInfo*)contracts.get(i);
+            if (contract.name_atom == disposable) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    public static unsafe u64 traits(SymbolTable* symbols, u32 type) {
+        if (!Types.is_struct(type)) {
+            return Ownership.COMPUTED | Ownership.TRIVIAL;
+        }
+        StructInfo* info = symbols.struct_at(Types.struct_index(type));
+        if (info == null) {
+            return Ownership.COMPUTED | Ownership.VALUE;
+        }
+        if (info.traits == 0) {
+            info.traits = Ownership.derive(symbols, info);
+        }
+        return info.traits;
+    }
+
+    static unsafe u64 derive(SymbolTable* symbols, StructInfo* info) {
+        bool disposable = Ownership.is_disposable(info);
+        mut bool trivial = !disposable && !(info.is_enum && info.has_payload);
+        mut bool needs = disposable;
+        if (info.fields != null) {
+            PointerList* fields = info.fields;
+            for (mut i32 i = 0; i < fields.length; i = i + 1) {
+                FieldInfo* field = (FieldInfo*)fields.get(i);
+                u64 held = Ownership.traits(symbols, field.type);
+                if ((held & Ownership.TRIVIAL) == 0) {
+                    trivial = false;
+                }
+                if ((held & Ownership.NEEDS_DISPOSE) != 0) {
+                    needs = true;
+                }
+            }
+        }
+        mut u64 result = Ownership.COMPUTED;
+        if (trivial && !needs) {
+            result = result | Ownership.TRIVIAL;
+        } else {
+            result = result | Ownership.VALUE;
+        }
+        if (disposable) {
+            result = result | Ownership.DISPOSABLE;
+        }
+        if (needs) {
+            result = result | Ownership.NEEDS_DISPOSE;
+        }
+        return result;
+    }
+
+    public static unsafe bool is_copy(SymbolTable* symbols, u32 type) {
+        return (Ownership.traits(symbols, type) & Ownership.TRIVIAL) != 0;
+    }
+
+    public static unsafe bool needs_dispose(SymbolTable* symbols, u32 type) {
+        return (Ownership.traits(symbols, type) & Ownership.NEEDS_DISPOSE) != 0;
+    }
+}

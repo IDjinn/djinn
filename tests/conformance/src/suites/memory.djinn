@@ -88,7 +88,7 @@ i32 main() {
     }
 
     [Test]
-    void StructMoveSemantics() {
+    void TrivialStructCopies() {
         str source = """
 struct Data {
     i32 value;
@@ -96,8 +96,62 @@ struct Data {
 
 i32 main() {
     Data d1 = { .value = 100 };
-    Data d2 = d1;  // Move d1 to d2
-    return d2.value;
+    Data d2 = d1;
+    return d1.value + d2.value;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(200));
+    }
+
+    [Test]
+    void StrCopies() {
+        str source = """
+i32 main() {
+    str a = "abc";
+    str b = a;
+    return (i32)(a.length + b.length);
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(6));
+    }
+
+    [Test]
+    void StructOfTrivialFieldsCopies() {
+        str source = """
+struct Inner {
+    i32 value;
+}
+
+struct Outer {
+    Inner inner;
+    str name;
+}
+
+i32 main() {
+    Outer o1 = { .inner = { .value = 4 }, .name = "ab" };
+    Outer o2 = o1;
+    return o1.inner.value + o2.inner.value + (i32)o1.name.length;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(10));
+    }
+
+    [Test]
+    void DisposableStructMoves() {
+        str source = """
+import std::types::constraints;
+
+struct Handle : Disposable {
+    i32 value;
+
+    public void disposable() {
+    }
+}
+
+i32 main() {
+    Handle h1 = { .value = 100 };
+    Handle h2 = h1;
+    return h2.value;
 }
 """;
         Verify.source(source).with_std().runs(Expected.exit(100));
@@ -106,14 +160,19 @@ i32 main() {
     [Test]
     void UseAfterMove() {
         str source = """
-struct Data {
+import std::types::constraints;
+
+struct Handle : Disposable {
     i32 value;
+
+    public void disposable() {
+    }
 }
 
 i32 main() {
-    Data d1 = { .value = 42 };
-    Data d2 = d1;  // Move d1 to d2
-    return d1.value;  // Error: use after move
+    Handle h1 = { .value = 42 };
+    Handle h2 = h1;
+    return h1.value;
 }
 """;
         Verify.source(source).with_std().diagnostics(Expected.error(DiagnosticErrors.USE_AFTER_MOVE));
@@ -122,15 +181,45 @@ i32 main() {
     [Test]
     void DoubleMoveError() {
         str source = """
-struct Data {
+import std::types::constraints;
+
+struct Handle : Disposable {
     i32 value;
+
+    public void disposable() {
+    }
 }
 
 i32 main() {
-    Data d1 = { .value = 10 };
-    Data d2 = d1;  // First move
-    Data d3 = d1;  // Error: d1 already moved
+    Handle h1 = { .value = 10 };
+    Handle h2 = h1;
+    Handle h3 = h1;
     return 0;
+}
+""";
+        Verify.source(source).with_std().diagnostics(Expected.error(DiagnosticErrors.USE_AFTER_MOVE));
+    }
+
+    [Test]
+    void StructWithDisposableFieldMoves() {
+        str source = """
+import std::types::constraints;
+
+struct Handle : Disposable {
+    i32 value;
+
+    public void disposable() {
+    }
+}
+
+struct Holder {
+    Handle handle;
+}
+
+i32 main() {
+    Holder a = { .handle = { .value = 1 } };
+    Holder b = a;
+    return a.handle.value;
 }
 """;
         Verify.source(source).with_std().diagnostics(Expected.error(DiagnosticErrors.USE_AFTER_MOVE));
@@ -139,15 +228,20 @@ i32 main() {
     [Test]
     void ReinitializeAfterMove() {
         str source = """
-struct Data {
+import std::types::constraints;
+
+struct Handle : Disposable {
     i32 value;
+
+    public void disposable() {
+    }
 }
 
 i32 main() {
-    Data mut d1 = { .value = 10 };
-    Data d2 = d1;  // Move d1 to d2
-    d1 = { .value = 20 };  // Reinitialize d1
-    return d1.value + d2.value;  // Both valid
+    Handle mut h1 = { .value = 10 };
+    Handle h2 = h1;
+    h1 = { .value = 20 };
+    return h1.value + h2.value;
 }
 """;
         Verify.source(source).with_std().runs(Expected.exit(30));
