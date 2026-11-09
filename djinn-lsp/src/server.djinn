@@ -1,0 +1,569 @@
+namespace djinnc;
+
+unsafe static mut i32 server_shutdown = 0;
+unsafe static mut i32 server_exit = 0;
+unsafe static mut i64 check_due_ms = 0;
+unsafe static mut ptr check_queue = null;
+
+struct Server {
+    public static i64 now_ms() {
+        return __djinn_now_us() / 1000;
+    }
+
+    public static bool should_exit() {
+        return server_exit == 1;
+    }
+
+    public static unsafe bool check_scheduled() {
+        if (check_queue == null) {
+            return false;
+        }
+        PointerList* queue = (PointerList*)check_queue;
+        return queue.length > 0;
+    }
+
+    public static unsafe i64 check_due() {
+        return check_due_ms;
+    }
+
+    public static unsafe void schedule_check(Unit* unit, i64 delay_ms) {
+        ptr saved = Heap.enter_persistent();
+        if (check_queue == null) {
+            check_queue = (ptr)PointerList.create();
+        }
+        PointerList* queue = (PointerList*)check_queue;
+        if (!queue.contains((ptr)unit)) {
+            queue.push((ptr)unit);
+        }
+        Heap.leave(saved);
+        check_due_ms = Server.now_ms() + delay_ms;
+    }
+
+    public static unsafe void run_checks() {
+        PointerList* queue = (PointerList*)check_queue;
+        mut ptr<i8> handled_directory = null;
+        PointerList* pending = PointerList.create();
+        for (mut i32 i = 0; i < queue.length; i = i + 1) {
+            pending.push(queue.get(i));
+        }
+        queue.truncate(0);
+        PointerList* done = PointerList.create();
+        for (mut i32 i = 0; i < pending.length; i = i + 1) {
+            Unit* unit = (Unit*)pending.get(i);
+            ProjectInfo* project = ProjectInfo.find(unit.path);
+            mut ptr<i8> key = unit.path;
+            if (project != null) {
+                key = project.directory;
+            }
+            if (done.contains_string(key)) {
+                continue;
+            }
+            done.push((ptr)key);
+            if (!Check.run(unit)) {
+                ptr saved = Heap.enter_persistent();
+                if (!queue.contains((ptr)unit)) {
+                    queue.push((ptr)unit);
+                }
+                Heap.leave(saved);
+                check_due_ms = Server.now_ms() + (i64)Workspace.get().debounce_ms;
+            }
+        }
+    }
+
+    static unsafe ByteBuffer* capabilities() {
+        ByteBuffer* out = ByteBuffer.create();
+        out.append("{\"capabilities\":{");
+        out.append("\"textDocumentSync\":{\"openClose\":true,\"change\":1,\"save\":{\"includeText\":false}},");
+        out.append("\"hoverProvider\":true,");
+        out.append("\"definitionProvider\":true,");
+        out.append("\"typeDefinitionProvider\":true,");
+        out.append("\"referencesProvider\":true,");
+        out.append("\"documentHighlightProvider\":true,");
+        out.append("\"documentSymbolProvider\":true,");
+        out.append("\"workspaceSymbolProvider\":true,");
+        out.append("\"foldingRangeProvider\":true,");
+        out.append("\"renameProvider\":{\"prepareProvider\":true},");
+        out.append("\"completionProvider\":{\"triggerCharacters\":[\".\",\":\"],\"resolveProvider\":false},");
+        out.append("\"signatureHelpProvider\":{\"triggerCharacters\":[\"(\",\",\"]},");
+        out.append("\"executeCommandProvider\":{\"commands\":[\"djinn.check\"]},");
+        out.append("\"semanticTokensProvider\":{\"legend\":");
+        out.append(Semantic.legend());
+        out.append(",\"full\":true}");
+        out.append("},\"serverInfo\":{\"name\":\"djinn-lsp\",\"version\":\"0.1.0\"}}");
+        return out;
+    }
+
+    static unsafe void add_root(ptr<i8> uri) {
+        if (uri == null) {
+            return;
+        }
+        Workspace* ws = Workspace.get();
+        ptr<i8> path = Uri.to_path(uri);
+        if (ws.roots.contains_string(path)) {
+            return;
+        }
+        ptr saved = Heap.enter_persistent();
+        ws.roots.push((ptr)Strings.duplicate(path, strlen(path)));
+        Heap.leave(saved);
+    }
+
+    static unsafe void apply_options(JsonValue* options) {
+        if (options == null || options.kind != JsonKind.OBJECT) {
+            return;
+        }
+        Workspace* ws = Workspace.get();
+        ptr saved = Heap.enter_persistent();
+        ptr<i8> compiler = options.field_string("compilerPath");
+        if (compiler != null && strlen(compiler) > 0) {
+            ws.compiler = Paths.normalize(compiler);
+        }
+        ptr<i8> runtime = options.field_string("runtimeDir");
+        if (runtime != null && strlen(runtime) > 0) {
+            ws.runtime_dir = Paths.normalize(runtime);
+        }
+        ptr<i8> std = options.field_string("stdDir");
+        if (std != null && strlen(std) > 0) {
+            ws.std_dir = Paths.normalize(std);
+        }
+        ws.check_on_change = options.field_bool("checkOnChange", ws.check_on_change);
+        ws.debounce_ms = (i32)options.field_int("debounceMs", (i64)ws.debounce_ms);
+        Heap.leave(saved);
+    }
+
+    static unsafe void initialize(JsonValue* id, JsonValue* params) {
+        if (params != null) {
+            Server.add_root(params.field_string("rootUri"));
+            JsonValue* folders = params.get("workspaceFolders");
+            if (folders != null) {
+                for (mut i32 i = 0; i < folders.length(); i = i + 1) {
+                    Server.add_root(folders.at(i).field_string("uri"));
+                }
+            }
+            Server.apply_options(params.get("initializationOptions"));
+        }
+        Rpc.respond(id, Server.capabilities());
+    }
+
+    static unsafe bool has_core(ptr<i8> runtime) {
+        ptr<i8> core = Paths.join(runtime, "core");
+        ptr<i8> listing = __djinn_list_files(core, ".djinn");
+        if (listing == null) {
+            return false;
+        }
+        free((ptr)listing);
+        return true;
+    }
+
+    static unsafe ptr<i8> search_upward(ptr<i8> start, ptr<i8> relative, i32 kind) {
+        mut ptr<i8> directory = start;
+        for (mut i32 depth = 0; depth < 8; depth = depth + 1) {
+            ptr<i8> candidate = Paths.join(directory, relative);
+            if (kind == 0 && Server.has_core(candidate)) {
+                return candidate;
+            }
+            if (kind == 1 && Paths.exists(candidate)) {
+                return candidate;
+            }
+            ptr<i8> parent = Paths.directory(directory);
+            if (Strings.same(parent, directory) || Strings.same(parent, ".")) {
+                break;
+            }
+            directory = parent;
+        }
+        return null;
+    }
+
+    static unsafe void discover() {
+        Workspace* ws = Workspace.get();
+        ptr saved = Heap.enter_persistent();
+        ptr<i8> self = Paths.normalize(Process.argv_or(0, "."));
+        ptr<i8> self_directory = Paths.directory(self);
+        if (ws.runtime_dir == null) {
+            ptr<i8> configured = getenv("DJINN_RUNTIME_DIR");
+            if (configured != null) {
+                ws.runtime_dir = Paths.normalize(configured);
+            }
+        }
+        if (ws.runtime_dir == null) {
+            for (mut i32 i = 0; i < ws.roots.length && ws.runtime_dir == null; i = i + 1) {
+                ws.runtime_dir = Server.search_upward((ptr<i8>)ws.roots.get(i), "runtime", 0);
+            }
+        }
+        if (ws.runtime_dir == null) {
+            ws.runtime_dir = Server.search_upward(self_directory, "runtime", 0);
+        }
+        if (ws.runtime_dir == null) {
+            ws.runtime_dir = "runtime";
+        }
+        if (ws.std_dir == null) {
+            ptr<i8> configured = getenv("DJINN_STD_DIR");
+            if (configured != null) {
+                ws.std_dir = Paths.normalize(configured);
+            }
+        }
+        if (ws.std_dir == null) {
+            ptr<i8> sibling = Paths.join(ws.runtime_dir, "../std");
+            ptr<i8> listing = __djinn_list_files(sibling, ".djinn");
+            if (listing != null) {
+                free((ptr)listing);
+                ws.std_dir = sibling;
+            }
+        }
+        if (ws.compiler == null) {
+            ptr<i8> configured = getenv("DJINNC");
+            if (configured != null) {
+                ws.compiler = Paths.normalize(configured);
+            }
+        }
+        if (ws.compiler == null) {
+            ws.compiler = Server.find_compiler(self_directory);
+        }
+        Heap.leave(saved);
+    }
+
+    static unsafe bool supports_check(ptr<i8> compiler) {
+        ByteBuffer* command = ByteBuffer.create();
+        command.append_char(34);
+        command.append(compiler);
+        command.append_char(34);
+        ptr process = __djinn_process_start(command.cstr(), null, 0);
+        if (process == null) {
+            return false;
+        }
+        i64 deadline = __djinn_now_us() + 5000000;
+        mut bool supported = false;
+        while (__djinn_process_poll(process) == 0 && __djinn_now_us() < deadline) {
+            Transport.sleep(5);
+        }
+        if (__djinn_process_poll(process) != 0) {
+            supported = Paths.contains(__djinn_process_stderr_data(process), "--check") || Paths.contains(__djinn_process_stdout_data(process), "--check");
+        } else {
+            __djinn_process_kill(process);
+        }
+        __djinn_process_free(process);
+        return supported;
+    }
+
+    static unsafe ptr<i8> find_compiler(ptr<i8> self_directory) {
+        PointerList* names = PointerList.create();
+        names.push((ptr)"djinnc.exe");
+        names.push((ptr)"djinnc");
+        PointerList* places = PointerList.create();
+        places.push((ptr)"djinnc/build");
+        places.push((ptr)"build/bootstrap/stage2");
+        places.push((ptr)"build/bootstrap/stage3");
+        places.push((ptr)"build");
+        PointerList* candidates = PointerList.create();
+        Workspace* ws = Workspace.get();
+        for (mut i32 n = 0; n < names.length; n = n + 1) {
+            ptr<i8> beside = Paths.join(self_directory, (ptr<i8>)names.get(n));
+            if (Paths.exists(beside)) {
+                candidates.push((ptr)beside);
+            }
+            for (mut i32 r = 0; r < ws.roots.length; r = r + 1) {
+                for (mut i32 p = 0; p < places.length; p = p + 1) {
+                    ByteBuffer* relative = ByteBuffer.create();
+                    relative.append((ptr<i8>)places.get(p));
+                    relative.append("/");
+                    relative.append((ptr<i8>)names.get(n));
+                    ptr<i8> found = Server.search_upward((ptr<i8>)ws.roots.get(r), relative.cstr(), 1);
+                    if (found != null && !candidates.contains_string(found)) {
+                        candidates.push((ptr)found);
+                    }
+                }
+            }
+        }
+        for (mut i32 i = 0; i < candidates.length; i = i + 1) {
+            if (Server.supports_check((ptr<i8>)candidates.get(i))) {
+                return (ptr<i8>)candidates.get(i);
+            }
+        }
+        if (candidates.length > 0) {
+            return (ptr<i8>)candidates.get(0);
+        }
+        return "djinnc";
+    }
+
+    static unsafe void index_workspace() {
+        Workspace* ws = Workspace.get();
+        if (ws.runtime_dir != null) {
+            Workspace.index_directory(Paths.join(ws.runtime_dir, "core"), true);
+        }
+        if (ws.std_dir != null) {
+            Workspace.index_directory(ws.std_dir, true);
+        }
+        for (mut i32 i = 0; i < ws.roots.length; i = i + 1) {
+            Workspace.index_directory((ptr<i8>)ws.roots.get(i), false);
+        }
+    }
+
+    static unsafe void initialized() {
+        Server.discover();
+        Server.index_workspace();
+        Workspace* ws = Workspace.get();
+        ByteBuffer* message = ByteBuffer.create();
+        message.append("djinn-lsp ready: compiler=");
+        message.append(ws.compiler);
+        message.append(" runtime=");
+        message.append(ws.runtime_dir);
+        message.append(" units=");
+        message.append_int((i64)ws.units.length);
+        Rpc.log(3, message.cstr());
+    }
+
+    static unsafe Unit* document(JsonValue* params) {
+        JsonValue* doc = params.get("textDocument");
+        if (doc == null) {
+            return (Unit*)0;
+        }
+        ptr<i8> uri = doc.field_string("uri");
+        if (uri == null) {
+            return (Unit*)0;
+        }
+        return Workspace.find_uri(uri);
+    }
+
+    static unsafe void did_open(JsonValue* params) {
+        JsonValue* doc = params.get("textDocument");
+        if (doc == null) {
+            return;
+        }
+        ptr<i8> uri = doc.field_string("uri");
+        ptr<i8> text = doc.field_string("text");
+        if (uri == null || text == null) {
+            return;
+        }
+        Unit* unit = Workspace.ensure_unit(Uri.to_path(uri), uri);
+        unit.open = true;
+        unit.dirty = false;
+        unit.version = (i32)doc.field_int("version", 0);
+        unit.set_text(text, strlen(text));
+        Workspace.mark_index_dirty();
+        Publisher.publish(unit);
+        Server.schedule_check(unit, 80);
+    }
+
+    static unsafe void did_change(JsonValue* params) {
+        Unit* unit = Server.document(params);
+        JsonValue* changes = params.get("contentChanges");
+        if (unit == null || changes == null || changes.length() == 0) {
+            return;
+        }
+        JsonValue* last = changes.at(changes.length() - 1);
+        ptr<i8> text = last.field_string("text");
+        if (text == null) {
+            return;
+        }
+        unit.dirty = true;
+        JsonValue* doc = params.get("textDocument");
+        if (doc != null) {
+            unit.version = (i32)doc.field_int("version", (i64)unit.version);
+        }
+        unit.set_text(text, strlen(text));
+        Workspace.mark_index_dirty();
+        Workspace* ws = Workspace.get();
+        if (ws.check_on_change) {
+            Server.schedule_check(unit, (i64)ws.debounce_ms);
+        }
+        if (!unit.checked) {
+            Publisher.publish(unit);
+        }
+    }
+
+    static unsafe void did_save(JsonValue* params) {
+        Unit* unit = Server.document(params);
+        if (unit == null) {
+            return;
+        }
+        unit.dirty = false;
+        Server.schedule_check(unit, 0);
+    }
+
+    static unsafe void did_close(JsonValue* params) {
+        Unit* unit = Server.document(params);
+        if (unit == null) {
+            return;
+        }
+        unit.open = false;
+        unit.dirty = false;
+        if (Paths.exists(unit.path)) {
+            Workspace.load_from_disk(unit);
+        }
+    }
+
+    static unsafe void did_change_watched(JsonValue* params) {
+        JsonValue* changes = params.get("changes");
+        if (changes == null) {
+            return;
+        }
+        for (mut i32 i = 0; i < changes.length(); i = i + 1) {
+            JsonValue* change = changes.at(i);
+            ptr<i8> uri = change.field_string("uri");
+            if (uri == null) {
+                continue;
+            }
+            ptr<i8> path = Uri.to_path(uri);
+            if (!Paths.ends_with(path, ".djinn")) {
+                continue;
+            }
+            i64 type = change.field_int("type", 2);
+            Unit* existing = Workspace.find_path(path);
+            if (type == 3) {
+                if (existing != null && !existing.open) {
+                    Workspace.remove_unit(existing);
+                }
+            } else if (existing == null || !existing.open) {
+                Unit* unit = Workspace.ensure_unit(path, uri);
+                Workspace.load_from_disk(unit);
+            }
+        }
+    }
+
+    static unsafe void position_of(JsonValue* params, i32* line, i32* character) {
+        JsonValue* position = params.get("position");
+        line[0] = 0;
+        character[0] = 0;
+        if (position != null) {
+            line[0] = (i32)position.field_int("line", 0);
+            character[0] = (i32)position.field_int("character", 0);
+        }
+    }
+
+    static unsafe void request(JsonValue* id, ptr<i8> method, JsonValue* params) {
+        if (Strings.same(method, "initialize")) {
+            Server.initialize(id, params);
+            return;
+        }
+        if (Strings.same(method, "shutdown")) {
+            server_shutdown = 1;
+            Rpc.respond(id, (ByteBuffer*)0);
+            return;
+        }
+        if (Strings.same(method, "djinn/info")) {
+            Workspace* ws = Workspace.get();
+            ByteBuffer* info = ByteBuffer.create();
+            info.append("{\"compiler\":");
+            info.append_json_string(ws.compiler);
+            info.append(",\"runtimeDir\":");
+            info.append_json_string(ws.runtime_dir);
+            info.append(",\"stdDir\":");
+            info.append_json_string(ws.std_dir);
+            info.append(",\"units\":");
+            info.append_int((i64)ws.units.length);
+            info.append("}");
+            Rpc.respond(id, info);
+            return;
+        }
+        if (params == null) {
+            Rpc.respond(id, (ByteBuffer*)0);
+            return;
+        }
+        if (Strings.same(method, "workspace/symbol")) {
+            mut ptr<i8> query = params.field_string("query");
+            if (query == null) {
+                query = "";
+            }
+            Rpc.respond(id, Outline.workspace_symbols(query));
+            return;
+        }
+        if (Strings.same(method, "workspace/executeCommand")) {
+            Workspace* ws = Workspace.get();
+            for (mut i32 i = 0; i < ws.units.length; i = i + 1) {
+                Unit* unit = (Unit*)ws.units.get(i);
+                if (unit.open) {
+                    Server.schedule_check(unit, 0);
+                }
+            }
+            Rpc.respond(id, (ByteBuffer*)0);
+            return;
+        }
+        Unit* unit = Server.document(params);
+        if (unit == null || !unit.analyzed) {
+            Rpc.respond(id, (ByteBuffer*)0);
+            return;
+        }
+        mut i32 line = 0;
+        mut i32 character = 0;
+        Server.position_of(params, &line, &character);
+        if (Strings.same(method, "textDocument/hover")) {
+            Rpc.respond(id, Navigation.hover(unit, line, character));
+        } else if (Strings.same(method, "textDocument/definition")) {
+            Rpc.respond(id, Navigation.definition(unit, line, character));
+        } else if (Strings.same(method, "textDocument/typeDefinition")) {
+            Rpc.respond(id, Navigation.type_definition(unit, line, character));
+        } else if (Strings.same(method, "textDocument/references")) {
+            JsonValue* context = params.get("context");
+            mut bool include = true;
+            if (context != null) {
+                include = context.field_bool("includeDeclaration", true);
+            }
+            Rpc.respond(id, Navigation.references(unit, line, character, include));
+        } else if (Strings.same(method, "textDocument/documentHighlight")) {
+            Rpc.respond(id, Navigation.highlights(unit, line, character));
+        } else if (Strings.same(method, "textDocument/documentSymbol")) {
+            Rpc.respond(id, Outline.document_symbols(unit));
+        } else if (Strings.same(method, "textDocument/foldingRange")) {
+            Rpc.respond(id, Outline.folding_ranges(unit));
+        } else if (Strings.same(method, "textDocument/completion")) {
+            Rpc.respond(id, Completion.complete(unit, line, character));
+        } else if (Strings.same(method, "textDocument/signatureHelp")) {
+            Rpc.respond(id, Navigation.signature_help(unit, line, character));
+        } else if (Strings.same(method, "textDocument/prepareRename")) {
+            Rpc.respond(id, Navigation.prepare_rename(unit, line, character));
+        } else if (Strings.same(method, "textDocument/rename")) {
+            ByteBuffer* edit = Navigation.rename(unit, line, character, params.field_string("newName"));
+            if (edit == null) {
+                Rpc.respond_error(id, 0 - 32803, "This symbol cannot be renamed");
+            } else {
+                Rpc.respond(id, edit);
+            }
+        } else if (Strings.same(method, "textDocument/semanticTokens/full")) {
+            Rpc.respond(id, Semantic.tokens(unit));
+        } else {
+            Rpc.respond_error(id, 0 - 32601, "method not found");
+        }
+    }
+
+    static unsafe void notification(ptr<i8> method, JsonValue* params) {
+        if (Strings.same(method, "initialized")) {
+            Server.initialized();
+        } else if (Strings.same(method, "exit")) {
+            server_exit = 1;
+        } else if (params == null) {
+            return;
+        } else if (Strings.same(method, "textDocument/didOpen")) {
+            Server.did_open(params);
+        } else if (Strings.same(method, "textDocument/didChange")) {
+            Server.did_change(params);
+        } else if (Strings.same(method, "textDocument/didSave")) {
+            Server.did_save(params);
+        } else if (Strings.same(method, "textDocument/didClose")) {
+            Server.did_close(params);
+        } else if (Strings.same(method, "workspace/didChangeWatchedFiles")) {
+            Server.did_change_watched(params);
+        } else if (Strings.same(method, "workspace/didChangeConfiguration")) {
+            JsonValue* settings = params.get("settings");
+            if (settings != null) {
+                Server.apply_options(settings.get("djinn"));
+            }
+        }
+    }
+
+    public static unsafe void handle(ptr<i8> body, i32 length) {
+        JsonValue* message = Json.parse(body, length);
+        if (message == null || message.kind != JsonKind.OBJECT) {
+            return;
+        }
+        ptr<i8> method = message.field_string("method");
+        if (method == null) {
+            return;
+        }
+        JsonValue* id = message.get("id");
+        JsonValue* params = message.get("params");
+        if (id != null) {
+            Server.request(id, method, params);
+        } else {
+            Server.notification(method, params);
+        }
+    }
+}

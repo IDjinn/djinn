@@ -1,0 +1,287 @@
+namespace djinnc;
+
+struct Completion {
+    static unsafe i32 item_kind(Sym* sym) {
+        if (sym.kind == SK.METHOD) {
+            return 2;
+        }
+        if (sym.kind == SK.FUNCTION || sym.kind == SK.OPERATOR) {
+            return 3;
+        }
+        if (sym.kind == SK.CONSTRUCTOR) {
+            return 4;
+        }
+        if (sym.kind == SK.FIELD) {
+            return 5;
+        }
+        if (sym.kind == SK.VARIABLE) {
+            return 6;
+        }
+        if (sym.kind == SK.STRUCT) {
+            return 22;
+        }
+        if (sym.kind == SK.ENUM) {
+            return 13;
+        }
+        if (sym.kind == SK.INTERFACE) {
+            return 8;
+        }
+        if (sym.kind == SK.NAMESPACE) {
+            return 9;
+        }
+        if (sym.kind == SK.CONSTANT) {
+            return 21;
+        }
+        if (sym.kind == SK.ENUM_MEMBER) {
+            return 20;
+        }
+        return 1;
+    }
+
+    static unsafe void item(ByteBuffer* out, Sym* sym, bool* any) {
+        if (any[0]) {
+            out.append(",");
+        }
+        any[0] = true;
+        out.append("{\"label\":");
+        out.append_json_string(sym.name);
+        out.append(",\"kind\":");
+        out.append_int((i64)Completion.item_kind(sym));
+        if (sym.detail != null) {
+            out.append(",\"detail\":");
+            out.append_json_string(sym.detail);
+        }
+        out.append("}");
+    }
+
+    static unsafe void word(ByteBuffer* out, ptr<i8> text, i32 kind, bool* any) {
+        if (any[0]) {
+            out.append(",");
+        }
+        any[0] = true;
+        out.append("{\"label\":");
+        out.append_json_string(text);
+        out.append(",\"kind\":");
+        out.append_int((i64)kind);
+        out.append("}");
+    }
+
+    static unsafe bool seen(PointerList* names, ptr<i8> name) {
+        return names.contains_string(name);
+    }
+
+    static unsafe void members_of(ByteBuffer* out, ptr<i8> type_name, bool* any, PointerList* names) {
+        Workspace* ws = Workspace.get();
+        for (mut i32 i = 0; i < ws.units.length; i = i + 1) {
+            Unit* unit = (Unit*)ws.units.get(i);
+            if (unit.syms == null) {
+                continue;
+            }
+            for (mut i32 s = 0; s < unit.syms.length; s = s + 1) {
+                Sym* sym = (Sym*)unit.syms.get(s);
+                if (sym.is_local() || !Resolve.belongs_to(sym, type_name)) {
+                    continue;
+                }
+                if (sym.kind == SK.OPERATOR || Completion.seen(names, sym.name)) {
+                    continue;
+                }
+                names.push((ptr)sym.name);
+                Completion.item(out, sym, any);
+            }
+        }
+    }
+
+    static unsafe void all_members(ByteBuffer* out, bool* any, PointerList* names) {
+        Workspace* ws = Workspace.get();
+        for (mut i32 i = 0; i < ws.units.length; i = i + 1) {
+            Unit* unit = (Unit*)ws.units.get(i);
+            if (unit.syms == null) {
+                continue;
+            }
+            for (mut i32 s = 0; s < unit.syms.length; s = s + 1) {
+                Sym* sym = (Sym*)unit.syms.get(s);
+                if (sym.is_member() && sym.kind != SK.OPERATOR && sym.kind != SK.CONSTRUCTOR && !Completion.seen(names, sym.name)) {
+                    names.push((ptr)sym.name);
+                    Completion.item(out, sym, any);
+                }
+            }
+        }
+    }
+
+    static unsafe void globals(ByteBuffer* out, bool* any, PointerList* names, bool types_only, ptr<i8> namespace_prefix) {
+        Workspace* ws = Workspace.get();
+        for (mut i32 i = 0; i < ws.units.length; i = i + 1) {
+            Unit* unit = (Unit*)ws.units.get(i);
+            if (unit.syms == null) {
+                continue;
+            }
+            for (mut i32 s = 0; s < unit.syms.length; s = s + 1) {
+                Sym* sym = (Sym*)unit.syms.get(s);
+                bool eligible = sym.is_global() || (sym.parent != null && sym.parent.kind == SK.NAMESPACE);
+                if (!eligible || sym.kind == SK.NAMESPACE) {
+                    continue;
+                }
+                if (types_only && !sym.is_type()) {
+                    continue;
+                }
+                if (namespace_prefix != null && (unit.namespace_name == null || !Strings.same(unit.namespace_name, namespace_prefix))) {
+                    continue;
+                }
+                if (Completion.seen(names, sym.name)) {
+                    continue;
+                }
+                names.push((ptr)sym.name);
+                Completion.item(out, sym, any);
+            }
+        }
+    }
+
+    static unsafe void namespaces(ByteBuffer* out, bool* any, PointerList* names) {
+        Workspace* ws = Workspace.get();
+        for (mut i32 i = 0; i < ws.units.length; i = i + 1) {
+            Unit* unit = (Unit*)ws.units.get(i);
+            if (unit.namespace_name != null && !Completion.seen(names, unit.namespace_name)) {
+                names.push((ptr)unit.namespace_name);
+                Completion.word(out, unit.namespace_name, 9, any);
+            }
+        }
+    }
+
+    static unsafe void locals(ByteBuffer* out, Unit* u, i32 raw, bool* any, PointerList* names) {
+        Sym* function = Resolve.enclosing_callable(u, raw);
+        if (function == null) {
+            return;
+        }
+        for (mut i32 i = 0; i < u.syms.length; i = i + 1) {
+            Sym* sym = (Sym*)u.syms.get(i);
+            if (sym.parent != function || !sym.is_local()) {
+                continue;
+            }
+            bool visible = (sym.flags & SF.PARAM) != 0 || (sym.first_tok < raw && raw <= sym.scope_end);
+            if (visible && !Completion.seen(names, sym.name)) {
+                names.push((ptr)sym.name);
+                Completion.item(out, sym, any);
+            }
+        }
+        if (function.parent != null && function.parent.is_container()) {
+            Completion.members_of(out, function.parent.name, any, names);
+        }
+    }
+
+    static unsafe void keywords(ByteBuffer* out, bool* any, PointerList* names) {
+        ptr<i8> list = "struct union enum interface impl namespace import mut unsafe async await spawn const constexpr static extern operator where this return if else for while do switch case default break continue new null true false try throw throws require ensure yield auto void public private macro";
+        i32 length = strlen(list);
+        mut i32 start = 0;
+        for (mut i32 i = 0; i <= length; i = i + 1) {
+            if (i == length || list[i] == 32) {
+                if (i > start) {
+                    ptr<i8> word = Strings.duplicate(list + start, i - start);
+                    if (!Completion.seen(names, word)) {
+                        names.push((ptr)word);
+                        Completion.word(out, word, 14, any);
+                    }
+                }
+                start = i + 1;
+            }
+        }
+        ptr<i8> types = "i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 bool size str string ptr usize isize";
+        i32 type_length = strlen(types);
+        mut i32 type_start = 0;
+        for (mut i32 i = 0; i <= type_length; i = i + 1) {
+            if (i == type_length || types[i] == 32) {
+                if (i > type_start) {
+                    ptr<i8> word = Strings.duplicate(types + type_start, i - type_start);
+                    if (!Completion.seen(names, word)) {
+                        names.push((ptr)word);
+                        Completion.word(out, word, 25, any);
+                    }
+                }
+                type_start = i + 1;
+            }
+        }
+    }
+
+    public static unsafe ByteBuffer* complete(Unit* u, i32 line, i32 character) {
+        i32 offset = u.offset_of_position(line, character);
+        ByteBuffer* out = ByteBuffer.create();
+        out.append("{\"isIncomplete\":false,\"items\":[");
+        mut bool any = false;
+        PointerList* names = PointerList.create();
+        i32 inside = u.token_at_offset(offset);
+        if (inside >= 0 && offset > u.tstart[inside] && offset < u.tend[inside]) {
+            i32 kind = u.tkind[inside];
+            if (kind == Tk.COMMENT || kind == Tk.DOC || kind == Tk.STRING || kind == Tk.ERROR) {
+                out.append("]}");
+                return out;
+            }
+        }
+        mut i32 before = 0 - 1;
+        for (mut i32 c = 0; c < u.code_count; c = c + 1) {
+            i32 raw = u.code[c];
+            bool typing = u.tkind[raw] == Tk.IDENT || u.tkind[raw] == Tk.TYPE || u.tkind[raw] == Tk.KEYWORD;
+            if (u.tend[raw] < offset || (u.tend[raw] == offset && !typing)) {
+                before = c;
+            } else if (u.tend[raw] == offset && typing && u.tstart[raw] < offset) {
+                break;
+            } else if (u.tstart[raw] >= offset) {
+                break;
+            }
+        }
+        mut i32 anchor = offset;
+        if (before >= 0) {
+            anchor = u.tend[u.code[before]];
+        }
+        if (before >= 0 && u.is_member_access(before)) {
+            ptr<i8> owner = Resolve.type_of(u, before - 1);
+            if (owner != null) {
+                Completion.members_of(out, owner, &any, names);
+            }
+            if (any == false) {
+                Completion.all_members(out, &any, names);
+            }
+            out.append("]}");
+            return out;
+        }
+        if (before >= 0 && u.is_scope(before)) {
+            if (u.is_name(before - 1)) {
+                ptr<i8> left = u.word_at(before - 1);
+                Sym* type = Resolve.type_named(u, left);
+                if (type != null) {
+                    Completion.members_of(out, left, &any, names);
+                } else {
+                    ByteBuffer* qualified = ByteBuffer.create();
+                    mut i32 first = before - 1;
+                    while (u.is_scope(first - 1) && u.is_name(first - 2)) {
+                        first = first - 2;
+                    }
+                    mut i32 k = first;
+                    while (k < before) {
+                        qualified.append_slice(u.text + u.tstart[u.code[k]], u.width(k));
+                        if (k + 1 < before) {
+                            qualified.append("::");
+                        }
+                        k = k + 2;
+                    }
+                    Completion.globals(out, &any, names, false, qualified.cstr());
+                    Completion.namespaces(out, &any, names);
+                }
+            }
+            out.append("]}");
+            return out;
+        }
+        if (before >= 0 && (u.is_word(before, "import") || u.is_word(before, "namespace"))) {
+            Completion.namespaces(out, &any, names);
+            out.append("]}");
+            return out;
+        }
+        mut i32 raw_here = offset;
+        if (before >= 0) {
+            raw_here = u.code[before] + 1;
+        }
+        Completion.locals(out, u, raw_here, &any, names);
+        Completion.globals(out, &any, names, false, null);
+        Completion.keywords(out, &any, names);
+        out.append("]}");
+        return out;
+    }
+}

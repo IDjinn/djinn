@@ -1,0 +1,800 @@
+namespace djinnc;
+
+struct Scanner {
+    Unit* unit;
+    i32 n;
+
+    public static unsafe void run(Unit* unit) {
+        Scanner* scanner = (Scanner*)Memory.zalloc(sizeof(Scanner));
+        scanner.unit = unit;
+        scanner.n = unit.code_count;
+        scanner.members(0, scanner.n, (Sym*)0, false);
+    }
+
+    unsafe Sym* add(i32 kind, i32 flags, i32 name_c, i32 first_c, Sym* parent, bool declare) {
+        Unit* u = this.unit;
+        Sym* sym = (Sym*)Memory.zalloc(sizeof(Sym));
+        sym.kind = kind;
+        sym.flags = flags;
+        sym.name = u.word_at(name_c);
+        sym.name_tok = u.code[name_c];
+        sym.name_end_tok = sym.name_tok;
+        sym.first_tok = u.code[first_c];
+        sym.last_tok = sym.name_tok;
+        sym.body_open = 0 - 1;
+        sym.body_close = 0 - 1;
+        sym.scope_end = 0 - 1;
+        sym.parent = parent;
+        sym.unit = u;
+        u.syms.push((ptr)sym);
+        if (declare) {
+            u.tok_sym[sym.name_tok] = (ptr)sym;
+        }
+        return sym;
+    }
+
+    unsafe i32 close_of(i32 open) {
+        i32 close = this.unit.match[open];
+        if (close < 0) {
+            return this.n;
+        }
+        return close;
+    }
+
+    unsafe i32 last_raw(i32 c) {
+        mut i32 index = c;
+        if (index >= this.n) {
+            index = this.n - 1;
+        }
+        if (index < 0) {
+            index = 0;
+        }
+        return this.unit.code[index];
+    }
+
+    unsafe i32 skip_attributes(i32 from, i32 to) {
+        mut i32 c = from;
+        while (c < to && this.unit.is_punct(c, 91)) {
+            i32 close = this.unit.match[c];
+            if (close < 0) {
+                return c + 1;
+            }
+            c = close + 1;
+        }
+        return c;
+    }
+
+    unsafe ptr<i8> base_type(i32 from, i32 to) {
+        Unit* u = this.unit;
+        mut i32 i = from;
+        while (i < to && (u.is_word(i, "mut") || u.is_word(i, "const") || u.is_word(i, "unsafe") || u.is_word(i, "static") || u.is_word(i, "public") || u.is_word(i, "private") || u.is_word(i, "async"))) {
+            i = i + 1;
+        }
+        if (i >= to) {
+            return null;
+        }
+        if (u.is_name(i)) {
+            mut i32 last = i;
+            while (u.is_scope(last + 1) && last + 2 < to && u.is_name(last + 2)) {
+                last = last + 2;
+            }
+            return u.word_at(last);
+        }
+        if (u.is_word(i, "void")) {
+            return u.word_at(i);
+        }
+        return null;
+    }
+
+    unsafe void qualified_name(i32 from, ByteBuffer* name, i32* first_out, i32* last_out) {
+        Unit* u = this.unit;
+        mut i32 c = from;
+        first_out[0] = 0 - 1;
+        last_out[0] = 0 - 1;
+        while (c < this.n && u.is_name(c)) {
+            if (first_out[0] < 0) {
+                first_out[0] = c;
+            }
+            last_out[0] = c;
+            u.tcls[u.code[c]] = 1;
+            name.append_slice(u.text + u.tstart[u.code[c]], u.width(c));
+            if (u.is_scope(c + 1) && u.is_name(c + 2)) {
+                name.append("::");
+                c = c + 2;
+            } else {
+                break;
+            }
+        }
+    }
+
+    unsafe void members(i32 from, i32 to, Sym* parent, bool in_extern) {
+        Unit* u = this.unit;
+        mut i32 c = from;
+        while (c < to) {
+            i32 start = c;
+            c = this.skip_attributes(c, to);
+            i32 decl = c;
+            mut i32 flags = 0;
+            if (in_extern) {
+                flags = flags | SF.EXTERN;
+            }
+            mut bool modifiers = true;
+            while (modifiers && c < to) {
+                if (u.is_word(c, "public") || u.is_word(c, "private") || u.is_word(c, "unsafe") || u.is_word(c, "async") || u.is_word(c, "override")) {
+                    c = c + 1;
+                } else if (u.is_word(c, "static")) {
+                    flags = flags | SF.STATIC;
+                    c = c + 1;
+                } else if (u.is_word(c, "macro")) {
+                    flags = flags | SF.MACRO;
+                    c = c + 1;
+                } else if (u.is_word(c, "const") || u.is_word(c, "constexpr") || u.is_word(c, "consteval")) {
+                    flags = flags | SF.CONST;
+                    c = c + 1;
+                } else if (u.is_word(c, "extern") && u.kind_at(c + 1) != Tk.STRING) {
+                    flags = flags | SF.EXTERN;
+                    c = c + 1;
+                } else {
+                    modifiers = false;
+                }
+            }
+            if (c >= to) {
+                break;
+            }
+            if (u.is_word(c, "namespace")) {
+                c = this.namespace_decl(c, to, decl);
+            } else if (u.is_word(c, "import")) {
+                c = this.import_decl(c, to, decl);
+            } else if (u.is_word(c, "extern") && u.kind_at(c + 1) == Tk.STRING) {
+                mut i32 open = c + 2;
+                if (u.is_punct(open, 123)) {
+                    i32 close = this.close_of(open);
+                    this.members(open + 1, close, parent, true);
+                    c = close + 1;
+                } else {
+                    c = open;
+                }
+            } else if (u.is_word(c, "struct") || u.is_word(c, "union") || u.is_word(c, "interface") || u.is_word(c, "enum")) {
+                c = this.type_decl(c, to, decl, flags, parent);
+            } else if (u.is_word(c, "impl")) {
+                c = this.impl_decl(c, to, decl, parent);
+            } else if (u.is_punct(c, 125)) {
+                c = c + 1;
+            } else if (u.is_word(c, "operator")) {
+                c = this.operator_decl(c, to, decl, flags, parent);
+            } else {
+                c = this.member_decl(c, to, decl, flags, parent);
+            }
+            if (c <= start) {
+                c = start + 1;
+            }
+        }
+    }
+
+    unsafe i32 namespace_decl(i32 c, i32 to, i32 decl) {
+        Unit* u = this.unit;
+        ByteBuffer* name = ByteBuffer.create();
+        mut i32 first = 0 - 1;
+        mut i32 last = 0 - 1;
+        this.qualified_name(c + 1, name, &first, &last);
+        if (first < 0) {
+            return c + 1;
+        }
+        Sym* sym = this.add(SK.NAMESPACE, 0, first, decl, (Sym*)0, true);
+        sym.name = name.cstr();
+        sym.name_end_tok = u.code[last];
+        sym.detail = u.collapse(u.code[decl], u.code[last]);
+        if (u.namespace_name == null) {
+            u.namespace_name = sym.name;
+        }
+        mut i32 next = last + 1;
+        if (u.is_punct(next, 123)) {
+            i32 close = this.close_of(next);
+            sym.body_open = u.code[next];
+            sym.last_tok = this.last_raw(close);
+            this.members(next + 1, close, sym, false);
+            return close + 1;
+        }
+        if (u.is_punct(next, 59)) {
+            next = next + 1;
+        }
+        sym.last_tok = this.last_raw(next - 1);
+        return next;
+    }
+
+    unsafe i32 import_decl(i32 c, i32 to, i32 decl) {
+        Unit* u = this.unit;
+        ByteBuffer* name = ByteBuffer.create();
+        mut i32 first = 0 - 1;
+        mut i32 last = 0 - 1;
+        this.qualified_name(c + 1, name, &first, &last);
+        if (first < 0) {
+            return c + 1;
+        }
+        Sym* sym = this.add(SK.IMPORT, 0, first, decl, (Sym*)0, false);
+        sym.name = name.cstr();
+        sym.name_end_tok = u.code[last];
+        mut i32 next = last + 1;
+        while (next < to && !u.is_punct(next, 59) && !u.is_punct(next, 125)) {
+            next = next + 1;
+        }
+        if (u.is_punct(next, 59)) {
+            next = next + 1;
+        }
+        return next;
+    }
+
+    unsafe i32 type_decl(i32 c, i32 to, i32 decl, i32 flags, Sym* parent) {
+        Unit* u = this.unit;
+        i32 name_c = c + 1;
+        if (!u.is_name(name_c)) {
+            return c + 1;
+        }
+        mut i32 kind = SK.STRUCT;
+        if (u.is_word(c, "union") || u.is_word(c, "enum")) {
+            kind = SK.ENUM;
+        } else if (u.is_word(c, "interface")) {
+            kind = SK.INTERFACE;
+        }
+        Sym* sym = this.add(kind, flags, name_c, decl, parent, true);
+        mut i32 j = name_c + 1;
+        mut bool where_seen = false;
+        while (j < to) {
+            if (u.is_punct(j, 123) || u.is_punct(j, 125)) {
+                break;
+            }
+            if (u.is_punct(j, 59) && !where_seen) {
+                break;
+            }
+            if (u.is_word(j, "where")) {
+                where_seen = true;
+            }
+            if (u.is_punct(j, 40) || u.is_punct(j, 91)) {
+                i32 close = u.match[j];
+                if (close > j) {
+                    j = close + 1;
+                    continue;
+                }
+            }
+            j = j + 1;
+        }
+        sym.detail = u.collapse(u.code[decl], this.last_raw(j - 1));
+        if (j < to && u.is_punct(j, 123)) {
+            i32 close = this.close_of(j);
+            sym.body_open = u.code[j];
+            sym.body_close = this.last_raw(close);
+            sym.last_tok = sym.body_close;
+            if (kind == SK.ENUM) {
+                this.enum_body(j + 1, close, sym);
+            } else {
+                this.members(j + 1, close, sym, false);
+            }
+            return close + 1;
+        }
+        sym.last_tok = this.last_raw(j);
+        if (j < to && u.is_punct(j, 59)) {
+            return j + 1;
+        }
+        return j;
+    }
+
+    unsafe void enum_body(i32 from, i32 to, Sym* parent) {
+        Unit* u = this.unit;
+        mut i32 c = from;
+        while (c < to) {
+            if (!u.is_name(c)) {
+                this.members(c, to, parent, false);
+                return;
+            }
+            mut i32 next = c + 1;
+            if (u.is_punct(next, 40)) {
+                i32 close = u.match[next];
+                if (close < 0) {
+                    return;
+                }
+                next = close + 1;
+            }
+            if (u.is_punct(next, 61)) {
+                while (next < to && !u.is_punct(next, 44) && !u.is_punct(next, 59)) {
+                    if (u.is_punct(next, 40) || u.is_punct(next, 91) || u.is_punct(next, 123)) {
+                        i32 close = u.match[next];
+                        if (close > next) {
+                            next = close;
+                        }
+                    }
+                    next = next + 1;
+                }
+            }
+            if (next >= to || u.is_punct(next, 44) || u.is_punct(next, 59)) {
+                Sym* member = this.add(SK.ENUM_MEMBER, 0, c, c, parent, true);
+                member.detail = u.collapse(u.code[c], this.last_raw(next - 1));
+                member.type_name = parent.name;
+                member.last_tok = this.last_raw(next - 1);
+                if (next < to && u.is_punct(next, 59)) {
+                    this.members(next + 1, to, parent, false);
+                    return;
+                }
+                c = next + 1;
+            } else {
+                this.members(c, to, parent, false);
+                return;
+            }
+        }
+    }
+
+    unsafe i32 impl_decl(i32 c, i32 to, i32 decl, Sym* parent) {
+        Unit* u = this.unit;
+        mut i32 j = c + 1;
+        mut i32 target = 0 - 1;
+        mut i32 first_name = 0 - 1;
+        mut bool after_for = false;
+        mut bool where_seen = false;
+        while (j < to) {
+            if (u.is_punct(j, 123) || u.is_punct(j, 125)) {
+                break;
+            }
+            if (u.is_punct(j, 59) && !where_seen) {
+                break;
+            }
+            if (u.is_word(j, "where")) {
+                where_seen = true;
+            }
+            if (u.is_word(j, "for")) {
+                after_for = true;
+            }
+            if (u.is_name(j) && !where_seen) {
+                if (first_name < 0) {
+                    first_name = j;
+                }
+                if (after_for && target < 0) {
+                    target = j;
+                }
+            }
+            if (u.is_punct(j, 40) || u.is_punct(j, 91)) {
+                i32 close = u.match[j];
+                if (close > j) {
+                    j = close + 1;
+                    continue;
+                }
+            }
+            j = j + 1;
+        }
+        if (target < 0) {
+            target = first_name;
+        }
+        if (target < 0) {
+            return j;
+        }
+        Sym* sym = this.add(SK.IMPL, 0, target, decl, parent, false);
+        sym.detail = u.collapse(u.code[decl], this.last_raw(j - 1));
+        if (j < to && u.is_punct(j, 123)) {
+            i32 close = this.close_of(j);
+            sym.body_open = u.code[j];
+            sym.body_close = this.last_raw(close);
+            sym.last_tok = sym.body_close;
+            this.members(j + 1, close, sym, false);
+            return close + 1;
+        }
+        return j;
+    }
+
+    unsafe i32 operator_decl(i32 c, i32 to, i32 decl, i32 flags, Sym* parent) {
+        Unit* u = this.unit;
+        mut i32 j = c + 1;
+        while (j < to && !u.is_punct(j, 40) && !u.is_punct(j, 59) && !u.is_punct(j, 123)) {
+            j = j + 1;
+        }
+        if (j >= to || !u.is_punct(j, 40)) {
+            return j;
+        }
+        Sym* sym = this.add(SK.OPERATOR, flags, c, decl, parent, true);
+        if (j > c + 1) {
+            sym.name = u.collapse(u.code[c], u.code[j - 1]);
+        }
+        return this.function_tail(sym, c, c, j, to, decl);
+    }
+
+    unsafe i32 member_decl(i32 c, i32 to, i32 decl, i32 flags, Sym* parent) {
+        Unit* u = this.unit;
+        mut i32 j = c;
+        mut i32 angle = 0;
+        mut i32 name_c = 0 - 1;
+        mut i32 stop = 0;
+        while (j < to) {
+            if (j > c && (u.is_word(j, "struct") || u.is_word(j, "union") || u.is_word(j, "interface") || u.is_word(j, "enum") || u.is_word(j, "impl") || u.is_word(j, "namespace") || u.is_word(j, "import"))) {
+                stop = 4;
+                break;
+            }
+            if (u.is_punct(j, 60)) {
+                angle = angle + 1;
+                j = j + 1;
+                continue;
+            }
+            if (u.is_punct(j, 62)) {
+                if (angle > 0) {
+                    angle = angle - 1;
+                }
+                j = j + 1;
+                continue;
+            }
+            if (angle == 0) {
+                if (u.is_punct(j, 40)) {
+                    stop = 1;
+                    break;
+                }
+                if (u.is_punct(j, 59)) {
+                    stop = 2;
+                    break;
+                }
+                if (u.is_punct(j, 61)) {
+                    stop = 2;
+                    break;
+                }
+                if (u.is_punct(j, 123)) {
+                    stop = 3;
+                    break;
+                }
+                if (u.is_punct(j, 125)) {
+                    stop = 5;
+                    break;
+                }
+                if (u.is_punct2(j, 61, 62)) {
+                    stop = 6;
+                    break;
+                }
+            }
+            if (u.is_punct(j, 91)) {
+                i32 close = u.match[j];
+                if (close > j) {
+                    j = close + 1;
+                    continue;
+                }
+            }
+            if (angle == 0 && u.is_name(j)) {
+                name_c = j;
+            }
+            j = j + 1;
+        }
+        if (stop == 1) {
+            if (name_c < 0) {
+                i32 close = u.match[j];
+                if (close > j) {
+                    return close + 1;
+                }
+                return j + 1;
+            }
+            mut i32 kind = SK.FUNCTION;
+            bool inside_type = parent != null && parent.is_container();
+            if (inside_type) {
+                kind = SK.METHOD;
+                if (name_c == c && Strings.same(u.word_at(name_c), parent.name)) {
+                    kind = SK.CONSTRUCTOR;
+                }
+            }
+            Sym* sym = this.add(kind, flags, name_c, decl, parent, true);
+            return this.function_tail(sym, c, name_c, j, to, decl);
+        }
+        if (stop == 2) {
+            if (name_c <= c) {
+                return this.skip_statement(j, to);
+            }
+            mut i32 kind = SK.VARIABLE;
+            if ((flags & SF.CONST) != 0) {
+                kind = SK.CONSTANT;
+            } else if (parent != null && parent.is_container()) {
+                kind = SK.FIELD;
+            }
+            Sym* sym = this.add(kind, flags, name_c, decl, parent, true);
+            sym.type_name = this.base_type(c, name_c);
+            mut i32 end = j;
+            if (u.is_punct(j, 61)) {
+                end = this.statement_end(j, to);
+            }
+            if (kind == SK.CONSTANT && end > j && end - j < 12) {
+                sym.detail = u.collapse(u.code[decl], this.last_raw(end - 1));
+            } else {
+                sym.detail = u.collapse(u.code[decl], u.code[name_c]);
+            }
+            sym.last_tok = this.last_raw(end);
+            if (end < to && u.is_punct(end, 59)) {
+                return end + 1;
+            }
+            return end;
+        }
+        if (stop == 3) {
+            i32 close = u.match[j];
+            if (close > j) {
+                return close + 1;
+            }
+            return j + 1;
+        }
+        if (stop == 6) {
+            return this.skip_statement(j, to);
+        }
+        if (stop == 0) {
+            return to;
+        }
+        return j;
+    }
+
+    unsafe i32 statement_end(i32 from, i32 to) {
+        Unit* u = this.unit;
+        mut i32 k = from;
+        while (k < to && !u.is_punct(k, 59)) {
+            if (u.is_punct(k, 125)) {
+                return k;
+            }
+            if (u.is_punct(k, 40) || u.is_punct(k, 91) || u.is_punct(k, 123)) {
+                i32 close = u.match[k];
+                if (close > k) {
+                    k = close;
+                }
+            }
+            k = k + 1;
+        }
+        return k;
+    }
+
+    unsafe i32 skip_statement(i32 from, i32 to) {
+        i32 end = this.statement_end(from, to);
+        if (end < to && this.unit.is_punct(end, 59)) {
+            return end + 1;
+        }
+        return end;
+    }
+
+    unsafe i32 function_tail(Sym* sym, i32 head, i32 name_c, i32 open, i32 to, i32 decl) {
+        Unit* u = this.unit;
+        mut i32 close = u.match[open];
+        if (close < 0) {
+            close = to - 1;
+        }
+        this.params(sym, open, close);
+        sym.type_name = this.base_type(head, name_c);
+        if (sym.kind == SK.CONSTRUCTOR && sym.parent != null) {
+            sym.type_name = sym.parent.name;
+        }
+        mut i32 k = close + 1;
+        mut bool where_seen = false;
+        mut i32 stop = 0;
+        while (k < to) {
+            if (u.is_punct(k, 123)) {
+                stop = 1;
+                break;
+            }
+            if (u.is_punct(k, 59) && !where_seen) {
+                stop = 2;
+                break;
+            }
+            if (u.is_punct2(k, 61, 62)) {
+                stop = 3;
+                break;
+            }
+            if (u.is_punct(k, 125)) {
+                stop = 4;
+                break;
+            }
+            if (u.is_word(k, "where")) {
+                where_seen = true;
+            }
+            if (u.is_punct2(k, 45, 62) && u.is_name(k + 1)) {
+                sym.type_name = this.base_type(k + 1, to);
+            }
+            if (u.is_punct(k, 40) || u.is_punct(k, 91)) {
+                i32 inner = u.match[k];
+                if (inner > k) {
+                    k = inner + 1;
+                    continue;
+                }
+            }
+            k = k + 1;
+        }
+        sym.detail = u.collapse(u.code[decl], this.last_raw(k - 1));
+        if (stop == 1) {
+            i32 body_close = this.close_of(k);
+            sym.body_open = u.code[k];
+            sym.body_close = this.last_raw(body_close);
+            sym.last_tok = sym.body_close;
+            this.body(sym, k, body_close);
+            return body_close + 1;
+        }
+        if (stop == 3) {
+            i32 end = this.statement_end(k, to);
+            sym.last_tok = this.last_raw(end);
+            if (end < to && u.is_punct(end, 59)) {
+                return end + 1;
+            }
+            return end;
+        }
+        sym.last_tok = this.last_raw(k);
+        if (stop == 2) {
+            return k + 1;
+        }
+        return k;
+    }
+
+    unsafe void params(Sym* function, i32 open, i32 close) {
+        Unit* u = this.unit;
+        mut i32 segment = open + 1;
+        mut i32 angle = 0;
+        mut i32 k = open + 1;
+        while (k <= close) {
+            if (k < close) {
+                if (u.is_punct(k, 60)) {
+                    angle = angle + 1;
+                } else if (u.is_punct(k, 62) && angle > 0) {
+                    angle = angle - 1;
+                } else if (u.is_punct(k, 40) || u.is_punct(k, 91)) {
+                    i32 inner = u.match[k];
+                    if (inner > k && inner < close) {
+                        k = inner;
+                    }
+                }
+            }
+            if (k == close || (angle == 0 && u.is_punct(k, 44))) {
+                this.param(function, segment, k);
+                segment = k + 1;
+            }
+            k = k + 1;
+        }
+    }
+
+    unsafe void param(Sym* function, i32 from, i32 to) {
+        Unit* u = this.unit;
+        mut i32 a = from;
+        while (a < to && (u.is_word(a, "mut") || u.is_word(a, "const"))) {
+            a = a + 1;
+        }
+        mut i32 end = to;
+        for (mut i32 k = a; k < to; k = k + 1) {
+            if (u.is_punct(k, 61)) {
+                end = k;
+                break;
+            }
+        }
+        mut i32 name_c = 0 - 1;
+        mut i32 angle = 0;
+        for (mut i32 k = a; k < end; k = k + 1) {
+            if (u.is_punct(k, 60)) {
+                angle = angle + 1;
+            } else if (u.is_punct(k, 62) && angle > 0) {
+                angle = angle - 1;
+            } else if (angle == 0 && u.is_name(k)) {
+                name_c = k;
+            }
+        }
+        if (name_c <= a) {
+            return;
+        }
+        Sym* sym = this.add(SK.VARIABLE, SF.PARAM, name_c, from, function, true);
+        sym.type_name = this.base_type(a, name_c);
+        sym.detail = u.collapse(u.code[from], u.code[name_c]);
+    }
+
+    unsafe bool statement_start(i32 c, i32 open) {
+        Unit* u = this.unit;
+        if (c == open + 1) {
+            return true;
+        }
+        if (u.is_punct(c - 1, 59) || u.is_punct(c - 1, 123) || u.is_punct(c - 1, 125)) {
+            return true;
+        }
+        if (u.is_punct(c - 1, 40) && (u.is_word(c - 2, "for") || u.is_word(c - 2, "catch") || u.is_word(c - 2, "using"))) {
+            return true;
+        }
+        return false;
+    }
+
+    unsafe i32 local_declaration(i32 c, i32 limit, i32* type_start_out) {
+        Unit* u = this.unit;
+        mut i32 i = c;
+        while (i < limit && (u.is_word(i, "mut") || u.is_word(i, "const") || u.is_word(i, "static") || u.is_word(i, "unsafe"))) {
+            i = i + 1;
+        }
+        if (i >= limit) {
+            return 0 - 1;
+        }
+        type_start_out[0] = i;
+        mut i32 type_end = i + 1;
+        if (u.is_word(i, "auto")) {
+            type_end = i + 1;
+        } else {
+            if (!u.is_name(i)) {
+                return 0 - 1;
+            }
+            mut i32 j = i;
+            while (u.is_scope(j + 1) && u.is_name(j + 2)) {
+                j = j + 2;
+            }
+            type_end = j + 1;
+            if (u.is_punct(type_end, 60)) {
+                mut i32 k = type_end + 1;
+                mut i32 depth = 1;
+                while (k < limit && depth > 0) {
+                    if (u.is_punct(k, 60)) {
+                        depth = depth + 1;
+                    } else if (u.is_punct(k, 62)) {
+                        depth = depth - 1;
+                    } else if (!(u.is_name(k) || u.is_scope(k) || u.is_punct(k, 44) || u.is_punct(k, 42) || u.is_punct(k, 63) || u.kind_at(k) == Tk.NUMBER)) {
+                        return 0 - 1;
+                    }
+                    k = k + 1;
+                }
+                if (depth != 0) {
+                    return 0 - 1;
+                }
+                type_end = k;
+            }
+            mut bool suffix = true;
+            while (suffix && type_end < limit) {
+                if (u.is_punct(type_end, 42) || u.is_punct(type_end, 63) || u.is_punct(type_end, 38)) {
+                    type_end = type_end + 1;
+                } else if (u.is_punct(type_end, 91) && u.match[type_end] > type_end) {
+                    type_end = u.match[type_end] + 1;
+                } else {
+                    suffix = false;
+                }
+            }
+        }
+        if (!u.is_ident(type_end)) {
+            return 0 - 1;
+        }
+        i32 after = type_end + 1;
+        if (after >= limit) {
+            return 0 - 1;
+        }
+        if (u.is_punct(after, 61) || u.is_punct(after, 59) || u.is_punct(after, 44) || u.is_word(after, "in")) {
+            return type_end;
+        }
+        return 0 - 1;
+    }
+
+    unsafe void body(Sym* function, i32 open, i32 close) {
+        Unit* u = this.unit;
+        ptr<i32> stack = (ptr<i32>)Memory.zalloc(64 * 4);
+        mut i32 depth = 0;
+        mut i32 c = open + 1;
+        mut i32 type_start = 0;
+        while (c < close) {
+            if (u.is_punct(c, 123)) {
+                if (depth < 63) {
+                    mut i32 end = u.match[c];
+                    if (end < 0) {
+                        end = close;
+                    }
+                    stack[depth] = end;
+                    depth = depth + 1;
+                }
+                c = c + 1;
+                continue;
+            }
+            if (u.is_punct(c, 125)) {
+                if (depth > 0) {
+                    depth = depth - 1;
+                }
+                c = c + 1;
+                continue;
+            }
+            if (this.statement_start(c, open)) {
+                i32 name_c = this.local_declaration(c, close, &type_start);
+                if (name_c >= 0) {
+                    Sym* local = this.add(SK.VARIABLE, SF.LOCAL, name_c, c, function, true);
+                    if (u.is_word(type_start, "auto")) {
+                        local.type_name = null;
+                    } else {
+                        local.type_name = this.base_type(type_start, name_c);
+                    }
+                    local.detail = u.collapse(u.code[c], u.code[name_c]);
+                    mut i32 scope = close;
+                    if (depth > 0) {
+                        scope = stack[depth - 1];
+                    }
+                    local.scope_end = u.code[scope];
+                    c = name_c + 1;
+                    continue;
+                }
+            }
+            c = c + 1;
+        }
+    }
+}

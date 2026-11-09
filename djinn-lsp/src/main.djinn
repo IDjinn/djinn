@@ -1,0 +1,57 @@
+namespace djinnc;
+
+i32 main() {
+    i32 status = run_server();
+    return status;
+}
+
+unsafe i32 dump_file(ptr<i8> path) {
+    Unit* unit = Workspace.ensure_unit(Paths.normalize(path), null);
+    if (!Workspace.load_from_disk(unit)) {
+        printf("cannot read %s\n", path);
+        return 1;
+    }
+    printf("tokens=%d symbols=%d lint=%d namespace=%s\n", unit.token_count, unit.syms.length, unit.lint.length, unit.namespace_name);
+    for (mut i32 i = 0; i < unit.syms.length; i = i + 1) {
+        Sym* sym = (Sym*)unit.syms.get(i);
+        mut ptr<i8> parent = "-";
+        if (sym.parent != null) {
+            parent = sym.parent.name;
+        }
+        printf("%d f=%d %s parent=%s type=%s | %s\n", sym.kind, sym.flags, sym.name, parent, sym.type_name, sym.detail);
+    }
+    return 0;
+}
+
+unsafe i32 run_server() {
+    Arena* arena = Memory.arena();
+    if (Process.argc() >= 3 && Strings.same(Process.argv_or(1, ""), "--dump")) {
+        return dump_file(Process.argv_or(2, "."));
+    }
+    if (Process.argc() >= 2 && Strings.same(Process.argv_or(1, ""), "--version")) {
+        printf("djinn-lsp 0.1.0\n");
+        return 0;
+    }
+    Transport.init();
+    Words.init();
+    ArenaMark* base = arena.mark();
+    while (!Server.should_exit()) {
+        if (Server.check_scheduled() && !Transport.has_pending()) {
+            if (Server.now_ms() >= Server.check_due()) {
+                Server.run_checks();
+                arena.reset_to(base);
+            } else {
+                Transport.sleep(8);
+            }
+            continue;
+        }
+        mut i32 length = 0;
+        ptr<i8> body = Transport.read_message(&length);
+        if (body == null) {
+            return 1;
+        }
+        Server.handle(body, length);
+        arena.reset_to(base);
+    }
+    return 0;
+}

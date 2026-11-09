@@ -1,0 +1,339 @@
+namespace djinnc;
+
+struct JsonKind {
+    const i32 NULL_VALUE = 0;
+    const i32 BOOL = 1;
+    const i32 INT = 2;
+    const i32 REAL = 3;
+    const i32 STRING = 4;
+    const i32 ARRAY = 5;
+    const i32 OBJECT = 6;
+}
+
+struct JsonValue {
+    i32 kind;
+    i64 number;
+    ptr<i8> text;
+    PointerList* items;
+    PointerList* keys;
+
+    public unsafe JsonValue* get(ptr<i8> key) {
+        if (this.kind != JsonKind.OBJECT) {
+            return (JsonValue*)0;
+        }
+        for (mut i32 i = 0; i < this.keys.length; i = i + 1) {
+            if (Strings.same((ptr<i8>)this.keys.get(i), key)) {
+                return (JsonValue*)this.items.get(i);
+            }
+        }
+        return (JsonValue*)0;
+    }
+
+    public unsafe JsonValue* at(i32 index) {
+        if (this.kind != JsonKind.ARRAY || index < 0 || index >= this.items.length) {
+            return (JsonValue*)0;
+        }
+        return (JsonValue*)this.items.get(index);
+    }
+
+    public unsafe i32 length() {
+        if (this.kind != JsonKind.ARRAY && this.kind != JsonKind.OBJECT) {
+            return 0;
+        }
+        return this.items.length;
+    }
+
+    public ptr<i8> string_or(ptr<i8> fallback) {
+        if (this.kind != JsonKind.STRING) {
+            return fallback;
+        }
+        return this.text;
+    }
+
+    public i64 int_or(i64 fallback) {
+        if (this.kind != JsonKind.INT && this.kind != JsonKind.REAL) {
+            return fallback;
+        }
+        return this.number;
+    }
+
+    public bool bool_or(bool fallback) {
+        if (this.kind != JsonKind.BOOL) {
+            return fallback;
+        }
+        return this.number == 1;
+    }
+
+    public unsafe ptr<i8> field_string(ptr<i8> key) {
+        JsonValue* value = this.get(key);
+        if (value == null) {
+            return null;
+        }
+        return value.string_or(null);
+    }
+
+    public unsafe i64 field_int(ptr<i8> key, i64 fallback) {
+        JsonValue* value = this.get(key);
+        if (value == null) {
+            return fallback;
+        }
+        return value.int_or(fallback);
+    }
+
+    public unsafe bool field_bool(ptr<i8> key, bool fallback) {
+        JsonValue* value = this.get(key);
+        if (value == null) {
+            return fallback;
+        }
+        return value.bool_or(fallback);
+    }
+}
+
+struct Json {
+    public static unsafe JsonValue* parse(ptr<i8> text, i32 length) {
+        JsonParser* parser = (JsonParser*)Memory.zalloc(sizeof(JsonParser));
+        parser.text = text;
+        parser.length = length;
+        parser.ok = true;
+        JsonValue* value = parser.value();
+        parser.skip_blanks();
+        if (!parser.ok) {
+            return (JsonValue*)0;
+        }
+        return value;
+    }
+
+    public static unsafe void write_id(ByteBuffer* out, JsonValue* id) {
+        if (id == null || id.kind == JsonKind.NULL_VALUE) {
+            out.append("null");
+        } else if (id.kind == JsonKind.STRING) {
+            out.append_json_string(id.text);
+        } else {
+            out.append_int(id.number);
+        }
+    }
+}
+
+struct JsonParser {
+    ptr<i8> text;
+    i32 length;
+    i32 pos;
+    bool ok;
+
+    unsafe i32 peek() {
+        if (this.pos >= this.length) {
+            return 0;
+        }
+        return (i32)(u8)this.text[this.pos];
+    }
+
+    unsafe void skip_blanks() {
+        while (this.pos < this.length) {
+            i32 c = (i32)this.text[this.pos];
+            if (c == 32 || c == 9 || c == 10 || c == 13) {
+                this.pos = this.pos + 1;
+            } else {
+                return;
+            }
+        }
+    }
+
+    unsafe JsonValue* make(i32 kind) {
+        JsonValue* value = (JsonValue*)Memory.zalloc(sizeof(JsonValue));
+        value.kind = kind;
+        return value;
+    }
+
+    unsafe JsonValue* fail() {
+        this.ok = false;
+        return this.make(JsonKind.NULL_VALUE);
+    }
+
+    unsafe bool consume_word(ptr<i8> word) {
+        i32 count = strlen(word);
+        if (Strings.starts_with(this.text, this.pos, this.length, word)) {
+            this.pos = this.pos + count;
+            return true;
+        }
+        return false;
+    }
+
+    unsafe JsonValue* value() {
+        this.skip_blanks();
+        i32 c = this.peek();
+        if (c == 123) {
+            return this.object();
+        }
+        if (c == 91) {
+            return this.array();
+        }
+        if (c == 34) {
+            JsonValue* text = this.make(JsonKind.STRING);
+            text.text = this.string();
+            return text;
+        }
+        if (c == 116 && this.consume_word("true")) {
+            JsonValue* yes = this.make(JsonKind.BOOL);
+            yes.number = 1;
+            return yes;
+        }
+        if (c == 102 && this.consume_word("false")) {
+            return this.make(JsonKind.BOOL);
+        }
+        if (c == 110 && this.consume_word("null")) {
+            return this.make(JsonKind.NULL_VALUE);
+        }
+        if (c == 45 || (c >= 48 && c <= 57)) {
+            return this.number();
+        }
+        return this.fail();
+    }
+
+    unsafe JsonValue* number() {
+        mut bool negative = false;
+        if (this.peek() == 45) {
+            negative = true;
+            this.pos = this.pos + 1;
+        }
+        mut i64 whole = 0;
+        mut bool real = false;
+        while (this.peek() >= 48 && this.peek() <= 57) {
+            whole = whole * 10 + (i64)(this.peek() - 48);
+            this.pos = this.pos + 1;
+        }
+        while (this.pos < this.length) {
+            i32 c = this.peek();
+            if (c == 46 || c == 101 || c == 69 || c == 43 || c == 45 || (c >= 48 && c <= 57)) {
+                real = true;
+                this.pos = this.pos + 1;
+            } else {
+                break;
+            }
+        }
+        JsonValue* value = this.make(JsonKind.INT);
+        if (real) {
+            value.kind = JsonKind.REAL;
+        }
+        if (negative) {
+            whole = 0 - whole;
+        }
+        value.number = whole;
+        return value;
+    }
+
+    unsafe i32 hex4() {
+        mut i32 value = 0;
+        for (mut i32 i = 0; i < 4; i = i + 1) {
+            i32 digit = Strings.digit_value(this.peek());
+            if (digit < 0) {
+                this.ok = false;
+                return 0;
+            }
+            value = value * 16 + digit;
+            this.pos = this.pos + 1;
+        }
+        return value;
+    }
+
+    unsafe ptr<i8> string() {
+        this.pos = this.pos + 1;
+        ByteBuffer* out = ByteBuffer.create();
+        while (this.pos < this.length) {
+            i32 c = this.peek();
+            if (c == 34) {
+                this.pos = this.pos + 1;
+                return out.cstr();
+            }
+            if (c != 92) {
+                out.append_char(c);
+                this.pos = this.pos + 1;
+                continue;
+            }
+            this.pos = this.pos + 1;
+            i32 e = this.peek();
+            this.pos = this.pos + 1;
+            if (e == 110) {
+                out.append_char(10);
+            } else if (e == 114) {
+                out.append_char(13);
+            } else if (e == 116) {
+                out.append_char(9);
+            } else if (e == 98) {
+                out.append_char(8);
+            } else if (e == 102) {
+                out.append_char(12);
+            } else if (e == 117) {
+                mut i32 code = this.hex4();
+                if (code >= 55296 && code < 56320 && this.peek() == 92) {
+                    this.pos = this.pos + 2;
+                    i32 low = this.hex4();
+                    code = 65536 + ((code - 55296) * 1024) + (low - 56320);
+                }
+                Utf8.append(out, code);
+            } else {
+                out.append_char(e);
+            }
+        }
+        this.ok = false;
+        return out.cstr();
+    }
+
+    unsafe JsonValue* array() {
+        JsonValue* value = this.make(JsonKind.ARRAY);
+        value.items = PointerList.create();
+        this.pos = this.pos + 1;
+        this.skip_blanks();
+        if (this.peek() == 93) {
+            this.pos = this.pos + 1;
+            return value;
+        }
+        while (this.ok) {
+            value.items.push((ptr)this.value());
+            this.skip_blanks();
+            i32 c = this.peek();
+            this.pos = this.pos + 1;
+            if (c == 93) {
+                return value;
+            }
+            if (c != 44) {
+                return this.fail();
+            }
+        }
+        return value;
+    }
+
+    unsafe JsonValue* object() {
+        JsonValue* value = this.make(JsonKind.OBJECT);
+        value.items = PointerList.create();
+        value.keys = PointerList.create();
+        this.pos = this.pos + 1;
+        this.skip_blanks();
+        if (this.peek() == 125) {
+            this.pos = this.pos + 1;
+            return value;
+        }
+        while (this.ok) {
+            this.skip_blanks();
+            if (this.peek() != 34) {
+                return this.fail();
+            }
+            value.keys.push((ptr)this.string());
+            this.skip_blanks();
+            if (this.peek() != 58) {
+                return this.fail();
+            }
+            this.pos = this.pos + 1;
+            value.items.push((ptr)this.value());
+            this.skip_blanks();
+            i32 c = this.peek();
+            this.pos = this.pos + 1;
+            if (c == 125) {
+                return value;
+            }
+            if (c != 44) {
+                return this.fail();
+            }
+        }
+        return value;
+    }
+}

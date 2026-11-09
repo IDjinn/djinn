@@ -1,0 +1,119 @@
+namespace djinnc;
+
+struct ProjectInfo {
+    ptr<i8> directory;
+    ptr<i8> entry;
+    PointerList* sources;
+    PointerList* libs;
+    PointerList* test_libs;
+    bool library;
+    bool std;
+
+    public static unsafe ProjectInfo* find(ptr<i8> file_path) {
+        mut ptr<i8> directory = Paths.directory(file_path);
+        for (mut i32 depth = 0; depth < 12; depth = depth + 1) {
+            ptr<i8> manifest = Paths.join(directory, "djinn.proj");
+            if (Paths.exists(manifest)) {
+                return ProjectInfo.read(directory, manifest);
+            }
+            ptr<i8> parent = Paths.directory(directory);
+            if (Strings.same(parent, directory) || Strings.same(parent, ".")) {
+                break;
+            }
+            directory = parent;
+        }
+        return (ProjectInfo*)0;
+    }
+
+    static unsafe ProjectInfo* read(ptr<i8> directory, ptr<i8> manifest_path) {
+        ProjectInfo* info = (ProjectInfo*)Memory.zalloc(sizeof(ProjectInfo));
+        info.directory = directory;
+        info.sources = PointerList.create();
+        info.libs = PointerList.create();
+        info.test_libs = PointerList.create();
+        ptr<i8> manifest = Files.read_all(manifest_path);
+        if (manifest == null) {
+            return info;
+        }
+        i32 length = strlen(manifest);
+        mut i32 start = 0;
+        mut i32 open_list = 0;
+        for (mut i32 i = 0; i <= length; i = i + 1) {
+            if (i == length || manifest[i] == 10) {
+                mut i32 first = start;
+                while (first < i && (manifest[first] == 32 || manifest[first] == 9)) {
+                    first = first + 1;
+                }
+                if (open_list != 0) {
+                    open_list = info.read_items(manifest, first, i, open_list);
+                } else if (Strings.starts_with(manifest, first, i, "libs:")) {
+                    info.std = false;
+                    open_list = info.read_items(manifest, first + 5, i, 1);
+                } else if (Strings.starts_with(manifest, first, i, "test-libs:")) {
+                    open_list = info.read_items(manifest, first + 10, i, 2);
+                } else if (Strings.starts_with(manifest, first, i, "sources:")) {
+                    open_list = info.read_items(manifest, first + 8, i, 3);
+                } else if (Strings.starts_with(manifest, first, i, "library-mode:")) {
+                    info.library = Strings.same(ProjectInfo.value(manifest, first + 13, i), "true");
+                } else if (Strings.starts_with(manifest, first, i, "entry:")) {
+                    info.entry = ProjectInfo.value(manifest, first + 6, i);
+                }
+                start = i + 1;
+            }
+        }
+        return info;
+    }
+
+    static unsafe ptr<i8> value(ptr<i8> text, i32 from, i32 to) {
+        mut i32 start = from;
+        while (start < to && (text[start] == 32 || text[start] == 9)) {
+            start = start + 1;
+        }
+        mut i32 end = to;
+        while (end > start && (text[end - 1] == 13 || text[end - 1] == 32 || text[end - 1] == 44)) {
+            end = end - 1;
+        }
+        if (end - start >= 2 && (text[start] == 39 || text[start] == 34) && text[end - 1] == text[start]) {
+            start = start + 1;
+            end = end - 1;
+        }
+        return Strings.duplicate(text + start, end - start);
+    }
+
+    unsafe i32 read_items(ptr<i8> text, i32 from, i32 to, i32 list) {
+        mut i32 position = from;
+        while (position < to) {
+            i32 c = (i32)text[position];
+            if (c == 93) {
+                return 0;
+            }
+            position = position + 1;
+            if (c == 39 || c == 34) {
+                i32 item = position;
+                while (position < to && (i32)text[position] != c) {
+                    position = position + 1;
+                }
+                ptr<i8> name = Strings.duplicate(text + item, position - item);
+                if (list == 1) {
+                    if (Strings.same(name, "std")) {
+                        this.std = true;
+                    } else {
+                        this.libs.push((ptr)name);
+                    }
+                } else if (list == 2) {
+                    if (!Strings.same(name, "std")) {
+                        this.test_libs.push((ptr)name);
+                    }
+                } else {
+                    this.sources.push((ptr)Paths.join(this.directory, name));
+                }
+                position = position + 1;
+            }
+        }
+        return list;
+    }
+
+    public static unsafe bool is_test_file(ptr<i8> path) {
+        return Paths.ends_with(path, "_test.djinn");
+    }
+}

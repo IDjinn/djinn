@@ -1,0 +1,323 @@
+namespace djinnc;
+
+struct Resolve {
+    public static unsafe Sym* enclosing_callable(Unit* u, i32 raw) {
+        mut Sym* best = (Sym*)0;
+        for (mut i32 i = 0; i < u.syms.length; i = i + 1) {
+            Sym* sym = (Sym*)u.syms.get(i);
+            if (sym.is_callable() && sym.body_open >= 0 && sym.body_open < raw && raw < sym.body_close) {
+                if (best == null || sym.body_open > best.body_open) {
+                    best = sym;
+                }
+            }
+        }
+        return best;
+    }
+
+    public static unsafe Sym* enclosing_container(Unit* u, i32 raw) {
+        mut Sym* best = (Sym*)0;
+        for (mut i32 i = 0; i < u.syms.length; i = i + 1) {
+            Sym* sym = (Sym*)u.syms.get(i);
+            if (sym.is_container() && sym.body_open >= 0 && sym.body_open < raw && raw < sym.body_close) {
+                if (best == null || sym.body_open > best.body_open) {
+                    best = sym;
+                }
+            }
+        }
+        return best;
+    }
+
+    public static unsafe Sym* local(Unit* u, Sym* function, ptr<i8> name, i32 raw) {
+        mut Sym* best = (Sym*)0;
+        for (mut i32 i = 0; i < u.syms.length; i = i + 1) {
+            Sym* sym = (Sym*)u.syms.get(i);
+            if (sym.parent != function || !sym.is_local() || !Strings.same(sym.name, name)) {
+                continue;
+            }
+            if ((sym.flags & SF.PARAM) != 0) {
+                if (best == null) {
+                    best = sym;
+                }
+                continue;
+            }
+            if (sym.first_tok <= raw && raw <= sym.scope_end) {
+                if (best == null || (best.flags & SF.PARAM) != 0 || sym.first_tok > best.first_tok) {
+                    best = sym;
+                }
+            }
+        }
+        return best;
+    }
+
+    public static unsafe bool belongs_to(Sym* sym, ptr<i8> type_name) {
+        return sym.parent != null && sym.parent.is_container() && Strings.same(sym.parent.name, type_name);
+    }
+
+    public static unsafe Sym* member(ptr<i8> type_name, ptr<i8> name) {
+        if (type_name == null) {
+            return (Sym*)0;
+        }
+        PointerList* list = Workspace.find(name);
+        if (list == null) {
+            return (Sym*)0;
+        }
+        mut Sym* fallback = (Sym*)0;
+        for (mut i32 i = 0; i < list.length; i = i + 1) {
+            Sym* sym = (Sym*)list.get(i);
+            if (Resolve.belongs_to(sym, type_name)) {
+                if (sym.parent.kind != SK.IMPL) {
+                    return sym;
+                }
+                if (fallback == null) {
+                    fallback = sym;
+                }
+            }
+        }
+        return fallback;
+    }
+
+    public static unsafe PointerList* members_named(ptr<i8> name) {
+        PointerList* found = PointerList.create();
+        PointerList* list = Workspace.find(name);
+        if (list == null) {
+            return found;
+        }
+        for (mut i32 i = 0; i < list.length && found.length < 20; i = i + 1) {
+            Sym* sym = (Sym*)list.get(i);
+            if (sym.is_member()) {
+                found.push((ptr)sym);
+            }
+        }
+        return found;
+    }
+
+    public static unsafe bool imports(Unit* u, ptr<i8> namespace_name) {
+        if (namespace_name == null) {
+            return false;
+        }
+        for (mut i32 i = 0; i < u.syms.length; i = i + 1) {
+            Sym* sym = (Sym*)u.syms.get(i);
+            if (sym.kind == SK.IMPORT && Strings.same(sym.name, namespace_name)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    public static unsafe ptr<i8> namespace_of(Sym* sym) {
+        return sym.unit.namespace_name;
+    }
+
+    public static unsafe Sym* global(Unit* u, ptr<i8> name, bool types_only) {
+        PointerList* list = Workspace.find(name);
+        if (list == null) {
+            return (Sym*)0;
+        }
+        mut Sym* best = (Sym*)0;
+        mut i32 best_score = 0 - 1;
+        for (mut i32 i = 0; i < list.length; i = i + 1) {
+            Sym* sym = (Sym*)list.get(i);
+            bool eligible = sym.is_global() || (sym.parent != null && sym.parent.kind == SK.NAMESPACE);
+            if (!eligible) {
+                continue;
+            }
+            if (types_only && !sym.is_type()) {
+                continue;
+            }
+            mut i32 score = 0;
+            if (sym.unit == u) {
+                score = score + 4;
+            }
+            ptr<i8> ns = Resolve.namespace_of(sym);
+            if (ns != null && u.namespace_name != null && Strings.same(ns, u.namespace_name)) {
+                score = score + 3;
+            } else if (Resolve.imports(u, ns)) {
+                score = score + 2;
+            }
+            if (sym.is_type()) {
+                score = score + 1;
+            }
+            if (score > best_score) {
+                best = sym;
+                best_score = score;
+            }
+        }
+        return best;
+    }
+
+    public static unsafe Sym* namespace_named(ptr<i8> name, bool prefix) {
+        Workspace* ws = Workspace.get();
+        i32 length = strlen(name);
+        mut Sym* partial = (Sym*)0;
+        for (mut i32 i = 0; i < ws.units.length; i = i + 1) {
+            Unit* unit = (Unit*)ws.units.get(i);
+            if (unit.syms == null) {
+                continue;
+            }
+            for (mut i32 s = 0; s < unit.syms.length; s = s + 1) {
+                Sym* sym = (Sym*)unit.syms.get(s);
+                if (sym.kind != SK.NAMESPACE) {
+                    continue;
+                }
+                if (Strings.same(sym.name, name)) {
+                    return sym;
+                }
+                if (prefix && partial == null && strlen(sym.name) > length + 2 && Strings.starts_with(sym.name, 0, strlen(sym.name), name) && sym.name[length] == 58) {
+                    partial = sym;
+                }
+            }
+        }
+        return partial;
+    }
+
+    static unsafe Sym* qualifier(Unit* u, i32 c) {
+        mut i32 first = c;
+        while (u.is_scope(first - 1) && u.is_name(first - 2)) {
+            first = first - 2;
+        }
+        ByteBuffer* prefix = ByteBuffer.create();
+        mut i32 k = first;
+        while (k <= c) {
+            prefix.append_slice(u.text + u.tstart[u.code[k]], u.width(k));
+            if (k < c) {
+                prefix.append("::");
+            }
+            k = k + 2;
+        }
+        return Resolve.namespace_named(prefix.cstr(), true);
+    }
+
+    public static unsafe Sym* type_named(Unit* u, ptr<i8> name) {
+        return Resolve.global(u, name, true);
+    }
+
+    public static unsafe Sym* at(Unit* u, i32 raw) {
+        if (raw < 0 || raw >= u.token_count) {
+            return (Sym*)0;
+        }
+        if (u.tok_sym[raw] != null) {
+            return (Sym*)u.tok_sym[raw];
+        }
+        i32 kind = u.tkind[raw];
+        i32 c = u.code_of[raw];
+        if (c < 0) {
+            return (Sym*)0;
+        }
+        if (kind == Tk.KEYWORD) {
+            if (u.is_word(c, "this")) {
+                Sym* container = Resolve.enclosing_container(u, raw);
+                if (container != null) {
+                    Sym* declared = Resolve.type_named(u, container.name);
+                    if (declared != null) {
+                        return declared;
+                    }
+                    return container;
+                }
+            }
+            return (Sym*)0;
+        }
+        if (kind != Tk.IDENT && kind != Tk.TYPE) {
+            return (Sym*)0;
+        }
+        ptr<i8> name = u.token_text(raw);
+        if (u.tcls[raw] == 1) {
+            return Resolve.qualifier(u, c);
+        }
+        if (c > 0 && u.is_member_access(c - 1)) {
+            ptr<i8> owner = Resolve.type_of(u, c - 2);
+            if (owner == null) {
+                return (Sym*)0;
+            }
+            return Resolve.member(owner, name);
+        }
+        if (c > 0 && u.is_scope(c - 1) && u.is_name(c - 2)) {
+            ptr<i8> left = u.word_at(c - 2);
+            Sym* scoped = Resolve.member(left, name);
+            if (scoped != null) {
+                return scoped;
+            }
+            Sym* named = Resolve.global(u, name, false);
+            if (named != null) {
+                return named;
+            }
+            return (Sym*)0;
+        }
+        if (u.is_scope(c + 1) && u.is_name(c + 2)) {
+            Sym* as_type = Resolve.type_named(u, name);
+            if (as_type != null) {
+                return as_type;
+            }
+            return Resolve.qualifier(u, c);
+        }
+        Sym* function = Resolve.enclosing_callable(u, raw);
+        if (function != null) {
+            Sym* local = Resolve.local(u, function, name, raw);
+            if (local != null) {
+                return local;
+            }
+            if (function.parent != null && function.parent.is_container()) {
+                Sym* field = Resolve.member(function.parent.name, name);
+                if (field != null) {
+                    return field;
+                }
+            }
+        }
+        return Resolve.global(u, name, false);
+    }
+
+    public static unsafe ptr<i8> type_of(Unit* u, i32 c) {
+        if (c < 0 || c >= u.code_count) {
+            return null;
+        }
+        i32 raw = u.code[c];
+        if (u.is_word(c, "this")) {
+            Sym* container = Resolve.enclosing_container(u, raw);
+            if (container != null) {
+                return container.name;
+            }
+            return null;
+        }
+        if (u.is_punct(c, 41)) {
+            i32 open = u.match[c];
+            if (open > 0) {
+                return Resolve.type_of(u, open - 1);
+            }
+            return null;
+        }
+        i32 kind = u.tkind[raw];
+        if (kind == Tk.STRING) {
+            return "str";
+        }
+        if (kind != Tk.IDENT && kind != Tk.TYPE) {
+            return null;
+        }
+        Sym* sym = Resolve.at(u, raw);
+        if (sym == null) {
+            return null;
+        }
+        if (sym.kind == SK.ENUM_MEMBER) {
+            return sym.parent.name;
+        }
+        if (sym.is_type()) {
+            return sym.name;
+        }
+        if (sym.kind == SK.NAMESPACE) {
+            return null;
+        }
+        return sym.type_name;
+    }
+
+    public static unsafe PointerList* candidates(Unit* u, i32 raw) {
+        PointerList* found = PointerList.create();
+        Sym* sym = Resolve.at(u, raw);
+        if (sym != null) {
+            found.push((ptr)sym);
+            return found;
+        }
+        i32 c = u.code_of[raw];
+        if (c > 0 && u.is_member_access(c - 1) && (u.tkind[raw] == Tk.IDENT || u.tkind[raw] == Tk.TYPE)) {
+            return Resolve.members_named(u.token_text(raw));
+        }
+        return found;
+    }
+}

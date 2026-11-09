@@ -1,0 +1,204 @@
+namespace djinnc;
+
+struct Outline {
+    static unsafe i32 lsp_kind(Sym* sym) {
+        if (sym.kind == SK.IMPL) {
+            return SK.CLASS;
+        }
+        if (sym.kind == SK.CONSTRUCTOR) {
+            return SK.CONSTRUCTOR;
+        }
+        return sym.kind;
+    }
+
+    static unsafe bool listed(Sym* sym) {
+        return !sym.is_local() && sym.kind != SK.IMPORT;
+    }
+
+    static unsafe void display_name(ByteBuffer* out, Sym* sym) {
+        if (sym.kind == SK.IMPL) {
+            out.append_json_string(Outline.impl_label(sym));
+        } else {
+            out.append_json_string(sym.name);
+        }
+    }
+
+    static unsafe ptr<i8> impl_label(Sym* sym) {
+        ByteBuffer* label = ByteBuffer.create();
+        label.append("impl ");
+        label.append(sym.name);
+        return label.cstr();
+    }
+
+    static unsafe void symbol(ByteBuffer* out, Unit* u, Sym* sym) {
+        out.append("{\"name\":");
+        Outline.display_name(out, sym);
+        out.append(",\"detail\":");
+        if (sym.kind == SK.IMPL && sym.detail != null) {
+            out.append_json_string(sym.detail);
+        } else {
+            out.append_json_string("");
+        }
+        out.append(",\"kind\":");
+        out.append_int((i64)Outline.lsp_kind(sym));
+        out.append(",\"range\":");
+        mut i32 last = sym.last_tok;
+        if (last < sym.first_tok) {
+            last = sym.name_end_tok;
+        }
+        mut i32 first = sym.first_tok;
+        if (first > sym.name_tok) {
+            first = sym.name_tok;
+        }
+        if (last < sym.name_end_tok) {
+            last = sym.name_end_tok;
+        }
+        Lsp.token_range(out, u, first, last);
+        out.append(",\"selectionRange\":");
+        Lsp.name_range(out, sym);
+        out.append(",\"children\":[");
+        mut bool any = false;
+        for (mut i32 i = 0; i < u.syms.length; i = i + 1) {
+            Sym* child = (Sym*)u.syms.get(i);
+            if (child.parent == sym && Outline.listed(child)) {
+                if (any) {
+                    out.append(",");
+                }
+                any = true;
+                Outline.symbol(out, u, child);
+            }
+        }
+        out.append("]}");
+    }
+
+    public static unsafe ByteBuffer* document_symbols(Unit* u) {
+        ByteBuffer* out = ByteBuffer.create();
+        out.append("[");
+        mut bool any = false;
+        for (mut i32 i = 0; i < u.syms.length; i = i + 1) {
+            Sym* sym = (Sym*)u.syms.get(i);
+            if (sym.parent == null && Outline.listed(sym)) {
+                if (any) {
+                    out.append(",");
+                }
+                any = true;
+                Outline.symbol(out, u, sym);
+            }
+        }
+        out.append("]");
+        return out;
+    }
+
+    static unsafe bool matches(ptr<i8> name, ptr<i8> query) {
+        i32 length = strlen(name);
+        i32 size = strlen(query);
+        if (size == 0) {
+            return true;
+        }
+        for (mut i32 i = 0; i + size <= length; i = i + 1) {
+            mut bool same = true;
+            for (mut i32 j = 0; j < size; j = j + 1) {
+                mut i32 a = (i32)name[i + j];
+                mut i32 b = (i32)query[j];
+                if (a >= 65 && a <= 90) {
+                    a = a + 32;
+                }
+                if (b >= 65 && b <= 90) {
+                    b = b + 32;
+                }
+                if (a != b) {
+                    same = false;
+                    break;
+                }
+            }
+            if (same) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    public static unsafe ByteBuffer* workspace_symbols(ptr<i8> query) {
+        Workspace* ws = Workspace.get();
+        ByteBuffer* out = ByteBuffer.create();
+        out.append("[");
+        mut i32 count = 0;
+        for (mut i32 i = 0; i < ws.units.length && count < 300; i = i + 1) {
+            Unit* unit = (Unit*)ws.units.get(i);
+            if (unit.syms == null) {
+                continue;
+            }
+            for (mut i32 s = 0; s < unit.syms.length && count < 300; s = s + 1) {
+                Sym* sym = (Sym*)unit.syms.get(s);
+                if (!Outline.listed(sym) || sym.kind == SK.IMPL || !Outline.matches(sym.name, query)) {
+                    continue;
+                }
+                if (count > 0) {
+                    out.append(",");
+                }
+                count = count + 1;
+                out.append("{\"name\":");
+                out.append_json_string(sym.name);
+                out.append(",\"kind\":");
+                out.append_int((i64)sym.kind);
+                out.append(",\"location\":");
+                Lsp.location(out, sym);
+                out.append(",\"containerName\":");
+                if (sym.parent != null) {
+                    out.append_json_string(sym.parent.name);
+                } else if (unit.namespace_name != null) {
+                    out.append_json_string(unit.namespace_name);
+                } else {
+                    out.append_json_string("");
+                }
+                out.append("}");
+            }
+        }
+        out.append("]");
+        return out;
+    }
+
+    public static unsafe ByteBuffer* folding_ranges(Unit* u) {
+        ByteBuffer* out = ByteBuffer.create();
+        out.append("[");
+        mut bool any = false;
+        for (mut i32 c = 0; c < u.code_count; c = c + 1) {
+            if (!u.is_punct(c, 123) || u.match[c] < 0) {
+                continue;
+            }
+            i32 start_line = u.line_of(u.tstart[u.code[c]]);
+            i32 end_line = u.line_of(u.tstart[u.code[u.match[c]]]);
+            if (end_line > start_line) {
+                if (any) {
+                    out.append(",");
+                }
+                any = true;
+                out.append("{\"startLine\":");
+                out.append_int((i64)start_line);
+                out.append(",\"endLine\":");
+                out.append_int((i64)(end_line - 1));
+                out.append("}");
+            }
+        }
+        for (mut i32 t = 0; t < u.token_count; t = t + 1) {
+            bool block = (u.tkind[t] == Tk.COMMENT || u.tkind[t] == Tk.DOC) && u.text[u.tstart[t] + 1] == 42;
+            if (block) {
+                i32 start_line = u.line_of(u.tstart[t]);
+                i32 end_line = u.line_of(u.tend[t] - 1);
+                if (end_line > start_line) {
+                    if (any) {
+                        out.append(",");
+                    }
+                    any = true;
+                    out.append("{\"startLine\":");
+                    out.append_int((i64)start_line);
+                    out.append(",\"endLine\":");
+                    out.append_int((i64)end_line);
+                    out.append(",\"kind\":\"comment\"}");
+                }
+            }
+        }
+        out.append("]");
+        return out;
+    }
+}

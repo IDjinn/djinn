@@ -1,0 +1,403 @@
+namespace djinnc;
+
+struct RefHit {
+    Unit* unit;
+    i32 token;
+}
+
+struct Navigation {
+    public static unsafe ptr<i8> signature(Sym* sym) {
+        ByteBuffer* out = ByteBuffer.create();
+        mut ptr<i8> detail = sym.detail;
+        if (detail == null) {
+            detail = sym.name;
+        }
+        if ((sym.flags & SF.PARAM) != 0) {
+            out.append("(parameter) ");
+        } else if ((sym.flags & SF.LOCAL) != 0) {
+            out.append("(local) ");
+        } else if (sym.kind == SK.FIELD) {
+            out.append("(field) ");
+        } else if (sym.kind == SK.ENUM_MEMBER) {
+            out.append("(member) ");
+            out.append(sym.parent.name);
+            out.append("::");
+        } else if (sym.kind == SK.CONSTANT) {
+            out.append("(constant) ");
+        }
+        out.append(detail);
+        return out.cstr();
+    }
+
+    public static unsafe ptr<i8> doc_for(Sym* sym) {
+        Unit* u = sym.unit;
+        mut i32 c = u.code_of[sym.first_tok];
+        if (c < 0) {
+            return null;
+        }
+        while (c > 0 && u.is_punct(c - 1, 93)) {
+            i32 open = u.match[c - 1];
+            if (open < 0) {
+                break;
+            }
+            c = open;
+        }
+        mut i32 raw = u.code[c];
+        mut ptr<i8> doc = u.doc_before(raw);
+        if (doc == null && raw != sym.first_tok) {
+            doc = u.doc_before(sym.first_tok);
+        }
+        return doc;
+    }
+
+    public static unsafe ByteBuffer* hover(Unit* u, i32 line, i32 character) {
+        i32 offset = u.offset_of_position(line, character);
+        i32 raw = u.token_touching(offset);
+        if (raw < 0) {
+            return (ByteBuffer*)0;
+        }
+        i32 kind = u.tkind[raw];
+        ByteBuffer* md = ByteBuffer.create();
+        if (kind == Tk.KEYWORD || kind == Tk.TYPE) {
+            ptr<i8> word = u.token_text(raw);
+            ptr<i8> docs = Docs.keyword(word);
+            Sym* resolved = Resolve.at(u, raw);
+            if (resolved == null && docs == null) {
+                return (ByteBuffer*)0;
+            }
+            if (resolved == null) {
+                md.append("```djinn\n");
+                md.append(word);
+                md.append("\n```\n");
+                md.append(docs);
+                return Navigation.hover_result(u, raw, md);
+            }
+        } else if (kind != Tk.IDENT) {
+            return (ByteBuffer*)0;
+        }
+        Sym* sym = Resolve.at(u, raw);
+        if (sym == null) {
+            return (ByteBuffer*)0;
+        }
+        md.append("```djinn\n");
+        md.append(Navigation.signature(sym));
+        md.append("\n```");
+        ptr<i8> doc = Navigation.doc_for(sym);
+        if (doc != null) {
+            md.append("\n\n");
+            md.append(doc);
+        }
+        if (sym.is_global() && sym.unit.namespace_name != null) {
+            md.append("\n\n---\n*namespace* `");
+            md.append(sym.unit.namespace_name);
+            md.append("`");
+        } else if (sym.is_member() && sym.parent != null) {
+            md.append("\n\n---\n*member of* `");
+            md.append(sym.parent.name);
+            md.append("`");
+        }
+        return Navigation.hover_result(u, raw, md);
+    }
+
+    static unsafe ByteBuffer* hover_result(Unit* u, i32 raw, ByteBuffer* md) {
+        ByteBuffer* out = ByteBuffer.create();
+        out.append("{\"contents\":");
+        Lsp.markdown(out, md.cstr());
+        out.append(",\"range\":");
+        Lsp.token_range(out, u, raw, raw);
+        out.append("}");
+        return out;
+    }
+
+    public static unsafe ByteBuffer* definition(Unit* u, i32 line, i32 character) {
+        i32 offset = u.offset_of_position(line, character);
+        i32 raw = u.token_touching(offset);
+        ByteBuffer* out = ByteBuffer.create();
+        out.append("[");
+        if (raw >= 0) {
+            PointerList* found = Resolve.candidates(u, raw);
+            for (mut i32 i = 0; i < found.length; i = i + 1) {
+                if (i > 0) {
+                    out.append(",");
+                }
+                Lsp.location(out, (Sym*)found.get(i));
+            }
+        }
+        out.append("]");
+        return out;
+    }
+
+    public static unsafe ByteBuffer* type_definition(Unit* u, i32 line, i32 character) {
+        i32 offset = u.offset_of_position(line, character);
+        i32 raw = u.token_touching(offset);
+        ByteBuffer* out = ByteBuffer.create();
+        out.append("[");
+        if (raw >= 0) {
+            Sym* sym = Resolve.at(u, raw);
+            if (sym != null) {
+                mut Sym* type = (Sym*)0;
+                if (sym.is_type()) {
+                    type = sym;
+                } else if (sym.type_name != null) {
+                    type = Resolve.type_named(sym.unit, sym.type_name);
+                }
+                if (type != null) {
+                    Lsp.location(out, type);
+                }
+            }
+        }
+        out.append("]");
+        return out;
+    }
+
+    public static unsafe void collect_references(Sym* target, PointerList* hits, Unit* only) {
+        Workspace* ws = Workspace.get();
+        i32 length = strlen(target.name);
+        for (mut i32 i = 0; i < ws.units.length; i = i + 1) {
+            Unit* unit = (Unit*)ws.units.get(i);
+            if (unit.syms == null) {
+                continue;
+            }
+            if (only != null && unit != only) {
+                continue;
+            }
+            if (target.is_local() && unit != target.unit) {
+                continue;
+            }
+            for (mut i32 raw = 0; raw < unit.token_count; raw = raw + 1) {
+                i32 kind = unit.tkind[raw];
+                if (kind != Tk.IDENT && kind != Tk.TYPE) {
+                    continue;
+                }
+                if (unit.tend[raw] - unit.tstart[raw] != length) {
+                    continue;
+                }
+                if (memcmp((ptr)(unit.text + unit.tstart[raw]), (ptr)target.name, (u64)length) != 0) {
+                    continue;
+                }
+                if (Resolve.at(unit, raw) == target) {
+                    RefHit* hit = (RefHit*)Memory.zalloc(sizeof(RefHit));
+                    hit.unit = unit;
+                    hit.token = raw;
+                    hits.push((ptr)hit);
+                }
+            }
+        }
+    }
+
+    public static unsafe ByteBuffer* references(Unit* u, i32 line, i32 character, bool include_declaration) {
+        i32 offset = u.offset_of_position(line, character);
+        i32 raw = u.token_touching(offset);
+        ByteBuffer* out = ByteBuffer.create();
+        out.append("[");
+        if (raw >= 0) {
+            Sym* sym = Resolve.at(u, raw);
+            if (sym != null) {
+                PointerList* hits = PointerList.create();
+                Navigation.collect_references(sym, hits, (Unit*)0);
+                mut bool first = true;
+                for (mut i32 i = 0; i < hits.length; i = i + 1) {
+                    RefHit* hit = (RefHit*)hits.get(i);
+                    if (!include_declaration && hit.unit == sym.unit && hit.token == sym.name_tok) {
+                        continue;
+                    }
+                    if (!first) {
+                        out.append(",");
+                    }
+                    first = false;
+                    Lsp.token_location(out, hit.unit, hit.token);
+                }
+            }
+        }
+        out.append("]");
+        return out;
+    }
+
+    public static unsafe ByteBuffer* highlights(Unit* u, i32 line, i32 character) {
+        i32 offset = u.offset_of_position(line, character);
+        i32 raw = u.token_touching(offset);
+        ByteBuffer* out = ByteBuffer.create();
+        out.append("[");
+        if (raw >= 0) {
+            Sym* sym = Resolve.at(u, raw);
+            if (sym != null) {
+                PointerList* hits = PointerList.create();
+                Navigation.collect_references(sym, hits, u);
+                for (mut i32 i = 0; i < hits.length; i = i + 1) {
+                    RefHit* hit = (RefHit*)hits.get(i);
+                    if (i > 0) {
+                        out.append(",");
+                    }
+                    out.append("{\"range\":");
+                    Lsp.token_range(out, hit.unit, hit.token, hit.token);
+                    out.append(",\"kind\":1}");
+                }
+            }
+        }
+        out.append("]");
+        return out;
+    }
+
+    public static unsafe ByteBuffer* prepare_rename(Unit* u, i32 line, i32 character) {
+        i32 offset = u.offset_of_position(line, character);
+        i32 raw = u.token_touching(offset);
+        if (raw < 0 || (u.tkind[raw] != Tk.IDENT && u.tkind[raw] != Tk.TYPE)) {
+            return (ByteBuffer*)0;
+        }
+        Sym* sym = Resolve.at(u, raw);
+        if (sym == null || sym.unit.library) {
+            return (ByteBuffer*)0;
+        }
+        ByteBuffer* out = ByteBuffer.create();
+        out.append("{\"range\":");
+        Lsp.token_range(out, u, raw, raw);
+        out.append(",\"placeholder\":");
+        out.append_json_string(u.token_text(raw));
+        out.append("}");
+        return out;
+    }
+
+    public static unsafe bool valid_identifier(ptr<i8> name) {
+        i32 length = strlen(name);
+        if (length == 0 || !Strings.is_ident_start((i32)name[0])) {
+            return false;
+        }
+        for (mut i32 i = 1; i < length; i = i + 1) {
+            if (!Strings.is_ident_part((i32)name[i])) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    public static unsafe ByteBuffer* rename(Unit* u, i32 line, i32 character, ptr<i8> new_name) {
+        i32 offset = u.offset_of_position(line, character);
+        i32 raw = u.token_touching(offset);
+        if (raw < 0 || !Navigation.valid_identifier(new_name)) {
+            return (ByteBuffer*)0;
+        }
+        Sym* sym = Resolve.at(u, raw);
+        if (sym == null || sym.unit.library) {
+            return (ByteBuffer*)0;
+        }
+        PointerList* hits = PointerList.create();
+        Navigation.collect_references(sym, hits, (Unit*)0);
+        ByteBuffer* out = ByteBuffer.create();
+        out.append("{\"changes\":{");
+        mut bool first_unit = true;
+        Workspace* ws = Workspace.get();
+        for (mut i32 i = 0; i < ws.units.length; i = i + 1) {
+            Unit* unit = (Unit*)ws.units.get(i);
+            mut bool any = false;
+            for (mut i32 h = 0; h < hits.length; h = h + 1) {
+                RefHit* hit = (RefHit*)hits.get(h);
+                if (hit.unit == unit) {
+                    if (!any) {
+                        if (!first_unit) {
+                            out.append(",");
+                        }
+                        first_unit = false;
+                        out.append_json_string(unit.uri);
+                        out.append(":[");
+                    } else {
+                        out.append(",");
+                    }
+                    any = true;
+                    out.append("{\"range\":");
+                    Lsp.token_range(out, unit, hit.token, hit.token);
+                    out.append(",\"newText\":");
+                    out.append_json_string(new_name);
+                    out.append("}");
+                }
+            }
+            if (any) {
+                out.append("]");
+            }
+        }
+        out.append("}}");
+        return out;
+    }
+
+    public static unsafe ByteBuffer* signature_help(Unit* u, i32 line, i32 character) {
+        i32 offset = u.offset_of_position(line, character);
+        mut i32 k = 0 - 1;
+        for (mut i32 c = 0; c < u.code_count; c = c + 1) {
+            if (u.tstart[u.code[c]] < offset) {
+                k = c;
+            } else {
+                break;
+            }
+        }
+        mut i32 commas = 0;
+        mut i32 open = 0 - 1;
+        while (k >= 0) {
+            if (u.is_punct(k, 41) || u.is_punct(k, 93) || u.is_punct(k, 125)) {
+                i32 m = u.match[k];
+                if (m < 0) {
+                    break;
+                }
+                k = m - 1;
+                continue;
+            }
+            if (u.is_punct(k, 40)) {
+                open = k;
+                break;
+            }
+            if (u.is_punct(k, 91) || u.is_punct(k, 123) || u.is_punct(k, 59)) {
+                break;
+            }
+            if (u.is_punct(k, 44)) {
+                commas = commas + 1;
+            }
+            k = k - 1;
+        }
+        if (open < 1 || !u.is_name(open - 1)) {
+            return (ByteBuffer*)0;
+        }
+        mut Sym* sym = Resolve.at(u, u.code[open - 1]);
+        if (sym == null) {
+            return (ByteBuffer*)0;
+        }
+        if (sym.is_type()) {
+            Sym* constructor = Resolve.member(sym.name, sym.name);
+            if (constructor == null || constructor.kind != SK.CONSTRUCTOR) {
+                return (ByteBuffer*)0;
+            }
+            sym = constructor;
+        }
+        if (!sym.is_callable()) {
+            return (ByteBuffer*)0;
+        }
+        ByteBuffer* out = ByteBuffer.create();
+        out.append("{\"signatures\":[{\"label\":");
+        mut ptr<i8> label = sym.detail;
+        if (label == null) {
+            label = sym.name;
+        }
+        out.append_json_string(label);
+        ptr<i8> doc = Navigation.doc_for(sym);
+        if (doc != null) {
+            out.append(",\"documentation\":");
+            Lsp.markdown(out, doc);
+        }
+        out.append(",\"parameters\":[");
+        mut bool first = true;
+        Unit* owner = sym.unit;
+        for (mut i32 i = 0; i < owner.syms.length; i = i + 1) {
+            Sym* param = (Sym*)owner.syms.get(i);
+            if (param.parent == sym && (param.flags & SF.PARAM) != 0) {
+                if (!first) {
+                    out.append(",");
+                }
+                first = false;
+                out.append("{\"label\":");
+                out.append_json_string(param.detail);
+                out.append("}");
+            }
+        }
+        out.append("]}],\"activeSignature\":0,\"activeParameter\":");
+        out.append_int((i64)commas);
+        out.append("}");
+        return out;
+    }
+}

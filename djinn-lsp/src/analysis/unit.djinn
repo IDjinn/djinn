@@ -1,0 +1,423 @@
+namespace djinnc;
+
+struct LintItem {
+    i32 token;
+    ptr<i8> message;
+}
+
+struct Unit {
+    ptr<i8> path;
+    ptr<i8> uri;
+    ptr<i8> text;
+    i32 length;
+    i32 version;
+    bool open;
+    bool dirty;
+    bool library;
+    bool analyzed;
+
+    Arena* arena;
+    i32 line_count;
+    ptr<i32> line_starts;
+    bool ascii;
+
+    i32 token_count;
+    ptr<i32> tkind;
+    ptr<i32> tstart;
+    ptr<i32> tend;
+    i32 code_count;
+    ptr<i32> code;
+    ptr<i32> code_of;
+    ptr<i32> match;
+    ptr<ptr> tok_sym;
+    ptr<i32> tcls;
+
+    PointerList* syms;
+    PointerList* lint;
+    ptr<i8> namespace_name;
+
+    Arena* diag_arena;
+    PointerList* diags;
+    bool checked;
+    bool published;
+
+    public static unsafe Unit* create(ptr<i8> path, ptr<i8> uri) {
+        Unit* unit = (Unit*)calloc(1, sizeof(Unit));
+        unit.path = path;
+        unit.uri = uri;
+        return unit;
+    }
+
+    public unsafe void set_text(ptr<i8> source, i32 size) {
+        this.length = size;
+        ptr saved = process_arena;
+        if (this.arena != null) {
+            this.arena.destroy();
+            free((ptr)this.arena);
+        }
+        this.arena = Arena.create(65536);
+        process_arena = (ptr)this.arena;
+        this.text = Strings.duplicate(source, size);
+        this.analyze();
+        process_arena = saved;
+        this.analyzed = true;
+    }
+
+    unsafe void analyze() {
+        this.compute_lines();
+        Lexer.run(this);
+        this.build_code();
+        this.syms = PointerList.create();
+        this.lint = PointerList.create();
+        this.namespace_name = null;
+        this.tok_sym = (ptr<ptr>)Memory.zalloc((u64)(this.token_count + 1) * 8);
+        this.tcls = (ptr<i32>)Memory.zalloc((u64)(this.token_count + 1) * 4);
+        Scanner.run(this);
+        this.collect_lint();
+    }
+
+    unsafe void compute_lines() {
+        mut i32 count = 1;
+        this.ascii = true;
+        for (mut i32 i = 0; i < this.length; i = i + 1) {
+            if (this.text[i] == 10) {
+                count = count + 1;
+            } else if ((i32)(u8)this.text[i] >= 128) {
+                this.ascii = false;
+            }
+        }
+        this.line_starts = (ptr<i32>)Memory.zalloc((u64)(count + 1) * 4);
+        this.line_count = count;
+        mut i32 line = 1;
+        this.line_starts[0] = 0;
+        for (mut i32 i = 0; i < this.length; i = i + 1) {
+            if (this.text[i] == 10) {
+                this.line_starts[line] = i + 1;
+                line = line + 1;
+            }
+        }
+        this.line_starts[count] = this.length + 1;
+    }
+
+    unsafe void build_code() {
+        this.code = (ptr<i32>)Memory.zalloc((u64)(this.token_count + 1) * 4);
+        this.code_of = (ptr<i32>)Memory.zalloc((u64)(this.token_count + 1) * 4);
+        mut i32 count = 0;
+        for (mut i32 i = 0; i < this.token_count; i = i + 1) {
+            i32 kind = this.tkind[i];
+            if (kind == Tk.COMMENT || kind == Tk.DOC) {
+                this.code_of[i] = 0 - 1;
+            } else {
+                this.code[count] = i;
+                this.code_of[i] = count;
+                count = count + 1;
+            }
+        }
+        this.code_count = count;
+        this.match = (ptr<i32>)Memory.zalloc((u64)(count + 1) * 4);
+        ptr<i32> stack = (ptr<i32>)Memory.zalloc((u64)(count + 1) * 4);
+        mut i32 depth = 0;
+        for (mut i32 c = 0; c < count; c = c + 1) {
+            this.match[c] = 0 - 1;
+            if (this.is_punct(c, 40) || this.is_punct(c, 91) || this.is_punct(c, 123)) {
+                stack[depth] = c;
+                depth = depth + 1;
+            } else if (this.is_punct(c, 41) || this.is_punct(c, 93) || this.is_punct(c, 125)) {
+                mut i32 opener = 40;
+                if (this.is_punct(c, 93)) {
+                    opener = 91;
+                } else if (this.is_punct(c, 125)) {
+                    opener = 123;
+                }
+                mut i32 d = depth - 1;
+                while (d >= 0 && !this.is_punct(stack[d], opener)) {
+                    d = d - 1;
+                }
+                if (d >= 0) {
+                    this.match[stack[d]] = c;
+                    this.match[c] = stack[d];
+                    depth = d;
+                }
+            }
+        }
+    }
+
+    unsafe void collect_lint() {
+        for (mut i32 i = 0; i < this.token_count; i = i + 1) {
+            if (this.tkind[i] == Tk.ERROR) {
+                mut ptr<i8> message = "unterminated string literal";
+                if (this.tend[i] > this.tstart[i] + 1 && this.text[this.tstart[i]] == 47) {
+                    message = "unterminated block comment";
+                }
+                this.add_lint(i, message);
+            }
+        }
+        for (mut i32 c = 0; c < this.code_count; c = c + 1) {
+            bool opener = this.is_punct(c, 40) || this.is_punct(c, 91) || this.is_punct(c, 123);
+            bool closer = this.is_punct(c, 41) || this.is_punct(c, 93) || this.is_punct(c, 125);
+            if ((opener || closer) && this.match[c] < 0) {
+                if (opener) {
+                    this.add_lint(this.code[c], "unclosed bracket");
+                } else {
+                    this.add_lint(this.code[c], "unmatched closing bracket");
+                }
+            }
+        }
+    }
+
+    unsafe void add_lint(i32 token, ptr<i8> message) {
+        LintItem* item = (LintItem*)Memory.zalloc(sizeof(LintItem));
+        item.token = token;
+        item.message = message;
+        this.lint.push((ptr)item);
+    }
+
+    public unsafe i32 kind_at(i32 c) {
+        if (c < 0 || c >= this.code_count) {
+            return 0;
+        }
+        return this.tkind[this.code[c]];
+    }
+
+    public unsafe i32 first_char(i32 c) {
+        if (c < 0 || c >= this.code_count) {
+            return 0;
+        }
+        return (i32)(u8)this.text[this.tstart[this.code[c]]];
+    }
+
+    public unsafe i32 width(i32 c) {
+        i32 raw = this.code[c];
+        return this.tend[raw] - this.tstart[raw];
+    }
+
+    public unsafe bool is_punct(i32 c, i32 ch) {
+        if (c < 0 || c >= this.code_count) {
+            return false;
+        }
+        i32 raw = this.code[c];
+        return this.tkind[raw] == Tk.PUNCT && this.tend[raw] - this.tstart[raw] == 1 && (i32)this.text[this.tstart[raw]] == ch;
+    }
+
+    public unsafe bool is_punct2(i32 c, i32 first, i32 second) {
+        if (c < 0 || c >= this.code_count) {
+            return false;
+        }
+        i32 raw = this.code[c];
+        return this.tkind[raw] == Tk.PUNCT && this.tend[raw] - this.tstart[raw] == 2 && (i32)this.text[this.tstart[raw]] == first && (i32)this.text[this.tstart[raw] + 1] == second;
+    }
+
+    public unsafe bool is_member_access(i32 c) {
+        return this.is_punct(c, 46) || this.is_punct2(c, 63, 46) || this.is_punct2(c, 33, 46);
+    }
+
+    public unsafe bool is_scope(i32 c) {
+        return this.is_punct2(c, 58, 58);
+    }
+
+    public unsafe bool is_word(i32 c, ptr<i8> word) {
+        if (c < 0 || c >= this.code_count) {
+            return false;
+        }
+        i32 raw = this.code[c];
+        i32 kind = this.tkind[raw];
+        if (kind != Tk.KEYWORD && kind != Tk.IDENT && kind != Tk.TYPE) {
+            return false;
+        }
+        return Strings.equals(this.text + this.tstart[raw], this.tend[raw] - this.tstart[raw], word);
+    }
+
+    public unsafe bool is_ident(i32 c) {
+        return this.kind_at(c) == Tk.IDENT;
+    }
+
+    public unsafe bool is_name(i32 c) {
+        i32 kind = this.kind_at(c);
+        return kind == Tk.IDENT || kind == Tk.TYPE;
+    }
+
+    public unsafe ptr<i8> word_at(i32 c) {
+        i32 raw = this.code[c];
+        return Strings.duplicate(this.text + this.tstart[raw], this.tend[raw] - this.tstart[raw]);
+    }
+
+    public unsafe ptr<i8> token_text(i32 raw) {
+        return Strings.duplicate(this.text + this.tstart[raw], this.tend[raw] - this.tstart[raw]);
+    }
+
+    public unsafe i32 line_of(i32 offset) {
+        mut i32 low = 0;
+        mut i32 high = this.line_count - 1;
+        while (low < high) {
+            i32 mid = (low + high + 1) / 2;
+            if (this.line_starts[mid] <= offset) {
+                low = mid;
+            } else {
+                high = mid - 1;
+            }
+        }
+        return low;
+    }
+
+    public unsafe i32 offset_of_position(i32 line, i32 character) {
+        if (line < 0) {
+            return 0;
+        }
+        if (line >= this.line_count) {
+            return this.length;
+        }
+        i32 start = this.line_starts[line];
+        mut i32 end = this.line_starts[line + 1] - 1;
+        if (end > this.length) {
+            end = this.length;
+        }
+        if (this.ascii) {
+            mut i32 target = start + character;
+            if (target > end) {
+                target = end;
+            }
+            return target;
+        }
+        mut i32 offset = start;
+        mut i32 units = 0;
+        while (offset < end && units < character) {
+            i32 lead = (i32)(u8)this.text[offset];
+            units = units + Utf8.utf16_units(lead);
+            offset = offset + Utf8.sequence_length(lead);
+        }
+        if (offset > end) {
+            offset = end;
+        }
+        return offset;
+    }
+
+    public unsafe i32 character_of_offset(i32 line, i32 offset) {
+        i32 start = this.line_starts[line];
+        if (this.ascii) {
+            return offset - start;
+        }
+        mut i32 units = 0;
+        mut i32 at = start;
+        while (at < offset && at < this.length) {
+            i32 lead = (i32)(u8)this.text[at];
+            units = units + Utf8.utf16_units(lead);
+            at = at + Utf8.sequence_length(lead);
+        }
+        return units;
+    }
+
+    public unsafe i32 token_at_offset(i32 offset) {
+        mut i32 low = 0;
+        mut i32 high = this.token_count - 1;
+        while (low <= high) {
+            i32 mid = (low + high) / 2;
+            if (offset < this.tstart[mid]) {
+                high = mid - 1;
+            } else if (offset >= this.tend[mid]) {
+                low = mid + 1;
+            } else {
+                return mid;
+            }
+        }
+        return 0 - 1;
+    }
+
+    public unsafe i32 token_touching(i32 offset) {
+        i32 inside = this.token_at_offset(offset);
+        if (inside >= 0 && (this.tkind[inside] == Tk.IDENT || this.tkind[inside] == Tk.TYPE || this.tkind[inside] == Tk.KEYWORD)) {
+            return inside;
+        }
+        if (offset > 0) {
+            i32 before = this.token_at_offset(offset - 1);
+            if (before >= 0 && (this.tkind[before] == Tk.IDENT || this.tkind[before] == Tk.TYPE || this.tkind[before] == Tk.KEYWORD)) {
+                return before;
+            }
+        }
+        return inside;
+    }
+
+    public unsafe ptr<i8> collapse(i32 first_raw, i32 last_raw) {
+        ByteBuffer* out = ByteBuffer.create();
+        mut bool space = false;
+        i32 from = this.tstart[first_raw];
+        i32 to = this.tend[last_raw];
+        for (mut i32 i = from; i < to && out.length < 400; i = i + 1) {
+            i32 c = (i32)this.text[i];
+            if (c == 32 || c == 9 || c == 10 || c == 13) {
+                space = true;
+            } else {
+                if (space && out.length > 0) {
+                    out.append_char(32);
+                }
+                space = false;
+                out.append_char(c);
+            }
+        }
+        return out.cstr();
+    }
+
+    public unsafe ptr<i8> doc_before(i32 raw) {
+        mut i32 first = raw;
+        mut i32 expected_line = this.line_of(this.tstart[raw]);
+        mut i32 cursor = raw - 1;
+        while (cursor >= 0 && (this.tkind[cursor] == Tk.COMMENT || this.tkind[cursor] == Tk.DOC)) {
+            i32 end_line = this.line_of(this.tend[cursor] - 1);
+            i32 start_line = this.line_of(this.tstart[cursor]);
+            if (end_line + 1 < expected_line || end_line > expected_line) {
+                break;
+            }
+            first = cursor;
+            expected_line = start_line;
+            cursor = cursor - 1;
+        }
+        if (first == raw) {
+            return null;
+        }
+        ByteBuffer* out = ByteBuffer.create();
+        for (mut i32 t = first; t < raw; t = t + 1) {
+            this.append_comment_text(out, t);
+        }
+        return out.cstr();
+    }
+
+    unsafe void append_comment_text(ByteBuffer* out, i32 raw) {
+        mut i32 from = this.tstart[raw];
+        mut i32 to = this.tend[raw];
+        bool block = this.text[from + 1] == 42;
+        if (block) {
+            from = from + 2;
+            if (to - from >= 2 && this.text[to - 1] == 47 && this.text[to - 2] == 42) {
+                to = to - 2;
+            }
+        } else {
+            from = from + 2;
+            if (from < to && this.text[from] == 47) {
+                from = from + 1;
+            }
+        }
+        mut i32 line_start = from;
+        for (mut i32 i = from; i <= to; i = i + 1) {
+            if (i == to || this.text[i] == 10) {
+                mut i32 a = line_start;
+                mut i32 b = i;
+                while (a < b && (this.text[a] == 32 || this.text[a] == 9)) {
+                    a = a + 1;
+                }
+                if (block && a < b && this.text[a] == 42) {
+                    a = a + 1;
+                    if (a < b && this.text[a] == 32) {
+                        a = a + 1;
+                    }
+                }
+                while (b > a && (this.text[b - 1] == 13 || this.text[b - 1] == 32)) {
+                    b = b - 1;
+                }
+                if (b > a || out.length > 0) {
+                    out.append_slice(this.text + a, b - a);
+                    out.append_char(10);
+                }
+                line_start = i + 1;
+            }
+        }
+    }
+}

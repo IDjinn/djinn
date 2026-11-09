@@ -1,0 +1,152 @@
+namespace djinnc;
+
+extern "C" {
+    void __djinn_stdio_binary();
+    i32 __djinn_stdin_pending();
+    i32 __djinn_stdin_read(ptr buffer, i32 capacity);
+    i32 __djinn_stdout_write(ptr data, i32 length);
+    void __djinn_thread_sleep(i64 milliseconds);
+    ptr memmove(ptr destination, ptr source, u64 count);
+}
+
+unsafe static mut ptr transport_buffer = null;
+unsafe static mut i32 transport_start = 0;
+unsafe static mut i32 transport_end = 0;
+unsafe static mut i32 transport_closed = 0;
+
+struct Transport {
+    const i32 CAPACITY = 65536;
+
+    public static unsafe void init() {
+        __djinn_stdio_binary();
+        transport_buffer = malloc((u64)Transport.CAPACITY);
+    }
+
+    public static unsafe bool has_pending() {
+        if (transport_end > transport_start) {
+            return true;
+        }
+        return __djinn_stdin_pending() == 1;
+    }
+
+    public static void sleep(i64 milliseconds) {
+        __djinn_thread_sleep(milliseconds);
+    }
+
+    static unsafe bool fill() {
+        if (transport_closed == 1) {
+            return false;
+        }
+        if (transport_start == transport_end) {
+            transport_start = 0;
+            transport_end = 0;
+        } else if (transport_end == Transport.CAPACITY) {
+            ptr<i8> data = (ptr<i8>)transport_buffer;
+            memmove((ptr)data, (ptr)(data + transport_start), (u64)(transport_end - transport_start));
+            transport_end = transport_end - transport_start;
+            transport_start = 0;
+        }
+        ptr<i8> data = (ptr<i8>)transport_buffer;
+        i32 count = __djinn_stdin_read((ptr)(data + transport_end), Transport.CAPACITY - transport_end);
+        if (count <= 0) {
+            transport_closed = 1;
+            return false;
+        }
+        transport_end = transport_end + count;
+        return true;
+    }
+
+    static unsafe i32 find_header_end() {
+        ptr<i8> data = (ptr<i8>)transport_buffer;
+        for (mut i32 i = transport_start; i + 3 < transport_end; i = i + 1) {
+            if (data[i] == 13 && data[i + 1] == 10 && data[i + 2] == 13 && data[i + 3] == 10) {
+                return i;
+            }
+        }
+        return 0 - 1;
+    }
+
+    static unsafe i32 content_length(ptr<i8> data, i32 from, i32 to) {
+        ptr<i8> label = "content-length:";
+        i32 label_length = strlen(label);
+        mut i32 line = from;
+        while (line < to) {
+            mut i32 end = line;
+            while (end < to && data[end] != 10) {
+                end = end + 1;
+            }
+            if (end - line > label_length) {
+                mut bool same = true;
+                for (mut i32 i = 0; i < label_length; i = i + 1) {
+                    mut i32 c = (i32)data[line + i];
+                    if (c >= 65 && c <= 90) {
+                        c = c + 32;
+                    }
+                    if (c != (i32)label[i]) {
+                        same = false;
+                        break;
+                    }
+                }
+                if (same) {
+                    mut i32 p = line + label_length;
+                    while (p < end && data[p] == 32) {
+                        p = p + 1;
+                    }
+                    mut i32 value = 0;
+                    while (p < end && data[p] >= 48 && data[p] <= 57) {
+                        value = value * 10 + ((i32)data[p] - 48);
+                        p = p + 1;
+                    }
+                    return value;
+                }
+            }
+            line = end + 1;
+        }
+        return 0 - 1;
+    }
+
+    public static unsafe ptr<i8> read_message(ptr<i32> length_out) {
+        mut i32 header_end = Transport.find_header_end();
+        while (header_end < 0) {
+            if (!Transport.fill()) {
+                return null;
+            }
+            header_end = Transport.find_header_end();
+        }
+        ptr<i8> data = (ptr<i8>)transport_buffer;
+        i32 length = Transport.content_length(data, transport_start, header_end);
+        transport_start = header_end + 4;
+        if (length < 0) {
+            return Transport.read_message(length_out);
+        }
+        ptr<i8> body = (ptr<i8>)Memory.zalloc((u64)length + 1);
+        mut i32 got = 0;
+        while (got < length) {
+            if (transport_start == transport_end && !Transport.fill()) {
+                return null;
+            }
+            ptr<i8> source = (ptr<i8>)transport_buffer;
+            mut i32 take = transport_end - transport_start;
+            if (take > length - got) {
+                take = length - got;
+            }
+            memcpy((ptr)(body + got), (ptr)(source + transport_start), (u64)take);
+            transport_start = transport_start + take;
+            got = got + take;
+        }
+        length_out[0] = length;
+        return body;
+    }
+
+    public static unsafe void send(ptr<i8> body, i32 length) {
+        ByteBuffer* frame = ByteBuffer.create();
+        frame.append("Content-Length: ");
+        frame.append_int((i64)length);
+        frame.append_char(13);
+        frame.append_char(10);
+        frame.append_char(13);
+        frame.append_char(10);
+        frame.append_slice(body, length);
+        __djinn_stdout_write((ptr)frame.data, frame.length);
+    }
+}
