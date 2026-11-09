@@ -7,7 +7,9 @@ struct ConstEval {
     const i32 KNOWN = 2048;
     const i32 NUMERIC = 1536;
     const i32 TEXT = 4096;
-    const i32 SCALAR = 5632;
+    const i32 STRING = 8192;
+    const i32 STRUCT = 16384;
+    const i32 SCALAR = 22016;
     const i32 STEP_LIMIT = 1000000;
     const i32 DEPTH_LIMIT = 512;
     const i32 FRAME_CAPACITY = 16384;
@@ -32,6 +34,8 @@ struct ConstEval {
     Node* failure_node;
     i64 evaluations;
     i64 total_steps;
+    u32 str_type;
+    u32 string_type;
 
     public static unsafe ConstEval* create(TypeChecker* checker) {
         Arena* arena = Memory.arena();
@@ -76,6 +80,14 @@ struct ConstEval {
     }
 
     unsafe i32 shape_of(u32 type) {
+        i32 text = this.text_shape(type);
+        if (text != 0) {
+            return text;
+        }
+        i32 composite = this.struct_shape(type);
+        if (composite != 0) {
+            return composite;
+        }
         if (type < (u32)ConstEval.SHAPE_CAPACITY) {
             i32 cached = this.shapes[type];
             if (cached != 0) {
@@ -230,7 +242,7 @@ struct ConstEval {
         i32 own = this.shape_of(own_type);
         i32 target = this.shape_of(target_type);
         mut bool ok = false;
-        if ((own & ConstEval.SCALAR) == 0 || (target & ConstEval.SCALAR) == 0) {
+        if ((own & ConstEval.SCALAR) == 0 || (target & ConstEval.SCALAR) == 0 || ((own | target) & ConstEval.STRUCT) != 0) {
             ok = this.fail(expression, "only integers, floats, booleans, enums and string literals are supported");
         } else {
             ok = this.eval(expression);
@@ -302,6 +314,9 @@ struct ConstEval {
             this.rf = 0.0;
             return true;
         }
+        if (kind == NodeKind::INTERPOLATION) {
+            return this.eval_interpolation(node);
+        }
         if (kind == NodeKind::INDEX) {
             return this.eval_index(node);
         }
@@ -338,6 +353,9 @@ struct ConstEval {
         }
         if (kind == NodeKind::FIELD_ACCESS) {
             return this.eval_member(node);
+        }
+        if (kind == NodeKind::STRUCT_INIT) {
+            return this.eval_struct_init(node);
         }
         return this.fail(node, "expression cannot be evaluated at compile time");
     }
@@ -403,6 +421,12 @@ struct ConstEval {
     }
 
     unsafe bool eval_member(Node* node) {
+        if (node.symbol_kind() == SymbolKind.FIELD) {
+            if ((this.shape_of(node.first().value_type()) & ConstEval.STRUCT) != 0) {
+                return this.eval_struct_field(node);
+            }
+            return this.eval_text_length(node);
+        }
         if (node.symbol_kind() != SymbolKind.CONSTANT) {
             return this.fail(node, "field access cannot be evaluated at compile time");
         }
@@ -556,6 +580,9 @@ struct ConstEval {
 
         i32 left_shape = this.shape_of(left.value_type());
         i32 right_shape = this.shape_of(right.value_type());
+        if ((left_shape & ConstEval.STRING) != 0 && (right_shape & ConstEval.STRING) != 0) {
+            return this.eval_text_binary(node, op);
+        }
         if ((left_shape & ConstEval.TEXT) != 0 && op == TokenKind::PLUS && (right_shape & ConstEval.INTEGER) != 0) {
             if (!this.eval(left)) {
                 return false;
@@ -907,12 +934,18 @@ struct ConstEval {
             return this.fail(at, "function is still being checked");
         }
         Node* declaration = info.node;
+        mut i32 shift = 0;
+        if (info.is_instance) {
+            shift = 1;
+            LocalVariable* receiver = info.this_variable;
+            receiver.eval_slot = 1;
+        }
         for (mut i32 i = 0; i < declaration.count(); i = i + 1) {
             Node* parameter = declaration.child(i);
             LocalVariable* variable = (LocalVariable*)parameter.symbol();
-            variable.eval_slot = i + 1;
+            variable.eval_slot = i + 1 + shift;
         }
-        info.eval_slots = declaration.count();
+        info.eval_slots = declaration.count() + shift;
         this.number_locals(declaration.first(), info);
         info.eval_ready = true;
         return true;

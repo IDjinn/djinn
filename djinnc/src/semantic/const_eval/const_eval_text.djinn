@@ -1,0 +1,118 @@
+namespace djinnc;
+
+impl ConstEval {
+    unsafe i32 text_shape(u32 type) {
+        if (!Types.is_struct(type)) {
+            return 0;
+        }
+        TypeChecker* checker = this.checker;
+        if (this.str_type == 0) {
+            this.str_type = checker.core_type("str");
+            this.string_type = checker.core_type("string");
+        }
+        if (type == this.str_type || type == this.string_type) {
+            return ConstEval.KNOWN | ConstEval.TEXT | ConstEval.STRING | 64;
+        }
+        return 0;
+    }
+
+    static unsafe ptr<i8> keep_text(ByteBuffer* source) {
+        ptr<i8> text = source.cstr();
+        i64 length = (i64)strlen(text);
+        Arena* arena = Memory.arena();
+        ptr<i8> copy = (ptr<i8>)arena.zalloc((u64)length + 1, 1);
+        memcpy((ptr)copy, (ptr)text, (u64)length);
+        return copy;
+    }
+
+    unsafe bool eval_text_binary(Node* node, TokenKind op) {
+        if (!this.eval(node.first())) {
+            return false;
+        }
+        ptr<i8> left = (ptr<i8>)this.ri;
+        if (!this.eval(node.second())) {
+            return false;
+        }
+        ptr<i8> right = (ptr<i8>)this.ri;
+        this.rf = 0.0;
+        if (op == TokenKind::PLUS) {
+            ByteBuffer* joined = ByteBuffer.create();
+            joined.append(left);
+            joined.append(right);
+            this.ri = (i64)ConstEval.keep_text(joined);
+            return true;
+        }
+        if (op == TokenKind::EQUAL_EQUAL) {
+            this.ri = ConstEval.flag(strcmp(left, right) == 0);
+            return true;
+        }
+        if (op == TokenKind::BANG_EQUAL) {
+            this.ri = ConstEval.flag(strcmp(left, right) != 0);
+            return true;
+        }
+        return this.fail(node, "operator cannot be applied to strings at compile time");
+    }
+
+    unsafe bool eval_text_length(Node* node) {
+        Node* base = node.first();
+        if ((this.shape_of(base.value_type()) & ConstEval.STRING) == 0 || node.name() != Ast.intern_base_name("length", 6)) {
+            return this.fail(node, "field access cannot be evaluated at compile time");
+        }
+        if (!this.eval(base)) {
+            return false;
+        }
+        this.ri = (i64)strlen((ptr<i8>)this.ri);
+        this.rf = (f64)this.ri;
+        return true;
+    }
+
+    unsafe bool eval_interpolation(Node* node) {
+        ByteBuffer* out = ByteBuffer.create();
+        for (mut i32 i = 0; i < node.count(); i = i + 1) {
+            Node* part = node.child(i);
+            if (i % 2 == 0) {
+                if ((part.int_value() & 4294967295) > 0) {
+                    out.append(part.text());
+                }
+                continue;
+            }
+            Node* before = node.child(i - 1);
+            if ((before.int_value() >> 32) != 0) {
+                return this.fail(part, "a formatted interpolation cannot be evaluated at compile time");
+            }
+            if (!this.eval(part)) {
+                return false;
+            }
+            if (!this.append_constant(part, out)) {
+                return false;
+            }
+        }
+        this.ri = (i64)ConstEval.keep_text(out);
+        this.rf = 0.0;
+        return true;
+    }
+
+    unsafe bool append_constant(Node* part, ByteBuffer* out) {
+        i32 shape = this.shape_of(part.value_type());
+        if ((shape & ConstEval.TEXT) != 0) {
+            out.append((ptr<i8>)this.ri);
+            return true;
+        }
+        if ((shape & ConstEval.INTEGER) == 0) {
+            return this.fail(part, "this value cannot be formatted at compile time");
+        }
+        if ((shape & 255) == 1) {
+            if (this.ri != 0) {
+                out.append("true");
+            } else {
+                out.append("false");
+            }
+            return true;
+        }
+        if ((shape & ConstEval.SIGNED) == 0 && this.ri < 0) {
+            return this.fail(part, "this value cannot be formatted at compile time");
+        }
+        out.append_int(this.ri);
+        return true;
+    }
+}

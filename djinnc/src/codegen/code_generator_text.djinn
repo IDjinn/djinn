@@ -35,6 +35,17 @@ impl CodeGenerator {
         return Value.create(LLVMBuildLoad2(this.builder, llvm, slot, "text.loaded"), type);
     }
 
+    unsafe ptr static_text(ptr<i8> content, u32 type) {
+        ptr llvm = this.llvm_type(type);
+        StructInfo* info = this.struct_of(type);
+        PointerList* fields = info.fields;
+        FieldInfo* length_field = (FieldInfo*)fields.get(1);
+        ptr<ptr> values = CodeGenerator.array_of(2);
+        values[0] = this.string_constant(content);
+        values[1] = LLVMConstInt(this.llvm_type(length_field.type), (u64)strlen(content), 0);
+        return LLVMConstNamedStruct(llvm, values, 2);
+    }
+
     ptr call_runtime(ptr<i8> name, ptr return_type, ptr<ptr> parameters, ptr<ptr> arguments, i32 count) {
         ptr function_type = LLVMFunctionType(return_type, parameters, (u32)count, 0);
         mut ptr function = LLVMGetNamedFunction(this.module, name);
@@ -154,7 +165,7 @@ impl CodeGenerator {
         }
         if (kind == NodeKind::INT_LITERAL) {
             u32 type = part.value_type();
-            if (type == Types.byte_pointer()) {
+            if (type == Types.byte_pointer() || type == this.symbols_core_type("str") || type == this.symbols_core_type("string")) {
                 out.append((ptr<i8>)part.int_value());
                 return true;
             }
@@ -175,6 +186,9 @@ impl CodeGenerator {
         if (kind == NodeKind::INTERPOLATION) {
             return this.fold_interpolation(part, out, depth + 1);
         }
+        if (kind == NodeKind::ARRAY_LITERAL) {
+            return this.fold_array(part, out, depth + 1);
+        }
         if (kind == NodeKind::IDENTIFIER && part.symbol_kind() == SymbolKind.LOCAL) {
             LocalVariable* variable = (LocalVariable*)part.symbol();
             Node* declaration = variable.node;
@@ -190,10 +204,95 @@ impl CodeGenerator {
         return false;
     }
 
+    unsafe Node* initial_of(Node* node) {
+        if (node.kind() != NodeKind::IDENTIFIER || node.symbol_kind() != SymbolKind.LOCAL) {
+            return node;
+        }
+        LocalVariable* variable = (LocalVariable*)node.symbol();
+        Node* declaration = variable.node;
+        if (variable.is_mutable || declaration == null || declaration.kind() != NodeKind::VAR_DECL || declaration.first() == null) {
+            return (Node*)0;
+        }
+        return declaration.first();
+    }
+
+    unsafe bool fold_element(Node* item, ByteBuffer* out, i32 depth) {
+        if (depth > 8) {
+            return false;
+        }
+        Node* source = this.initial_of(item);
+        if (source == null) {
+            return false;
+        }
+        NodeKind kind = source.kind();
+        u32 type = source.value_type();
+        u32 view = this.symbols_core_type("str");
+        u32 owned = this.symbols_core_type("string");
+        if (kind == NodeKind::STRING_LITERAL) {
+            out.append("\"");
+            out.append(source.text());
+            out.append("\"");
+            return true;
+        }
+        if (kind == NodeKind::INT_LITERAL) {
+            if (type == Types.byte_pointer() || type == view || type == owned) {
+                out.append("\"");
+                out.append((ptr<i8>)source.int_value());
+                out.append("\"");
+                return true;
+            }
+            if (!Types.is_integer(type) || Types.bits(type) == 1 || (!Types.is_signed(type) && source.int_value() < 0)) {
+                return false;
+            }
+            out.append_int(source.int_value());
+            return true;
+        }
+        if (kind == NodeKind::STRUCT_INIT && Types.is_struct(type) && type != view && type != owned) {
+            StructInfo* info = this.struct_of(type);
+            FunctionInfo* formatter = this.formatter_of(type);
+            if (info.is_enum || info.origin != null) {
+                return false;
+            }
+            if (formatter != null) {
+                ConstEval* evaluator = this.const_eval;
+                if (formatter.const_kind == 0 || evaluator == null || !evaluator.format_text(source, formatter)) {
+                    return false;
+                }
+                out.append("\"");
+                out.append((ptr<i8>)evaluator.ri);
+                out.append("\"");
+                return true;
+            }
+            SymbolTable* symbols = this.symbols;
+            symbols.describe_type(type, out);
+            return true;
+        }
+        return false;
+    }
+
+    unsafe bool fold_array(Node* literal, ByteBuffer* out, i32 depth) {
+        out.append("[");
+        for (mut i32 i = 0; i < literal.count(); i = i + 1) {
+            if (i == 0) {
+                out.append(" ");
+            } else {
+                out.append(", ");
+            }
+            if (!this.fold_element(literal.child(i), out, depth)) {
+                return false;
+            }
+        }
+        out.append(" ]");
+        return true;
+    }
+
     unsafe Value* gen_interpolation(Node* node) {
         u32 type = node.value_type();
         ByteBuffer* folded = ByteBuffer.create();
         if (this.fold_interpolation(node, folded, 0)) {
+            if (type == this.symbols_core_type("str")) {
+                return Value.create(this.static_text(folded.cstr(), type), type);
+            }
             ptr constant = LLVMBuildGlobalStringPtr(this.builder, folded.cstr(), "interp.const");
             return this.gen_constant_text(folded.cstr(), constant, type);
         }
@@ -204,7 +303,17 @@ impl CodeGenerator {
         u32 owned = this.symbols_core_type("string");
         u32 view = this.symbols_core_type("str");
 
-        ptr handle = this.call_runtime("__djinn_text_begin", pointer_llvm, null, null, 0);
+        mut i64 hint = 0;
+        for (mut i32 i = 0; i < node.count(); i = i + 1) {
+            if (i % 2 == 0) {
+                hint = hint + (node.child(i).int_value() & 4294967295);
+            } else {
+                hint = hint + 24;
+            }
+        }
+        ptr handle = LLVMBuildAlloca(this.alloca_builder, LLVMArrayType2(LLVMIntTypeInContext(this.context, 8), 16), "text.builder");
+        LLVMSetAlignment(handle, 8);
+        this.append_text(handle, "__djinn_text_init", i32_type, LLVMConstInt(i32_type, (u64)hint, 0));
         for (mut i32 i = 0; i < node.count(); i = i + 1) {
             Node* part = node.child(i);
             if (i % 2 == 0) {
@@ -259,7 +368,10 @@ impl CodeGenerator {
         LLVMBuildStore(this.builder, LLVMConstNull(llvm), slot);
         LLVMBuildStore(this.builder, data, LLVMBuildStructGEP2(this.builder, llvm, slot, 0, "interp.data.ptr"));
         LLVMBuildStore(this.builder, length, LLVMBuildStructGEP2(this.builder, llvm, slot, 1, "interp.length.ptr"));
-        LLVMBuildStore(this.builder, length, LLVMBuildStructGEP2(this.builder, llvm, slot, 2, "interp.capacity.ptr"));
+        PointerList* result_fields = this.struct_of(type).fields;
+        if (result_fields.length > 2) {
+            LLVMBuildStore(this.builder, length, LLVMBuildStructGEP2(this.builder, llvm, slot, 2, "interp.capacity.ptr"));
+        }
         return Value.create(LLVMBuildLoad2(this.builder, llvm, slot, "interp.loaded"), type);
     }
 }
