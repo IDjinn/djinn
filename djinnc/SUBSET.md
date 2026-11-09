@@ -157,8 +157,17 @@ Intrinsics: `unlikely(bool)`, `assume(bool)`, `debugtrap()`, `trap()`, `unreacha
 (`{ 0, 0, 0 }`).
 
 ## Ownership
-Non-copy values (structs, tagged enums, `str`, `string`, `arr<T>`) move on `T x = y;` and `x = y;`. Using a moved variable is an error;
-assigning to it re-initializes it. Integers, floats, `bool`, pointers and payload-less enums copy. Passing to a function does not move.
+A type is Trivial or a Value, derived from its fields. Trivial types copy on `T x = y;` and `x = y;`: integers, floats, `bool`,
+pointers, `str`, `arr<T>`, payload-less enums, and structs whose fields are all Trivial. A struct that implements `Disposable`, or has
+a field that needs disposal, is a Value and moves; tagged enums move too. Using a moved variable is an error; assigning to it
+re-initializes it. A local also moves when it is returned or used as a field value in a struct initializer. Passing to a function does
+not move.
+
+`Disposable` (`std::types::constraints`) has `void disposable()`. The compiler calls it at the end of the block that declares the
+variable, in reverse order, before `return`, `throw` and error propagation, on `break` and `continue`, and on reassignment. A struct
+without its own `disposable()` disposes its Disposable fields, last first. A drop flag exists only for a variable that is moved or
+declared without an initializer. Temporaries, values moved into containers and coroutines cancelled while suspended are not disposed.
+`Cloneable<T>` (`T clone()`) is the interface for an explicit copy.
 
 Borrows: `T* p = &x;` (local `x`, safe pointer) borrows `x` until `p` leaves scope. While the borrow is live, `x = ...`, `x++` and moving `x`
 are errors, and a second `&x` is an error when `x` is `mut` (the borrow is exclusive; borrows of an immutable `x` are shared and can coexist).
