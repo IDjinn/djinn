@@ -1,0 +1,86 @@
+extern "C" {
+    i32 printf(i8* format, ...);
+}
+
+struct InsufficientFunds;
+struct AuditUnavailable;
+
+struct Account {
+    i64 id;
+    i64 balance;
+}
+
+i32 audit(i64 amount) throws(AuditUnavailable) {
+    if (amount == 13) {
+        throw AuditUnavailable();
+    }
+    return 0;
+}
+
+i32 transfer_unsafe(Account* from, Account* to, i64 amount) throws(InsufficientFunds, AuditUnavailable) require(amount > 0) {
+    if (from.balance < amount) {
+        throw InsufficientFunds();
+    }
+    from.balance = from.balance - amount;
+    try audit(amount);
+    to.balance = to.balance + amount;
+    return 0;
+}
+
+i32 transfer_atomic(Account* from, Account* to, i64 amount) throws(InsufficientFunds, AuditUnavailable) require(amount > 0) {
+    i64 saved_from = from.balance;
+    i64 saved_to = to.balance;
+    i32 failed = switch audit(amount) {
+        Result v -> 0,
+        AuditUnavailable e -> 1
+    };
+    if (failed == 1) {
+        from.balance = saved_from;
+        to.balance = saved_to;
+        throw AuditUnavailable();
+    }
+    if (from.balance < amount) {
+        throw InsufficientFunds();
+    }
+    from.balance = from.balance - amount;
+    to.balance = to.balance + amount;
+    return 0;
+}
+
+unsafe i32 main() {
+    Account alice = Account { .id = 1, .balance = 100 };
+    Account bob = Account { .id = 2, .balance = 50 };
+
+    i32 r1 = switch transfer_unsafe(&alice, &bob, 13) {
+        Result v -> 0,
+        InsufficientFunds e -> 1,
+        AuditUnavailable e -> 2
+    };
+    printf("unsafe, audit fails: result=%d alice=%d bob=%d (money vanished)\n", r1, (i32)alice.balance, (i32)bob.balance);
+
+    alice.balance = 100;
+    bob.balance = 50;
+    i32 r2 = switch transfer_atomic(&alice, &bob, 13) {
+        Result v -> 0,
+        InsufficientFunds e -> 1,
+        AuditUnavailable e -> 2
+    };
+    printf("atomic, audit fails: result=%d alice=%d bob=%d (unchanged)\n", r2, (i32)alice.balance, (i32)bob.balance);
+
+    alice.balance = 100;
+    bob.balance = 50;
+    i32 r3 = switch transfer_atomic(&alice, &bob, 30) {
+        Result v -> 0,
+        InsufficientFunds e -> 1,
+        AuditUnavailable e -> 2
+    };
+    printf("atomic, ok: result=%d alice=%d bob=%d\n", r3, (i32)alice.balance, (i32)bob.balance);
+
+    i32 r4 = switch transfer_atomic(&alice, &bob, 500) {
+        Result v -> 0,
+        InsufficientFunds e -> 1,
+        AuditUnavailable e -> 2
+    };
+    printf("atomic, insufficient: result=%d alice=%d bob=%d\n", r4, (i32)alice.balance, (i32)bob.balance);
+    return 0;
+}
