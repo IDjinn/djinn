@@ -37,19 +37,71 @@ impl TypeChecker {
         this.error_code(at, DiagnosticErrors.BORROW_CONFLICT, message.cstr());
     }
 
+    unsafe bool is_view_type(u32 type) {
+        if (!Types.is_struct(type)) {
+            return false;
+        }
+        SymbolTable* symbols = this.symbols;
+        StructInfo* info = symbols.struct_at(Types.struct_index(type));
+        if (info == null) {
+            return false;
+        }
+        mut u32 name = info.name_atom;
+        if (info.origin != null) {
+            StructInfo* origin = info.origin;
+            name = origin.name_atom;
+        }
+        return name == Ast.intern_base_name("str", 3) || name == Ast.intern_base_name("arr", 3);
+    }
+
+    unsafe LocalVariable* owning_local(Node* node) {
+        if (node.kind() != NodeKind::IDENTIFIER || node.symbol_kind() != SymbolKind.LOCAL) {
+            return (LocalVariable*)0;
+        }
+        LocalVariable* local = (LocalVariable*)node.symbol();
+        if (this.is_copy_type(local.type)) {
+            return (LocalVariable*)0;
+        }
+        return local;
+    }
+
+    unsafe LocalVariable* view_source(Node* initializer, u32 view_type) {
+        if (!this.is_view_type(view_type)) {
+            return (LocalVariable*)0;
+        }
+        if (initializer.kind() == NodeKind::IDENTIFIER) {
+            LocalVariable* owner = this.owning_local(initializer);
+            if (owner != null && owner.type != view_type) {
+                return owner;
+            }
+            return (LocalVariable*)0;
+        }
+        if (initializer.kind() == NodeKind::CALL) {
+            Node* callee = initializer.first();
+            if (callee.symbol_kind() == SymbolKind.INSTANCE_METHOD && initializer.value_type() == view_type) {
+                return this.owning_local(callee.first());
+            }
+        }
+        return (LocalVariable*)0;
+    }
+
     unsafe void borrow_from(Node* initializer, LocalVariable* borrower) {
-        if (initializer.kind() != NodeKind::UNARY || initializer.op_kind() != TokenKind::AMPERSAND) {
-            return;
+        mut LocalVariable* source = this.view_source(initializer, borrower.type);
+        mut bool exclusive = false;
+        if (source == null) {
+            if (initializer.kind() != NodeKind::UNARY || initializer.op_kind() != TokenKind::AMPERSAND) {
+                return;
+            }
+            if (Types.is_raw_pointer(borrower.type)) {
+                return;
+            }
+            Node* operand = initializer.first();
+            if (operand.kind() != NodeKind::IDENTIFIER || operand.symbol_kind() != SymbolKind.LOCAL) {
+                return;
+            }
+            source = (LocalVariable*)operand.symbol();
+            exclusive = source.is_mutable;
         }
-        if (Types.is_raw_pointer(borrower.type)) {
-            return;
-        }
-        Node* operand = initializer.first();
-        if (operand.kind() != NodeKind::IDENTIFIER || operand.symbol_kind() != SymbolKind.LOCAL) {
-            return;
-        }
-        LocalVariable* source = (LocalVariable*)operand.symbol();
-        bool exclusive = source.is_mutable;
         Borrow* conflict = this.conflicting_borrow(source, exclusive);
         if (conflict != null) {
             this.ownership_error(initializer, "cannot borrow '", source.name, "': it is already borrowed");
@@ -61,6 +113,13 @@ impl TypeChecker {
         borrow.at = initializer;
         PointerList* borrows = this.borrows;
         borrows.push((ptr)borrow);
+    }
+
+    unsafe void check_returned_view(Node* value, u32 returned) {
+        LocalVariable* source = this.view_source(value, returned);
+        if (source != null) {
+            this.error_code(value, DiagnosticErrors.BORROW_OUTLIVES_VALUE, "cannot return a view of a local variable");
+        }
     }
 
     void check_returned_borrow(Node* value) {

@@ -19,15 +19,52 @@ impl CodeGenerator {
             allocator = LLVMAddFunction(this.module, "__djinn_malloc", allocator_type);
             this.mark_allocator(allocator);
         }
-        ptr<ptr> args = CodeGenerator.array_of(1);
-        args[0] = LLVMBuildMul(this.builder, LLVMSizeOf(element_llvm), LLVMConstInt(i64_type, (u64)node.count(), 0), "array.size");
-        ptr memory = LLVMBuildCall2(this.builder, allocator_type, allocator, args, 1, "array.new");
+        u32 boxed = this.symbols_core_type("object");
+        PointerList* items = PointerList.create();
+        PointerList* payloads = PointerList.create();
+        mut ptr size = LLVMBuildMul(this.builder, LLVMSizeOf(element_llvm), LLVMConstInt(i64_type, (u64)node.count(), 0), "array.size");
+        ptr mask = LLVMConstInt(i64_type, 15, 0);
         for (mut i32 i = 0; i < node.count(); i = i + 1) {
             Value* item = this.gen_expression(node.child(i));
+            items.push((ptr)item);
+            if (element == boxed && item.type != boxed) {
+                Value* payload = this.format_for_boxing(item);
+                payloads.push((ptr)payload);
+                ptr rounded = LLVMBuildAnd(this.builder, LLVMBuildAdd(this.builder, LLVMSizeOf(this.llvm_type(payload.type)), mask, "payload.pad"), LLVMBuildNot(this.builder, mask, "payload.mask"), "payload.size");
+                size = LLVMBuildAdd(this.builder, size, rounded, "array.size.total");
+            } else {
+                payloads.push((ptr)0);
+            }
+        }
+        ptr<ptr> args = CodeGenerator.array_of(1);
+        args[0] = size;
+        mut ptr memory = (ptr)0;
+        if (node.flag()) {
+            memory = LLVMBuildAlloca(this.alloca_builder, LLVMArrayType2(element_llvm, (u64)node.count()), "array.stack");
+            LLVMSetAlignment(memory, 16);
+        } else {
+            memory = LLVMBuildCall2(this.builder, allocator_type, allocator, args, 1, "array.new");
+        }
+        mut ptr tail = LLVMBuildMul(this.builder, LLVMSizeOf(element_llvm), LLVMConstInt(i64_type, (u64)node.count(), 0), "array.tail");
+        ptr byte_type = LLVMIntTypeInContext(this.context, 8);
+        for (mut i32 i = 0; i < node.count(); i = i + 1) {
+            Value* item = (Value*)items.get(i);
             ptr<ptr> indices = CodeGenerator.array_of(1);
             indices[0] = LLVMConstInt(i64_type, (u64)i, 0);
             ptr address = LLVMBuildGEP2(this.builder, element_llvm, memory, indices, 1, "array.item");
-            LLVMBuildStore(this.builder, this.coerce(item, element), address);
+            Value* payload = (Value*)payloads.get(i);
+            if (payload == null) {
+                LLVMBuildStore(this.builder, this.coerce(item, element), address);
+            } else if (node.flag()) {
+                LLVMBuildStore(this.builder, this.box_value_in(payload, true), address);
+            } else {
+                ptr<ptr> offset = CodeGenerator.array_of(1);
+                offset[0] = tail;
+                ptr payload_address = LLVMBuildGEP2(this.builder, byte_type, memory, offset, 1, "array.payload");
+                LLVMBuildStore(this.builder, this.box_into(payload, payload_address), address);
+                ptr rounded = LLVMBuildAnd(this.builder, LLVMBuildAdd(this.builder, LLVMSizeOf(this.llvm_type(payload.type)), mask, "payload.pad"), LLVMBuildNot(this.builder, mask, "payload.mask"), "payload.size");
+                tail = LLVMBuildAdd(this.builder, tail, rounded, "array.tail.next");
+            }
         }
         ptr llvm = this.llvm_type(type);
         ptr slot = this.create_slot(type, "array");
@@ -50,6 +87,7 @@ impl CodeGenerator {
             Value* value = this.gen_expression(init.first());
             ptr address = LLVMBuildStructGEP2(this.builder, llvm, slot, (u32)field.index, "init.field");
             LLVMBuildStore(this.builder, this.coerce(value, field.type), address);
+            this.release_moved(init.first());
         }
         return Value.create(LLVMBuildLoad2(this.builder, llvm, slot, "init.loaded"), type);
     }

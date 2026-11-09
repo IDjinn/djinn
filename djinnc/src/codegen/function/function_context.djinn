@@ -3,6 +3,7 @@ namespace djinnc;
 struct FunctionContext {
     FunctionInfo* function;
     PointerList* loops;
+    PointerList* drops;
     bool is_async;
     ptr promise;
     ptr coro_id;
@@ -14,6 +15,7 @@ struct FunctionContext {
     public static unsafe FunctionContext* create() {
         FunctionContext* context = (FunctionContext*)Memory.zalloc(sizeof(FunctionContext));
         context.loops = PointerList.create();
+        context.drops = PointerList.create();
         return context;
     }
 
@@ -22,13 +24,33 @@ struct FunctionContext {
         this.is_async = false;
         PointerList* loops = this.loops;
         loops.truncate(0);
+        PointerList* drops = this.drops;
+        drops.truncate(0);
     }
 
     public unsafe void enter_loop(ptr break_block, ptr continue_block) {
+        PointerList* drops = this.drops;
         LoopTargets* targets = (LoopTargets*)Memory.zalloc(sizeof(LoopTargets));
         targets.break_block = break_block;
         targets.continue_block = continue_block;
+        targets.break_depth = drops.length;
+        targets.continue_depth = drops.length;
         PointerList* loops = this.loops;
+        loops.push((ptr)targets);
+    }
+
+    public unsafe void enter_switch(ptr break_block) {
+        PointerList* drops = this.drops;
+        PointerList* loops = this.loops;
+        LoopTargets* targets = (LoopTargets*)Memory.zalloc(sizeof(LoopTargets));
+        targets.break_block = break_block;
+        targets.break_depth = drops.length;
+        targets.continue_depth = drops.length;
+        if (loops.length > 0) {
+            LoopTargets* enclosing = (LoopTargets*)loops.get(loops.length - 1);
+            targets.continue_block = enclosing.continue_block;
+            targets.continue_depth = enclosing.continue_depth;
+        }
         loops.push((ptr)targets);
     }
 
@@ -52,5 +74,17 @@ struct FunctionContext {
         PointerList* loops = this.loops;
         LoopTargets* targets = (LoopTargets*)loops.get(loops.length - 1);
         return targets.continue_block;
+    }
+
+    public unsafe i32 break_depth() {
+        PointerList* loops = this.loops;
+        LoopTargets* targets = (LoopTargets*)loops.get(loops.length - 1);
+        return targets.break_depth;
+    }
+
+    public unsafe i32 continue_depth() {
+        PointerList* loops = this.loops;
+        LoopTargets* targets = (LoopTargets*)loops.get(loops.length - 1);
+        return targets.continue_depth;
     }
 }

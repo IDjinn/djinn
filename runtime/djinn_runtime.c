@@ -45,6 +45,11 @@ void __djinn_free(void* pointer)
     free(pointer);
 }
 
+int32_t __djinn_atomic_add(int32_t* counter, int32_t delta)
+{
+    return __atomic_fetch_add(counter, delta, __ATOMIC_ACQ_REL);
+}
+
 DJINN_ATTR_REALLOC
 void* __djinn_realloc(void* pointer, size_t new_size)
 {

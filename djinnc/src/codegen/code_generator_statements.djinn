@@ -12,9 +12,11 @@ impl CodeGenerator {
                     DebugInfo* debug = this.debug;
                     outer_scope = debug.enter_block(node);
                 }
+                i32 block_mark = this.drop_mark();
                 for (mut i32 i = 0; i < node.count(); i = i + 1) {
                     this.gen_statement(node.child(i));
                 }
+                this.end_scope(block_mark);
                 if (this.debug != null) {
                     DebugInfo* debug = this.debug;
                     debug.leave_block(outer_scope);
@@ -41,10 +43,12 @@ impl CodeGenerator {
                 this.gen_switch(node);
             case BREAK:
                 FunctionContext* function_context = this.function_context;
+                this.emit_drops(function_context.break_depth());
                 LLVMBuildBr(this.builder, function_context.break_block());
                 this.start_dead_block();
             case CONTINUE:
                 FunctionContext* function_context = this.function_context;
+                this.emit_drops(function_context.continue_depth());
                 LLVMBuildBr(this.builder, function_context.continue_block());
                 this.start_dead_block();
             default:
@@ -62,6 +66,8 @@ impl CodeGenerator {
         } else {
             LLVMBuildStore(this.builder, LLVMConstNull(this.llvm_type(declared)), variable.slot);
         }
+        this.track_disposable(variable, node.first() != null);
+        this.release_moved(node.first());
         this.declare_variable(variable.slot, variable.name, declared, node, 0);
     }
 
@@ -75,18 +81,23 @@ impl CodeGenerator {
             if (node.first() != null) {
                 Value* produced = this.gen_expression(node.first());
                 LLVMBuildStore(this.builder, this.coerce(produced, this.current_function().return_type), function_context.promise);
+                this.release_moved(node.first());
             }
+            this.emit_drops(0);
             LLVMBuildBr(this.builder, function_context.final_block);
             this.start_dead_block();
             return;
         }
         FunctionInfo* current = this.current_function();
         if (node.first() == null) {
+            this.emit_drops(0);
             this.emit_frame_pop();
             LLVMBuildRetVoid(this.builder);
         } else {
             Value* returned = this.gen_expression(node.first());
             ptr coerced = this.coerce(returned, current.return_type);
+            this.release_moved(node.first());
+            this.emit_drops(0);
             this.emit_frame_pop();
             LLVMBuildRet(this.builder, coerced);
         }
@@ -162,17 +173,15 @@ impl CodeGenerator {
         }
 
         FunctionContext* function_context = this.function_context;
-        mut ptr continue_target = (ptr)0;
-        if (function_context.in_loop()) {
-            continue_target = function_context.continue_block();
-        }
-        function_context.enter_loop(end_block, continue_target);
+        function_context.enter_switch(end_block);
         for (mut i32 i = 0; i < node.count(); i = i + 1) {
             Node* arm = node.child(i);
             LLVMPositionBuilderAtEnd(this.builder, blocks.get(i));
+            i32 arm_mark = this.drop_mark();
             for (mut i32 j = 0; j < arm.count(); j = j + 1) {
                 this.gen_statement(arm.child(j));
             }
+            this.end_scope(arm_mark);
             this.branch_if_open(end_block);
         }
         function_context.leave_loop();

@@ -92,6 +92,8 @@ void* __djinn_realloc(void* pointer, size_t new_size);
 
 void __djinn_free(void* pointer);
 
+int32_t __djinn_atomic_add(int32_t* counter, int32_t delta);
+
 void* __djinn_malloc(size_t size);
 
 void* __djinn_malloc_aligned(size_t size, size_t alignment);

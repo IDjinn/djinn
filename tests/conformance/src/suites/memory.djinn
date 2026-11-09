@@ -88,7 +88,7 @@ i32 main() {
     }
 
     [Test]
-    void StructMoveSemantics() {
+    void TrivialStructCopies() {
         str source = """
 struct Data {
     i32 value;
@@ -96,8 +96,62 @@ struct Data {
 
 i32 main() {
     Data d1 = { .value = 100 };
-    Data d2 = d1;  // Move d1 to d2
-    return d2.value;
+    Data d2 = d1;
+    return d1.value + d2.value;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(200));
+    }
+
+    [Test]
+    void StrCopies() {
+        str source = """
+i32 main() {
+    str a = "abc";
+    str b = a;
+    return (i32)(a.length + b.length);
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(6));
+    }
+
+    [Test]
+    void StructOfTrivialFieldsCopies() {
+        str source = """
+struct Inner {
+    i32 value;
+}
+
+struct Outer {
+    Inner inner;
+    str name;
+}
+
+i32 main() {
+    Outer o1 = { .inner = { .value = 4 }, .name = "ab" };
+    Outer o2 = o1;
+    return o1.inner.value + o2.inner.value + (i32)o1.name.length;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(10));
+    }
+
+    [Test]
+    void DisposableStructMoves() {
+        str source = """
+import std::types::constraints;
+
+struct Handle : Disposable {
+    i32 value;
+
+    public void disposable() {
+    }
+}
+
+i32 main() {
+    Handle h1 = { .value = 100 };
+    Handle h2 = h1;
+    return h2.value;
 }
 """;
         Verify.source(source).with_std().runs(Expected.exit(100));
@@ -106,14 +160,19 @@ i32 main() {
     [Test]
     void UseAfterMove() {
         str source = """
-struct Data {
+import std::types::constraints;
+
+struct Handle : Disposable {
     i32 value;
+
+    public void disposable() {
+    }
 }
 
 i32 main() {
-    Data d1 = { .value = 42 };
-    Data d2 = d1;  // Move d1 to d2
-    return d1.value;  // Error: use after move
+    Handle h1 = { .value = 42 };
+    Handle h2 = h1;
+    return h1.value;
 }
 """;
         Verify.source(source).with_std().diagnostics(Expected.error(DiagnosticErrors.USE_AFTER_MOVE));
@@ -122,15 +181,45 @@ i32 main() {
     [Test]
     void DoubleMoveError() {
         str source = """
-struct Data {
+import std::types::constraints;
+
+struct Handle : Disposable {
     i32 value;
+
+    public void disposable() {
+    }
 }
 
 i32 main() {
-    Data d1 = { .value = 10 };
-    Data d2 = d1;  // First move
-    Data d3 = d1;  // Error: d1 already moved
+    Handle h1 = { .value = 10 };
+    Handle h2 = h1;
+    Handle h3 = h1;
     return 0;
+}
+""";
+        Verify.source(source).with_std().diagnostics(Expected.error(DiagnosticErrors.USE_AFTER_MOVE));
+    }
+
+    [Test]
+    void StructWithDisposableFieldMoves() {
+        str source = """
+import std::types::constraints;
+
+struct Handle : Disposable {
+    i32 value;
+
+    public void disposable() {
+    }
+}
+
+struct Holder {
+    Handle handle;
+}
+
+i32 main() {
+    Holder a = { .handle = { .value = 1 } };
+    Holder b = a;
+    return a.handle.value;
 }
 """;
         Verify.source(source).with_std().diagnostics(Expected.error(DiagnosticErrors.USE_AFTER_MOVE));
@@ -139,15 +228,20 @@ i32 main() {
     [Test]
     void ReinitializeAfterMove() {
         str source = """
-struct Data {
+import std::types::constraints;
+
+struct Handle : Disposable {
     i32 value;
+
+    public void disposable() {
+    }
 }
 
 i32 main() {
-    Data mut d1 = { .value = 10 };
-    Data d2 = d1;  // Move d1 to d2
-    d1 = { .value = 20 };  // Reinitialize d1
-    return d1.value + d2.value;  // Both valid
+    Handle mut h1 = { .value = 10 };
+    Handle h2 = h1;
+    h1 = { .value = 20 };
+    return h1.value + h2.value;
 }
 """;
         Verify.source(source).with_std().runs(Expected.exit(30));
@@ -245,5 +339,680 @@ i32 main() {
 }
 """;
         Verify.source(source).with_std().runs(Expected.exit(10));
+    }
+}
+
+struct AllocationTests {
+    [Test]
+    void MixedObjectArrayFormatsEveryItem() {
+        str source = """
+struct Box { i32 value; }
+
+i32 main() {
+    Box item = { .value = 123 };
+    auto items = [item, 69, "hello world"];
+    string text = $"test = {items}";
+    return (i32)text.length();
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(33));
+    }
+
+    [Test]
+    void LocalArrayLiteralIsReadable() {
+        str source = """
+i32 main() {
+    i32[] nums = [4, 5, 6];
+    mut i32 total = 0;
+    for (mut i32 i = 0; i < 3; i = i + 1) {
+        i32[] inner = [i, i + 1];
+        total = total + inner[1];
+    }
+    return (i32)nums.length + nums[1] + total;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(14));
+    }
+
+    [Test]
+    void ReturnedArrayLiteralStaysValid() {
+        str source = """
+i32[] make() {
+    i32[] nums = [7, 8, 9];
+    return nums;
+}
+
+i32 clobber(i32 depth) {
+    i32[] filler = [1, 1, 1, 1, 1, 1, 1, 1];
+    if (depth == 0) { return filler[3]; }
+    return clobber(depth - 1) + filler[2];
+}
+
+i32 main() {
+    i32[] kept = make();
+    i32 noise = clobber(8);
+    return kept[0] + kept[2] + noise - 9;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(16));
+    }
+
+    [Test]
+    void ArrayAssignedAwayStaysValid() {
+        str source = """
+struct Holder { i32[] items; }
+
+Holder store() {
+    i32[] nums = [3, 4];
+    Holder holder = { .items = nums };
+    return holder;
+}
+
+i32 clobber() {
+    i32[] filler = [9, 9, 9, 9];
+    return filler[0];
+}
+
+i32 main() {
+    Holder held = store();
+    i32 noise = clobber();
+    return held.items[0] + held.items[1] + noise - 9;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(7));
+    }
+}
+
+struct ViewTests {
+    [Test]
+    void ViewBorrowsWithoutMoving() {
+        str source = """
+i32 main() {
+    string text = "hello";
+    str view = text;
+    str part = text.slice(1, 3);
+    return (i32)(view.length + part.length) + (i32)text.length();
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(13));
+    }
+
+    [Test]
+    void ViewEndsWithItsScope() {
+        str source = """
+i32 main() {
+    string text = "hello";
+    {
+        str view = text;
+    }
+    string moved = text;
+    return (i32)moved.length();
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(5));
+    }
+}
+
+struct DisposeTests {
+    [Test]
+    void DisposeRunsAtScopeEnd() {
+        str source = """
+import std::types::constraints;
+
+unsafe static mut i32 log = 0;
+
+struct Handle : Disposable {
+    i32 id;
+
+    public void disposable() {
+        log = log * 4 + this.id;
+    }
+}
+
+i32 main() {
+    {
+        Handle h = { .id = 7 };
+    }
+    return log;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(7));
+    }
+
+    [Test]
+    void DisposeRunsInReverseOrder() {
+        str source = """
+import std::types::constraints;
+
+unsafe static mut i32 log = 0;
+
+struct Handle : Disposable {
+    i32 id;
+
+    public void disposable() {
+        log = log * 4 + this.id;
+    }
+}
+
+i32 main() {
+    {
+        Handle a = { .id = 1 };
+        Handle b = { .id = 2 };
+        Handle c = { .id = 3 };
+    }
+    return log;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(57));
+    }
+
+    [Test]
+    void MovedValueIsDisposedOnce() {
+        str source = """
+import std::types::constraints;
+
+unsafe static mut i32 log = 0;
+
+struct Handle : Disposable {
+    i32 id;
+
+    public void disposable() {
+        log = log * 4 + this.id;
+    }
+}
+
+i32 main() {
+    {
+        Handle a = { .id = 4 };
+        Handle b = a;
+    }
+    return log;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(4));
+    }
+
+    [Test]
+    void DisposeOnEarlyReturn() {
+        str source = """
+import std::types::constraints;
+
+unsafe static mut i32 log = 0;
+
+struct Handle : Disposable {
+    i32 id;
+
+    public void disposable() {
+        log = log * 4 + this.id;
+    }
+}
+
+i32 run(bool early) {
+    Handle h = { .id = 5 };
+    if (early) {
+        return 1;
+    }
+    return 2;
+}
+
+i32 main() {
+    run(true);
+    run(false);
+    return log;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(25));
+    }
+
+    [Test]
+    void DisposeOnBreakAndContinue() {
+        str source = """
+import std::types::constraints;
+
+unsafe static mut i32 log = 0;
+
+struct Handle : Disposable {
+    i32 id;
+
+    public void disposable() {
+        log = log * 4 + this.id;
+    }
+}
+
+i32 main() {
+    for (i32 mut i = 0; i < 4; i = i + 1) {
+        Handle h = { .id = 1 };
+        if (i == 1) {
+            continue;
+        }
+        if (i == 2) {
+            break;
+        }
+    }
+    return log;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(21));
+    }
+
+    [Test]
+    void DisposeFieldsOfContainingStruct() {
+        str source = """
+import std::types::constraints;
+
+unsafe static mut i32 log = 0;
+
+struct Handle : Disposable {
+    i32 id;
+
+    public void disposable() {
+        log = log * 4 + this.id;
+    }
+}
+
+struct Holder {
+    Handle first;
+    Handle second;
+}
+
+i32 main() {
+    {
+        Holder h = { .first = { .id = 1 }, .second = { .id = 2 } };
+    }
+    return log;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(9));
+    }
+
+    [Test]
+    void ReturnedValueIsNotDisposedByCallee() {
+        str source = """
+import std::types::constraints;
+
+unsafe static mut i32 log = 0;
+
+struct Handle : Disposable {
+    i32 id;
+
+    public void disposable() {
+        log = log * 4 + this.id;
+    }
+}
+
+Handle make() {
+    Handle h = { .id = 6 };
+    return h;
+}
+
+i32 main() {
+    {
+        Handle h = make();
+        log = log * 10;
+    }
+    return log;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(6));
+    }
+
+    [Test]
+    void ReassignmentDisposesPreviousValue() {
+        str source = """
+import std::types::constraints;
+
+unsafe static mut i32 log = 0;
+
+struct Handle : Disposable {
+    i32 id;
+
+    public void disposable() {
+        log = log * 4 + this.id;
+    }
+}
+
+i32 main() {
+    {
+        Handle mut h = { .id = 1 };
+        h = { .id = 2 };
+    }
+    return log;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(6));
+    }
+
+    [Test]
+    void MovedIntoStructFieldIsDisposedOnce() {
+        str source = """
+import std::types::constraints;
+
+unsafe static mut i32 log = 0;
+
+struct Handle : Disposable {
+    i32 id;
+
+    public void disposable() {
+        log = log * 4 + this.id;
+    }
+}
+
+struct Holder {
+    Handle inner;
+}
+
+i32 main() {
+    {
+        Handle a = { .id = 3 };
+        Holder h = { .inner = a };
+    }
+    return log;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(3));
+    }
+
+    [Test]
+    void CloneProducesAnIndependentValue() {
+        str source = """
+import std::types::constraints;
+
+unsafe static mut i32 log = 0;
+
+struct Handle : Disposable, Cloneable<Handle> {
+    i32 id;
+
+    public void disposable() {
+        log = log * 4 + this.id;
+    }
+
+    public Handle clone() {
+        return { .id = this.id + 1 };
+    }
+}
+
+i32 main() {
+    {
+        Handle original = { .id = 1 };
+        Handle copy = original.clone();
+        Handle moved = original;
+    }
+    return log;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(6));
+    }
+
+    [Test]
+    void ArgumentIsMovedAndDisposedByCallee() {
+        str source = """
+import std::types::constraints;
+
+unsafe static mut i32 log = 0;
+
+struct Handle : Disposable {
+    i32 id;
+
+    public void disposable() {
+        log = log * 4 + this.id;
+    }
+}
+
+void consume(Handle h) {
+}
+
+i32 main() {
+    {
+        Handle a = { .id = 3 };
+        consume(a);
+    }
+    return log;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(3));
+    }
+
+    [Test]
+    void UseAfterPassingToFunction() {
+        str source = """
+import std::types::constraints;
+
+unsafe static mut i32 log = 0;
+
+struct Handle : Disposable {
+    i32 id;
+
+    public void disposable() {
+        log = log * 4 + this.id;
+    }
+}
+
+void consume(Handle h) {
+}
+
+i32 main() {
+    Handle a = { .id = 3 };
+    consume(a);
+    return a.id;
+}
+""";
+        Verify.source(source).with_std().diagnostics(Expected.error(DiagnosticErrors.USE_AFTER_MOVE));
+    }
+
+    [Test]
+    void TemporaryArgumentIsDisposedByCallee() {
+        str source = """
+import std::types::constraints;
+
+unsafe static mut i32 log = 0;
+
+struct Handle : Disposable {
+    i32 id;
+
+    public void disposable() {
+        log = log * 4 + this.id;
+    }
+}
+
+Handle make() {
+    Handle h = { .id = 2 };
+    return h;
+}
+
+void consume(Handle h) {
+}
+
+i32 main() {
+    consume(make());
+    return log;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(2));
+    }
+
+    [Test]
+    void ParameterReturnedIsNotDisposed() {
+        str source = """
+import std::types::constraints;
+
+unsafe static mut i32 log = 0;
+
+struct Handle : Disposable {
+    i32 id;
+
+    public void disposable() {
+        log = log * 4 + this.id;
+    }
+}
+
+Handle pass(Handle h) {
+    return h;
+}
+
+i32 main() {
+    {
+        Handle a = { .id = 2 };
+        Handle b = pass(a);
+    }
+    return log;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(2));
+    }
+
+    [Test]
+    void ParameterStoredInFieldIsDisposedOnce() {
+        str source = """
+import std::types::constraints;
+
+unsafe static mut i32 log = 0;
+
+struct Handle : Disposable {
+    i32 id;
+
+    public void disposable() {
+        log = log * 4 + this.id;
+    }
+}
+
+struct Slot {
+    Handle inner;
+
+    public void put(Handle h) {
+        this.inner = h;
+    }
+}
+
+i32 main() {
+    {
+        Slot s = { .inner = { .id = 1 } };
+        Handle h = { .id = 2 };
+        s.put(h);
+    }
+    return log;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(2));
+    }
+
+    [Test]
+    void StringMoves() {
+        str source = """
+i32 main() {
+    string a = "abc";
+    string b = a;
+    return (i32)b.length;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(3));
+    }
+
+    [Test]
+    void UseAfterStringMove() {
+        str source = """
+i32 main() {
+    string a = "abc";
+    string b = a;
+    return (i32)a.length;
+}
+""";
+        Verify.source(source).with_std().diagnostics(Expected.error(DiagnosticErrors.USE_AFTER_MOVE));
+    }
+
+    [Test]
+    void StringParameterIsOwnedByCallee() {
+        str source = """
+i32 measure(string s) {
+    return (i32)s.length;
+}
+
+i32 main() {
+    string a = "hello";
+    return measure(a);
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(5));
+    }
+
+    [Test]
+    void UseAfterStringPassedToFunction() {
+        str source = """
+i32 measure(string s) {
+    return (i32)s.length;
+}
+
+i32 main() {
+    string a = "hello";
+    i32 n = measure(a);
+    return (i32)a.length;
+}
+""";
+        Verify.source(source).with_std().diagnostics(Expected.error(DiagnosticErrors.USE_AFTER_MOVE));
+    }
+
+    [Test]
+    void StringConcatenationKeepsOperands() {
+        str source = """
+i32 main() {
+    string a = "ab";
+    string b = "cd";
+    string c = a + b;
+    return (i32)c.length + (i32)a.length + (i32)b.length;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(8));
+    }
+
+    [Test]
+    void StringReassignmentFreesPreviousBuffer() {
+        str source = """
+i32 main() {
+    string mut s = "a";
+    s = "bb";
+    s = "ccc";
+    return (i32)s.length;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(3));
+    }
+
+    [Test]
+    void StringInterpolationIsOwned() {
+        str source = """
+i32 main() {
+    i32 count = 12;
+    string s = $"{count} items";
+    return (i32)s.length;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(8));
+    }
+
+    [Test]
+    void StringsInALoopAreFreed() {
+        str source = """
+i32 main() {
+    i32 mut total = 0;
+    for (i32 mut i = 0; i < 20000; i = i + 1) {
+        string s = $"{i} loop";
+        string t = s;
+        total = total + (i32)t.length;
+    }
+    return total % 251;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(138));
+    }
+
+    [Test]
+    void StringViewStaysStatic() {
+        str source = """
+i32 main() {
+    str a = "view";
+    str b = a;
+    return (i32)(a.length + b.length);
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(8));
     }
 }
