@@ -100,21 +100,55 @@ struct Check {
         return name.cstr();
     }
 
+    static unsafe ptr<i8> library_file(ptr<i8> directory, ptr<i8> name, bool nested) {
+        ByteBuffer* file = ByteBuffer.create();
+        if (nested) {
+            file.append(Paths.join(Paths.join(Paths.join(directory, "libs"), name), "build/libs"));
+        } else {
+            file.append(Paths.join(directory, "build/libs"));
+        }
+        file.append("/");
+        file.append(name);
+        file.append(".djlib");
+        return file.cstr();
+    }
+
+    static unsafe ptr<i8> find_library(ProjectInfo* project, ptr<i8> name) {
+        ptr<i8> own = Check.library_file(project.directory, name, false);
+        if (Paths.exists(own)) {
+            return own;
+        }
+        mut ptr<i8> current = Paths.directory(project.directory);
+        for (mut i32 depth = 0; depth < 8 && current != null && strlen(current) > 0; depth = depth + 1) {
+            ptr<i8> nested = Check.library_file(current, name, true);
+            if (Paths.exists(nested)) {
+                return nested;
+            }
+            ptr<i8> shared = Check.library_file(current, name, false);
+            if (Paths.exists(shared)) {
+                return shared;
+            }
+            ptr<i8> parent = Paths.directory(current);
+            if (parent == null || Strings.same(parent, current)) {
+                break;
+            }
+            current = parent;
+        }
+        return null;
+    }
+
     static unsafe bool libraries_built(ProjectInfo* project) {
         for (mut i32 i = 0; i < project.libs.length; i = i + 1) {
             ptr<i8> name = (ptr<i8>)project.libs.get(i);
             if (Strings.same(name, "std")) {
                 continue;
             }
-            ByteBuffer* file = ByteBuffer.create();
-            file.append(Paths.join(Paths.join(project.directory, "build/libs"), name));
-            file.append(".djlib");
-            if (!Paths.exists(file.cstr())) {
+            if (Check.find_library(project, name) == null) {
                 ByteBuffer* note = ByteBuffer.create();
                 note.append("djinn-lsp: compiler check skipped, library '");
                 note.append(name);
                 note.append("' is not built (expected ");
-                note.append(file.cstr());
+                note.append(Check.library_file(project.directory, name, false));
                 note.append("); build it to get compiler diagnostics for this project");
                 Rpc.log(2, note.cstr());
                 return false;
@@ -125,13 +159,22 @@ struct Check {
 
     static unsafe void append_libs(ByteBuffer* command, ProjectInfo* project, PointerList* names) {
         for (mut i32 i = 0; i < names.length; i = i + 1) {
-            ptr<i8> lib = Paths.join(Paths.join(project.directory, "build/libs"), (ptr<i8>)names.get(i));
-            ByteBuffer* file = ByteBuffer.create();
-            file.append(lib);
-            file.append(".djlib");
-            if (Paths.exists(file.cstr())) {
+            ptr<i8> name = (ptr<i8>)names.get(i);
+            if (Strings.same(name, "std")) {
+                continue;
+            }
+            ptr<i8> file = Check.find_library(project, name);
+            if (file != null) {
                 command.append(" --lib ");
-                Check.quote(command, file.cstr());
+                Check.quote(command, file);
+            } else {
+                ByteBuffer* note = ByteBuffer.create();
+                note.append("djinn-lsp: library '");
+                note.append(name);
+                note.append("' is not built; its declarations will be reported as unknown (expected ");
+                note.append(Check.library_file(project.directory, name, false));
+                note.append(")");
+                Rpc.log(2, note.cstr());
             }
         }
     }
