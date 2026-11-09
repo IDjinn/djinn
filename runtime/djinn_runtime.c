@@ -154,23 +154,29 @@ char* __djinn_argv(int index)
 }
 #endif
 
+int __djinn_jit;
+
 int __djinn_call_entry(void* address)
 {
+    __djinn_jit = 1;
     return ((int (*)(void))address)();
 }
 
 void __djinn_call_method(void* address, void* target)
 {
+    __djinn_jit = 1;
     ((void (*)(void*))address)(target);
 }
 
 void* __djinn_call_entry_handle(void* address)
 {
+    __djinn_jit = 1;
     return ((void* (*)(void))address)();
 }
 
 void* __djinn_call_method_handle(void* address, void* target)
 {
+    __djinn_jit = 1;
     return ((void* (*)(void*))address)(target);
 }
 

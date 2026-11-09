@@ -19,3 +19,4 @@ bash "$root/tools/build_std.sh" "$compiler" "$out/libs/std.djlib" --runtime-dir 
 "$compiler" test djinnc -o "$out/djinnc_tests$exe" "${flags[@]}"
 bash tests/djinnc/graph.sh "$compiler" "$runtime_lib" "$runtime"
 bash tests/djinnc/ieee754.sh "$compiler" "$runtime_lib" "$runtime"
+bash tests/djinnc/jit_panic.sh "$compiler" "$runtime_lib" "$runtime"

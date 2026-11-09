@@ -1,5 +1,28 @@
 #include "runtime_internal.h"
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
+extern int __djinn_jit;
+
+__attribute__((noreturn)) static void djinn_abort(void)
+{
+    if (__djinn_jit)
+    {
+        fflush(NULL);
+#ifdef _WIN32
+        _Exit(3);
+#else
+        _Exit(134);
+#endif
+    }
+#ifdef _WIN32
+    SetErrorMode(SEM_NOGPFAULTERRORBOX | SEM_FAILCRITICALERRORS);
+#endif
+    abort();
+}
+
 // ---------------------------------------------------------------------------
 // Runtime error reporting: rich traps with source location, operand values
 // and a shadow call-stack trace. Mirrors the compile-time diagnostic style
@@ -397,7 +420,7 @@ void __djinn_runtime_error(const djinn_error_info_t* info)
     fputs(report, stderr);
     fflush(stderr);
     if (djinn_shadow_stack.depth == 0) djinn_native_stack(2);
-    abort();
+    djinn_abort();
 }
 
 // Legacy simple trap: keeps pre-descriptor callers failing loudly.
@@ -472,7 +495,7 @@ void __djinn_uncaught_error(const int tag, const char* type_name, const char* me
 
     fputs(report, stderr);
     fflush(stderr);
-    abort();
+    djinn_abort();
 }
 
 const char* __djinn_error_stack_text(void)
@@ -497,7 +520,7 @@ void __djinn_panic(const char* message, const char* file, const uint32_t line)
     fputs(report, stderr);
     fflush(stderr);
     if (djinn_shadow_stack.depth == 0) djinn_native_stack(2);
-    abort();
+    djinn_abort();
 }
 
 
