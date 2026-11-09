@@ -77,10 +77,10 @@ impl CodeGenerator {
         if (Types.is_struct(type)) {
             SymbolTable* symbols = this.symbols;
             StructInfo* info = symbols.struct_at(Types.struct_index(type));
-            if (Strings.same(info.name, "str")) {
+            if (type == this.symbols_core_type("str")) {
                 return ReflectionKind.STR;
             }
-            if (Strings.same(info.name, "string")) {
+            if (type == this.symbols_core_type("string")) {
                 return ReflectionKind.STRING;
             }
         }
@@ -174,12 +174,96 @@ impl CodeGenerator {
         return Value.create(cstring, terminate.return_type);
     }
 
+    unsafe u32 array_element_of(u32 type) {
+        if (type == 0 || !Types.is_struct(type)) {
+            return 0;
+        }
+        SymbolTable* symbols = this.symbols;
+        StructInfo* info = symbols.struct_at(Types.struct_index(type));
+        if (info.origin == null || info.type_args == null) {
+            return 0;
+        }
+        StructInfo* origin = info.origin;
+        if (origin.name_atom != Ast.intern_base_name("arr", 3)) {
+            return 0;
+        }
+        IdList* args = info.type_args;
+        return args.get(0);
+    }
+
+    unsafe ptr call_reflection(ptr<i8> method_name, ptr<ptr> args, u32 count) {
+        SymbolTable* symbols = this.symbols;
+        StructInfo* helper = symbols.find_core_struct(Ast.intern_base_name("Reflection", 10));
+        FunctionInfo* method = symbols.find_method(helper, Ast.intern_base_name(method_name, (i32)strlen(method_name)));
+        return LLVMBuildCall2(this.builder, method.function_type, method.function, args, count, "reflection.call");
+    }
+
+    unsafe Value* format_array(Value* source, u32 element) {
+        ptr i32_type = LLVMIntTypeInContext(this.context, 32);
+        u32 text_type = this.symbols_core_type("string");
+        u32 index_type = Types.integer(32, false);
+        ptr data = LLVMBuildExtractValue(this.builder, source.ref, 0, "array.text.data");
+        ptr length = LLVMBuildIntCast2(this.builder, LLVMBuildExtractValue(this.builder, source.ref, 1, "array.text.length"), i32_type, 0, "array.text.count");
+
+        ptr joined = this.create_slot(text_type, "array.text");
+        ptr index = this.create_slot(index_type, "array.index");
+        LLVMBuildStore(this.builder, this.call_reflection("array_start", CodeGenerator.array_of(1), 0), joined);
+        LLVMBuildStore(this.builder, LLVMConstInt(i32_type, 0, 0), index);
+
+        ptr condition_block = this.new_block("array.text.cond");
+        ptr body_block = this.new_block("array.text.body");
+        ptr end_block = this.new_block("array.text.end");
+        LLVMBuildBr(this.builder, condition_block);
+
+        LLVMPositionBuilderAtEnd(this.builder, condition_block);
+        ptr current = LLVMBuildLoad2(this.builder, i32_type, index, "array.i");
+        LLVMBuildCondBr(this.builder, LLVMBuildICmp(this.builder, LlvmConst.INT_ULT, current, length, "array.more"), body_block, end_block);
+
+        LLVMPositionBuilderAtEnd(this.builder, body_block);
+        ptr<ptr> indices = CodeGenerator.array_of(1);
+        indices[0] = LLVMBuildIntCast2(this.builder, current, LLVMIntTypeInContext(this.context, 64), 0, "array.i64");
+        ptr address = LLVMBuildGEP2(this.builder, this.llvm_type(element), data, indices, 1, "array.element");
+        mut ptr item = (ptr)0;
+        FunctionInfo* formatter = this.formatter_of(element);
+        if (element == this.symbols_core_type("object")) {
+            ptr<ptr> object_args = CodeGenerator.array_of(1);
+            object_args[0] = LLVMBuildLoad2(this.builder, this.llvm_type(element), address, "array.object");
+            item = this.call_reflection("object_text", object_args, 1);
+        } else if (formatter != null) {
+            ptr<ptr> formatter_args = CodeGenerator.array_of(1);
+            formatter_args[0] = address;
+            item = LLVMBuildCall2(this.builder, formatter.function_type, formatter.function, formatter_args, 1, "array.format");
+        } else {
+            ptr<ptr> text_args = CodeGenerator.array_of(2);
+            text_args[0] = this.type_info_of(element);
+            text_args[1] = address;
+            item = this.call_reflection("element_text", text_args, 2);
+        }
+        ptr<ptr> join_args = CodeGenerator.array_of(3);
+        join_args[0] = LLVMBuildLoad2(this.builder, this.llvm_type(text_type), joined, "array.so.far");
+        join_args[1] = item;
+        join_args[2] = current;
+        LLVMBuildStore(this.builder, this.call_reflection("array_join", join_args, 3), joined);
+        LLVMBuildStore(this.builder, LLVMBuildAdd(this.builder, current, LLVMConstInt(i32_type, 1, 0), "array.next"), index);
+        LLVMBuildBr(this.builder, condition_block);
+
+        LLVMPositionBuilderAtEnd(this.builder, end_block);
+        ptr<ptr> end_args = CodeGenerator.array_of(1);
+        end_args[0] = LLVMBuildLoad2(this.builder, this.llvm_type(text_type), joined, "array.done");
+        ptr closed = this.call_reflection("array_end", end_args, 1);
+        return this.terminate_text(Value.create(closed, text_type), "terminated");
+    }
+
     unsafe Value* format_for_boxing(Value* source) {
         if (source.type == this.symbols_core_type("string")) {
             return this.terminate_text(source, "terminated");
         }
         if (source.type == this.symbols_core_type("str")) {
             return this.terminate_text(source, "terminated_view");
+        }
+        u32 element = this.array_element_of(source.type);
+        if (element != 0) {
+            return this.format_array(source, element);
         }
         FunctionInfo* formatter = this.formatter_of(source.type);
         if (formatter == null) {
@@ -200,9 +284,18 @@ impl CodeGenerator {
     }
 
     ptr box_value(Value* source) {
+        return this.box_value_in(source, false);
+    }
+
+    unsafe ptr box_value_in(Value* source, bool on_stack) {
         u32 boxed = this.symbols_core_type("object");
         ptr object_llvm = this.llvm_type(boxed);
-        ptr memory = this.allocate_bytes(LLVMSizeOf(this.llvm_type(source.type)));
+        mut ptr memory = (ptr)0;
+        if (on_stack) {
+            memory = this.create_slot(source.type, "boxed.stack");
+        } else {
+            memory = this.allocate_bytes(LLVMSizeOf(this.llvm_type(source.type)));
+        }
         LLVMBuildStore(this.builder, source.ref, memory);
         ptr slot = this.create_slot(boxed, "boxed");
         LLVMBuildStore(this.builder, this.type_info_of(source.type), LLVMBuildStructGEP2(this.builder, object_llvm, slot, 0, "boxed.type"));

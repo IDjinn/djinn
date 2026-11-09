@@ -191,7 +191,7 @@ impl TypeChecker {
             Node* part = node.child(i);
             u32 type = this.check_expression(part, 0);
             bool printable = Types.is_integer(type) || Types.is_float(type) || type == Types.byte_pointer()
-                || type == owned || type == view;
+                || type == owned || type == view || this.array_element(type) != 0;
             if (!printable) {
                 this.error_code(part, DiagnosticErrors.INVALID_INTERPOLATION, "this value cannot be interpolated into a string");
             }
@@ -236,6 +236,10 @@ impl TypeChecker {
         return args.get(0);
     }
 
+    bool same_number_kind(u32 left, u32 right) {
+        return (Types.is_integer(left) && Types.is_integer(right)) || (Types.is_float(left) && Types.is_float(right));
+    }
+
     u32 check_array_literal(Node* node, u32 expected) {
         SymbolTable* symbols = this.symbols;
         mut u32 element = this.array_element(expected);
@@ -243,10 +247,14 @@ impl TypeChecker {
             this.error_code(node, DiagnosticErrors.LITERAL_NEEDS_CONTEXT, "an empty array literal needs an array type from its context");
             return Types.i32_type();
         }
+        mut bool inferred = element == 0;
         for (mut i32 i = 0; i < node.count(); i = i + 1) {
             u32 actual = this.check_expression(node.child(i), element);
             if (element == 0) {
                 element = actual;
+            } else if (inferred && actual != element && !this.same_number_kind(actual, element)) {
+                element = this.core_type("object");
+                inferred = false;
             }
         }
         u32 atom = Ast.intern_base_name("arr", 3);
