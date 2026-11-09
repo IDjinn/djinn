@@ -1,0 +1,195 @@
+namespace djinnc;
+
+struct Suggest {
+    public static unsafe i32 lower(i32 c) {
+        if (c >= 65 && c <= 90) {
+            return c + 32;
+        }
+        return c;
+    }
+
+    public static unsafe i32 distance(ptr<i8> a, ptr<i8> b) {
+        i32 n = strlen(a);
+        i32 m = strlen(b);
+        if (n > 40 || m > 40) {
+            return 99;
+        }
+        ptr<i32> table = (ptr<i32>)Memory.zalloc((u64)(41 * 41 * 4));
+        for (mut i32 i = 0; i <= n; i = i + 1) {
+            table[i * 41] = i;
+        }
+        for (mut i32 j = 0; j <= m; j = j + 1) {
+            table[j] = j;
+        }
+        for (mut i32 i = 1; i <= n; i = i + 1) {
+            for (mut i32 j = 1; j <= m; j = j + 1) {
+                i32 x = Suggest.lower((i32)a[i - 1]);
+                i32 y = Suggest.lower((i32)b[j - 1]);
+                mut i32 cost = 1;
+                if (x == y) {
+                    cost = 0;
+                }
+                mut i32 best = table[(i - 1) * 41 + j] + 1;
+                i32 insert = table[i * 41 + j - 1] + 1;
+                if (insert < best) {
+                    best = insert;
+                }
+                i32 replace = table[(i - 1) * 41 + j - 1] + cost;
+                if (replace < best) {
+                    best = replace;
+                }
+                if (i > 1 && j > 1 && x == Suggest.lower((i32)b[j - 2]) && y == Suggest.lower((i32)a[i - 2])) {
+                    i32 swap = table[(i - 2) * 41 + j - 2] + 1;
+                    if (swap < best) {
+                        best = swap;
+                    }
+                }
+                table[i * 41 + j] = best;
+            }
+        }
+        i32 result = table[n * 41 + m];
+        return result;
+    }
+
+    static unsafe void builtin_types(PointerList* names) {
+        ptr<i8> types = "i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 bool size str string ptr usize isize";
+        i32 length = strlen(types);
+        mut i32 start = 0;
+        for (mut i32 i = 0; i <= length; i = i + 1) {
+            if (i == length || types[i] == 32) {
+                if (i > start) {
+                    names.push((ptr)Strings.duplicate(types + start, i - start));
+                }
+                start = i + 1;
+            }
+        }
+    }
+
+    static unsafe PointerList* candidates(Unit* u, i32 raw, bool types) {
+        PointerList* names = PointerList.create();
+        ByteBuffer* sink = ByteBuffer.create();
+        mut bool any = false;
+        i32 c = u.code_of[raw];
+        if (types) {
+            Completion.globals(sink, &any, names, true, null);
+            Suggest.builtin_types(names);
+            return names;
+        }
+        if (c >= 2 && u.is_member_access(c - 1)) {
+            ptr<i8> owner = Resolve.type_of(u, c - 2);
+            if (owner != null) {
+                Completion.members_of(sink, owner, &any, names);
+            }
+            return names;
+        }
+        if (c >= 2 && u.is_scope(c - 1) && u.is_name(c - 2)) {
+            ptr<i8> left = u.word_at(c - 2);
+            if (Resolve.type_named(u, left) != null) {
+                Completion.members_of(sink, left, &any, names);
+            }
+            return names;
+        }
+        Completion.locals(sink, u, raw, &any, names);
+        Completion.globals(sink, &any, names, false, null);
+        return names;
+    }
+
+    public static unsafe ptr<i8> best(Unit* u, i32 raw, bool types) {
+        if (raw < 0 || raw >= u.token_count) {
+            return null;
+        }
+        i32 kind = u.tkind[raw];
+        if (kind != Tk.IDENT && kind != Tk.TYPE) {
+            return null;
+        }
+        ptr<i8> word = u.token_text(raw);
+        i32 length = strlen(word);
+        if (length < 3) {
+            return null;
+        }
+        PointerList* names = Suggest.candidates(u, raw, types);
+        mut ptr<i8> winner = null;
+        mut i32 winner_distance = 99;
+        mut i32 runner_up = 99;
+        for (mut i32 i = 0; i < names.length; i = i + 1) {
+            ptr<i8> name = (ptr<i8>)names.get(i);
+            if (Strings.same(name, word)) {
+                return null;
+            }
+            i32 d = Suggest.distance(word, name);
+            if (d < winner_distance) {
+                runner_up = winner_distance;
+                winner_distance = d;
+                winner = name;
+            } else if (d < runner_up) {
+                runner_up = d;
+            }
+        }
+        if (winner == null) {
+            return null;
+        }
+        mut i32 allowed = 1;
+        if (length >= 8) {
+            allowed = 2;
+        }
+        if (winner_distance > allowed || runner_up <= winner_distance) {
+            return null;
+        }
+        if (length <= 4 && Suggest.lower((i32)word[0]) != Suggest.lower((i32)winner[0])) {
+            return null;
+        }
+        return winner;
+    }
+
+    public static unsafe bool is_name_error(ptr<i8> code) {
+        return Strings.same(code, "E3002") || Strings.same(code, "E3027") || Strings.same(code, "E2001");
+    }
+
+    public static unsafe ptr<i8> for_diagnostic(Unit* u, ptr<i8> code, i32 offset) {
+        if (!Suggest.is_name_error(code)) {
+            return null;
+        }
+        i32 raw = u.token_at_offset(offset);
+        return Suggest.best(u, raw, Strings.same(code, "E2001"));
+    }
+
+    public static unsafe ByteBuffer* actions(Unit* u, JsonValue* diagnostics) {
+        ByteBuffer* out = ByteBuffer.create();
+        out.append("[");
+        mut i32 count = 0;
+        for (mut i32 i = 0; i < diagnostics.length(); i = i + 1) {
+            JsonValue* diag = diagnostics.at(i);
+            ptr<i8> code = diag.field_string("code");
+            JsonValue* range = diag.get("range");
+            if (code == null || range == null || range.get("start") == null) {
+                continue;
+            }
+            JsonValue* start = range.get("start");
+            i32 offset = u.offset_of_position((i32)start.field_int("line", 0), (i32)start.field_int("character", 0));
+            ptr<i8> replacement = Suggest.for_diagnostic(u, code, offset);
+            if (replacement == null) {
+                continue;
+            }
+            if (count > 0) {
+                out.append(",");
+            }
+            count = count + 1;
+            i32 raw = u.token_at_offset(offset);
+            ByteBuffer* title = ByteBuffer.create();
+            title.append("Change to '");
+            title.append(replacement);
+            title.append("'");
+            out.append("{\"title\":");
+            out.append_json_string(title.cstr());
+            out.append(",\"kind\":\"quickfix\",\"isPreferred\":true,\"edit\":{\"changes\":{");
+            out.append_json_string(u.uri);
+            out.append(":[{\"range\":");
+            Lsp.token_range(out, u, raw, raw);
+            out.append(",\"newText\":");
+            out.append_json_string(replacement);
+            out.append("}]}}}");
+        }
+        out.append("]");
+        return out;
+    }
+}

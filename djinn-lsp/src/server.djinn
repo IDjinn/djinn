@@ -75,6 +75,7 @@ struct Server {
         out.append("{\"capabilities\":{");
         out.append("\"textDocumentSync\":{\"openClose\":true,\"change\":1,\"save\":{\"includeText\":false}},");
         out.append("\"hoverProvider\":true,");
+        out.append("\"codeActionProvider\":{\"codeActionKinds\":[\"quickfix\"]},");
         out.append("\"definitionProvider\":true,");
         out.append("\"typeDefinitionProvider\":true,");
         out.append("\"referencesProvider\":true,");
@@ -498,6 +499,13 @@ struct Server {
                 include = context.field_bool("includeDeclaration", true);
             }
             Rpc.respond(id, Navigation.references(unit, line, character, include));
+        } else if (Strings.same(method, "textDocument/codeAction")) {
+            JsonValue* context = params.get("context");
+            if (context == null || context.get("diagnostics") == null) {
+                Rpc.respond(id, (ByteBuffer*)0);
+            } else {
+                Rpc.respond(id, Suggest.actions(unit, context.get("diagnostics")));
+            }
         } else if (Strings.same(method, "textDocument/documentHighlight")) {
             Rpc.respond(id, Navigation.highlights(unit, line, character));
         } else if (Strings.same(method, "textDocument/documentSymbol")) {
@@ -550,8 +558,16 @@ struct Server {
     }
 
     public static unsafe void handle(ptr<i8> body, i32 length) {
-        JsonValue* message = Json.parse(body, length);
-        if (message == null || message.kind != JsonKind.OBJECT) {
+        JsonValue* message = JsonDoc.parse(body, length);
+        if (message == null) {
+            return;
+        }
+        Server.dispatch(message);
+        message.release();
+    }
+
+    static unsafe void dispatch(JsonValue* message) {
+        if (message.kind != JsonKind.OBJECT) {
             return;
         }
         ptr<i8> method = message.field_string("method");

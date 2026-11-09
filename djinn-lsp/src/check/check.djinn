@@ -20,6 +20,7 @@ struct CDiag {
     i32 column;
     i32 end_line;
     i32 end_column;
+    ptr<i8> subject;
 }
 
 unsafe static mut i64 check_stamp = 0;
@@ -99,12 +100,94 @@ struct Check {
         return name.cstr();
     }
 
+    static unsafe ptr<i8> library_file(ptr<i8> directory, ptr<i8> name, bool nested) {
+        ByteBuffer* file = ByteBuffer.create();
+        if (nested) {
+            file.append(Paths.join(Paths.join(Paths.join(directory, "libs"), name), "build/libs"));
+        } else {
+            file.append(Paths.join(directory, "build/libs"));
+        }
+        file.append("/");
+        file.append(name);
+        file.append(".djlib");
+        return file.cstr();
+    }
+
+    static unsafe ptr<i8> find_library(ProjectInfo* project, ptr<i8> name) {
+        ptr<i8> own = Check.library_file(project.directory, name, false);
+        if (Paths.exists(own)) {
+            return own;
+        }
+        mut ptr<i8> current = Paths.directory(project.directory);
+        for (mut i32 depth = 0; depth < 8 && current != null && strlen(current) > 0; depth = depth + 1) {
+            ptr<i8> nested = Check.library_file(current, name, true);
+            if (Paths.exists(nested)) {
+                return nested;
+            }
+            ptr<i8> shared = Check.library_file(current, name, false);
+            if (Paths.exists(shared)) {
+                return shared;
+            }
+            ptr<i8> parent = Paths.directory(current);
+            if (parent == null || Strings.same(parent, current)) {
+                break;
+            }
+            current = parent;
+        }
+        return null;
+    }
+
+    static unsafe bool libraries_built(ProjectInfo* project) {
+        for (mut i32 i = 0; i < project.libs.length; i = i + 1) {
+            ptr<i8> name = (ptr<i8>)project.libs.get(i);
+            if (Strings.same(name, "std")) {
+                continue;
+            }
+            if (Check.find_library(project, name) == null) {
+                ByteBuffer* note = ByteBuffer.create();
+                note.append("djinn-lsp: compiler check skipped, library '");
+                note.append(name);
+                note.append("' is not built (expected ");
+                note.append(Check.library_file(project.directory, name, false));
+                note.append("); build it to get compiler diagnostics for this project");
+                Rpc.log(2, note.cstr());
+                return false;
+            }
+        }
+        return true;
+    }
+
+    static unsafe void append_libs(ByteBuffer* command, ProjectInfo* project, PointerList* names) {
+        for (mut i32 i = 0; i < names.length; i = i + 1) {
+            ptr<i8> name = (ptr<i8>)names.get(i);
+            if (Strings.same(name, "std")) {
+                continue;
+            }
+            ptr<i8> file = Check.find_library(project, name);
+            if (file != null) {
+                command.append(" --lib ");
+                Check.quote(command, file);
+            } else {
+                ByteBuffer* note = ByteBuffer.create();
+                note.append("djinn-lsp: library '");
+                note.append(name);
+                note.append("' is not built; its declarations will be reported as unknown (expected ");
+                note.append(Check.library_file(project.directory, name, false));
+                note.append(")");
+                Rpc.log(2, note.cstr());
+            }
+        }
+    }
+
     public static unsafe bool run(Unit* doc) {
         Workspace* ws = Workspace.get();
         if (check_stamp == 0) {
             check_stamp = __djinn_now_us();
         }
         ProjectInfo* project = ProjectInfo.find(doc.path);
+        if (project != null && !Check.libraries_built(project)) {
+            return true;
+        }
         mut bool use_std = false;
         mut bool library = false;
         PointerList* files = Check.collect_files(doc, project, &use_std, &library);
@@ -142,15 +225,9 @@ struct Check {
             command.append(" --library");
         }
         if (project != null) {
-            for (mut i32 i = 0; i < project.libs.length; i = i + 1) {
-                ptr<i8> lib = Paths.join(Paths.join(project.directory, "build/libs"), (ptr<i8>)project.libs.get(i));
-                ByteBuffer* file = ByteBuffer.create();
-                file.append(lib);
-                file.append(".djlib");
-                if (Paths.exists(file.cstr())) {
-                    command.append(" --lib ");
-                    Check.quote(command, file.cstr());
-                }
+            Check.append_libs(command, project, project.libs);
+            if (ProjectInfo.is_test_file(doc.path)) {
+                Check.append_libs(command, project, project.test_libs);
             }
         }
 
@@ -266,8 +343,16 @@ struct Check {
     }
 
     static unsafe void parse_line(ptr<i8> line, i32 length, PointerList* overlays, PointerList* overlay_units, PointerList* touched) {
-        JsonValue* value = Json.parse(line, length);
-        if (value == null || value.kind != JsonKind.OBJECT) {
+        JsonValue* value = JsonDoc.parse(line, length);
+        if (value == null) {
+            return;
+        }
+        Check.apply_line(value, overlays, overlay_units, touched);
+        value.release();
+    }
+
+    static unsafe void apply_line(JsonValue* value, PointerList* overlays, PointerList* overlay_units, PointerList* touched) {
+        if (value.kind != JsonKind.OBJECT) {
             return;
         }
         ptr<i8> file = value.field_string("file");
@@ -308,6 +393,10 @@ struct Check {
             message.append(text);
         }
         JsonValue* args = value.get("args");
+        if (args != null && args.length() > 0) {
+            ptr<i8> first = args.at(0).string_or("");
+            diag.subject = Strings.duplicate(first, strlen(first));
+        }
         if (args != null && args.length() > 0) {
             message.append(": ");
             for (mut i32 i = 0; i < args.length(); i = i + 1) {
@@ -354,6 +443,51 @@ struct Publisher {
         return offset;
     }
 
+    static unsafe void narrow(Unit* u, CDiag* diag, ptr<i32> from, ptr<i32> to) {
+        if (diag.subject == null || strlen(diag.subject) == 0) {
+            return;
+        }
+        i32 length = strlen(diag.subject);
+        mut i32 segment = length;
+        while (segment > 0 && diag.subject[segment - 1] != 58 && diag.subject[segment - 1] != 46) {
+            segment = segment - 1;
+        }
+        i32 width = length - segment;
+        if (segment == 0 || width == 0) {
+            return;
+        }
+        mut i32 token = u.token_at_offset(from[0]);
+        if (token < 0) {
+            return;
+        }
+        i32 line = diag.line - 1;
+        mut i32 limit = u.length;
+        if (line + 1 < u.line_count) {
+            limit = u.line_starts[line + 1];
+        }
+        while (token < u.token_count && u.tstart[token] < limit) {
+            if (u.tkind[token] == Tk.IDENT && u.tend[token] - u.tstart[token] == width && Strings.equals(u.text + u.tstart[token], width, diag.subject + segment)) {
+                from[0] = u.tstart[token];
+                to[0] = u.tend[token];
+                return;
+            }
+            token = token + 1;
+        }
+    }
+
+    static unsafe ptr<i8> with_hint(Unit* u, CDiag* diag, i32 offset) {
+        ptr<i8> replacement = Suggest.for_diagnostic(u, diag.code, offset);
+        if (replacement == null) {
+            return diag.message;
+        }
+        ByteBuffer* text = ByteBuffer.create();
+        text.append(diag.message);
+        text.append(". Did you mean '");
+        text.append(replacement);
+        text.append("'?");
+        return text.cstr();
+    }
+
     public static unsafe void publish(Unit* u) {
         ByteBuffer* out = ByteBuffer.create();
         out.append("{\"uri\":");
@@ -369,18 +503,19 @@ struct Publisher {
                     }
                     count = count + 1;
                     out.append("{\"range\":");
-                    i32 from = Publisher.offset_of(u, diag.line, diag.column);
+                    mut i32 from = Publisher.offset_of(u, diag.line, diag.column);
                     mut i32 to = Publisher.offset_of(u, diag.end_line, diag.end_column);
+                    mut i32 start = from;
+                    Publisher.narrow(u, diag, &start, &to);
+                    from = start;
                     if (to <= from) {
                         to = from + 1;
                     }
                     Lsp.range(out, u, from, to);
                     out.append(",\"severity\":");
                     out.append_int((i64)diag.severity);
-                    out.append(",\"code\":");
-                    out.append_json_string(diag.code);
                     out.append(",\"source\":\"djinnc\",\"message\":");
-                    out.append_json_string(diag.message);
+                    out.append_json_string(Publisher.with_hint(u, diag, from));
                     out.append("}");
                 }
             } else if (!u.checked && u.open && u.lint != null) {
