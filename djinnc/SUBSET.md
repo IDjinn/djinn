@@ -160,8 +160,10 @@ Intrinsics: `unlikely(bool)`, `assume(bool)`, `debugtrap()`, `trap()`, `unreacha
 A type is Trivial or a Value, derived from its fields. Trivial types copy on `T x = y;` and `x = y;`: integers, floats, `bool`,
 pointers, `str`, `arr<T>`, payload-less enums, and structs whose fields are all Trivial. A struct that implements `Disposable`, or has
 a field that needs disposal, is a Value and moves; tagged enums move too. Using a moved variable is an error; assigning to it
-re-initializes it. A local also moves when it is returned or used as a field value in a struct initializer. Passing to a function does
-not move.
+re-initializes it. A local also moves when it is returned, assigned to a field or an index, used as a field value in a struct
+initializer, or passed by value to a function; a parameter of a Value type is owned by the callee, which disposes it. Extern
+functions, operators and property accessors borrow their parameters. `string` is a Value that always owns a heap buffer (a literal
+typed `string` is copied); `str` is a Trivial view.
 
 `Disposable` (`std::types::constraints`) has `void disposable()`. The compiler calls it at the end of the block that declares the
 variable, in reverse order, before `return`, `throw` and error propagation, on `break` and `continue`, and on reassignment. A struct
