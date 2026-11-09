@@ -1,0 +1,176 @@
+namespace djinnc;
+
+impl ConstEval {
+    unsafe StructInfo* evaluable_struct(u32 type) {
+        mut u32 target = type;
+        if (Types.is_pointer(type)) {
+            target = Types.element(type);
+        }
+        if (!Types.is_struct(target)) {
+            return (StructInfo*)0;
+        }
+        if (target == this.str_type || target == this.string_type) {
+            return (StructInfo*)0;
+        }
+        TypeChecker* checker = this.checker;
+        SymbolTable* symbols = checker.symbols;
+        StructInfo* info = symbols.struct_at(Types.struct_index(target));
+        if (info == null || info.is_enum || info.is_primitive || info.has_payload || info.origin != null || info.is_template || info.fields == null) {
+            return (StructInfo*)0;
+        }
+        PointerList* fields = info.fields;
+        for (mut i32 i = 0; i < fields.length; i = i + 1) {
+            FieldInfo* field = (FieldInfo*)fields.get(i);
+            i32 field_shape = this.text_shape(field.type) | ConstEval.describe(field.type);
+            if ((field_shape & (ConstEval.INTEGER | ConstEval.FLOAT | ConstEval.TEXT)) == 0) {
+                return (StructInfo*)0;
+            }
+        }
+        return info;
+    }
+
+    unsafe i32 struct_shape(u32 type) {
+        if (this.evaluable_struct(type) == null) {
+            return 0;
+        }
+        return ConstEval.KNOWN | ConstEval.STRUCT | 64;
+    }
+
+    unsafe i32 field_position(StructInfo* info, FieldInfo* wanted) {
+        PointerList* fields = info.fields;
+        for (mut i32 i = 0; i < fields.length; i = i + 1) {
+            if ((FieldInfo*)fields.get(i) == wanted) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    unsafe bool eval_struct_init(Node* node) {
+        StructInfo* info = this.evaluable_struct(node.value_type());
+        if (info == null) {
+            return this.fail(node, "this struct cannot be evaluated at compile time");
+        }
+        PointerList* fields = info.fields;
+        Arena* arena = Memory.arena();
+        ptr<i64> cells = (ptr<i64>)arena.zalloc((u64)(fields.length + 1) * 8, 8);
+        for (mut i32 i = 0; i < node.count(); i = i + 1) {
+            Node* init = node.child(i);
+            FieldInfo* field = (FieldInfo*)init.symbol();
+            i32 position = this.field_position(info, field);
+            if (position < 0) {
+                return this.fail(init, "field cannot be evaluated at compile time");
+            }
+            Node* value = init.first();
+            if (!this.eval(value)) {
+                return false;
+            }
+            i32 shape = this.shape_of(field.type);
+            this.convert(this.shape_of(value.value_type()), shape);
+            if ((shape & ConstEval.FLOAT) != 0) {
+                cells[position] = ConstBits.of_float(this.rf);
+            } else {
+                cells[position] = this.ri;
+            }
+        }
+        this.ri = (i64)cells;
+        this.rf = 0.0;
+        return true;
+    }
+
+    unsafe bool eval_struct_field(Node* node) {
+        Node* base = node.first();
+        StructInfo* info = this.evaluable_struct(base.value_type());
+        if (info == null) {
+            return this.fail(node, "field access cannot be evaluated at compile time");
+        }
+        FieldInfo* field = (FieldInfo*)node.symbol();
+        i32 position = this.field_position(info, field);
+        if (position < 0) {
+            return this.fail(node, "field access cannot be evaluated at compile time");
+        }
+        if (!this.eval(base)) {
+            return false;
+        }
+        ptr<i64> cells = (ptr<i64>)this.ri;
+        i32 shape = this.shape_of(field.type);
+        if ((shape & ConstEval.FLOAT) != 0) {
+            this.rf = ConstBits.to_float(cells[position]);
+            this.ri = 0;
+        } else {
+            this.ri = cells[position];
+            this.rf = (f64)this.ri;
+        }
+        return true;
+    }
+
+    public unsafe bool format_text(Node* receiver, FunctionInfo* method) {
+        this.ensure_storage();
+        i32 saved_base = this.base;
+        i32 saved_top = this.top;
+        bool saved_frame = this.in_frame;
+        i32 saved_return = this.return_shape;
+        ptr<i8> saved_reason = this.reason;
+        Node* saved_blame = this.blame;
+        if (this.nesting == 0) {
+            this.steps = 0;
+        }
+        this.nesting = this.nesting + 1;
+        this.base = this.top;
+        this.in_frame = false;
+        this.reason = null;
+        this.blame = (Node*)0;
+
+        mut bool ok = false;
+        if (method.const_kind == 0 || !method.is_instance || method.is_async || method.is_extern || method.is_variadic || method.is_template) {
+            ok = this.fail(receiver, "the formatter is not a constexpr or consteval method");
+        } else if ((this.shape_of(method.return_type) & ConstEval.STRING) == 0) {
+            ok = this.fail(receiver, "the formatter must return a string");
+        } else if (this.prepare(receiver, method) && this.eval(receiver)) {
+            ok = this.run_method(receiver, method, this.ri);
+        }
+
+        this.failure = this.reason;
+        this.failure_node = this.blame;
+        this.nesting = this.nesting - 1;
+        this.base = saved_base;
+        this.top = saved_top;
+        this.in_frame = saved_frame;
+        this.return_shape = saved_return;
+        this.reason = saved_reason;
+        this.blame = saved_blame;
+        return ok;
+    }
+
+    unsafe bool run_method(Node* at, FunctionInfo* info, i64 receiver) {
+        Node* declaration = info.node;
+        i32 frame_base = this.top;
+        i32 frame_top = frame_base + info.eval_slots;
+        if (frame_top > ConstEval.FRAME_CAPACITY || this.depth >= ConstEval.DEPTH_LIMIT) {
+            return this.fail(at, "compile-time stack overflow");
+        }
+        this.top = frame_top;
+        this.ints[frame_base] = receiver;
+        this.floats[frame_base] = 0.0;
+        i32 saved_base = this.base;
+        bool saved_frame = this.in_frame;
+        i32 saved_return = this.return_shape;
+        this.base = frame_base;
+        this.in_frame = true;
+        this.return_shape = this.shape_of(info.return_type);
+        this.depth = this.depth + 1;
+        i32 status = this.exec(declaration.first());
+        this.depth = this.depth - 1;
+        this.base = saved_base;
+        this.in_frame = saved_frame;
+        this.return_shape = saved_return;
+        this.top = frame_base;
+        if (status == EvalStatus.FAILED) {
+            return false;
+        }
+        if (status != EvalStatus.RETURN) {
+            return this.fail(at, "function ended without returning a value");
+        }
+        return true;
+    }
+}

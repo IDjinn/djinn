@@ -194,6 +194,8 @@ are not supported in the evaluator yet. Strings are `i8*` values that always poi
 
 String interpolation also folds in the code generator: when every part is a literal, an immutable local with a literal initializer, or an array literal of such items (integers, text and structs without a formatter, printed as `[ item, item ]`), the whole text is one constant and no text builder, boxing or reflection call remains. When the interpolation is typed `str` (for example an argument of a `str` parameter) the constant is static and nothing is allocated.
 
+Structs of integers, floats, `bool` and text fields can be built and read inside the evaluator, and a `constexpr` or `consteval` instance method can be evaluated with `this` bound to such a struct. A struct that implements `IFormatable<string>` through a `constexpr` `format()` is therefore folded when it is an element of a constant array: its text is evaluated at compile time and printed quoted, as the runtime does, so no `format()` call, boxing or reflection remains.
+
 The evaluator works on the type-checked AST, with no bytecode step: expression results travel in two registers (`ri`, `rf`) chosen by the static type,
 locals live in one flat frame stack of parallel `i64`/`f64` arrays (slots are numbered once per function), type shapes are cached per type id, and a result
 is written back into the AST node as a literal (`IntLiteral`, `BoolLiteral`, `FloatConst`), so code generation pays no lookup and reads of constexpr
