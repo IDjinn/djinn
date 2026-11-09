@@ -20,6 +20,7 @@ struct CDiag {
     i32 column;
     i32 end_line;
     i32 end_column;
+    ptr<i8> subject;
 }
 
 unsafe static mut i64 check_stamp = 0;
@@ -99,12 +100,38 @@ struct Check {
         return name.cstr();
     }
 
+    static unsafe bool libraries_built(ProjectInfo* project) {
+        for (mut i32 i = 0; i < project.libs.length; i = i + 1) {
+            ptr<i8> name = (ptr<i8>)project.libs.get(i);
+            if (Strings.same(name, "std")) {
+                continue;
+            }
+            ByteBuffer* file = ByteBuffer.create();
+            file.append(Paths.join(Paths.join(project.directory, "build/libs"), name));
+            file.append(".djlib");
+            if (!Paths.exists(file.cstr())) {
+                ByteBuffer* note = ByteBuffer.create();
+                note.append("djinn-lsp: compiler check skipped, library '");
+                note.append(name);
+                note.append("' is not built (expected ");
+                note.append(file.cstr());
+                note.append("); build it to get compiler diagnostics for this project");
+                Rpc.log(2, note.cstr());
+                return false;
+            }
+        }
+        return true;
+    }
+
     public static unsafe bool run(Unit* doc) {
         Workspace* ws = Workspace.get();
         if (check_stamp == 0) {
             check_stamp = __djinn_now_us();
         }
         ProjectInfo* project = ProjectInfo.find(doc.path);
+        if (project != null && !Check.libraries_built(project)) {
+            return true;
+        }
         mut bool use_std = false;
         mut bool library = false;
         PointerList* files = Check.collect_files(doc, project, &use_std, &library);
@@ -266,8 +293,16 @@ struct Check {
     }
 
     static unsafe void parse_line(ptr<i8> line, i32 length, PointerList* overlays, PointerList* overlay_units, PointerList* touched) {
-        JsonValue* value = Json.parse(line, length);
-        if (value == null || value.kind != JsonKind.OBJECT) {
+        JsonValue* value = JsonDoc.parse(line, length);
+        if (value == null) {
+            return;
+        }
+        Check.apply_line(value, overlays, overlay_units, touched);
+        value.release();
+    }
+
+    static unsafe void apply_line(JsonValue* value, PointerList* overlays, PointerList* overlay_units, PointerList* touched) {
+        if (value.kind != JsonKind.OBJECT) {
             return;
         }
         ptr<i8> file = value.field_string("file");
@@ -308,6 +343,10 @@ struct Check {
             message.append(text);
         }
         JsonValue* args = value.get("args");
+        if (args != null && args.length() > 0) {
+            ptr<i8> first = args.at(0).string_or("");
+            diag.subject = Strings.duplicate(first, strlen(first));
+        }
         if (args != null && args.length() > 0) {
             message.append(": ");
             for (mut i32 i = 0; i < args.length(); i = i + 1) {
@@ -354,6 +393,51 @@ struct Publisher {
         return offset;
     }
 
+    static unsafe void narrow(Unit* u, CDiag* diag, ptr<i32> from, ptr<i32> to) {
+        if (diag.subject == null || strlen(diag.subject) == 0) {
+            return;
+        }
+        i32 length = strlen(diag.subject);
+        mut i32 segment = length;
+        while (segment > 0 && diag.subject[segment - 1] != 58 && diag.subject[segment - 1] != 46) {
+            segment = segment - 1;
+        }
+        i32 width = length - segment;
+        if (segment == 0 || width == 0) {
+            return;
+        }
+        mut i32 token = u.token_at_offset(from[0]);
+        if (token < 0) {
+            return;
+        }
+        i32 line = diag.line - 1;
+        mut i32 limit = u.length;
+        if (line + 1 < u.line_count) {
+            limit = u.line_starts[line + 1];
+        }
+        while (token < u.token_count && u.tstart[token] < limit) {
+            if (u.tkind[token] == Tk.IDENT && u.tend[token] - u.tstart[token] == width && Strings.equals(u.text + u.tstart[token], width, diag.subject + segment)) {
+                from[0] = u.tstart[token];
+                to[0] = u.tend[token];
+                return;
+            }
+            token = token + 1;
+        }
+    }
+
+    static unsafe ptr<i8> with_hint(Unit* u, CDiag* diag, i32 offset) {
+        ptr<i8> replacement = Suggest.for_diagnostic(u, diag.code, offset);
+        if (replacement == null) {
+            return diag.message;
+        }
+        ByteBuffer* text = ByteBuffer.create();
+        text.append(diag.message);
+        text.append(". Did you mean '");
+        text.append(replacement);
+        text.append("'?");
+        return text.cstr();
+    }
+
     public static unsafe void publish(Unit* u) {
         ByteBuffer* out = ByteBuffer.create();
         out.append("{\"uri\":");
@@ -369,8 +453,11 @@ struct Publisher {
                     }
                     count = count + 1;
                     out.append("{\"range\":");
-                    i32 from = Publisher.offset_of(u, diag.line, diag.column);
+                    mut i32 from = Publisher.offset_of(u, diag.line, diag.column);
                     mut i32 to = Publisher.offset_of(u, diag.end_line, diag.end_column);
+                    mut i32 start = from;
+                    Publisher.narrow(u, diag, &start, &to);
+                    from = start;
                     if (to <= from) {
                         to = from + 1;
                     }
@@ -380,7 +467,7 @@ struct Publisher {
                     out.append(",\"code\":");
                     out.append_json_string(diag.code);
                     out.append(",\"source\":\"djinnc\",\"message\":");
-                    out.append_json_string(diag.message);
+                    out.append_json_string(Publisher.with_hint(u, diag, from));
                     out.append("}");
                 }
             } else if (!u.checked && u.open && u.lint != null) {

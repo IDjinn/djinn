@@ -5,6 +5,8 @@ const { LanguageClient, TransportKind } = require("vscode-languageclient/node");
 
 let client;
 let output;
+let errorDecoration;
+let warningDecoration;
 
 function exeName() {
   return process.platform === "win32" ? "djinn-lsp.exe" : "djinn-lsp";
@@ -219,6 +221,48 @@ const taskProvider = {
   },
 };
 
+
+function inlineDecoration(color) {
+  return vscode.window.createTextEditorDecorationType({
+    after: { margin: "0 0 0 2em", color: new vscode.ThemeColor(color) },
+    isWholeLine: false,
+  });
+}
+
+function renderInline(editor) {
+  if (!editor || editor.document.languageId !== "djinn") {
+    return;
+  }
+  const errors = [];
+  const warnings = [];
+  if (settings().get("inlineDiagnostics")) {
+    const seen = new Set();
+    const diagnostics = vscode.languages.getDiagnostics(editor.document.uri)
+      .filter((d) => d.severity <= vscode.DiagnosticSeverity.Warning)
+      .sort((a, b) => a.severity - b.severity);
+    for (const diagnostic of diagnostics) {
+      const line = diagnostic.range.start.line;
+      if (seen.has(line)) {
+        continue;
+      }
+      seen.add(line);
+      const end = editor.document.lineAt(line).range.end;
+      const code = diagnostic.code ? ` [${diagnostic.code.value || diagnostic.code}]` : "";
+      const decoration = {
+        range: new vscode.Range(end, end),
+        renderOptions: { after: { contentText: `${diagnostic.message.split(String.fromCharCode(10))[0]}${code}` } },
+      };
+      (diagnostic.severity === vscode.DiagnosticSeverity.Error ? errors : warnings).push(decoration);
+    }
+  }
+  editor.setDecorations(errorDecoration, errors);
+  editor.setDecorations(warningDecoration, warnings);
+}
+
+function renderAllInline() {
+  vscode.window.visibleTextEditors.forEach(renderInline);
+}
+
 async function showInfo() {
   const info = await serverInfo();
   if (!info) {
@@ -234,8 +278,14 @@ async function showInfo() {
 
 async function activate(context) {
   output = vscode.window.createOutputChannel("Djinn Language Server");
+  errorDecoration = inlineDecoration("editorError.foreground");
+  warningDecoration = inlineDecoration("editorWarning.foreground");
   context.subscriptions.push(
     output,
+    errorDecoration,
+    warningDecoration,
+    vscode.languages.onDidChangeDiagnostics(renderAllInline),
+    vscode.window.onDidChangeVisibleTextEditors(renderAllInline),
     vscode.commands.registerCommand("djinn.restartServer", () => restart(context)),
     vscode.commands.registerCommand("djinn.checkProject", () => runTask("check")),
     vscode.commands.registerCommand("djinn.build", () => runTask("build")),
@@ -246,6 +296,7 @@ async function activate(context) {
       if (!event.affectsConfiguration("djinn")) {
         return;
       }
+      renderAllInline();
       if (client && event.affectsConfiguration("djinn.server.path")) {
         restart(context);
       } else if (client) {

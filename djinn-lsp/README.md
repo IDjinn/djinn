@@ -2,7 +2,7 @@
 
 Language server for `djinnc`, written in Djinn. Provides diagnostics (lexical lint plus `djinnc --check`), hover, definition, references, rename, completion, signature help, symbols, folding and semantic tokens.
 
-Build (needs a `djinnc` with `--check`, for example the stage2 compiler):
+Build (needs `clang` and `llvm-ar`, and a `djinnc` recent enough to compile `std`; JSON comes from `std::util::Json`, backed by the runtime's yyjson):
 
 ```bash
 ./build.sh <djinnc> [runtime dir]
