@@ -1,7 +1,7 @@
 namespace djinnc;
 
 impl CodeGenerator {
-    ptr coerce(Value* source, u32 target) {
+    unsafe ptr coerce(Value* source, u32 target) {
         u32 from = source.type;
         ptr ref = source.ref;
         if (target == 0 || from == target) {
@@ -74,7 +74,7 @@ impl CodeGenerator {
         return ref;
     }
 
-    ptr to_condition(Value* source) {
+    unsafe ptr to_condition(Value* source) {
         u32 type = source.type;
         ptr ref = source.ref;
         if (Types.is_integer(type) && Types.bits(type) == 1) {
@@ -87,7 +87,7 @@ impl CodeGenerator {
         return LLVMBuildICmp(this.builder, LlvmConst.INT_NE, ref, zero, "tobool");
     }
 
-    Value* gen_unary(Node* node) {
+    unsafe Value* gen_unary(Node* node) {
         TokenKind op = node.op_kind();
 
         if (op == TokenKind::AMPERSAND) {
@@ -306,7 +306,7 @@ impl CodeGenerator {
         return Value.create(moved, pointer.type);
     }
 
-    Value* gen_comparison(Node* node, u32 common, ptr lhs, ptr rhs) {
+    unsafe Value* gen_comparison(Node* node, u32 common, ptr lhs, ptr rhs) {
         TokenKind op = node.op_kind();
         u32 flag = Types.bool_type();
 
@@ -336,7 +336,7 @@ impl CodeGenerator {
         return Value.create(LLVMBuildICmp(this.builder, predicate, lhs, rhs, "icmp"), flag);
     }
 
-    Value* gen_arithmetic(Node* node, u32 common, ptr lhs, ptr rhs) {
+    unsafe Value* gen_arithmetic(Node* node, u32 common, ptr lhs, ptr rhs) {
         TokenKind op = node.op_kind();
         ptr builder = this.builder;
         bool is_signed = Types.is_signed(common);
@@ -367,7 +367,7 @@ impl CodeGenerator {
     }
 
     // x % -1 is always 0, but srem of the minimum value by -1 is undefined and traps on x86, while x % 1 is also 0.
-    ptr remainder_divisor(ptr rhs) {
+    unsafe ptr remainder_divisor(ptr rhs) {
         ptr type = LLVMTypeOf(rhs);
         ptr minus_one = LLVMBuildNot(this.builder, LLVMConstNull(type), "minus_one");
         ptr is_minus_one = LLVMBuildICmp(this.builder, LlvmConst.INT_EQ, rhs, minus_one, "rem.minus_one");
@@ -387,7 +387,7 @@ impl CodeGenerator {
         LLVMPositionBuilderAtEnd(this.builder, valid);
     }
 
-    void check_divisor(Node* node, ptr rhs) {
+    unsafe void check_divisor(Node* node, ptr rhs) {
         ptr is_zero = LLVMBuildICmp(this.builder, LlvmConst.INT_EQ, rhs, LLVMConstNull(LLVMTypeOf(rhs)), "div.zero");
         if (this.can_throw("DivisionByZero")) {
             this.throw_core_error_when(is_zero, node, "DivisionByZero", "division by zero");
@@ -396,7 +396,7 @@ impl CodeGenerator {
         this.stop_when(is_zero, node, "division by zero");
     }
 
-    void check_shift(Node* node, u32 common, ptr rhs) {
+    unsafe void check_shift(Node* node, u32 common, ptr rhs) {
         ptr width = LLVMConstInt(LLVMTypeOf(rhs), (u64)Types.bits(common), 0);
         ptr too_far = LLVMBuildICmp(this.builder, LlvmConst.INT_UGE, rhs, width, "shift.range");
         this.stop_when(too_far, node, "shift amount is out of range");
@@ -412,7 +412,7 @@ impl CodeGenerator {
 
     // Truncation keeps values just outside the limits valid, so the signed lower limit is one below the minimum when the
     // float can hold that value, and the minimum itself when it cannot.
-    void check_float_cast(Node* node, Value* source, u32 target) {
+    unsafe void check_float_cast(Node* node, Value* source, u32 target) {
         u32 from = source.type;
         if (!Types.is_float(from) || !Types.is_integer(target) || Types.bits(target) == 1) {
             return;
@@ -444,7 +444,7 @@ impl CodeGenerator {
 
     // A narrowing cast is valid when extending the truncated value back gives the original. Casts that keep or widen the
     // width are bit reinterpretations and are not checked. Casting to bool accepts only 0 and 1.
-    void check_integer_cast(Node* node, Value* source, u32 target) {
+    unsafe void check_integer_cast(Node* node, Value* source, u32 target) {
         u32 from = source.type;
         if (!Types.is_integer(from) && !Types.is_float(from)) {
             return;
@@ -502,7 +502,7 @@ impl CodeGenerator {
         this.stop_when(overflow, node, "integer overflow: the minimum value divided by -1");
     }
 
-    Value* gen_division(Node* node, bool is_signed, u32 common, ptr lhs, ptr rhs) {
+    unsafe Value* gen_division(Node* node, bool is_signed, u32 common, ptr lhs, ptr rhs) {
         this.check_divisor(node, rhs);
         if (is_signed && node.mode() == OverflowMode::SATURATING) {
             return this.gen_saturating_division(common, lhs, rhs);
@@ -514,18 +514,18 @@ impl CodeGenerator {
         return Value.create(LLVMBuildUDiv(this.builder, lhs, rhs, "udiv"), common);
     }
 
-    Value* gen_remainder(Node* node, bool is_signed, u32 common, ptr lhs, ptr rhs) {
+    unsafe Value* gen_remainder(Node* node, bool is_signed, u32 common, ptr lhs, ptr rhs) {
         this.check_divisor(node, rhs);
         if (is_signed) { return Value.create(LLVMBuildSRem(this.builder, lhs, this.remainder_divisor(rhs), "srem"), common); }
         return Value.create(LLVMBuildURem(this.builder, lhs, rhs, "urem"), common);
     }
 
-    Value* gen_shift_left(Node* node, u32 common, ptr lhs, ptr rhs) {
+    unsafe Value* gen_shift_left(Node* node, u32 common, ptr lhs, ptr rhs) {
         this.check_shift(node, common, rhs);
         return Value.create(LLVMBuildShl(this.builder, lhs, rhs, "shl"), common);
     }
 
-    Value* gen_shift_right(Node* node, bool is_signed, u32 common, ptr lhs, ptr rhs) {
+    unsafe Value* gen_shift_right(Node* node, bool is_signed, u32 common, ptr lhs, ptr rhs) {
         this.check_shift(node, common, rhs);
         if (is_signed) { return Value.create(LLVMBuildAShr(this.builder, lhs, rhs, "ashr"), common); }
         return Value.create(LLVMBuildLShr(this.builder, lhs, rhs, "lshr"), common);
