@@ -1,0 +1,169 @@
+namespace djinnc;
+
+struct Bitcode {
+    const i32 INLINE_LIMIT = 60;
+
+    static unsafe bool local(ptr value) {
+        i32 linkage = LLVMGetLinkage(value);
+        return linkage == LlvmConst.LINKAGE_INTERNAL || linkage == LlvmConst.LINKAGE_PRIVATE;
+    }
+
+    static unsafe bool portable_global(ptr global) {
+        if (!Bitcode.local(global)) {
+            return true;
+        }
+        if (LLVMIsGlobalConstant(global) == 0) {
+            return false;
+        }
+        ptr initializer = LLVMGetInitializer(global);
+        return initializer != null && LLVMGetNumOperands(initializer) == 0;
+    }
+
+    static unsafe bool portable(ptr value) {
+        if (LLVMIsAFunction(value) != null) {
+            return !Bitcode.local(value);
+        }
+        if (LLVMIsAGlobalVariable(value) != null) {
+            return Bitcode.portable_global(value);
+        }
+        if (LLVMIsAConstantExpr(value) != null) {
+            i32 count = LLVMGetNumOperands(value);
+            for (mut i32 i = 0; i < count; i = i + 1) {
+                if (!Bitcode.portable(LLVMGetOperand(value, (u32)i))) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    static unsafe bool inlinable(ptr function) {
+        if (LLVMIsDeclaration(function) != 0 || LLVMGetLinkage(function) != LlvmConst.LINKAGE_EXTERNAL) {
+            return false;
+        }
+        u64 length = 0;
+        ptr<i8> name = LLVMGetValueName2(function, &length);
+        if (length == 0 || Tiering.has_prefix(name, length, "llvm.") || Tiering.has_prefix(name, length, "__djinn_") || Strings.same(name, "main")) {
+            return false;
+        }
+        if (Tiering.instruction_count(function) > Bitcode.INLINE_LIMIT || Tiering.uses_coroutine(function)) {
+            return false;
+        }
+        mut ptr block = LLVMGetFirstBasicBlock(function);
+        while (block != null) {
+            mut ptr instruction = LLVMGetFirstInstruction(block);
+            while (instruction != null) {
+                i32 count = LLVMGetNumOperands(instruction);
+                for (mut i32 i = 0; i < count; i = i + 1) {
+                    if (!Bitcode.portable(LLVMGetOperand(instruction, (u32)i))) {
+                        return false;
+                    }
+                }
+                instruction = LLVMGetNextInstruction(instruction);
+            }
+            block = LLVMGetNextBasicBlock(block);
+        }
+        return true;
+    }
+
+    static unsafe void strip(ptr module) {
+        PointerList* keep = PointerList.create();
+        PointerList* drop = PointerList.create();
+        mut ptr function = LLVMGetFirstFunction(module);
+        while (function != null) {
+            if (LLVMIsDeclaration(function) == 0) {
+                if (Bitcode.inlinable(function)) {
+                    keep.push(function);
+                } else {
+                    drop.push(function);
+                }
+            }
+            function = LLVMGetNextFunction(function);
+        }
+        for (mut i32 i = 0; i < drop.length; i = i + 1) {
+            ptr dropped = drop.get(i);
+            bool was_local = Bitcode.local(dropped);
+            LLVMSetComdat(dropped, (ptr)0);
+            Tiering.hollow(dropped);
+            if (was_local) {
+                LLVMSetLinkage(dropped, LlvmConst.LINKAGE_INTERNAL);
+            }
+        }
+        for (mut i32 i = 0; i < keep.length; i = i + 1) {
+            LLVMSetComdat(keep.get(i), (ptr)0);
+        }
+        mut ptr global = LLVMGetFirstGlobal(module);
+        while (global != null) {
+            ptr next = LLVMGetNextGlobal(global);
+            if (LLVMIsDeclaration(global) == 0 && !(Bitcode.local(global) && Bitcode.portable_global(global))) {
+                u64 length = 0;
+                ptr<i8> name = LLVMGetValueName2(global, &length);
+                if (!Tiering.has_prefix(name, length, "llvm.")) {
+                    LLVMSetInitializer(global, (ptr)0);
+                    LLVMSetComdat(global, (ptr)0);
+                    LLVMSetLinkage(global, LlvmConst.LINKAGE_EXTERNAL);
+                }
+            }
+            global = next;
+        }
+        for (mut i32 pass = 0; pass < 2; pass = pass + 1) {
+            mut ptr leftover = LLVMGetFirstFunction(module);
+            while (leftover != null) {
+                ptr next = LLVMGetNextFunction(leftover);
+                if (LLVMIsDeclaration(leftover) != 0 && Bitcode.local(leftover) && LLVMGetFirstUse(leftover) == null) {
+                    LLVMDeleteFunction(leftover);
+                }
+                leftover = next;
+            }
+        }
+    }
+
+    public static unsafe ptr<i8> capture(ptr module, u64* size) {
+        ptr clone = LLVMCloneModule(module);
+        Bitcode.strip(clone);
+        ptr buffer = LLVMWriteBitcodeToMemoryBuffer(clone);
+        u64 length = LLVMGetBufferSize(buffer);
+        ptr<i8> copy = Strings.duplicate(LLVMGetBufferStart(buffer), (i32)length);
+        LLVMDisposeMemoryBuffer(buffer);
+        LLVMDisposeModule(clone);
+        size[0] = length;
+        return copy;
+    }
+
+    public static unsafe bool absorb(CodeGenerator* gen, ptr<i8> data, u64 size) {
+        ptr buffer = LLVMCreateMemoryBufferWithMemoryRangeCopy(data, size, "djinn-library-bitcode");
+        ptr<ptr> parsed = CodeGenerator.array_of(1);
+        if (LLVMParseBitcodeInContext2(gen.context, buffer, parsed) != 0) {
+            return false;
+        }
+        ptr module = parsed[0];
+        mut ptr function = LLVMGetFirstFunction(module);
+        while (function != null) {
+            if (LLVMIsDeclaration(function) == 0) {
+                u64 length = 0;
+                ptr<i8> name = LLVMGetValueName2(function, &length);
+                ptr existing = LLVMGetNamedFunction(gen.module, name);
+                if (existing != null && LLVMIsDeclaration(existing) == 0) {
+                    Tiering.hollow(function);
+                } else {
+                    LLVMSetLinkage(function, LlvmConst.LINKAGE_AVAILABLE_EXTERNALLY);
+                }
+            }
+            function = LLVMGetNextFunction(function);
+        }
+        return LLVMLinkModules2(gen.module, module) == 0;
+    }
+
+    public static unsafe void merge(CodeGenerator* gen, Options* options) {
+        if (options.opt_level == null || Strings.same(options.opt_level, "O0") || options.tiered || options.debug) {
+            return;
+        }
+        PointerList* blobs = Library.bitcode();
+        PointerList* sizes = Library.bitcode_sizes();
+        for (mut i32 i = 0; i < blobs.length; i = i + 1) {
+            if (!Bitcode.absorb(gen, (ptr<i8>)blobs.get(i), (u64)sizes.get(i))) {
+                logger_warn(Log.get(), "djinnc: library bitcode %d could not be imported; calls into it will not be inlined", i);
+            }
+        }
+    }
+}

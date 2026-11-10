@@ -199,7 +199,11 @@ impl CodeGenerator {
         LLVMBuildCondBr(this.builder, condition, body_block, end_block);
 
         this.run_loop_body(node.second(), body_block, end_block, condition_block);
+        bool open = !this.is_terminated();
         this.branch_if_open(condition_block);
+        if (open) {
+            this.mark_loop(node);
+        }
         LLVMPositionBuilderAtEnd(this.builder, end_block);
     }
 
@@ -215,6 +219,7 @@ impl CodeGenerator {
         LLVMPositionBuilderAtEnd(this.builder, condition_block);
         ptr condition = this.to_condition(this.gen_expression(node.first()));
         LLVMBuildCondBr(this.builder, condition, body_block, end_block);
+        this.mark_loop(node);
         LLVMPositionBuilderAtEnd(this.builder, end_block);
     }
 
@@ -245,7 +250,55 @@ impl CodeGenerator {
             this.gen_expression(node.third());
         }
         LLVMBuildBr(this.builder, condition_block);
+        this.mark_loop(node);
         LLVMPositionBuilderAtEnd(this.builder, end_block);
+    }
+
+    unsafe ptr loop_hint(ptr<i8> name, u32 bits, u64 value) {
+        ptr<ptr> operands = CodeGenerator.array_of(2);
+        operands[0] = LLVMMDStringInContext2(this.context, name, (u64)strlen(name));
+        if (bits == 0) {
+            return LLVMMDNodeInContext2(this.context, operands, 1);
+        }
+        operands[1] = LLVMValueAsMetadata(LLVMConstInt(LLVMIntTypeInContext(this.context, bits), value, 0));
+        return LLVMMDNodeInContext2(this.context, operands, 2);
+    }
+
+    unsafe void mark_loop(Node* node) {
+        PointerList* uses = Attributes.of(node);
+        if (uses.length == 0) {
+            return;
+        }
+        ptr<ptr> operands = CodeGenerator.array_of(uses.length + 1);
+        ptr placeholder = LLVMTemporaryMDNode(this.context, null, 0);
+        operands[0] = placeholder;
+        mut u64 count = 1;
+        for (mut i32 i = 0; i < uses.length; i = i + 1) {
+            AttributeUse* use = (AttributeUse*)uses.get(i);
+            mut ptr hint = (ptr)0;
+            if (Strings.same(use.name, "Unroll")) {
+                if (use.int_arg > 0) {
+                    hint = this.loop_hint("llvm.loop.unroll.count", 32, (u64)use.int_arg);
+                } else {
+                    hint = this.loop_hint("llvm.loop.unroll.enable", 0, 0);
+                }
+            } else if (Strings.same(use.name, "NoUnroll")) {
+                hint = this.loop_hint("llvm.loop.unroll.disable", 0, 0);
+            } else if (Strings.same(use.name, "Vectorize")) {
+                hint = this.loop_hint("llvm.loop.vectorize.enable", 1, 1);
+            } else if (Strings.same(use.name, "NoVectorize")) {
+                hint = this.loop_hint("llvm.loop.vectorize.enable", 1, 0);
+            }
+            if (hint != null) {
+                operands[(i32)count] = hint;
+                count = count + 1;
+            }
+        }
+        ptr identity = LLVMMDNodeInContext2(this.context, operands, count);
+        LLVMMetadataReplaceAllUsesWith(placeholder, identity);
+        ptr branch = LLVMGetBasicBlockTerminator(LLVMGetInsertBlock(this.builder));
+        u32 kind = LLVMGetMDKindIDInContext(this.context, "llvm.loop", 9);
+        LLVMSetMetadata(branch, kind, LLVMMetadataAsValue(this.context, identity));
     }
 
     void run_loop_body(Node* body, ptr body_block, ptr break_block, ptr continue_block) {

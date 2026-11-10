@@ -1,0 +1,41 @@
+namespace djinnc;
+
+struct Internalize {
+    static unsafe bool keeps(ptr value, bool is_function) {
+        u64 length = 0;
+        ptr<i8> name = LLVMGetValueName2(value, &length);
+        if (length >= 5 && name[0] == 108 && name[1] == 108 && name[2] == 118 && name[3] == 109 && name[4] == 46) {
+            return true;
+        }
+        if (is_function && LLVMGetStringAttributeAtIndex(value, LlvmConst.ATTRIBUTE_FUNCTION_INDEX, "djinn-export", 12) != null) {
+            return true;
+        }
+        if (Strings.same(name, "__djinn_sync_main")) {
+            return false;
+        }
+        return Strings.same(name, "main") || (length >= 8 && memcmp(name, "__djinn_", 8) == 0);
+    }
+
+    static unsafe bool candidate(ptr value, bool is_function) {
+        return LLVMIsDeclaration(value) == 0
+            && LLVMGetLinkage(value) == LlvmConst.LINKAGE_EXTERNAL
+            && !Internalize.keeps(value, is_function);
+    }
+
+    public static unsafe void run(ptr module) {
+        mut ptr function = LLVMGetFirstFunction(module);
+        while (function != null) {
+            if (Internalize.candidate(function, true)) {
+                LLVMSetLinkage(function, LlvmConst.LINKAGE_INTERNAL);
+            }
+            function = LLVMGetNextFunction(function);
+        }
+        mut ptr global = LLVMGetFirstGlobal(module);
+        while (global != null) {
+            if (Internalize.candidate(global, false)) {
+                LLVMSetLinkage(global, LlvmConst.LINKAGE_INTERNAL);
+            }
+            global = LLVMGetNextGlobal(global);
+        }
+    }
+}

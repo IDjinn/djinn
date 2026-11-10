@@ -251,6 +251,9 @@ impl CodeGenerator {
         if (id == Intrinsic.PANIC) {
             return this.generate_panic(node);
         }
+        if (id == Intrinsic.PREFETCH) {
+            return this.generate_prefetch(node);
+        }
         ptr condition = this.to_condition(this.gen_expression(node.first()));
         ptr<ptr> args = CodeGenerator.array_of(2);
         args[0] = condition;
@@ -270,6 +273,36 @@ impl CodeGenerator {
         args[1] = LLVMConstInt(flag, expectation, 0);
         ptr expected = this.coro_intrinsic("llvm.expect", overload, 1, args, 2, label);
         return Value.create(expected, Types.bool_type());
+    }
+}
+
+impl CodeGenerator {
+    unsafe Value* generate_prefetch(Node* node) {
+        ptr address = this.gen_expression(node.first()).ref;
+        mut u64 access = 0;
+        mut u64 locality = 3;
+        if (node.second() != null) {
+            access = this.literal_of(node.second());
+            locality = this.literal_of(node.third());
+        }
+        this.build_prefetch(address, access, locality);
+        return Value.create(null, Types.void_type());
+    }
+
+    unsafe void build_prefetch(ptr address, u64 access, u64 locality) {
+        ptr count = LLVMIntTypeInContext(this.context, 32);
+        ptr<ptr> args = CodeGenerator.array_of(4);
+        args[0] = address;
+        args[1] = LLVMConstInt(count, access, 0);
+        args[2] = LLVMConstInt(count, locality, 0);
+        args[3] = LLVMConstInt(count, 1, 0);
+        ptr<ptr> overload = CodeGenerator.array_of(1);
+        overload[0] = LLVMPointerTypeInContext(this.context, 0);
+        this.coro_intrinsic("llvm.prefetch", overload, 1, args, 4, "");
+    }
+
+    unsafe u64 literal_of(Node* node) {
+        return (u64)node.int_value();
     }
 }
 

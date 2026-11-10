@@ -11,37 +11,6 @@ struct Jit {
         return false;
     }
 
-    static unsafe bool keeps(ptr value) {
-        u64 length = 0;
-        ptr<i8> name = LLVMGetValueName2(value, &length);
-        if (length >= 5 && name[0] == 108 && name[1] == 108 && name[2] == 118 && name[3] == 109 && name[4] == 46) {
-            return true;
-        }
-        return Strings.same(name, "main")
-            || Strings.same(name, "__djinn_jit")
-            || Strings.same(name, "__djinn_coro_resume")
-            || Strings.same(name, "__djinn_coro_done")
-            || Strings.same(name, "__djinn_coro_destroy")
-            || Strings.same(name, "__djinn_coro_promise");
-    }
-
-    static unsafe void internalize(ptr module) {
-        mut ptr function = LLVMGetFirstFunction(module);
-        while (function != null) {
-            if (LLVMIsDeclaration(function) == 0 && !Jit.keeps(function)) {
-                LLVMSetLinkage(function, LlvmConst.LINKAGE_INTERNAL);
-            }
-            function = LLVMGetNextFunction(function);
-        }
-        mut ptr global = LLVMGetFirstGlobal(module);
-        while (global != null) {
-            if (LLVMIsDeclaration(global) == 0 && !Jit.keeps(global)) {
-                LLVMSetLinkage(global, LlvmConst.LINKAGE_INTERNAL);
-            }
-            global = LLVMGetNextGlobal(global);
-        }
-    }
-
     public static unsafe i32 run(CodeGenerator* gen, Options* options) {
         if (!Target.is_native()) {
             logger_error(Log.get(), "djinnc: --run needs the host target, but the target is '%s'", Target.triple());
@@ -57,17 +26,39 @@ struct Jit {
 
         PointerList* objects = Library.resident();
         PointerList* sizes = Library.resident_sizes();
-        bool prune = objects.length == 0;
-        if (prune) {
-            Jit.internalize(gen.module);
+        bool tiered = options.tiered;
+        mut TierState* tiering = (TierState*)0;
+        mut ptr<i8> level = options.opt_level;
+        if (tiered) {
+            if (options.debug) {
+                logger_error(Log.get(), "djinnc: --tiered does not support -g");
+                return 1;
+            }
+            tiering = Tiering.prepare(gen, options);
+            if (tiering == null) {
+                return 1;
+            }
+            level = tiering.level_name;
         }
-        ptr<i8> pipeline = ObjectWriter.pipeline(options.opt_level, prune, true);
+        bool prune = objects.length == 0 && !tiered;
+        if (prune) {
+            Internalize.run(gen.module);
+        }
+        mut ptr<i8> first_level = options.opt_level;
+        if (tiered) {
+            first_level = "O0";
+        }
+        ptr<i8> pipeline = ObjectWriter.pipeline(first_level, prune, true);
         if (!ObjectWriter.run_passes(gen.module, null, pipeline)) {
             return 1;
         }
 
         __djinn_link_debug_support();
-        ptr machine = ObjectWriter.jit_machine(options.opt_level);
+        mut i32 code_model = LlvmConst.CODE_MODEL_DEFAULT;
+        if (tiered) {
+            code_model = LlvmConst.CODE_MODEL_LARGE;
+        }
+        ptr machine = ObjectWriter.jit_machine_model(level, code_model);
         if (machine == null) {
             return 1;
         }
@@ -130,7 +121,9 @@ struct Jit {
         gen.module_taken = 1;
         ptr shared_context = LLVMOrcCreateNewThreadSafeContextFromLLVMContext(gen.context);
         ptr shared_module = LLVMOrcCreateNewThreadSafeModule(gen.module, shared_context);
-        LLVMOrcDisposeThreadSafeContext(shared_context);
+        if (!tiered) {
+            LLVMOrcDisposeThreadSafeContext(shared_context);
+        }
         if (!Jit.check(LLVMOrcLLJITAddLLVMIRModule(jit, dylib, shared_module), "cannot add the module")) {
             return 1;
         }
@@ -147,6 +140,13 @@ struct Jit {
         jit_flag[0] = 1;
         logger_info(Log.get(), "djinnc: running 'main' in process");
         fflush(null);
-        return __djinn_call_entry((ptr)entry);
+        if (tiered && !Tiering.start(tiering, jit, dylib, shared_context)) {
+            return 1;
+        }
+        i32 status = __djinn_call_entry((ptr)entry);
+        if (tiered) {
+            Tiering.stop();
+        }
+        return status;
     }
 }
