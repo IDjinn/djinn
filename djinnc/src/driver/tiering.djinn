@@ -1,0 +1,625 @@
+namespace djinnc;
+
+extern "C" {
+    void __djinn_tier_start();
+    void __djinn_tier_stop();
+}
+
+unsafe static mut ptr tier_state = null;
+
+struct TierState {
+    ptr jit;
+    ptr dylib;
+    ptr shared_context;
+    ptr context;
+    ptr pristine;
+    ptr hot_counts;
+    ptr branch_counts;
+    ptr counters_type;
+    PointerList* names;
+    ptr<i32> levels;
+    ptr<i32> seen;
+    ptr<i32> site_base;
+    ptr<i32> site_count;
+    i32 count;
+    i32 site_total;
+    i64 threshold;
+    i64 branch_threshold;
+    i32 settle_polls;
+    i32 polls;
+    i32 last_new;
+    i32 first_ready;
+    ptr<i8> level_name;
+}
+
+struct Tiering {
+    const i32 TYPE_VOID = 0;
+    const i32 TYPE_STRUCT = 10;
+    const i32 TYPE_ARRAY = 11;
+    const i32 TYPE_VECTOR = 13;
+    const i32 TYPE_TOKEN = 16;
+    const i32 TYPE_SCALABLE_VECTOR = 17;
+    const i32 LINKAGE_LINKONCE_ODR = 3;
+    const i32 SMALL_FUNCTION = 40;
+    const i32 MAX_WAIT_POLLS = 100;
+    const i32 POLL_MILLISECONDS = 10;
+
+    public static unsafe bool has_prefix(ptr<i8> name, u64 length, ptr<i8> prefix) {
+        return Strings.starts_with(name, 0, (i32)length, prefix);
+    }
+
+    public static unsafe bool uses_coroutine(ptr function) {
+        mut ptr block = LLVMGetFirstBasicBlock(function);
+        while (block != null) {
+            mut ptr instruction = LLVMGetFirstInstruction(block);
+            while (instruction != null) {
+                if (LLVMIsACallInst(instruction) != null) {
+                    ptr callee = LLVMGetCalledValue(instruction);
+                    if (callee != null) {
+                        u64 length = 0;
+                        ptr<i8> name = LLVMGetValueName2(callee, &length);
+                        if (Tiering.has_prefix(name, length, "llvm.coro.")) {
+                            return true;
+                        }
+                    }
+                }
+                instruction = LLVMGetNextInstruction(instruction);
+            }
+            block = LLVMGetNextBasicBlock(block);
+        }
+        return false;
+    }
+
+    static unsafe bool passes_aggregate(ptr function_type) {
+        u32 count = LLVMCountParamTypes(function_type);
+        ptr<ptr> types = CodeGenerator.array_of((i32)count);
+        LLVMGetParamTypes(function_type, types);
+        for (mut u32 i = 0; i < count; i = i + 1) {
+            i32 kind = LLVMGetTypeKind(types[(i32)i]);
+            if (kind == Tiering.TYPE_STRUCT || kind == Tiering.TYPE_ARRAY || kind == Tiering.TYPE_VECTOR || kind == Tiering.TYPE_SCALABLE_VECTOR) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static unsafe bool tierable(ptr function) {
+        if (LLVMIsDeclaration(function) != 0) {
+            return false;
+        }
+        i32 linkage = LLVMGetLinkage(function);
+        if (linkage != LlvmConst.LINKAGE_EXTERNAL && linkage != Tiering.LINKAGE_LINKONCE_ODR) {
+            return false;
+        }
+        u64 length = 0;
+        ptr<i8> name = LLVMGetValueName2(function, &length);
+        if (length == 0 || Tiering.has_prefix(name, length, "llvm.") || Tiering.has_prefix(name, length, "__djinn_") || Strings.same(name, "main")) {
+            return false;
+        }
+        ptr function_type = LLVMGlobalGetValueType(function);
+        if (LLVMIsFunctionVarArg(function_type) != 0 || Tiering.passes_aggregate(function_type)) {
+            return false;
+        }
+        return !Tiering.uses_coroutine(function);
+    }
+
+    static unsafe void name_and_export(ptr value, i32 serial) {
+        u64 length = 0;
+        LLVMGetValueName2(value, &length);
+        if (length == 0) {
+            ByteBuffer* name = ByteBuffer.create();
+            name.append("__djinn_tier.anon.");
+            name.append_int(serial);
+            LLVMSetValueName2(value, name.cstr(), (u64)strlen(name.cstr()));
+        }
+        i32 linkage = LLVMGetLinkage(value);
+        if (linkage == LlvmConst.LINKAGE_INTERNAL || linkage == LlvmConst.LINKAGE_PRIVATE) {
+            LLVMSetLinkage(value, LlvmConst.LINKAGE_EXTERNAL);
+        }
+    }
+
+    static unsafe void export_symbols(ptr module) {
+        mut i32 serial = 0;
+        mut ptr function = LLVMGetFirstFunction(module);
+        while (function != null) {
+            if (LLVMIsDeclaration(function) == 0) {
+                Tiering.name_and_export(function, serial);
+                serial = serial + 1;
+            }
+            function = LLVMGetNextFunction(function);
+        }
+        mut ptr global = LLVMGetFirstGlobal(module);
+        while (global != null) {
+            if (LLVMIsDeclaration(global) == 0) {
+                u64 length = 0;
+                ptr<i8> name = LLVMGetValueName2(global, &length);
+                if (!Tiering.has_prefix(name, length, "llvm.")) {
+                    Tiering.name_and_export(global, serial);
+                    serial = serial + 1;
+                }
+            }
+            global = LLVMGetNextGlobal(global);
+        }
+    }
+
+    static unsafe PointerList* conditional_branches(ptr function) {
+        PointerList* found = PointerList.create();
+        mut ptr block = LLVMGetFirstBasicBlock(function);
+        while (block != null) {
+            ptr terminator = LLVMGetBasicBlockTerminator(block);
+            if (terminator != null && LLVMIsABranchInst(terminator) != null && LLVMIsConditional(terminator) != 0) {
+                found.push(terminator);
+            }
+            block = LLVMGetNextBasicBlock(block);
+        }
+        return found;
+    }
+
+    static unsafe PointerList* loop_headers(ptr function) {
+        PointerList* found = PointerList.create();
+        mut ptr block = LLVMGetFirstBasicBlock(function);
+        while (block != null) {
+            ptr<i8> name = LLVMGetBasicBlockName(block);
+            i32 length = strlen(name);
+            if (Strings.starts_with(name, 0, length, "while.cond") || Strings.starts_with(name, 0, length, "for.cond") || Strings.starts_with(name, 0, length, "do.body")) {
+                found.push(block);
+            }
+            block = LLVMGetNextBasicBlock(block);
+        }
+        return found;
+    }
+
+    static unsafe void bump(ptr builder, ptr context, ptr array, ptr array_type, ptr index) {
+        ptr wide = LLVMIntTypeInContext(context, 64);
+        ptr<ptr> path = CodeGenerator.array_of(2);
+        path[0] = LLVMConstInt(wide, 0, 0);
+        path[1] = index;
+        ptr cell = LLVMBuildGEP2(builder, array_type, array, path, 2, "tier.cell");
+        ptr before = LLVMBuildLoad2(builder, wide, cell, "tier.count");
+        ptr after = LLVMBuildAdd(builder, before, LLVMConstInt(wide, 1, 0), "tier.next");
+        LLVMBuildStore(builder, after, cell);
+    }
+
+    static unsafe void count_branch(ptr builder, ptr context, ptr branch, ptr counters, ptr counters_type, i32 site) {
+        ptr wide = LLVMIntTypeInContext(context, 64);
+        LLVMPositionBuilderBefore(builder, branch);
+        ptr taken = LLVMBuildZExt(builder, LLVMGetCondition(branch), wide, "tier.taken");
+        ptr index = LLVMBuildAdd(builder, taken, LLVMConstInt(wide, (u64)site * 2, 0), "tier.index");
+        Tiering.bump(builder, context, counters, counters_type, index);
+    }
+
+    static unsafe void count_hit(ptr builder, ptr context, ptr block, ptr hot, ptr hot_type, i32 index) {
+        mut ptr first = LLVMGetFirstInstruction(block);
+        while (first != null && LLVMIsAPHINode(first) != null) {
+            first = LLVMGetNextInstruction(first);
+        }
+        if (first == null) {
+            return;
+        }
+        ptr wide = LLVMIntTypeInContext(context, 64);
+        LLVMPositionBuilderBefore(builder, first);
+        Tiering.bump(builder, context, hot, hot_type, LLVMConstInt(wide, (u64)index, 0));
+    }
+
+    static unsafe void forward_calls(ptr builder, ptr context, ptr function, ptr slot) {
+        ptr function_type = LLVMGlobalGetValueType(function);
+        ptr pointer = LLVMPointerTypeInContext(context, 0);
+        ptr original = LLVMGetFirstBasicBlock(function);
+        ptr forward = LLVMInsertBasicBlockInContext(context, original, "tier.forward");
+        ptr head = LLVMInsertBasicBlockInContext(context, forward, "tier.head");
+
+        LLVMPositionBuilderAtEnd(builder, head);
+        ptr target = LLVMBuildLoad2(builder, pointer, slot, "tier.target");
+        LLVMSetVolatile(target, 1);
+        ptr ready = LLVMBuildICmp(builder, 33, target, LLVMConstNull(pointer), "tier.ready");
+        LLVMBuildCondBr(builder, ready, forward, original);
+
+        LLVMPositionBuilderAtEnd(builder, forward);
+        u32 count = LLVMCountParams(function);
+        ptr<ptr> arguments = CodeGenerator.array_of((i32)count);
+        for (mut u32 i = 0; i < count; i = i + 1) {
+            arguments[(i32)i] = LLVMGetParam(function, i);
+        }
+        ptr return_type = LLVMGetReturnType(function_type);
+        if (LLVMGetTypeKind(return_type) == Tiering.TYPE_VOID) {
+            ptr call = LLVMBuildCall2(builder, function_type, target, arguments, count, "");
+            LLVMSetTailCall(call, 1);
+            LLVMBuildRetVoid(builder);
+        } else {
+            ptr call = LLVMBuildCall2(builder, function_type, target, arguments, count, "tier.call");
+            LLVMSetTailCall(call, 1);
+            LLVMBuildRet(builder, call);
+        }
+    }
+
+    static ptr<i8> slot_name(ptr<i8> function_name) {
+        ByteBuffer* name = ByteBuffer.create();
+        name.append("__djinn_tier.");
+        name.append(function_name);
+        return name.cstr();
+    }
+
+    static ptr<i8> version_name(ptr<i8> function_name, i32 tier) {
+        ByteBuffer* name = ByteBuffer.create();
+        name.append(function_name);
+        name.append(".djt");
+        name.append_int(tier);
+        return name.cstr();
+    }
+
+    public static unsafe TierState* prepare(CodeGenerator* gen, Options* options) {
+        ptr module = gen.module;
+        ptr context = gen.context;
+        Tiering.export_symbols(module);
+
+        PointerList* functions = PointerList.create();
+        PointerList* names = PointerList.create();
+        mut ptr function = LLVMGetFirstFunction(module);
+        while (function != null) {
+            if (Tiering.tierable(function)) {
+                functions.push(function);
+                u64 length = 0;
+                ptr<i8> name = LLVMGetValueName2(function, &length);
+                names.push((ptr)Strings.duplicate(name, (i32)length));
+            }
+            function = LLVMGetNextFunction(function);
+        }
+
+        i32 count = functions.length;
+        TierState* state = (TierState*)Memory.zalloc(sizeof(TierState));
+        state.context = context;
+        state.names = names;
+        state.count = count;
+        state.levels = (ptr<i32>)Memory.zalloc((u64)(count + 1) * 4);
+        state.seen = (ptr<i32>)Memory.zalloc((u64)(count + 1) * 4);
+        state.site_base = (ptr<i32>)Memory.zalloc((u64)(count + 1) * 4);
+        state.site_count = (ptr<i32>)Memory.zalloc((u64)(count + 1) * 4);
+        ptr<i32> bases = state.site_base;
+        ptr<i32> sizes = state.site_count;
+        mut i32 sites = 0;
+        for (mut i32 f = 0; f < count; f = f + 1) {
+            PointerList* branches = Tiering.conditional_branches(functions.get(f));
+            bases[f] = sites;
+            sizes[f] = branches.length;
+            sites = sites + branches.length;
+        }
+        state.site_total = sites;
+        state.threshold = options.tier_threshold;
+        state.branch_threshold = options.tier_threshold * 4;
+        state.settle_polls = (i32)(options.tier_settle / Tiering.POLL_MILLISECONDS);
+        state.level_name = "O2";
+        if (!Strings.same(options.opt_level, "O0")) {
+            state.level_name = options.opt_level;
+        }
+        state.pristine = LLVMCloneModule(module);
+
+        ptr wide = LLVMIntTypeInContext(context, 64);
+        ptr pointer = LLVMPointerTypeInContext(context, 0);
+        ptr hot_type = LLVMArrayType2(wide, (u64)(count + 1));
+        ptr hot = LLVMAddGlobal(module, hot_type, "__djinn_tier_hot");
+        LLVMSetInitializer(hot, LLVMConstNull(hot_type));
+        ptr counters_type = LLVMArrayType2(wide, (u64)(sites * 2 + 2));
+        state.counters_type = counters_type;
+        ptr counters = LLVMAddGlobal(module, counters_type, "__djinn_tier_counts");
+        LLVMSetInitializer(counters, LLVMConstNull(counters_type));
+
+        ptr builder = LLVMCreateBuilderInContext(context);
+        for (mut i32 f = 0; f < count; f = f + 1) {
+            ptr target = functions.get(f);
+            PointerList* headers = Tiering.loop_headers(target);
+            for (mut i32 h = 0; h < headers.length; h = h + 1) {
+                Tiering.count_hit(builder, context, headers.get(h), hot, hot_type, f);
+            }
+            Tiering.count_hit(builder, context, LLVMGetFirstBasicBlock(target), hot, hot_type, f);
+            ptr slot = LLVMAddGlobal(module, pointer, Tiering.slot_name((ptr<i8>)names.get(f)));
+            LLVMSetInitializer(slot, LLVMConstNull(pointer));
+            Tiering.forward_calls(builder, context, target, slot);
+        }
+        LLVMDisposeBuilder(builder);
+
+        ptr<ptr<i8>> message = (ptr<ptr<i8>>)Memory.zalloc(8);
+        if (LLVMVerifyModule(module, LlvmConst.VERIFY_RETURN_STATUS, message) != 0) {
+            logger_error(Log.get(), "djinnc: tiering produced invalid IR: %s", message[0]);
+            return (TierState*)0;
+        }
+        logger_info(Log.get(), "djinnc: tiering %d functions, %d branch sites", count, sites);
+        return state;
+    }
+
+    public static unsafe bool start(TierState* state, ptr jit, ptr dylib, ptr shared_context) {
+        state.jit = jit;
+        state.dylib = dylib;
+        state.shared_context = shared_context;
+        u64 hot = 0;
+        if (!Jit.check(LLVMOrcLLJITLookup(jit, &hot, "__djinn_tier_hot"), "cannot find the tier hit counters")) {
+            return false;
+        }
+        u64 counters = 0;
+        if (!Jit.check(LLVMOrcLLJITLookup(jit, &counters, "__djinn_tier_counts"), "cannot find the tier branch counters")) {
+            return false;
+        }
+        state.hot_counts = (ptr)hot;
+        state.branch_counts = (ptr)counters;
+        tier_state = (ptr)state;
+        __djinn_tier_start();
+        return true;
+    }
+
+    public static void stop() {
+        __djinn_tier_stop();
+    }
+
+    static unsafe i64 branch_total(TierState* state, i32 function) {
+        ptr<i64> counters = (ptr<i64>)state.branch_counts;
+        ptr<i32> bases = state.site_base;
+        ptr<i32> sizes = state.site_count;
+        mut i64 total = 0;
+        for (mut i32 i = 0; i < sizes[function] * 2; i = i + 1) {
+            total = total + counters[bases[function] * 2 + i];
+        }
+        return total;
+    }
+
+    static unsafe ptr weights_node(ptr context, i64 not_taken, i64 taken) {
+        mut i64 low = not_taken;
+        mut i64 high = taken;
+        while (low > 1000000000 || high > 1000000000) {
+            low = low / 2;
+            high = high / 2;
+        }
+        ptr word = LLVMIntTypeInContext(context, 32);
+        ptr<ptr> operands = CodeGenerator.array_of(3);
+        operands[0] = LLVMMDStringInContext2(context, "branch_weights", 14);
+        operands[1] = LLVMValueAsMetadata(LLVMConstInt(word, (u64)(low + 1), 0));
+        operands[2] = LLVMValueAsMetadata(LLVMConstInt(word, (u64)(high + 1), 0));
+        return LLVMMDNodeInContext2(context, operands, 3);
+    }
+
+    static unsafe void apply_weights(TierState* state, ptr function, i32 index) {
+        ptr context = state.context;
+        ptr<i64> counters = (ptr<i64>)state.branch_counts;
+        ptr<i32> bases = state.site_base;
+        u32 kind = LLVMGetMDKindIDInContext(context, "prof", 4);
+        PointerList* branches = Tiering.conditional_branches(function);
+        for (mut i32 b = 0; b < branches.length; b = b + 1) {
+            i32 site = bases[index] + b;
+            i64 not_taken = counters[site * 2];
+            i64 taken = counters[site * 2 + 1];
+            if (not_taken + taken > 0) {
+                ptr node = Tiering.weights_node(context, not_taken, taken);
+                LLVMSetMetadata(branches.get(b), kind, LLVMMetadataAsValue(context, node));
+            }
+        }
+    }
+
+    static unsafe void instrument_branches(TierState* state, ptr clone, ptr builder, ptr function, i32 index) {
+        ptr context = state.context;
+        ptr<i32> bases = state.site_base;
+        ptr counters = LLVMGetNamedGlobal(clone, "__djinn_tier_counts");
+        PointerList* branches = Tiering.conditional_branches(function);
+        for (mut i32 b = 0; b < branches.length; b = b + 1) {
+            Tiering.count_branch(builder, context, branches.get(b), counters, state.counters_type, bases[index] + b);
+        }
+    }
+
+    public static unsafe i32 instruction_count(ptr function) {
+        mut i32 total = 0;
+        mut ptr block = LLVMGetFirstBasicBlock(function);
+        while (block != null) {
+            mut ptr instruction = LLVMGetFirstInstruction(block);
+            while (instruction != null) {
+                total = total + 1;
+                instruction = LLVMGetNextInstruction(instruction);
+            }
+            block = LLVMGetNextBasicBlock(block);
+        }
+        return total;
+    }
+
+    public static unsafe void hollow(ptr function) {
+        PointerList* blocks = PointerList.create();
+        PointerList* instructions = PointerList.create();
+        mut ptr block = LLVMGetFirstBasicBlock(function);
+        while (block != null) {
+            blocks.push(block);
+            mut ptr instruction = LLVMGetFirstInstruction(block);
+            while (instruction != null) {
+                instructions.push(instruction);
+                instruction = LLVMGetNextInstruction(instruction);
+            }
+            block = LLVMGetNextBasicBlock(block);
+        }
+        for (mut i32 i = 0; i < instructions.length; i = i + 1) {
+            ptr instruction = instructions.get(i);
+            ptr type = LLVMTypeOf(instruction);
+            i32 kind = LLVMGetTypeKind(type);
+            if (kind == Tiering.TYPE_TOKEN) {
+                LLVMReplaceAllUsesWith(instruction, LLVMConstNull(type));
+            } else if (kind != Tiering.TYPE_VOID) {
+                LLVMReplaceAllUsesWith(instruction, LLVMGetUndef(type));
+            }
+        }
+        for (mut i32 i = 0; i < instructions.length; i = i + 1) {
+            LLVMInstructionEraseFromParent(instructions.get(i));
+        }
+        for (mut i32 i = 0; i < blocks.length; i = i + 1) {
+            LLVMDeleteBasicBlock(blocks.get(i));
+        }
+        LLVMSetLinkage(function, LlvmConst.LINKAGE_EXTERNAL);
+    }
+
+    static unsafe bool is_version(ptr function, ptr<i8> suffix) {
+        u64 length = 0;
+        ptr<i8> name = LLVMGetValueName2(function, &length);
+        i32 tail = strlen(suffix);
+        return (i32)length > tail && Strings.equals(name + (i32)length - tail, tail, suffix);
+    }
+
+    static unsafe void detach(TierState* state, ptr clone, i32 tier) {
+        mut ptr global = LLVMGetFirstGlobal(clone);
+        while (global != null) {
+            if (LLVMIsDeclaration(global) == 0) {
+                u64 length = 0;
+                ptr<i8> name = LLVMGetValueName2(global, &length);
+                if (!Tiering.has_prefix(name, length, "llvm.")) {
+                    LLVMSetInitializer(global, (ptr)0);
+                    LLVMSetComdat(global, (ptr)0);
+                    LLVMSetLinkage(global, LlvmConst.LINKAGE_EXTERNAL);
+                }
+            }
+            global = LLVMGetNextGlobal(global);
+        }
+        if (Linker.is_windows()) {
+            ptr legacy_write = LLVMGetNamedFunction(clone, "write");
+            if (legacy_write != null) {
+                LLVMSetValueName2(legacy_write, "_write", 6);
+            }
+        }
+        ptr<i8> suffix = Tiering.version_name("", tier);
+        PointerList* others = PointerList.create();
+        mut ptr function = LLVMGetFirstFunction(clone);
+        while (function != null) {
+            if (LLVMIsDeclaration(function) == 0 && !Tiering.is_version(function, suffix)) {
+                others.push(function);
+            }
+            function = LLVMGetNextFunction(function);
+        }
+        for (mut i32 i = 0; i < others.length; i = i + 1) {
+            ptr other = others.get(i);
+            LLVMSetComdat(other, (ptr)0);
+            if (Tiering.instruction_count(other) <= Tiering.SMALL_FUNCTION && !Tiering.uses_coroutine(other)) {
+                LLVMSetLinkage(other, LlvmConst.LINKAGE_AVAILABLE_EXTERNALLY);
+            } else {
+                Tiering.hollow(other);
+            }
+        }
+    }
+
+    static unsafe bool install(TierState* state, PointerList* members, i32 tier) {
+        PointerList* names = state.names;
+        ptr<i32> levels = state.levels;
+        for (mut i32 m = 0; m < members.length; m = m + 1) {
+            i32 f = (i32)(u64)members.get(m);
+            u64 optimized = 0;
+            if (!Jit.check(LLVMOrcLLJITLookup(state.jit, &optimized, Tiering.version_name((ptr<i8>)names.get(f), tier)), "cannot find the recompiled function")) {
+                return false;
+            }
+            u64 slot = 0;
+            if (!Jit.check(LLVMOrcLLJITLookup(state.jit, &slot, Tiering.slot_name((ptr<i8>)names.get(f))), "cannot find the tier slot")) {
+                return false;
+            }
+            ptr<u64> cell = (ptr<u64>)(ptr)slot;
+            cell[0] = optimized;
+            levels[f] = tier;
+        }
+        return true;
+    }
+
+    static unsafe bool recompile(TierState* state, PointerList* members, i32 tier) {
+        ptr clone = LLVMCloneModule(state.pristine);
+        ptr context = state.context;
+        PointerList* names = state.names;
+        ptr builder = LLVMCreateBuilderInContext(context);
+        LLVMAddGlobal(clone, state.counters_type, "__djinn_tier_counts");
+        for (mut i32 m = 0; m < members.length; m = m + 1) {
+            i32 f = (i32)(u64)members.get(m);
+            ptr function = LLVMGetNamedFunction(clone, (ptr<i8>)names.get(f));
+            if (tier == 1) {
+                Tiering.instrument_branches(state, clone, builder, function, f);
+            } else {
+                Tiering.apply_weights(state, function, f);
+            }
+        }
+        LLVMDisposeBuilder(builder);
+        for (mut i32 m = 0; m < members.length; m = m + 1) {
+            i32 f = (i32)(u64)members.get(m);
+            ptr function = LLVMGetNamedFunction(clone, (ptr<i8>)names.get(f));
+            ptr<i8> renamed = Tiering.version_name((ptr<i8>)names.get(f), tier);
+            LLVMSetValueName2(function, renamed, (u64)strlen(renamed));
+            LLVMSetLinkage(function, LlvmConst.LINKAGE_EXTERNAL);
+        }
+        Tiering.detach(state, clone, tier);
+
+        ptr<ptr<i8>> message = (ptr<ptr<i8>>)Memory.zalloc(8);
+        if (LLVMVerifyModule(clone, LlvmConst.VERIFY_RETURN_STATUS, message) != 0) {
+            logger_error(Log.get(), "djinnc: tier-%d module is invalid: %s", tier, message[0]);
+            return false;
+        }
+        LLVMSetDataLayout(clone, LLVMOrcLLJITGetDataLayoutStr(state.jit));
+        mut ptr<i8> level = "O1";
+        if (tier == 2) {
+            level = state.level_name;
+        }
+        ptr machine = ObjectWriter.jit_machine(level);
+        if (machine == null) {
+            return false;
+        }
+        bool optimized = ObjectWriter.run_passes(clone, machine, ObjectWriter.pipeline(level, true, true));
+        LLVMDisposeTargetMachine(machine);
+        if (!optimized) {
+            return false;
+        }
+        ptr unit = LLVMOrcCreateNewThreadSafeModule(clone, state.shared_context);
+        if (!Jit.check(LLVMOrcLLJITAddLLVMIRModule(state.jit, state.dylib, unit), "cannot add the recompiled module")) {
+            return false;
+        }
+        if (!Tiering.install(state, members, tier)) {
+            return false;
+        }
+        logger_info(Log.get(), "djinnc: tier-%d: %d functions recompiled", tier, members.length);
+        return true;
+    }
+
+    public static unsafe i32 poll() {
+        TierState* state = (TierState*)tier_state;
+        if (state == null) {
+            return 1;
+        }
+        state.polls = state.polls + 1;
+        ptr<i64> hot = (ptr<i64>)state.hot_counts;
+        ptr<i32> levels = state.levels;
+        ptr<i32> seen = state.seen;
+        ptr<i32> sizes = state.site_count;
+        PointerList* hot_with_sites = PointerList.create();
+        PointerList* hot_without_sites = PointerList.create();
+        PointerList* measured = PointerList.create();
+        for (mut i32 f = 0; f < state.count; f = f + 1) {
+            if (hot[f] > 0 && seen[f] == 0) {
+                seen[f] = 1;
+                state.last_new = state.polls;
+            }
+            if (levels[f] == 0 && hot[f] >= state.threshold) {
+                if (sizes[f] == 0) {
+                    hot_without_sites.push((ptr)(u64)f);
+                } else {
+                    hot_with_sites.push((ptr)(u64)f);
+                }
+            } else if (levels[f] == 1 && Tiering.branch_total(state, f) >= state.branch_threshold) {
+                measured.push((ptr)(u64)f);
+            }
+        }
+        if (measured.length > 0 && !Tiering.recompile(state, measured, 2)) {
+            return 1;
+        }
+        i32 waiting = hot_with_sites.length + hot_without_sites.length;
+        if (waiting == 0) {
+            state.first_ready = 0;
+            return 0;
+        }
+        if (state.first_ready == 0) {
+            state.first_ready = state.polls;
+        }
+        bool settled = state.polls - state.last_new >= state.settle_polls || state.polls - state.first_ready >= Tiering.MAX_WAIT_POLLS;
+        if (!settled) {
+            return 0;
+        }
+        state.first_ready = 0;
+        if (hot_with_sites.length > 0 && !Tiering.recompile(state, hot_with_sites, 1)) {
+            return 1;
+        }
+        if (hot_without_sites.length > 0 && !Tiering.recompile(state, hot_without_sites, 2)) {
+            return 1;
+        }
+        return 0;
+    }
+}

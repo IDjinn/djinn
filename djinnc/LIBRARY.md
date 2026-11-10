@@ -60,6 +60,7 @@ Section table: one 32 byte entry per section: `u32 kind, u32 pad, u64 offset, u6
 | 1 | manifest | `u32 len + name`, `u32 len + target triple`, file count |
 | 2 | interface | per file: `u32 len + path`, `u32 len + minified Djinn text` |
 | 3 | object | native object file |
+| 4 | bitcode | optional LLVM bitcode of the small, self-contained exported functions (see below). Readers that do not know the kind ignore it |
 
 The interface is the original source minified (comments and whitespace removed) with the bodies of non generic,
 non constexpr functions, constructors, operators and property accessors replaced by `{}`. Generics, macros,
@@ -74,6 +75,19 @@ constexpr and struct layouts stay complete.
   linked, then removed.
 - Dedup across modules: generic instances, constexpr functions and struct-instance methods are `linkonce_odr` in a
   comdat; typeinfo is `linkonce_odr`; reflection tables are internal.
+
+## Bitcode and cross-library inlining
+
+A library built with optimization (`-O1` and up, without `-g`) also stores a bitcode section: a copy of the module
+before optimization where only the small exported functions keep their bodies (at most 60 instructions, no
+coroutines, no `main` or `__djinn_*`, and nothing that touches non constant library-private data or private functions).
+Everything else is a declaration, so the section stays small.
+
+When a consumer compiles with `-O1` or higher (not `-g`, not `--tiered`), it parses each bitcode section into its own
+LLVM context, marks the function bodies `available_externally` and links them into the program module. The
+optimizer inlines them and drops the unused ones, while calls that stay are resolved against the library object.
+A body the consumer already defines wins. If a section cannot be parsed (for instance it was written by another
+LLVM), a warning is printed and the library is used without inlining. `--inspect-lib` lists the section size.
 
 ## Std as a library
 
@@ -97,7 +111,6 @@ constexpr and struct layouts stay complete.
 - Library depending on other libraries (manifest has no dependency list; header bytes 96..127 are reserved for it).
 - Version policy: reject libraries from an incompatible compiler version, and check the interface hash.
 - Per-function dead stripping of the std object (it is linked whole).
-- `inline` / `ForceInline` functions across libraries (bodies are stripped, so they are not inlined).
 - Binary AST interface instead of minified source (faster load, smaller files); `.djni` interface-only files.
 - Static variable initializers and global constructors across libraries (header globals are declarations only).
 - Reflection method pointers (`funcPtr`) and `[Reflect]` tables of library types when mixed with `--reflect-all`.

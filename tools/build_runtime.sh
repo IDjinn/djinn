@@ -40,12 +40,13 @@ rm -f "$archive"
 for name in runtime_all logger; do
     "$clang" "${flags[@]}" "$root/runtime/$name.c" -o "$out/$name.o"
 done
+"$clang" "${flags[@]}" "$root/runtime/tier.c" -o "$out/tier.o"
 "$clang" "${flags[@]}" "$root/runtime/third_party/yyjson/yyjson.c" -o "$out/yyjson.o"
 "$clang" "${flags[@]}" "$root/runtime/json/djinn_json.c" -o "$out/djinn_json.o"
 
 if [ "$windows" = 1 ]; then
-    "$archiver" "-out:$archive" "$out/runtime_all.o" "$out/logger.o" "$out/yyjson.o" "$out/djinn_json.o"
+    "$archiver" "-out:$archive" "$out/runtime_all.o" "$out/logger.o" "$out/yyjson.o" "$out/djinn_json.o" "$out/tier.o"
 else
-    "$archiver" rcs "$archive" "$out/runtime_all.o" "$out/logger.o" "$out/yyjson.o" "$out/djinn_json.o"
+    "$archiver" rcs "$archive" "$out/runtime_all.o" "$out/logger.o" "$out/yyjson.o" "$out/djinn_json.o" "$out/tier.o"
 fi
 echo "$archive"

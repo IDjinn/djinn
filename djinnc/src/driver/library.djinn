@@ -5,6 +5,10 @@ unsafe static mut ptr library_objects = null;
 unsafe static mut ptr library_resident = null;
 unsafe static mut ptr library_resident_sizes = null;
 unsafe static mut i32 library_loaded = 0;
+unsafe static mut ptr library_bitcode = null;
+unsafe static mut ptr library_bitcode_sizes = null;
+unsafe static mut ptr<i8> library_pending_bitcode = null;
+unsafe static mut u64 library_pending_bitcode_size = 0;
 
 struct Library {
     const i32 VERSION = 1;
@@ -17,6 +21,7 @@ struct Library {
     const i32 SECTION_MANIFEST = 1;
     const i32 SECTION_INTERFACE = 2;
     const i32 SECTION_OBJECT = 3;
+    const i32 SECTION_BITCODE = 4;
     const i32 FLAG_STD = 1;
 
     public static bool active() {
@@ -48,6 +53,25 @@ struct Library {
             library_resident_sizes = (ptr)PointerList.create();
         }
         return (PointerList*)library_resident_sizes;
+    }
+
+    public static unsafe PointerList* bitcode() {
+        if (library_bitcode == null) {
+            library_bitcode = (ptr)PointerList.create();
+        }
+        return (PointerList*)library_bitcode;
+    }
+
+    public static unsafe PointerList* bitcode_sizes() {
+        if (library_bitcode_sizes == null) {
+            library_bitcode_sizes = (ptr)PointerList.create();
+        }
+        return (PointerList*)library_bitcode_sizes;
+    }
+
+    public static unsafe void set_bitcode(ptr<i8> data, u64 size) {
+        library_pending_bitcode = data;
+        library_pending_bitcode_size = size;
     }
 
     static unsafe PointerList* objects() {
@@ -223,7 +247,12 @@ struct Library {
         if (options.use_std) {
             flags = (u32)Library.FLAG_STD;
         }
-        i32 section_count = 3;
+        ptr<i8> bitcode = library_pending_bitcode;
+        i32 bitcode_length = (i32)library_pending_bitcode_size;
+        mut i32 section_count = 3;
+        if (bitcode != null) {
+            section_count = 4;
+        }
         i32 table_size = Library.HEADER_SIZE + section_count * Library.ENTRY_SIZE;
         ByteBuffer* out = ByteBuffer.create();
         out.append("DJINNLIB");
@@ -253,6 +282,9 @@ struct Library {
             } else if (s == 2) {
                 data = object;
                 size = object_length;
+            } else if (s == 3) {
+                data = bitcode;
+                size = bitcode_length;
             }
             Library.put_u32(out, (u32)(s + 1));
             Library.put_u32(out, 0);
@@ -264,6 +296,9 @@ struct Library {
         out.append_slice(manifest.data, manifest.length);
         out.append_slice(iface.data, iface.length);
         out.append_slice(object, object_length);
+        if (bitcode != null) {
+            out.append_slice(bitcode, bitcode_length);
+        }
         return Files.write_bytes(options.output, out.data, out.length);
     }
 
@@ -325,6 +360,13 @@ struct Library {
         if (!Strings.equals(data + triple_at + 4, triple_size, Target.triple())) {
             logger_error(Log.get(), "djinnc: '%s' targets a different triple than '%s'", path, Target.triple());
             return -1;
+        }
+
+        i32 bitcode_offset = 0;
+        i32 bitcode_size = 0;
+        if (Library.section(data, length, Library.SECTION_BITCODE, &bitcode_offset, &bitcode_size)) {
+            Library.bitcode().push((ptr)(data + bitcode_offset));
+            Library.bitcode_sizes().push((ptr)(u64)bitcode_size);
         }
 
         if (options.run || options.check_only) {
@@ -441,6 +483,11 @@ struct Library {
         Library.number_field(out, "manifest:   ", manifest_size, " bytes");
         Library.number_field(out, "interface:  ", interface_size, " bytes (declarations without bodies)");
         Library.number_field(out, "object:     ", object_size, " bytes (compiled code)");
+        i32 bitcode_offset = 0;
+        i32 bitcode_size = 0;
+        if (Library.section(data, length, Library.SECTION_BITCODE, &bitcode_offset, &bitcode_size)) {
+            Library.number_field(out, "bitcode:    ", bitcode_size, " bytes (small functions, inlined by consumers)");
+        }
         mut i32 cursor = interface_offset;
         i32 end = interface_offset + interface_size;
         while (cursor < end) {
