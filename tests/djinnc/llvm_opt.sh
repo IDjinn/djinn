@@ -12,6 +12,9 @@ if [ -n "${DJINN_USE_LLD:-}" ]; then
     flags+=(--lld)
 fi
 
+nm_tool=nm
+command -v llvm-nm > /dev/null 2>&1 && nm_tool=llvm-nm
+
 fail() { echo "FAIL llvm_opt: $1"; exit 1; }
 
 exe=""
@@ -53,7 +56,7 @@ SOURCE
 
 grep -Eq "define [^@]*nonnull[^@]* @identity" "$out/app$exe.ll" || fail "[NonNull] on a pointer function must mark its return value nonnull"
 
-symbols="$(llvm-nm "$out/app$exe.obj")"
+symbols="$("$nm_tool" "$out/app$exe.obj")"
 grep -q '!"llvm.loop.unroll.count", i32 4' "$out/app$exe.ll" || fail "[Unroll(n)] must emit llvm.loop.unroll.count"
 grep -q '!"llvm.loop.vectorize.enable", i1 false' "$out/app$exe.ll" || fail "[NoVectorize] must emit llvm.loop.vectorize.enable false"
 
@@ -87,7 +90,7 @@ SOURCE
 "$compiler" --inspect-lib "$out/inlib.djlib" | grep -q "bitcode:" || fail "an optimized library must carry a bitcode section"
 "$compiler" "$out/inl_app.djinn" --lib "$out/inlib.djlib" -O2 -o "$out/inl_app$exe" "${flags[@]}" > "$out/inl_app.log" 2>&1 || { cat "$out/inl_app.log"; fail "the consumer must build"; }
 "$out/inl_app$exe" || fail "the consumer must return 0"
-if llvm-nm "$out/inl_app$exe.obj" | grep -q "inlib"; then
+if "$nm_tool" "$out/inl_app$exe.obj" | grep -q "inlib"; then
     fail "small library functions must be inlined into the consumer"
 fi
 "$compiler" "$out/inl_lib.djinn" --library -o "$out/inlib_o0.djlib" "${flags[@]}" > /dev/null 2>&1
