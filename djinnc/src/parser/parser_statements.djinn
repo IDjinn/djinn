@@ -14,8 +14,52 @@ impl Parser {
         return block;
     }
 
+    unsafe bool is_atomic_region() {
+        i32 token = this.current();
+        if (this.kind_of(token) != TokenKind::IDENTIFIER || !Strings.equals(this.text_of(token), this.length_of(token), "atomic")) {
+            return false;
+        }
+        if (this.kind_of(this.peek_token(1)) != TokenKind::LPAREN) {
+            return false;
+        }
+        mut i32 depth = 0;
+        for (mut i32 ahead = 1; this.kind_of(this.peek_token(ahead)) != TokenKind::END_OF_FILE; ahead = ahead + 1) {
+            TokenKind kind = this.kind_of(this.peek_token(ahead));
+            if (kind == TokenKind::LPAREN) {
+                depth = depth + 1;
+            } else if (kind == TokenKind::RPAREN) {
+                depth = depth - 1;
+                if (depth == 0) {
+                    return this.kind_of(this.peek_token(ahead + 1)) == TokenKind::LBRACE;
+                }
+            }
+        }
+        return false;
+    }
+
+    Node* parse_atomic() {
+        i32 start = this.advance();
+        Node* node = Node.create(NodeKind::ATOMIC_STMT, start);
+        this.expect(TokenKind::LPAREN, "expected '(' after atomic");
+        Node* operands = Node.create_list(NodeKind::BLOCK, start);
+        if (!this.check(TokenKind::RPAREN)) {
+            operands.add(this.parse_expression());
+            while (this.match(TokenKind::COMMA)) {
+                operands.add(this.parse_expression());
+            }
+        }
+        this.expect(TokenKind::RPAREN, "expected ')' after the atomic operands");
+        node.set_second(operands);
+        node.set_first(this.parse_block());
+        return node;
+    }
+
     unsafe Node* parse_statement() {
         i32 token = this.current();
+
+        if (this.is_atomic_region()) {
+            return this.parse_atomic();
+        }
 
         if (this.kind_of(token) == TokenKind::UNSAFE && this.kind_of(this.peek_token(1)) == TokenKind::LBRACE) {
             this.advance();
