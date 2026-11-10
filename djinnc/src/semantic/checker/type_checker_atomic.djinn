@@ -1,0 +1,46 @@
+namespace djinnc;
+
+impl TypeChecker {
+    unsafe void check_atomic(Node* node) {
+        FunctionInfo* current = this.function;
+        mut Node* owner = (Node*)0;
+        if (current != null) {
+            owner = current.node;
+        }
+        Obligations.record("atomic.rollback", "enforced", node, owner);
+        Obligations.record("atomic.no_suspend", "proved", node, owner);
+        if (node.third() != null) {
+            Obligations.record("after_commit", "best_effort", node.third(), owner);
+        }
+        Node* operands = node.second();
+        for (mut i32 i = 0; i < operands.count(); i = i + 1) {
+            Node* operand = operands.child(i);
+            if (!this.is_addressable(operand)) {
+                this.error_code(operand, DiagnosticErrors.ATOMIC_OPERAND, "an atomic operand must be a variable, a field, an element or a dereference");
+                continue;
+            }
+            u32 type = this.check_lvalue(operand);
+            if (!Ownership.is_copy(this.symbols, type)) {
+                this.error_code(operand, DiagnosticErrors.ATOMIC_OPERAND, "an atomic operand must be a plain value that can be copied");
+            }
+        }
+        this.atomic_depth = this.atomic_depth + 1;
+        this.check_statement(node.first());
+        this.atomic_depth = this.atomic_depth - 1;
+        if (node.third() != null) {
+            this.check_statement(node.third());
+        }
+    }
+
+    void require_no_suspension(Node* at, ptr<i8> operation) {
+        this.note_effect(Effects.SUSPENDS);
+        if (this.atomic_depth == 0) {
+            return;
+        }
+        ByteBuffer* message = ByteBuffer.create();
+        message.append("'");
+        message.append(operation);
+        message.append("' cannot be used inside an atomic region: other tasks could observe the half-done update");
+        this.error_code(at, DiagnosticErrors.ATOMIC_SUSPENDS, message.cstr());
+    }
+}

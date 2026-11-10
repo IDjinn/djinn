@@ -622,6 +622,800 @@ i32 main() {
     }
 
     [Test]
+    void extern_call_safe() {
+        str source = """
+extern "C" { i32 abs(i32 value); }
+
+i32 main() {
+    return abs(-3);
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.UNSAFE_REQUIRED).at(4, 15));
+    }
+
+    [Test]
+    void require_holds() {
+        str source = """
+i32 half(i32 n) require(n >= 0) require(n < 100) {
+    return n / 2;
+}
+
+i32 main() {
+    return half(84);
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void require_violation_panics() {
+        str source = """
+i32 half(i32 n) require(n >= 0) {
+    return n / 2;
+}
+
+i32 main() {
+    return half(-4);
+}
+""";
+        Verify.source(source).crashes(Expected.contains("error: require").and_contains("at half").and_contains("require_violation_panics.djinn:1"));
+    }
+
+    [Test]
+    void require_on_expression_body() {
+        str source = """
+i32 inc(i32 n) require(n > 0) => n + 1;
+
+i32 main() {
+    return inc(0);
+}
+""";
+        Verify.source(source).crashes(Expected.contains("error: require").and_contains("at inc"));
+    }
+
+    [Test]
+    void require_with_throws() {
+        str source = """
+struct Failed;
+
+i32 pick(i32 n) throws(Failed) require(n != 0) {
+    if (n > 5) {
+        throw Failed();
+    }
+    return n;
+}
+
+i32 main() {
+    i32 v = switch pick(9) {
+        Result r -> 0,
+        Failed e -> 7
+    };
+    return v;
+}
+""";
+        Verify.source(source).runs(Expected.exit(7));
+    }
+
+    [Test]
+    void ensure_holds() {
+        str source = """
+i32 clamp(i32 n) ensure(result >= 0) ensure(result <= 10) {
+    if (n < 0) {
+        return 0;
+    }
+    if (n > 10) {
+        return 10;
+    }
+    return n;
+}
+
+i32 main() {
+    return clamp(-5) + clamp(50) + clamp(4) + 28;
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void ensure_violation_panics() {
+        str source = """
+i32 broken(i32 n) ensure(result > 0) {
+    return n;
+}
+
+i32 main() {
+    return broken(0);
+}
+""";
+        Verify.source(source).crashes(Expected.contains("error: ensure").and_contains("at broken"));
+    }
+
+    [Test]
+    void ensure_on_void_function() {
+        str source = """
+void fill(i32* slot, i32 value) ensure(*slot == value) {
+    *slot = value + 1;
+}
+
+unsafe i32 main() {
+    i32 cell = 0;
+    fill(&cell, 3);
+    return 0;
+}
+""";
+        Verify.source(source).crashes(Expected.contains("error: ensure").and_contains("at fill"));
+    }
+
+    [Test]
+    void ensure_with_require_and_throws() {
+        str source = """
+struct Failed;
+
+i32 pick(i32 n) throws(Failed) require(n >= 0) ensure(result < 100) {
+    if (n > 5) {
+        throw Failed();
+    }
+    return n * 2;
+}
+
+i32 main() {
+    i32 v = switch pick(9) {
+        Result r -> 0,
+        Failed e -> 20
+    };
+    i32 w = switch pick(4) {
+        Result r -> 8,
+        Failed e -> 0
+    };
+    return v + w;
+}
+""";
+        Verify.source(source).runs(Expected.exit(28));
+    }
+
+    [Test]
+    void atomic_rolls_back_on_error() {
+        str source = """
+struct Failed;
+struct Account { i64 balance; }
+
+i32 audit(i64 amount) throws(Failed) {
+    if (amount == 13) {
+        throw Failed();
+    }
+    return 0;
+}
+
+i32 transfer(Account* from, Account* to, i64 amount) throws(Failed) {
+    atomic(*from, *to) {
+        from.balance = from.balance - amount;
+        try audit(amount);
+        to.balance = to.balance + amount;
+    }
+    return 0;
+}
+
+i32 main() {
+    Account a = { .balance = 100 };
+    Account b = { .balance = 50 };
+    i32 r = switch transfer(&a, &b, 13) {
+        Result v -> 0,
+        Failed e -> 1
+    };
+    i32 ok = switch transfer(&a, &b, 30) {
+        Result v -> 0,
+        Failed e -> 1
+    };
+    return (i32)a.balance + (i32)b.balance - 108 + r - 1 + ok;
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void atomic_commits_on_success() {
+        str source = """
+struct Account { i64 balance; }
+
+i32 main() {
+    Account a = { .balance = 10 };
+    atomic(a.balance) {
+        a.balance = a.balance + 32;
+    }
+    return (i32)a.balance;
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void atomic_nested_regions_roll_back_together() {
+        str source = """
+struct Failed;
+
+i32 fail() throws(Failed) {
+    throw Failed();
+}
+
+i32 work(i32* x, i32* y) throws(Failed) {
+    atomic(*x) {
+        *x = 1;
+        atomic(*y) {
+            *y = 2;
+            try fail();
+        }
+    }
+    return 0;
+}
+
+unsafe i32 main() {
+    i32 x = 10;
+    i32 y = 20;
+    i32 r = switch work(&x, &y) {
+        Result v -> 0,
+        Failed e -> 1
+    };
+    return x + y + r + 11;
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void atomic_rejects_owning_operand() {
+        str source = """
+i32 main() {
+    mut string text = "abc";
+    atomic(text) {
+        text = "def";
+    }
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.ATOMIC_OPERAND).at(3, 12));
+    }
+
+    [Test]
+    void atomic_rejects_rvalue_operand() {
+        str source = """
+i32 main() {
+    atomic(1 + 2) {
+    }
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.ATOMIC_OPERAND).at(2, 14));
+    }
+
+    [Test]
+    void atomic_region_cannot_await() {
+        str source = """
+async i32 load() {
+    return 1;
+}
+
+async i32 run() {
+    mut i32 total = 0;
+    atomic(total) {
+        total = await load();
+    }
+    return total;
+}
+
+i32 main() {
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.ATOMIC_SUSPENDS).at(8, 17));
+    }
+
+    [Test]
+    void await_outside_atomic_region_is_allowed() {
+        str source = """
+async i32 load() {
+    return 40;
+}
+
+async i32 run() {
+    mut i32 total = await load();
+    atomic(total) {
+        total = total + 2;
+    }
+    return total;
+}
+
+i32 main() {
+    return await run();
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void after_commit_runs_after_success() {
+        str source = """
+i32 main() {
+    mut i32 balance = 10;
+    mut i32 notified = 0;
+    atomic(balance) {
+        balance = balance + 30;
+    } after_commit {
+        notified = balance + 2;
+    }
+    return notified;
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void after_commit_is_skipped_on_error() {
+        str source = """
+struct Failed;
+
+i32 fail() throws(Failed) {
+    throw Failed();
+}
+
+i32 work(i32* balance, i32* notified) throws(Failed) {
+    atomic(*balance) {
+        *balance = 99;
+        try fail();
+    } after_commit {
+        *notified = 1;
+    }
+    return 0;
+}
+
+unsafe i32 main() {
+    i32 balance = 40;
+    i32 notified = 0;
+    i32 r = switch work(&balance, &notified) {
+        Result v -> 0,
+        Failed e -> 2
+    };
+    return balance + notified + r;
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void after_commit_runs_on_early_return() {
+        str source = """
+i32 work(i32* balance, i32* notified) {
+    atomic(*balance) {
+        *balance = *balance + 1;
+        return 5;
+    } after_commit {
+        *notified = 36;
+    }
+    return 0;
+}
+
+unsafe i32 main() {
+    i32 balance = 0;
+    i32 notified = 0;
+    i32 r = work(&balance, &notified);
+    return balance + notified + r;
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void after_commit_runs_on_break() {
+        str source = """
+i32 main() {
+    mut i32 total = 0;
+    mut i32 hooks = 0;
+    for (mut i32 i = 0; i < 10; i = i + 1) {
+        atomic(total) {
+            total = total + 10;
+            if (i == 2) {
+                break;
+            }
+        } after_commit {
+            hooks = hooks + 1;
+        }
+    }
+    return total + hooks + 9;
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void ensure_old_holds() {
+        str source = """
+struct Account { i64 balance; }
+
+i32 withdraw(Account* account, i64 amount) ensure(account.balance == old(account.balance) - amount) {
+    account.balance = account.balance - amount;
+    return 0;
+}
+
+i32 main() {
+    Account a = { .balance = 100 };
+    withdraw(&a, 58);
+    return (i32)a.balance;
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void ensure_old_violation_panics() {
+        str source = """
+struct Account { i64 balance; }
+
+i32 withdraw(Account* account, i64 amount) ensure(account.balance == old(account.balance) - amount) {
+    account.balance = account.balance - amount - 1;
+    return 0;
+}
+
+i32 main() {
+    Account a = { .balance = 100 };
+    withdraw(&a, 58);
+    return 0;
+}
+""";
+        Verify.source(source).crashes(Expected.contains("error: ensure").and_contains("at withdraw"));
+    }
+
+    [Test]
+    void pure_function_may_call_an_inferred_clean_function() {
+        str source = """
+i32 double_it(i32 n) {
+    return n * 2;
+}
+
+i32 chain(i32 n) {
+    return double_it(n) + 1;
+}
+
+[Pure]
+i32 total(i32 n) {
+    return chain(n);
+}
+
+i32 main() {
+    return total(20);
+}
+""";
+        Verify.source(source).runs(Expected.exit(41));
+    }
+
+    [Test]
+    void pure_function_effects_are_transitive() {
+        str source = """
+void store(i32* target) {
+    *target = 1;
+}
+
+void forward(i32* target) {
+    store(target);
+}
+
+[Pure]
+void caller(i32* target) {
+    forward(target);
+}
+
+i32 main() {
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.IMPURE_OPERATION).at(11, 12));
+    }
+
+    [Test]
+    void atomic_region_rejects_a_call_that_suspends() {
+        str source = """
+async i32 load() {
+    return 1;
+}
+
+i32 blocker() {
+    return await load();
+}
+
+i32 relay() {
+    return blocker();
+}
+
+i32 main() {
+    mut i32 total = 0;
+    atomic(total) {
+        total = relay();
+    }
+    return total;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.ATOMIC_SUSPENDS).at(16, 22));
+    }
+
+    [Test]
+    void atomic_region_allows_calling_an_async_function_without_awaiting() {
+        str source = """
+async i32 load() {
+    return 1;
+}
+
+i32 main() {
+    mut i32 total = 0;
+    atomic(total) {
+        total = 42;
+        load();
+    }
+    return total;
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void uow_shares_contract_atomic_and_after_commit() {
+        str source = """
+struct Failed;
+struct Account { i64 balance; }
+
+uow Transfer {
+    require(amount > 0)
+    ensure(from.balance + to.balance == old(from.balance) + old(to.balance))
+    atomic(*from, *to)
+    after_commit {
+        *notified = *notified + 1;
+    }
+}
+
+i32 audit(i64 amount) throws(Failed) {
+    if (amount == 13) {
+        throw Failed();
+    }
+    return 0;
+}
+
+i32 transfer(Account* from, Account* to, i64 amount, i32* notified) throws(Failed) uow(Transfer) {
+    from.balance = from.balance - amount;
+    try audit(amount);
+    to.balance = to.balance + amount;
+    return 0;
+}
+
+i32 refund(Account* from, Account* to, i64 amount, i32* notified) throws(Failed) uow(Transfer) {
+    to.balance = to.balance - amount;
+    from.balance = from.balance + amount;
+    return 0;
+}
+
+unsafe i32 main() {
+    Account a = { .balance = 100 };
+    Account b = { .balance = 50 };
+    i32 notified = 0;
+    i32 r1 = switch transfer(&a, &b, 13, &notified) {
+        Result v -> 0,
+        Failed e -> 1
+    };
+    i32 r2 = switch transfer(&a, &b, 30, &notified) {
+        Result v -> 0,
+        Failed e -> 1
+    };
+    i32 r3 = switch refund(&a, &b, 10, &notified) {
+        Result v -> 0,
+        Failed e -> 1
+    };
+    return (i32)a.balance - 80 + r1 * 10 + r2 + r3 + notified * 10 + (i32)b.balance - 69;
+}
+""";
+        Verify.source(source).runs(Expected.exit(31));
+    }
+
+    [Test]
+    void uow_contract_violation_panics() {
+        str source = """
+struct Account { i64 balance; }
+
+uow Conserve {
+    ensure(from.balance + to.balance == old(from.balance) + old(to.balance))
+}
+
+i32 leak(Account* from, Account* to) uow(Conserve) {
+    from.balance = from.balance - 1;
+    return 0;
+}
+
+i32 main() {
+    Account a = { .balance = 10 };
+    Account b = { .balance = 10 };
+    leak(&a, &b);
+    return 0;
+}
+""";
+        Verify.source(source).crashes(Expected.contains("error: ensure").and_contains("at leak"));
+    }
+
+    [Test]
+    void pure_function_with_local_writes() {
+        str source = """
+[Pure]
+i32 triangle(i32 n) {
+    mut i32 total = 0;
+    for (mut i32 i = 1; i <= n; i = i + 1) {
+        total = total + i;
+    }
+    return total;
+}
+
+i32 main() {
+    return triangle(4) - 10;
+}
+""";
+        Verify.source(source).runs(Expected.exit(0));
+    }
+
+    [Test]
+    void pure_function_calls_pure() {
+        str source = """
+[Pure]
+i32 twice(i32 n) { return n * 2; }
+
+[Pure]
+i32 four(i32 n) { return twice(twice(n)); }
+
+i32 main() {
+    return four(1) - 4;
+}
+""";
+        Verify.source(source).runs(Expected.exit(0));
+    }
+
+    [Test]
+    void pure_function_writes_through_pointer() {
+        str source = """
+[Pure]
+void set(i32* target) {
+    *target = 1;
+}
+
+i32 main() {
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.IMPURE_OPERATION).at(3, 5));
+    }
+
+    [Test]
+    void pure_function_calls_impure() {
+        str source = """
+unsafe static mut i32 counter = 0;
+
+unsafe i32 noisy(i32 n) {
+    counter = counter + n;
+    return n;
+}
+
+[Pure]
+unsafe i32 quiet(i32 n) {
+    return noisy(n);
+}
+
+i32 main() {
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.IMPURE_OPERATION).at(10, 17));
+    }
+
+    [Test]
+    void pure_function_writes_global() {
+        str source = """
+unsafe static mut i32 counter = 0;
+
+[Pure]
+unsafe void bump() {
+    counter = counter + 1;
+}
+
+i32 main() {
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.IMPURE_OPERATION).at(5, 5));
+    }
+
+    [Test]
+    void pure_function_calls_pure_extern() {
+        str source = """
+extern "C" {
+    [Pure]
+    i32 abs(i32 value);
+}
+
+[Pure]
+unsafe i32 magnitude(i32 value) {
+    return abs(value);
+}
+
+i32 main() {
+    return 0;
+}
+""";
+        Verify.source(source).runs(Expected.exit(0));
+    }
+
+    [Test]
+    void extern_call_in_unsafe_block() {
+        str source = """
+extern "C" { i32 abs(i32 value); }
+
+i32 main() {
+    unsafe {
+        return abs(-3);
+    }
+}
+""";
+        Verify.source(source).runs(Expected.exit(3));
+    }
+
+    [Test]
+    void extern_call_in_unsafe_function() {
+        str source = """
+extern "C" { i32 abs(i32 value); }
+
+unsafe i32 absolute(i32 value) {
+    return abs(value);
+}
+
+i32 main() {
+    return 4;
+}
+""";
+        Verify.source(source).runs(Expected.exit(4));
+    }
+
+    [Test]
+    void extern_call_in_unsafe_constructor() {
+        str source = """
+extern "C" { i32 abs(i32 value); }
+
+struct Holder {
+    i32 value;
+
+    unsafe Holder() {
+        this.value = abs(-5);
+    }
+}
+
+i32 main() {
+    Holder holder = Holder();
+    return holder.value;
+}
+""";
+        Verify.source(source).runs(Expected.exit(5));
+    }
+
+    [Test]
+    void extern_call_in_safe_constructor() {
+        str source = """
+extern "C" { i32 abs(i32 value); }
+
+struct Holder {
+    i32 value;
+
+    Holder() {
+        this.value = abs(-5);
+    }
+}
+
+i32 main() {
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.UNSAFE_REQUIRED).at(7, 25));
+    }
+
+    [Test]
     void ptr_from_integer_safe() {
         str source = """
 i32 main() {
@@ -1580,7 +2374,7 @@ i32 main() {
         str source = """
 extern i32 strlen(i8* s);
 
-i32 main() {
+unsafe i32 main() {
     return strlen("abc");
 }
 """;

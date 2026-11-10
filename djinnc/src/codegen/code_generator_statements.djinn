@@ -6,6 +6,8 @@ impl CodeGenerator {
         this.locate(node);
 
         switch (kind) {
+            case ATOMIC_STMT:
+                this.gen_atomic(node);
             case BLOCK:
                 mut ptr outer_scope = (ptr)0;
                 if (this.debug != null) {
@@ -43,11 +45,13 @@ impl CodeGenerator {
                 this.gen_switch(node);
             case BREAK:
                 FunctionContext* function_context = this.function_context;
+                this.emit_commit_hooks(function_context.break_atomics());
                 this.emit_drops(function_context.break_depth());
                 LLVMBuildBr(this.builder, function_context.break_block());
                 this.start_dead_block();
             case CONTINUE:
                 FunctionContext* function_context = this.function_context;
+                this.emit_commit_hooks(function_context.continue_atomics());
                 this.emit_drops(function_context.continue_depth());
                 LLVMBuildBr(this.builder, function_context.continue_block());
                 this.start_dead_block();
@@ -71,7 +75,7 @@ impl CodeGenerator {
         this.declare_variable(variable.slot, variable.name, declared, node, 0);
     }
 
-    void gen_return(Node* node) {
+    unsafe void gen_return(Node* node) {
         FunctionContext* function_context = this.function_context;
         if (this.current_function().has_throws) {
             this.generate_throwing_return(node, this.current_function());
@@ -83,6 +87,7 @@ impl CodeGenerator {
                 LLVMBuildStore(this.builder, this.coerce(produced, this.current_function().return_type), function_context.promise);
                 this.release_moved(node.first());
             }
+            this.emit_commit_hooks(0);
             this.emit_drops(0);
             LLVMBuildBr(this.builder, function_context.final_block);
             this.start_dead_block();
@@ -90,6 +95,7 @@ impl CodeGenerator {
         }
         FunctionInfo* current = this.current_function();
         if (node.first() == null) {
+            this.emit_commit_hooks(0);
             this.emit_drops(0);
             this.emit_frame_pop();
             LLVMBuildRetVoid(this.builder);
@@ -97,6 +103,7 @@ impl CodeGenerator {
             Value* returned = this.gen_expression(node.first());
             ptr coerced = this.coerce(returned, current.return_type);
             this.release_moved(node.first());
+            this.emit_commit_hooks(0);
             this.emit_drops(0);
             this.emit_frame_pop();
             LLVMBuildRet(this.builder, coerced);
@@ -104,7 +111,7 @@ impl CodeGenerator {
         this.start_dead_block();
     }
 
-    void gen_if(Node* node) {
+    unsafe void gen_if(Node* node) {
         if (node.op() == 2) {
             this.gen_statement(node.second());
             return;
@@ -188,7 +195,7 @@ impl CodeGenerator {
         LLVMPositionBuilderAtEnd(this.builder, end_block);
     }
 
-    void gen_while(Node* node) {
+    unsafe void gen_while(Node* node) {
         ptr condition_block = this.new_block("while.cond");
         ptr body_block = this.new_block("while.body");
         ptr end_block = this.new_block("while.end");
@@ -203,7 +210,7 @@ impl CodeGenerator {
         LLVMPositionBuilderAtEnd(this.builder, end_block);
     }
 
-    void gen_do_while(Node* node) {
+    unsafe void gen_do_while(Node* node) {
         ptr body_block = this.new_block("do.body");
         ptr condition_block = this.new_block("do.cond");
         ptr end_block = this.new_block("do.end");
@@ -218,7 +225,7 @@ impl CodeGenerator {
         LLVMPositionBuilderAtEnd(this.builder, end_block);
     }
 
-    void gen_for(Node* node) {
+    unsafe void gen_for(Node* node) {
         if (node.first() != null) {
             this.gen_statement(node.first());
         }
@@ -248,7 +255,7 @@ impl CodeGenerator {
         LLVMPositionBuilderAtEnd(this.builder, end_block);
     }
 
-    void run_loop_body(Node* body, ptr body_block, ptr break_block, ptr continue_block) {
+    unsafe void run_loop_body(Node* body, ptr body_block, ptr break_block, ptr continue_block) {
         FunctionContext* function_context = this.function_context;
         function_context.enter_loop(break_block, continue_block);
         LLVMPositionBuilderAtEnd(this.builder, body_block);

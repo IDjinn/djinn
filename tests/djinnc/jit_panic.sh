@@ -19,7 +19,7 @@ extern "C" {
     i32 puts(ptr<i8> text);
 }
 
-i32 main() {
+unsafe i32 main() {
     puts("before the panic");
     i64 big = 5000000000;
     return (i32)big;

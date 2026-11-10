@@ -1,0 +1,95 @@
+namespace djinnc;
+
+impl TypeChecker {
+    unsafe void note_effect(u32 effect) {
+        FunctionInfo* current = this.function;
+        if (current != null) {
+            current.effects = current.effects | effect;
+        }
+    }
+
+    unsafe void record_call(Node* node, FunctionInfo* info) {
+        FunctionInfo* current = this.function;
+        if (current == null || info.is_pure) {
+            return;
+        }
+        if (info.is_extern) {
+            current.effects = current.effects | Effects.EXTERN;
+            this.require_pure(node, "calling native or library code that is not [Pure]");
+            return;
+        }
+        if (current.edges == null) {
+            current.edges = PointerList.create();
+        }
+        CallEdge* edge = (CallEdge*)Memory.zalloc(sizeof(CallEdge));
+        edge.callee = info;
+        edge.at = node;
+        edge.in_atomic = this.atomic_depth > 0;
+        PointerList* edges = current.edges;
+        edges.push((ptr)edge);
+    }
+
+    unsafe u32 inherited_effects(FunctionInfo* callee) {
+        if (callee.is_async) {
+            return callee.effects & (Effects.WRITES | Effects.EXTERN);
+        }
+        return callee.effects;
+    }
+
+    unsafe void solve_effects() {
+        SymbolTable* symbols = this.symbols;
+        PointerList* functions = symbols.functions;
+        mut bool changed = true;
+        while (changed) {
+            changed = false;
+            for (mut i32 i = 0; i < functions.length; i = i + 1) {
+                FunctionInfo* info = (FunctionInfo*)functions.get(i);
+                if (info.edges == null) {
+                    continue;
+                }
+                PointerList* edges = info.edges;
+                for (mut i32 e = 0; e < edges.length; e = e + 1) {
+                    CallEdge* edge = (CallEdge*)edges.get(e);
+                    u32 merged = info.effects | this.inherited_effects(edge.callee);
+                    if (merged != info.effects) {
+                        info.effects = merged;
+                        changed = true;
+                    }
+                }
+            }
+        }
+    }
+
+    unsafe void record_pure_obligations() {
+        SymbolTable* symbols = this.symbols;
+        PointerList* functions = symbols.functions;
+        for (mut i32 i = 0; i < functions.length; i = i + 1) {
+            FunctionInfo* info = (FunctionInfo*)functions.get(i);
+            if (info.is_pure && info.node != null && !info.is_extern) {
+                Obligations.record("pure", "proved", info.node, info.node);
+            }
+        }
+    }
+
+    unsafe void check_effects() {
+        SymbolTable* symbols = this.symbols;
+        PointerList* functions = symbols.functions;
+        for (mut i32 i = 0; i < functions.length; i = i + 1) {
+            FunctionInfo* info = (FunctionInfo*)functions.get(i);
+            if (info.edges == null) {
+                continue;
+            }
+            PointerList* edges = info.edges;
+            for (mut i32 e = 0; e < edges.length; e = e + 1) {
+                CallEdge* edge = (CallEdge*)edges.get(e);
+                u32 inherited = this.inherited_effects(edge.callee);
+                if (info.is_pure && inherited != 0) {
+                    this.error_code(edge.at, DiagnosticErrors.IMPURE_OPERATION, "calling a function that writes memory, calls native code or suspends is not allowed in a [Pure] function");
+                }
+                if (edge.in_atomic && (inherited & Effects.SUSPENDS) != 0) {
+                    this.error_code(edge.at, DiagnosticErrors.ATOMIC_SUSPENDS, "calling a function that can suspend is not allowed inside an atomic region");
+                }
+            }
+        }
+    }
+}

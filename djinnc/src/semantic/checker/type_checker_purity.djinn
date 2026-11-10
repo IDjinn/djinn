@@ -1,0 +1,41 @@
+namespace djinnc;
+
+impl TypeChecker {
+    bool in_pure() {
+        FunctionInfo* current = this.function;
+        return current != null && current.is_pure;
+    }
+
+    void require_pure(Node* at, ptr<i8> operation) {
+        if (!this.in_pure()) {
+            return;
+        }
+        ByteBuffer* message = ByteBuffer.create();
+        message.append(operation);
+        message.append(" is not allowed in a [Pure] function");
+        this.error_code(at, DiagnosticErrors.IMPURE_OPERATION, message.cstr());
+    }
+
+    bool is_local_target(Node* target) {
+        NodeKind kind = target.kind();
+        if (kind == NodeKind::IDENTIFIER) {
+            return target.symbol_kind() == SymbolKind.LOCAL;
+        }
+        if (kind == NodeKind::FIELD_ACCESS) {
+            Node* base = target.first();
+            if (target.symbol_kind() != SymbolKind.FIELD || Types.is_pointer(base.value_type())) {
+                return false;
+            }
+            return this.is_local_target(base);
+        }
+        return false;
+    }
+
+    void require_pure_target(Node* target) {
+        if (this.is_local_target(target)) {
+            return;
+        }
+        this.note_effect(Effects.WRITES);
+        this.require_pure(target, "writing to memory that is not a local variable");
+    }
+}

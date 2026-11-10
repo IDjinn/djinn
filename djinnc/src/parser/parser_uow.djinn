@@ -1,0 +1,124 @@
+namespace djinnc;
+
+struct UowTemplate {
+    ptr<i8> name;
+    PointerList* requires;
+    PointerList* ensures;
+    PointerList* captures;
+    Node* operands;
+    Node* after;
+}
+
+impl Parser {
+    unsafe bool is_uow_declaration() {
+        return this.is_word(this.current(), "uow") && this.kind_of(this.peek_token(1)) == TokenKind::IDENTIFIER
+            && this.kind_of(this.peek_token(2)) == TokenKind::LBRACE;
+    }
+
+    unsafe void append_all(PointerList* target, PointerList* source) {
+        for (mut i32 i = 0; i < source.length; i = i + 1) {
+            target.push(source.get(i));
+        }
+    }
+
+    unsafe Node* parse_uow_declaration() {
+        this.advance();
+        i32 name = this.advance();
+        this.expect(TokenKind::LBRACE, "expected '{' after the uow name");
+        UowTemplate* template = (UowTemplate*)Memory.zalloc(sizeof(UowTemplate));
+        template.name = this.copy_of(name);
+        template.requires = PointerList.create();
+        template.ensures = PointerList.create();
+        template.captures = PointerList.create();
+        PointerList* saved_captures = this.old_decls;
+        i32 saved_base = this.old_base;
+        this.old_decls = template.captures;
+        this.old_base = 1000;
+        while (!this.check(TokenKind::RBRACE) && !this.at_end()) {
+            i32 token = this.current();
+            if (this.check(TokenKind::REQUIRE)) {
+                this.append_all(template.requires, this.parse_contracts(TokenKind::REQUIRE));
+            } else if (this.check(TokenKind::ENSURE)) {
+                this.in_ensure = true;
+                this.append_all(template.ensures, this.parse_contracts(TokenKind::ENSURE));
+                this.in_ensure = false;
+            } else if (this.is_word(token, "atomic") && this.kind_of(this.peek_token(1)) == TokenKind::LPAREN) {
+                this.advance();
+                this.advance();
+                Node* operands = Node.create_list(NodeKind::BLOCK, token);
+                if (!this.check(TokenKind::RPAREN)) {
+                    operands.add(this.parse_expression());
+                    while (this.match(TokenKind::COMMA)) {
+                        operands.add(this.parse_expression());
+                    }
+                }
+                this.expect(TokenKind::RPAREN, "expected ')' after the atomic operands");
+                this.match(TokenKind::SEMICOLON);
+                template.operands = operands;
+            } else if (this.is_word(token, "after_commit") && this.kind_of(this.peek_token(1)) == TokenKind::LBRACE) {
+                this.advance();
+                template.after = this.parse_block();
+            } else {
+                this.fail("expected require, ensure, atomic or after_commit in a uow");
+                return (Node*)0;
+            }
+        }
+        this.expect(TokenKind::RBRACE, "expected '}' to close the uow");
+        this.old_decls = saved_captures;
+        this.old_base = saved_base;
+        if (this.uows == null) {
+            this.uows = PointerList.create();
+        }
+        PointerList* declared = this.uows;
+        declared.push((ptr)template);
+        return (Node*)0;
+    }
+
+    unsafe UowTemplate* parse_uow_use(PointerList* requires, PointerList* ensures, PointerList* captures) {
+        i32 token = this.current();
+        if (!this.is_word(token, "uow") || this.kind_of(this.peek_token(1)) != TokenKind::LPAREN) {
+            return (UowTemplate*)0;
+        }
+        this.advance();
+        this.advance();
+        i32 name = this.expect(TokenKind::IDENTIFIER, "expected the uow name");
+        this.expect(TokenKind::RPAREN, "expected ')' after the uow name");
+        PointerList* declared = this.uows;
+        if (declared != null) {
+            for (mut i32 i = 0; i < declared.length; i = i + 1) {
+                UowTemplate* template = (UowTemplate*)declared.get(i);
+                if (!Strings.equals(this.text_of(name), this.length_of(name), template.name)) {
+                    continue;
+                }
+                this.append_clones(requires, template.requires);
+                this.append_clones(ensures, template.ensures);
+                this.append_clones(captures, template.captures);
+                return template;
+            }
+        }
+        this.fail("unknown uow: declare it before the function that uses it");
+        return (UowTemplate*)0;
+    }
+
+    unsafe void append_clones(PointerList* target, PointerList* source) {
+        for (mut i32 i = 0; i < source.length; i = i + 1) {
+            target.push((ptr)Node.clone((Node*)source.get(i)));
+        }
+    }
+
+    unsafe Node* with_uow(i32 token, Node* body, UowTemplate* uow) {
+        if (uow == null || uow.operands == null || body == null) {
+            return body;
+        }
+        Node* region = Node.create(NodeKind::ATOMIC_STMT, token);
+        region.set_first(body);
+        region.set_second(Node.clone(uow.operands));
+        if (uow.after != null) {
+            region.set_third(Node.clone(uow.after));
+        }
+        Node* wrapped = Node.create_list(NodeKind::BLOCK, token);
+        wrapped.set_op(body.op());
+        wrapped.add(region);
+        return wrapped;
+    }
+}

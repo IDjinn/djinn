@@ -1,0 +1,120 @@
+namespace djinnc;
+
+struct AtomicSave {
+    ptr address;
+    ptr save;
+    ptr llvm_type;
+}
+
+struct AtomicRegion {
+    PointerList* saves;
+    Node* after;
+}
+
+impl CodeGenerator {
+    unsafe void gen_atomic(Node* node) {
+        Node* operands = node.second();
+        AtomicRegion* region = (AtomicRegion*)Memory.zalloc(sizeof(AtomicRegion));
+        region.saves = PointerList.create();
+        region.after = node.third();
+        PointerList* saves = region.saves;
+        for (mut i32 i = 0; i < operands.count(); i = i + 1) {
+            Node* operand = operands.child(i);
+            ptr llvm = this.llvm_type(operand.value_type());
+            ptr address = this.gen_address(operand);
+            ptr save = LLVMBuildAlloca(this.alloca_builder, llvm, "atomic.save");
+            LLVMBuildStore(this.builder, LLVMBuildLoad2(this.builder, llvm, address, "atomic.value"), save);
+            AtomicSave* entry = (AtomicSave*)Memory.zalloc(sizeof(AtomicSave));
+            entry.address = address;
+            entry.save = save;
+            entry.llvm_type = llvm;
+            saves.push((ptr)entry);
+        }
+        FunctionContext* function_context = this.function_context;
+        PointerList* regions = function_context.atomics;
+        regions.push((ptr)region);
+        this.gen_statement(node.first());
+        regions.truncate(regions.length - 1);
+        if (region.after != null && !this.is_terminated()) {
+            this.gen_statement(region.after);
+        }
+    }
+
+    unsafe bool has_commit_hooks(i32 depth) {
+        FunctionContext* function_context = this.function_context;
+        PointerList* regions = function_context.atomics;
+        for (mut i32 i = depth; i < regions.length; i = i + 1) {
+            AtomicRegion* region = (AtomicRegion*)regions.get(i);
+            if (region.after != null) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    unsafe void emit_commit_hooks(i32 depth) {
+        if (!this.has_commit_hooks(depth)) {
+            return;
+        }
+        FunctionContext* function_context = this.function_context;
+        PointerList* regions = function_context.atomics;
+        PointerList* active = PointerList.create();
+        for (mut i32 i = 0; i < regions.length; i = i + 1) {
+            active.push(regions.get(i));
+        }
+        for (mut i32 i = active.length - 1; i >= depth; i = i - 1) {
+            AtomicRegion* region = (AtomicRegion*)active.get(i);
+            regions.truncate(i);
+            if (region.after != null && !this.is_terminated()) {
+                this.gen_statement(region.after);
+            }
+        }
+        regions.truncate(0);
+        for (mut i32 i = 0; i < active.length; i = i + 1) {
+            regions.push(active.get(i));
+        }
+    }
+
+    unsafe void emit_exit_hooks(ptr record) {
+        if (!this.has_commit_hooks(0)) {
+            return;
+        }
+        ptr i32_type = LLVMIntTypeInContext(this.context, 32);
+        ptr tag = LLVMBuildExtractValue(this.builder, record, 0, "commit.tag");
+        ptr failed = LLVMBuildICmp(this.builder, LlvmConst.INT_NE, tag, LLVMConstInt(i32_type, 0, 0), "commit.failed");
+        ptr hooks_block = this.new_block("commit.hooks");
+        ptr next_block = this.new_block("commit.next");
+        LLVMBuildCondBr(this.builder, failed, next_block, hooks_block);
+        LLVMPositionBuilderAtEnd(this.builder, hooks_block);
+        this.emit_commit_hooks(0);
+        if (!this.is_terminated()) {
+            LLVMBuildBr(this.builder, next_block);
+        }
+        LLVMPositionBuilderAtEnd(this.builder, next_block);
+    }
+
+    unsafe void emit_rollbacks(ptr record) {
+        FunctionContext* function_context = this.function_context;
+        PointerList* regions = function_context.atomics;
+        if (regions.length == 0) {
+            return;
+        }
+        ptr i32_type = LLVMIntTypeInContext(this.context, 32);
+        ptr tag = LLVMBuildExtractValue(this.builder, record, 0, "atomic.tag");
+        ptr failed = LLVMBuildICmp(this.builder, LlvmConst.INT_NE, tag, LLVMConstInt(i32_type, 0, 0), "atomic.failed");
+        ptr restore_block = this.new_block("atomic.rollback");
+        ptr next_block = this.new_block("atomic.next");
+        LLVMBuildCondBr(this.builder, failed, restore_block, next_block);
+        LLVMPositionBuilderAtEnd(this.builder, restore_block);
+        for (mut i32 r = regions.length - 1; r >= 0; r = r - 1) {
+            AtomicRegion* region = (AtomicRegion*)regions.get(r);
+            PointerList* saves = region.saves;
+            for (mut i32 i = saves.length - 1; i >= 0; i = i - 1) {
+                AtomicSave* entry = (AtomicSave*)saves.get(i);
+                LLVMBuildStore(this.builder, LLVMBuildLoad2(this.builder, entry.llvm_type, entry.save, "atomic.restore"), entry.address);
+            }
+        }
+        LLVMBuildBr(this.builder, next_block);
+        LLVMPositionBuilderAtEnd(this.builder, next_block);
+    }
+}

@@ -82,6 +82,10 @@ impl Parser {
             return this.parse_inspect();
         }
 
+        if (this.is_uow_declaration()) {
+            return this.parse_uow_declaration();
+        }
+
         if (this.kind_of(token) == TokenKind::NAMESPACE) {
             return this.parse_namespace();
         }
@@ -409,10 +413,15 @@ impl Parser {
         }
 
         this.parse_throws_clause(function);
-        if (this.check(TokenKind::REQUIRE) || this.check(TokenKind::ENSURE)) {
-            this.fail("contracts are not supported yet");
-            return function;
-        }
+        PointerList* requires = this.parse_contracts(TokenKind::REQUIRE);
+        this.old_decls = PointerList.create();
+        this.in_ensure = true;
+        PointerList* ensures = this.parse_contracts(TokenKind::ENSURE);
+        this.in_ensure = false;
+        PointerList* captures = this.old_decls;
+        UowTemplate* uow = this.parse_uow_use(requires, ensures, captures);
+        this.record_clause_obligations(function, requires, "require");
+        this.record_clause_obligations(function, ensures, "ensure");
 
         if (this.match(TokenKind::ARROW)) {
             i32 arrow = this.current();
@@ -421,7 +430,7 @@ impl Parser {
             ret.set_first(this.parse_expression());
             body.add(ret);
             this.expect(TokenKind::SEMICOLON, "expected ';' after expression body");
-            function.set_first(body);
+            function.set_first(this.with_requires(arrow, this.with_ensures(arrow, function, this.with_uow(arrow, body, uow), ensures, captures), requires));
             return function;
         }
 
@@ -434,8 +443,148 @@ impl Parser {
             return function;
         }
 
-        function.set_first(this.parse_body(function.generics() == null && (function.op() & 7) == 0));
+        i32 open = this.current();
+        function.set_first(this.with_requires(open, this.with_ensures(open, function, this.with_uow(open, this.parse_body(function.generics() == null && (function.op() & 7) == 0), uow), ensures, captures), requires));
         return function;
+    }
+
+    unsafe void record_clause_obligations(Node* function, PointerList* checks, ptr<i8> kind) {
+        for (mut i32 i = 0; i < checks.length; i = i + 1) {
+            Obligations.record(kind, "checked", (Node*)checks.get(i), function);
+        }
+    }
+
+    unsafe PointerList* parse_contracts(TokenKind keyword) {
+        PointerList* checks = PointerList.create();
+        while (this.check(keyword) && !this.failed) {
+            i32 token = this.advance();
+            this.expect(TokenKind::LPAREN, "expected '(' after the contract keyword");
+            Node* condition = this.parse_expression();
+            this.expect(TokenKind::RPAREN, "expected ')' after the contract condition");
+            Node* text = Node.create(NodeKind::STRING_LITERAL, token);
+            text.set_int_value(this.length_of(token));
+            Node* panic = Node.create(NodeKind::INTRINSIC, token);
+            panic.set_op(Intrinsic.PANIC);
+            panic.set_first(text);
+            Node* call = Node.create(NodeKind::EXPR_STMT, token);
+            call.set_first(panic);
+            Node* negated = Node.create(NodeKind::UNARY, token);
+            negated.set_op_kind(TokenKind::BANG);
+            negated.set_first(condition);
+            Node* check = Node.create(NodeKind::IF, token);
+            check.set_first(negated);
+            check.set_second(call);
+            checks.push((ptr)check);
+        }
+        return checks;
+    }
+
+    unsafe Node* with_ensures(i32 token, Node* function, Node* body, PointerList* checks, PointerList* captures) {
+        if (checks.length == 0 || body == null) {
+            return body;
+        }
+        TypeRef* type = function.type();
+        bool is_void = type == null || type.is_void();
+        this.guard_returns(body, checks, type, is_void);
+        if (is_void) {
+            bool ends_with_return = body.count() > 0 && body.child(body.count() - 1).kind() == NodeKind::RETURN;
+            if (!ends_with_return) {
+                for (mut i32 i = 0; i < checks.length; i = i + 1) {
+                    body.add(Node.clone((Node*)checks.get(i)));
+                }
+            }
+        }
+        if (captures.length == 0) {
+            return body;
+        }
+        Node* captured = Node.create_list(NodeKind::BLOCK, token);
+        captured.set_op(body.op());
+        for (mut i32 i = 0; i < captures.length; i = i + 1) {
+            captured.add((Node*)captures.get(i));
+        }
+        for (mut i32 i = 0; i < body.count(); i = i + 1) {
+            captured.add(body.child(i));
+        }
+        return captured;
+    }
+
+    unsafe void guard_returns(Node* node, PointerList* checks, TypeRef* type, bool is_void) {
+        if (node.kind() == NodeKind::FUNCTION) {
+            return;
+        }
+        Node* first = node.first();
+        if (first != null) {
+            if (first.kind() == NodeKind::RETURN) {
+                node.set_first(this.guard_return(first, checks, type, is_void));
+            } else {
+                this.guard_returns(first, checks, type, is_void);
+            }
+        }
+        Node* second = node.second();
+        if (second != null) {
+            if (second.kind() == NodeKind::RETURN) {
+                node.set_second(this.guard_return(second, checks, type, is_void));
+            } else {
+                this.guard_returns(second, checks, type, is_void);
+            }
+        }
+        Node* third = node.third();
+        if (third != null) {
+            if (third.kind() == NodeKind::RETURN) {
+                node.set_third(this.guard_return(third, checks, type, is_void));
+            } else {
+                this.guard_returns(third, checks, type, is_void);
+            }
+        }
+        if (node.has_items()) {
+            for (mut i32 i = 0; i < node.count(); i = i + 1) {
+                Node* child = node.child(i);
+                if (child.kind() == NodeKind::RETURN) {
+                    node.set_child(i, this.guard_return(child, checks, type, is_void));
+                } else {
+                    this.guard_returns(child, checks, type, is_void);
+                }
+            }
+        }
+    }
+
+    unsafe Node* guard_return(Node* returned, PointerList* checks, TypeRef* type, bool is_void) {
+        Node* block = Node.create_list(NodeKind::BLOCK, returned.token);
+        if (returned.first() == null) {
+            for (mut i32 i = 0; i < checks.length; i = i + 1) {
+                block.add(Node.clone((Node*)checks.get(i)));
+            }
+            block.add(returned);
+            return block;
+        }
+        Node* declaration = Node.create(NodeKind::VAR_DECL, returned.token);
+        declaration.set_type(type);
+        declaration.set_text("result");
+        declaration.set_first(returned.first());
+        block.add(declaration);
+        for (mut i32 i = 0; i < checks.length; i = i + 1) {
+            block.add(Node.clone((Node*)checks.get(i)));
+        }
+        Node* name = Node.create(NodeKind::IDENTIFIER, returned.token);
+        name.set_text("result");
+        returned.set_first(name);
+        block.add(returned);
+        return block;
+    }
+
+    unsafe Node* with_requires(i32 token, Node* body, PointerList* checks) {
+        if (checks.length == 0 || body == null) {
+            return body;
+        }
+        Node* guarded = Node.create_list(NodeKind::BLOCK, token);
+        guarded.set_op(body.op());
+        for (mut i32 i = 0; i < checks.length; i = i + 1) {
+            guarded.add((Node*)checks.get(i));
+        }
+        for (mut i32 i = 0; i < body.count(); i = i + 1) {
+            guarded.add(body.child(i));
+        }
+        return guarded;
     }
 
     void parse_throws_clause(Node* function) {
