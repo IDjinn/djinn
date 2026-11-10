@@ -1064,6 +1064,97 @@ i32 main() {
     }
 
     [Test]
+    void pure_function_may_call_an_inferred_clean_function() {
+        str source = """
+i32 double_it(i32 n) {
+    return n * 2;
+}
+
+i32 chain(i32 n) {
+    return double_it(n) + 1;
+}
+
+[Pure]
+i32 total(i32 n) {
+    return chain(n);
+}
+
+i32 main() {
+    return total(20);
+}
+""";
+        Verify.source(source).runs(Expected.exit(41));
+    }
+
+    [Test]
+    void pure_function_effects_are_transitive() {
+        str source = """
+void store(i32* target) {
+    *target = 1;
+}
+
+void forward(i32* target) {
+    store(target);
+}
+
+[Pure]
+void caller(i32* target) {
+    forward(target);
+}
+
+i32 main() {
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.IMPURE_OPERATION).at(11, 12));
+    }
+
+    [Test]
+    void atomic_region_rejects_a_call_that_suspends() {
+        str source = """
+async i32 load() {
+    return 1;
+}
+
+i32 blocker() {
+    return await load();
+}
+
+i32 relay() {
+    return blocker();
+}
+
+i32 main() {
+    mut i32 total = 0;
+    atomic(total) {
+        total = relay();
+    }
+    return total;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.ATOMIC_SUSPENDS).at(16, 22));
+    }
+
+    [Test]
+    void atomic_region_allows_calling_an_async_function_without_awaiting() {
+        str source = """
+async i32 load() {
+    return 1;
+}
+
+i32 main() {
+    mut i32 total = 0;
+    atomic(total) {
+        total = 42;
+        load();
+    }
+    return total;
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
     void pure_function_with_local_writes() {
         str source = """
 [Pure]
@@ -1116,10 +1207,15 @@ i32 main() {
     [Test]
     void pure_function_calls_impure() {
         str source = """
-i32 noisy(i32 n) { return n; }
+unsafe static mut i32 counter = 0;
+
+unsafe i32 noisy(i32 n) {
+    counter = counter + n;
+    return n;
+}
 
 [Pure]
-i32 quiet(i32 n) {
+unsafe i32 quiet(i32 n) {
     return noisy(n);
 }
 
@@ -1127,7 +1223,7 @@ i32 main() {
     return 0;
 }
 """;
-        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.IMPURE_OPERATION).at(5, 17));
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.IMPURE_OPERATION).at(10, 17));
     }
 
     [Test]
