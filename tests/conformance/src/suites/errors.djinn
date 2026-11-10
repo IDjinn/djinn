@@ -932,6 +932,100 @@ i32 main() {
     }
 
     [Test]
+    void after_commit_runs_after_success() {
+        str source = """
+i32 main() {
+    mut i32 balance = 10;
+    mut i32 notified = 0;
+    atomic(balance) {
+        balance = balance + 30;
+    } after_commit {
+        notified = balance + 2;
+    }
+    return notified;
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void after_commit_is_skipped_on_error() {
+        str source = """
+struct Failed;
+
+i32 fail() throws(Failed) {
+    throw Failed();
+}
+
+i32 work(i32* balance, i32* notified) throws(Failed) {
+    atomic(*balance) {
+        *balance = 99;
+        try fail();
+    } after_commit {
+        *notified = 1;
+    }
+    return 0;
+}
+
+unsafe i32 main() {
+    i32 balance = 40;
+    i32 notified = 0;
+    i32 r = switch work(&balance, &notified) {
+        Result v -> 0,
+        Failed e -> 2
+    };
+    return balance + notified + r;
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void after_commit_runs_on_early_return() {
+        str source = """
+i32 work(i32* balance, i32* notified) {
+    atomic(*balance) {
+        *balance = *balance + 1;
+        return 5;
+    } after_commit {
+        *notified = 36;
+    }
+    return 0;
+}
+
+unsafe i32 main() {
+    i32 balance = 0;
+    i32 notified = 0;
+    i32 r = work(&balance, &notified);
+    return balance + notified + r;
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void after_commit_runs_on_break() {
+        str source = """
+i32 main() {
+    mut i32 total = 0;
+    mut i32 hooks = 0;
+    for (mut i32 i = 0; i < 10; i = i + 1) {
+        atomic(total) {
+            total = total + 10;
+            if (i == 2) {
+                break;
+            }
+        } after_commit {
+            hooks = hooks + 1;
+        }
+    }
+    return total + hooks + 9;
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
     void pure_function_with_local_writes() {
         str source = """
 [Pure]
