@@ -93,6 +93,15 @@ void* __djinn_realloc(void* pointer, size_t new_size);
 void __djinn_free(void* pointer);
 
 int32_t __djinn_atomic_add(int32_t* counter, int32_t delta);
+int32_t __djinn_atomic_load_i32(int32_t* target);
+void __djinn_atomic_store_i32(int32_t* target, int32_t value);
+int32_t __djinn_atomic_exchange_i32(int32_t* target, int32_t value);
+int32_t __djinn_atomic_cas_i32(int32_t* target, int32_t expected, int32_t desired);
+int64_t __djinn_atomic_load_i64(int64_t* target);
+void __djinn_atomic_store_i64(int64_t* target, int64_t value);
+int64_t __djinn_atomic_exchange_i64(int64_t* target, int64_t value);
+int64_t __djinn_atomic_add_i64(int64_t* target, int64_t delta);
+int32_t __djinn_atomic_cas_i64(int64_t* target, int64_t expected, int64_t desired);
 
 void* __djinn_malloc(size_t size);
 

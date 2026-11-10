@@ -50,6 +50,51 @@ int32_t __djinn_atomic_add(int32_t* counter, int32_t delta)
     return __atomic_fetch_add(counter, delta, __ATOMIC_ACQ_REL);
 }
 
+int32_t __djinn_atomic_load_i32(int32_t* target)
+{
+    return __atomic_load_n(target, __ATOMIC_SEQ_CST);
+}
+
+void __djinn_atomic_store_i32(int32_t* target, int32_t value)
+{
+    __atomic_store_n(target, value, __ATOMIC_SEQ_CST);
+}
+
+int32_t __djinn_atomic_exchange_i32(int32_t* target, int32_t value)
+{
+    return __atomic_exchange_n(target, value, __ATOMIC_SEQ_CST);
+}
+
+int32_t __djinn_atomic_cas_i32(int32_t* target, int32_t expected, int32_t desired)
+{
+    return __atomic_compare_exchange_n(target, &expected, desired, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+}
+
+int64_t __djinn_atomic_load_i64(int64_t* target)
+{
+    return __atomic_load_n(target, __ATOMIC_SEQ_CST);
+}
+
+void __djinn_atomic_store_i64(int64_t* target, int64_t value)
+{
+    __atomic_store_n(target, value, __ATOMIC_SEQ_CST);
+}
+
+int64_t __djinn_atomic_exchange_i64(int64_t* target, int64_t value)
+{
+    return __atomic_exchange_n(target, value, __ATOMIC_SEQ_CST);
+}
+
+int64_t __djinn_atomic_add_i64(int64_t* target, int64_t delta)
+{
+    return __atomic_fetch_add(target, delta, __ATOMIC_SEQ_CST);
+}
+
+int32_t __djinn_atomic_cas_i64(int64_t* target, int64_t expected, int64_t desired)
+{
+    return __atomic_compare_exchange_n(target, &expected, desired, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+}
+
 DJINN_ATTR_REALLOC
 void* __djinn_realloc(void* pointer, size_t new_size)
 {

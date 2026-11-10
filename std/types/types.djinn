@@ -31,9 +31,19 @@ union result<T, E> {
 // Exceptions are builtin core types (Exception root + derived errors);
 // see docs — no std enum needed anymore.
 
-impl Hashable, Equatable for arr<T> {
+impl Equatable for arr<T> {
     operator ==(arr<T> left, arr<T> right) -> bool {
-        return left.hash() == right.hash();
+        if (left.length != right.length) {
+            return false;
+        }
+        unsafe {
+            for (mut size i = 0; i < left.length; i = i + 1) {
+                if (left.data[i] != right.data[i]) {
+                    return false;
+                }
+            }
+        }
+        return true;
     }
 }
 
@@ -178,6 +188,12 @@ struct object : Hashable {
     }
 }
 
+impl Equatable for object {
+    operator ==(object left, object right) -> bool {
+        return left.type == right.type && left.data == right.data;
+    }
+}
+
 struct str {
     i8* data;
     size length;
@@ -199,7 +215,7 @@ struct str {
 }
 
 struct arr<T> : Hashable
-where T : Hashable {
+where T : Hashable, Equatable {
     T* data;
     size length;
 
@@ -254,9 +270,167 @@ struct string : Disposable {
     }
 }
 
+bool isSpace(i8 c) {
+    return c == 32 || c == 9 || c == 10 || c == 13;
+}
+
 impl Hashable for str, string {
     u64 hash() {
         return __djinn_hash_string(this.data, this.length);
+    }
+
+    bool startsWith(str prefix) {
+        unsafe {
+            if (prefix.length > this.length) {
+                return false;
+            }
+            for (mut size i = 0; i < prefix.length; i = i + 1) {
+                if (this.data[i] != prefix.data[i]) {
+                    return false;
+                }
+            }
+            return true;
+        }
+    }
+
+    bool endsWith(str suffix) {
+        unsafe {
+            if (suffix.length > this.length) {
+                return false;
+            }
+            size offset = this.length - suffix.length;
+            for (mut size i = 0; i < suffix.length; i = i + 1) {
+                if (this.data[offset + i] != suffix.data[i]) {
+                    return false;
+                }
+            }
+            return true;
+        }
+    }
+
+    i32 indexOf(str needle) {
+        unsafe {
+            if (needle.length > this.length) {
+                return -1;
+            }
+            size last = this.length - needle.length;
+            for (mut size i = 0; i <= last; i = i + 1) {
+                mut bool matches = true;
+                for (mut size j = 0; j < needle.length; j = j + 1) {
+                    if (this.data[i + j] != needle.data[j]) {
+                        matches = false;
+                        break;
+                    }
+                }
+                if (matches) {
+                    return (i32)i;
+                }
+            }
+            return -1;
+        }
+    }
+
+    i32 lastIndexOf(str needle) {
+        unsafe {
+            if (needle.length > this.length) {
+                return -1;
+            }
+            mut i32 i = (i32)(this.length - needle.length);
+            while (i >= 0) {
+                mut bool matches = true;
+                for (mut size j = 0; j < needle.length; j = j + 1) {
+                    if (this.data[(size)i + j] != needle.data[j]) {
+                        matches = false;
+                        break;
+                    }
+                }
+                if (matches) {
+                    return i;
+                }
+                i = i - 1;
+            }
+            return -1;
+        }
+    }
+
+    i32 indexOfChar(i8 value) {
+        unsafe {
+            for (mut size i = 0; i < this.length; i = i + 1) {
+                if (this.data[i] == value) {
+                    return (i32)i;
+                }
+            }
+            return -1;
+        }
+    }
+
+    bool contains(str needle) {
+        return this.indexOf(needle) >= 0;
+    }
+
+    bool containsChar(i8 value) {
+        return this.indexOfChar(value) >= 0;
+    }
+
+    i8 charAt(size index) {
+        unsafe {
+            Debug.assert(index < this.length, "index out of bounds");
+            return this.data[index];
+        }
+    }
+
+    bool equalsIgnoreCase(str other) {
+        unsafe {
+            if (other.length != this.length) {
+                return false;
+            }
+            for (mut size i = 0; i < this.length; i = i + 1) {
+                mut i8 a = this.data[i];
+                mut i8 b = other.data[i];
+                if (a >= 65 && a <= 90) { a = a + 32; }
+                if (b >= 65 && b <= 90) { b = b + 32; }
+                if (a != b) {
+                    return false;
+                }
+            }
+            return true;
+        }
+    }
+
+    bool isBlank() {
+        unsafe {
+            for (mut size i = 0; i < this.length; i = i + 1) {
+                i8 c = this.data[i];
+                if (c != 32 && c != 9 && c != 10 && c != 13) {
+                    return false;
+                }
+            }
+            return true;
+        }
+    }
+
+    str trimStart() {
+        unsafe {
+            mut size start = 0;
+            while (start < this.length && isSpace(this.data[start])) {
+                start = start + 1;
+            }
+            return { .data = this.data + start, .length = this.length - start };
+        }
+    }
+
+    str trimEnd() {
+        unsafe {
+            mut size end = this.length;
+            while (end > 0 && isSpace(this.data[end - 1])) {
+                end = end - 1;
+            }
+            return { .data = this.data, .length = end };
+        }
+    }
+
+    str trim() {
+        return this.trimStart().trimEnd();
     }
 
     str slice(size start, size length) {
