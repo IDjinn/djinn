@@ -20,3 +20,4 @@ bash "$root/tools/build_std.sh" "$compiler" "$out/libs/std.djlib" --runtime-dir 
 bash tests/djinnc/graph.sh "$compiler" "$runtime_lib" "$runtime"
 bash tests/djinnc/ieee754.sh "$compiler" "$runtime_lib" "$runtime"
 bash tests/djinnc/jit_panic.sh "$compiler" "$runtime_lib" "$runtime"
+bash tests/djinnc/obligations.sh "$compiler" "$runtime_lib" "$runtime"
