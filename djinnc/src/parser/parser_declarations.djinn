@@ -410,7 +410,11 @@ impl Parser {
 
         this.parse_throws_clause(function);
         PointerList* requires = this.parse_contracts(TokenKind::REQUIRE);
+        this.old_decls = PointerList.create();
+        this.in_ensure = true;
         PointerList* ensures = this.parse_contracts(TokenKind::ENSURE);
+        this.in_ensure = false;
+        PointerList* captures = this.old_decls;
 
         if (this.match(TokenKind::ARROW)) {
             i32 arrow = this.current();
@@ -419,7 +423,7 @@ impl Parser {
             ret.set_first(this.parse_expression());
             body.add(ret);
             this.expect(TokenKind::SEMICOLON, "expected ';' after expression body");
-            function.set_first(this.with_requires(arrow, this.with_ensures(function, body, ensures), requires));
+            function.set_first(this.with_requires(arrow, this.with_ensures(arrow, function, body, ensures, captures), requires));
             return function;
         }
 
@@ -433,7 +437,7 @@ impl Parser {
         }
 
         i32 open = this.current();
-        function.set_first(this.with_requires(open, this.with_ensures(function, this.parse_body(function.generics() == null && (function.op() & 7) == 0), ensures), requires));
+        function.set_first(this.with_requires(open, this.with_ensures(open, function, this.parse_body(function.generics() == null && (function.op() & 7) == 0), ensures, captures), requires));
         return function;
     }
 
@@ -462,7 +466,7 @@ impl Parser {
         return checks;
     }
 
-    unsafe Node* with_ensures(Node* function, Node* body, PointerList* checks) {
+    unsafe Node* with_ensures(i32 token, Node* function, Node* body, PointerList* checks, PointerList* captures) {
         if (checks.length == 0 || body == null) {
             return body;
         }
@@ -477,7 +481,18 @@ impl Parser {
                 }
             }
         }
-        return body;
+        if (captures.length == 0) {
+            return body;
+        }
+        Node* captured = Node.create_list(NodeKind::BLOCK, token);
+        captured.set_op(body.op());
+        for (mut i32 i = 0; i < captures.length; i = i + 1) {
+            captured.add((Node*)captures.get(i));
+        }
+        for (mut i32 i = 0; i < body.count(); i = i + 1) {
+            captured.add(body.child(i));
+        }
+        return captured;
     }
 
     unsafe void guard_returns(Node* node, PointerList* checks, TypeRef* type, bool is_void) {
