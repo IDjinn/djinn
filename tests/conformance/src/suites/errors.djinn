@@ -774,6 +774,120 @@ i32 main() {
     }
 
     [Test]
+    void atomic_rolls_back_on_error() {
+        str source = """
+struct Failed;
+struct Account { i64 balance; }
+
+i32 audit(i64 amount) throws(Failed) {
+    if (amount == 13) {
+        throw Failed();
+    }
+    return 0;
+}
+
+i32 transfer(Account* from, Account* to, i64 amount) throws(Failed) {
+    atomic(*from, *to) {
+        from.balance = from.balance - amount;
+        try audit(amount);
+        to.balance = to.balance + amount;
+    }
+    return 0;
+}
+
+i32 main() {
+    Account a = { .balance = 100 };
+    Account b = { .balance = 50 };
+    i32 r = switch transfer(&a, &b, 13) {
+        Result v -> 0,
+        Failed e -> 1
+    };
+    i32 ok = switch transfer(&a, &b, 30) {
+        Result v -> 0,
+        Failed e -> 1
+    };
+    return (i32)a.balance + (i32)b.balance - 108 + r - 1 + ok;
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void atomic_commits_on_success() {
+        str source = """
+struct Account { i64 balance; }
+
+i32 main() {
+    Account a = { .balance = 10 };
+    atomic(a.balance) {
+        a.balance = a.balance + 32;
+    }
+    return (i32)a.balance;
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void atomic_nested_regions_roll_back_together() {
+        str source = """
+struct Failed;
+
+i32 fail() throws(Failed) {
+    throw Failed();
+}
+
+i32 work(i32* x, i32* y) throws(Failed) {
+    atomic(*x) {
+        *x = 1;
+        atomic(*y) {
+            *y = 2;
+            try fail();
+        }
+    }
+    return 0;
+}
+
+unsafe i32 main() {
+    i32 x = 10;
+    i32 y = 20;
+    i32 r = switch work(&x, &y) {
+        Result v -> 0,
+        Failed e -> 1
+    };
+    return x + y + r + 11;
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void atomic_rejects_owning_operand() {
+        str source = """
+i32 main() {
+    mut string text = "abc";
+    atomic(text) {
+        text = "def";
+    }
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.ATOMIC_OPERAND).at(3, 12));
+    }
+
+    [Test]
+    void atomic_rejects_rvalue_operand() {
+        str source = """
+i32 main() {
+    atomic(1 + 2) {
+    }
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.ATOMIC_OPERAND).at(2, 14));
+    }
+
+    [Test]
     void pure_function_with_local_writes() {
         str source = """
 [Pure]
