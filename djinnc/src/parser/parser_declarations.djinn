@@ -409,11 +409,8 @@ impl Parser {
         }
 
         this.parse_throws_clause(function);
-        PointerList* requires = this.parse_requires();
-        if (this.check(TokenKind::ENSURE)) {
-            this.fail("ensure is not supported yet");
-            return function;
-        }
+        PointerList* requires = this.parse_contracts(TokenKind::REQUIRE);
+        PointerList* ensures = this.parse_contracts(TokenKind::ENSURE);
 
         if (this.match(TokenKind::ARROW)) {
             i32 arrow = this.current();
@@ -422,7 +419,7 @@ impl Parser {
             ret.set_first(this.parse_expression());
             body.add(ret);
             this.expect(TokenKind::SEMICOLON, "expected ';' after expression body");
-            function.set_first(this.with_requires(arrow, body, requires));
+            function.set_first(this.with_requires(arrow, this.with_ensures(function, body, ensures), requires));
             return function;
         }
 
@@ -436,17 +433,17 @@ impl Parser {
         }
 
         i32 open = this.current();
-        function.set_first(this.with_requires(open, this.parse_body(function.generics() == null && (function.op() & 7) == 0), requires));
+        function.set_first(this.with_requires(open, this.with_ensures(function, this.parse_body(function.generics() == null && (function.op() & 7) == 0), ensures), requires));
         return function;
     }
 
-    unsafe PointerList* parse_requires() {
+    unsafe PointerList* parse_contracts(TokenKind keyword) {
         PointerList* checks = PointerList.create();
-        while (this.check(TokenKind::REQUIRE) && !this.failed) {
+        while (this.check(keyword) && !this.failed) {
             i32 token = this.advance();
-            this.expect(TokenKind::LPAREN, "expected '(' after require");
+            this.expect(TokenKind::LPAREN, "expected '(' after the contract keyword");
             Node* condition = this.parse_expression();
-            this.expect(TokenKind::RPAREN, "expected ')' after the require condition");
+            this.expect(TokenKind::RPAREN, "expected ')' after the contract condition");
             Node* text = Node.create(NodeKind::STRING_LITERAL, token);
             text.set_int_value(this.length_of(token));
             Node* panic = Node.create(NodeKind::INTRINSIC, token);
@@ -463,6 +460,88 @@ impl Parser {
             checks.push((ptr)check);
         }
         return checks;
+    }
+
+    unsafe Node* with_ensures(Node* function, Node* body, PointerList* checks) {
+        if (checks.length == 0 || body == null) {
+            return body;
+        }
+        TypeRef* type = function.type();
+        bool is_void = type == null || type.is_void();
+        this.guard_returns(body, checks, type, is_void);
+        if (is_void) {
+            bool ends_with_return = body.count() > 0 && body.child(body.count() - 1).kind() == NodeKind::RETURN;
+            if (!ends_with_return) {
+                for (mut i32 i = 0; i < checks.length; i = i + 1) {
+                    body.add(Node.clone((Node*)checks.get(i)));
+                }
+            }
+        }
+        return body;
+    }
+
+    unsafe void guard_returns(Node* node, PointerList* checks, TypeRef* type, bool is_void) {
+        if (node.kind() == NodeKind::FUNCTION) {
+            return;
+        }
+        Node* first = node.first();
+        if (first != null) {
+            if (first.kind() == NodeKind::RETURN) {
+                node.set_first(this.guard_return(first, checks, type, is_void));
+            } else {
+                this.guard_returns(first, checks, type, is_void);
+            }
+        }
+        Node* second = node.second();
+        if (second != null) {
+            if (second.kind() == NodeKind::RETURN) {
+                node.set_second(this.guard_return(second, checks, type, is_void));
+            } else {
+                this.guard_returns(second, checks, type, is_void);
+            }
+        }
+        Node* third = node.third();
+        if (third != null) {
+            if (third.kind() == NodeKind::RETURN) {
+                node.set_third(this.guard_return(third, checks, type, is_void));
+            } else {
+                this.guard_returns(third, checks, type, is_void);
+            }
+        }
+        if (node.has_items()) {
+            for (mut i32 i = 0; i < node.count(); i = i + 1) {
+                Node* child = node.child(i);
+                if (child.kind() == NodeKind::RETURN) {
+                    node.set_child(i, this.guard_return(child, checks, type, is_void));
+                } else {
+                    this.guard_returns(child, checks, type, is_void);
+                }
+            }
+        }
+    }
+
+    unsafe Node* guard_return(Node* returned, PointerList* checks, TypeRef* type, bool is_void) {
+        Node* block = Node.create_list(NodeKind::BLOCK, returned.token);
+        if (returned.first() == null) {
+            for (mut i32 i = 0; i < checks.length; i = i + 1) {
+                block.add(Node.clone((Node*)checks.get(i)));
+            }
+            block.add(returned);
+            return block;
+        }
+        Node* declaration = Node.create(NodeKind::VAR_DECL, returned.token);
+        declaration.set_type(type);
+        declaration.set_text("result");
+        declaration.set_first(returned.first());
+        block.add(declaration);
+        for (mut i32 i = 0; i < checks.length; i = i + 1) {
+            block.add(Node.clone((Node*)checks.get(i)));
+        }
+        Node* name = Node.create(NodeKind::IDENTIFIER, returned.token);
+        name.set_text("result");
+        returned.set_first(name);
+        block.add(returned);
+        return block;
     }
 
     unsafe Node* with_requires(i32 token, Node* body, PointerList* checks) {

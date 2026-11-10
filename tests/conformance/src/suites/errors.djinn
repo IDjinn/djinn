@@ -697,6 +697,83 @@ i32 main() {
     }
 
     [Test]
+    void ensure_holds() {
+        str source = """
+i32 clamp(i32 n) ensure(result >= 0) ensure(result <= 10) {
+    if (n < 0) {
+        return 0;
+    }
+    if (n > 10) {
+        return 10;
+    }
+    return n;
+}
+
+i32 main() {
+    return clamp(-5) + clamp(50) + clamp(4) + 28;
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void ensure_violation_panics() {
+        str source = """
+i32 broken(i32 n) ensure(result > 0) {
+    return n;
+}
+
+i32 main() {
+    return broken(0);
+}
+""";
+        Verify.source(source).crashes(Expected.contains("error: ensure").and_contains("at broken"));
+    }
+
+    [Test]
+    void ensure_on_void_function() {
+        str source = """
+void fill(i32* slot, i32 value) ensure(*slot == value) {
+    *slot = value + 1;
+}
+
+unsafe i32 main() {
+    i32 cell = 0;
+    fill(&cell, 3);
+    return 0;
+}
+""";
+        Verify.source(source).crashes(Expected.contains("error: ensure").and_contains("at fill"));
+    }
+
+    [Test]
+    void ensure_with_require_and_throws() {
+        str source = """
+struct Failed;
+
+i32 pick(i32 n) throws(Failed) require(n >= 0) ensure(result < 100) {
+    if (n > 5) {
+        throw Failed();
+    }
+    return n * 2;
+}
+
+i32 main() {
+    i32 v = switch pick(9) {
+        Result r -> 0,
+        Failed e -> 20
+    };
+    i32 w = switch pick(4) {
+        Result r -> 8,
+        Failed e -> 0
+    };
+    return v + w;
+}
+""";
+        Verify.source(source).runs(Expected.exit(28));
+    }
+
+    [Test]
     void pure_function_with_local_writes() {
         str source = """
 [Pure]
