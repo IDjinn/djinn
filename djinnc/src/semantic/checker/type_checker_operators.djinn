@@ -69,9 +69,9 @@ impl TypeChecker {
         }
         if (op == TokenKind::BANG_DOT) {
             u32 nullable = this.check_expression(node.first(), 0);
-            u32 target = this.pointer_type_inside_nullable_type(nullable);
+            u32 target = this.payload_inside_nullable_type(nullable);
             if (target == 0) {
-                this.error_code(node, DiagnosticErrors.INVALID_OPERATOR_OPERAND, "the operand of '!.' must be a nullable pointer");
+                this.error_code(node, DiagnosticErrors.INVALID_OPERATOR_OPERAND, "the operand of '!.' must be a nullable type");
                 return nullable;
             }
             return target;
@@ -364,6 +364,16 @@ impl TypeChecker {
         return Types.is_pointer(other) && (other == target || Types.is_void(Types.element(other)));
     }
 
+    unsafe bool compares_nullable_value_with_null(Node* node, u32 left, u32 right) {
+        SymbolTable* symbols = this.symbols;
+        bool left_is_null = node.first().kind() == NodeKind::NULL_LITERAL;
+        bool right_is_null = node.second().kind() == NodeKind::NULL_LITERAL;
+        if (right_is_null) {
+            return symbols.nullable_value_payload(left) != 0;
+        }
+        return left_is_null && symbols.nullable_value_payload(right) != 0;
+    }
+
     u32 check_binary(Node* node, u32 expected) {
         TokenKind op = node.op_kind();
         if (op == TokenKind::AND_AND || op == TokenKind::OR_OR) {
@@ -380,9 +390,9 @@ impl TypeChecker {
 
         if (op == TokenKind::QUESTION_QUESTION) {
             u32 pointer = this.check_expression(node.first(), expected);
-            u32 pointer_inside_nullable = this.pointer_type_inside_nullable_type(pointer);
+            u32 pointer_inside_nullable = this.payload_inside_nullable_type(pointer);
             if (!Types.is_pointer(pointer) && pointer_inside_nullable == 0) {
-                this.error_code(node, DiagnosticErrors.INVALID_OPERATOR_OPERAND, "the left operand of ?? must be a pointer");
+                this.error_code(node, DiagnosticErrors.INVALID_OPERATOR_OPERAND, "the left operand of ?? must be a nullable type");
                 return pointer;
             }
             u32 fallback = this.check_expression(node.second(), pointer);
@@ -411,7 +421,11 @@ impl TypeChecker {
             right = this.check_expression(node.second(), left);
         }
 
-        if ((op == TokenKind::EQUAL_EQUAL || op == TokenKind::BANG_EQUAL) && this.compares_nullable_pointers(left, right)) {
+        bool is_equality = op == TokenKind::EQUAL_EQUAL || op == TokenKind::BANG_EQUAL;
+        if (is_equality && this.compares_nullable_value_with_null(node, left, right)) {
+            return Types.bool_type();
+        }
+        if (is_equality && this.compares_nullable_pointers(left, right)) {
             return Types.bool_type();
         }
 

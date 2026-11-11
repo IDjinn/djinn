@@ -21,6 +21,9 @@ impl CodeGenerator {
             LLVMBuildStore(this.builder, length, LLVMBuildStructGEP2(this.builder, destination, view, 1, "view.length.ptr"));
             return LLVMBuildLoad2(this.builder, destination, view, "view.value");
         }
+        if (from != 0 && symbols.nullable_value_payload(target) == from) {
+            return this.wrap_in_nullable(ref, from, target);
+        }
         if (Types.is_pointer(from) && symbols.nullable_payload(target) == from) {
             ptr wrapped = this.create_slot(target, "nullable.value");
             LLVMBuildStore(this.builder, ref, LLVMBuildStructGEP2(this.builder, destination, wrapped, 0, "nullable.slot"));
@@ -246,9 +249,8 @@ impl CodeGenerator {
     unsafe Value* gen_coalesce(Node* node) {
         Value* left = this.gen_expression(node.first());
         u32 type = node.value_type();
-        ptr pointer_in_left = this.pointer_inside_nullable_value(left);
-        ptr present = LLVMBuildICmp(this.builder, LlvmConst.INT_NE, pointer_in_left, LLVMConstNull(LLVMTypeOf(pointer_in_left)), "present");
-        mut ptr left_result = pointer_in_left;
+        ptr present = this.nullable_presence(left);
+        mut ptr left_result = this.nullable_content(left);
         if (type == left.type) {
             left_result = left.ref;
         }
@@ -332,10 +334,9 @@ impl CodeGenerator {
             return Value.create(this.pre_evaluated_unwrap_pointer, node.value_type());
         }
         Value* operand = this.gen_expression(node.first());
-        ptr pointer = this.pointer_inside_nullable_value(operand);
-        ptr missing = LLVMBuildICmp(this.builder, LlvmConst.INT_EQ, pointer, LLVMConstNull(LLVMTypeOf(pointer)), "unwrap.null");
+        ptr missing = LLVMBuildNot(this.builder, this.nullable_presence(operand), "unwrap.null");
         this.stop_when(missing, node, RuntimeErrors.NULL_POINTER_UNWRAP);
-        return Value.create(pointer, node.value_type());
+        return Value.create(this.nullable_content(operand), node.value_type());
     }
 
     Value* gen_binary(Node* node) {
@@ -359,6 +360,19 @@ impl CodeGenerator {
         Value* left = this.gen_expression(node.first());
         Value* right = this.gen_expression(node.second());
 
+        SymbolTable* nullables = this.symbols;
+        bool compares_nullable_value = nullables.nullable_value_payload(left.type) != 0 || nullables.nullable_value_payload(right.type) != 0;
+        if ((op == TokenKind::EQUAL_EQUAL || op == TokenKind::BANG_EQUAL) && compares_nullable_value) {
+            mut Value* operand = left;
+            if (nullables.nullable_value_payload(left.type) == 0) {
+                operand = right;
+            }
+            ptr present = this.nullable_presence(operand);
+            if (op == TokenKind::EQUAL_EQUAL) {
+                return Value.create(LLVMBuildNot(this.builder, present, "is.null"), Types.bool_type());
+            }
+            return Value.create(present, Types.bool_type());
+        }
         if ((op == TokenKind::EQUAL_EQUAL || op == TokenKind::BANG_EQUAL)
             && (this.pointer_type_inside_nullable_type(left.type) != 0 || this.pointer_type_inside_nullable_type(right.type) != 0)) {
             ptr pointer_left = this.pointer_inside_nullable_value(left);
