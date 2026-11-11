@@ -248,6 +248,7 @@ keeps the block for diagnostics but injects nothing. A target that is not declar
   / `p.method()` on it check for null and stop with `R10009`. `p!.member` is the same access written out, and is an error on a value that is not
   nullable (E3041). `p?.member` and `p?.method()` yield a nullable pointer (`null` when `p` is null) and need a pointer-typed member; chains such as
   `a?.next?.next` work. `a ?? b` accepts a nullable `a` (`b` is a `T*` or a `T*?`), and `a ??= b` assigns when `a` is null.
+  Converting a `T*?` to a `T*` implicitly compiles with warning W6003; check it against `null` or use `!.`.
 - `nints`, `nintt`, `nintw`, `nintc` are `nint` with an overflow mode, like `i32s` / `i32t` / `i32w` / `i32c`. `nint.MAX_VALUE` and `nint.MIN_VALUE` come from `std`.
 - `Type.method(...)` calls a `static` method declared in `impl Type { }` of a primitive (`i32.clamp(x, 0, 9)`).
 - `str[i]` and `string[i]` read a byte and are bound checked (`R10010`); when the text and the index are constants (`const str`, a literal) the
