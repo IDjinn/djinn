@@ -104,3 +104,4 @@ char* __djinn_list_files(const char* directory, const char* extension)
     return result;
 }
 
+#include "fs_safe.c"

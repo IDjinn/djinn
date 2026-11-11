@@ -1,0 +1,677 @@
+namespace conformance;
+
+import testing;
+import djinnc::testing;
+import djinnc;
+
+struct FilesystemTests {
+    [Test]
+    void path_validation() {
+        str source = """
+import std::types;
+import std::filesystem;
+namespace app;
+
+bool bad(str text, FsError wanted) {
+    return switch Path.parse(text) { Ok v -> false, Error e -> e == wanted };
+}
+
+i32 main() {
+    if (!bad("", FsError::InvalidPath())) { return 1; }
+    if (!bad("a/../../x", FsError::PathEscapes())) { return 2; }
+    if (!bad("..", FsError::PathEscapes())) { return 3; }
+    if (!bad("a//b", FsError::InvalidPath())) { return 4; }
+    if (!bad("a/", FsError::InvalidPath())) { return 5; }
+    if (!bad("a:b", FsError::InvalidPath())) { return 6; }
+    if (!bad("file:stream", FsError::InvalidPath())) { return 7; }
+    if (!bad("dir/CON.txt", FsError::InvalidPath())) { return 8; }
+    if (!bad("lpt1", FsError::InvalidPath())) { return 9; }
+    if (!bad("trailing.", FsError::InvalidPath())) { return 10; }
+    if (!bad("what?", FsError::InvalidPath())) { return 11; }
+
+    bool relative = switch Path.parse("a/./b.txt") { Ok v -> !v.is_absolute(), Error e -> false };
+    if (!relative) { return 12; }
+    bool absolute = switch Path.parse("/etc/passwd") { Ok v -> v.is_absolute(), Error e -> false };
+    if (!absolute) { return 13; }
+    bool drive = switch Path.parse("C:/Users") { Ok v -> v.is_absolute(), Error e -> false };
+    if (!drive) { return 14; }
+    bool name = switch Path.parse("a/b/c.txt") { Ok v -> v.file_name() == "c.txt", Error e -> false };
+    if (!name) { return 15; }
+    bool parent = switch Path.parse("a/b/c.txt") { Ok v -> switch v.parent() { Value q -> q.as_str() == "a/b", Empty -> false }, Error e -> false };
+    if (!parent) { return 16; }
+
+    result<Directory, FsError> root = Directory.open_root_sync(Path.unchecked(".", false));
+    bool refused = switch root {
+        Ok d -> switch d.open_dir_sync(Path.unchecked("/", true)) { Ok x -> false, Error e -> e == FsError::AbsolutePath() },
+        Error e -> false
+    };
+    if (!refused) { return 17; }
+    return 0;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(0));
+    }
+
+    [Test]
+    void directory_capability_lifecycle() {
+        str source = """
+import std::types;
+import std::sys;
+import std::filesystem;
+namespace app;
+
+Path p(str text) {
+    return switch Path.parse(text) { Ok v -> v, Error e -> Path.unchecked("x", false) };
+}
+
+bool is_err(result<bool, FsError> r) {
+    return switch r { Ok v -> false, Error e -> true };
+}
+
+bool fails_with(result<File, FsError> r, FsError wanted) {
+    return switch r { Ok f -> false, Error e -> e == wanted };
+}
+
+i32 main() {
+    Process.run("rd /s /q fsconf_flow 2>nul || rm -rf fsconf_flow");
+    result<Directory, FsError> rootr = Directory.open_root_sync(p("."));
+    return switch rootr {
+        Ok root -> body(&root),
+        Error e -> 1
+    };
+}
+
+i32 body(Directory* root) {
+    if (is_err(root.create_dir_all_sync(p("fsconf_flow/a/b")))) { return 2; }
+    if (is_err(root.create_dir_all_sync(p("fsconf_flow/a/b")))) { return 3; }
+    if (is_err(root.write_atomic_sync(p("fsconf_flow/a/b/f.txt"), "hello"))) { return 4; }
+    result<string, FsError> text = root.read_to_string_sync(p("fsconf_flow/a/b/f.txt"), 1000);
+    i32 len = switch text { Ok s -> (i32)s.length, Error e -> -1 };
+    if (len != 5) { return 5; }
+
+    if (is_err(root.write_atomic_sync(p("fsconf_flow/a/b/f.txt"), "world!"))) { return 6; }
+    result<string, FsError> again = root.read_to_string_sync(p("fsconf_flow/a/b/f.txt"), 1000);
+    i32 len2 = switch again { Ok s -> (i32)s.length, Error e -> -1 };
+    if (len2 != 6) { return 7; }
+    result<string, FsError> capped = root.read_to_string_sync(p("fsconf_flow/a/b/f.txt"), 3);
+    bool too_large = switch capped { Ok s -> false, Error e -> e == FsError::FileTooLarge() };
+    if (!too_large) { return 8; }
+
+    if (!fails_with(root.open_file_sync(p("fsconf_flow/nope"), OpenOptions.read()), FsError::NotFound())) { return 9; }
+    if (!fails_with(root.open_file_sync(p("fsconf_flow/a/b/f.txt"), OpenOptions.create_new()), FsError::AlreadyExists())) { return 10; }
+    if (!fails_with(root.open_file_sync(p("fsconf_flow/a"), OpenOptions.read()), FsError::IsADirectory())) { return 11; }
+
+    result<Directory, FsError> sub = root.open_dir_sync(p("fsconf_flow"));
+    i32 n = switch sub { Ok d -> count_entries(&d), Error e -> -1 };
+    if (n != 1) { return 12; }
+
+    if (is_err(root.rename_sync(p("fsconf_flow/a/b/f.txt"), root, p("fsconf_flow/g.txt"), false))) { return 13; }
+    if (is_err(root.write_atomic_sync(p("fsconf_flow/h.txt"), "x"))) { return 14; }
+    if (!is_err(root.rename_sync(p("fsconf_flow/h.txt"), root, p("fsconf_flow/g.txt"), false))) { return 15; }
+    if (is_err(root.rename_sync(p("fsconf_flow/h.txt"), root, p("fsconf_flow/g.txt"), true))) { return 16; }
+    bool is_file = switch root.metadata_sync(p("fsconf_flow/g.txt")) { Ok m -> m.is_file() && m.size == 1, Error e -> false };
+    if (!is_file) { return 17; }
+    if (is_err(root.remove_file_sync(p("fsconf_flow/g.txt")))) { return 18; }
+    if (!is_err(root.remove_dir_sync(p("fsconf_flow/a")))) { return 19; }
+    if (is_err(root.remove_dir_sync(p("fsconf_flow/a/b")))) { return 20; }
+    if (is_err(root.remove_dir_sync(p("fsconf_flow/a")))) { return 21; }
+    if (is_err(root.remove_dir_sync(p("fsconf_flow")))) { return 22; }
+    return 0;
+}
+
+i32 count_entries(Directory* d) {
+    result<DirEntries, FsError> r = d.entries_sync();
+    return switch r { Ok l -> drain(&l), Error e -> -1 };
+}
+
+i32 drain(DirEntries* l) {
+    mut i32 n = 0;
+    while (true) {
+        optional<DirEntry> e = l.next();
+        bool more = switch e { Value x -> true, Empty -> false };
+        if (!more) { break; }
+        n = n + 1;
+    }
+    return n;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(0));
+    }
+
+    [Test]
+    void symlinks_are_refused_unless_followed() {
+        str source = """
+import std::types;
+import std::sys;
+import std::filesystem;
+namespace app;
+
+Path p(str text) {
+    return switch Path.parse(text) { Ok v -> v, Error e -> Path.unchecked("x", false) };
+}
+
+bool is_err(result<bool, FsError> r) {
+    return switch r { Ok v -> false, Error e -> true };
+}
+
+bool fails_with(result<File, FsError> r, FsError wanted) {
+    return switch r { Ok f -> false, Error e -> e == wanted };
+}
+
+i32 main() {
+    Process.run("rd /s /q fsconf_link 2>nul || rm -rf fsconf_link");
+    result<Directory, FsError> rootr = Directory.open_root_sync(p("."));
+    return switch rootr {
+        Ok root -> body(&root),
+        Error e -> 1
+    };
+}
+
+i32 body(Directory* root) {
+    if (is_err(root.create_dir_all_sync(p("fsconf_link/a/b")))) { return 2; }
+    if (is_err(root.write_atomic_sync(p("fsconf_link/a/b/f.txt"), "hello"))) { return 3; }
+
+    Process.run("cd fsconf_link && mklink /J j a >nul 2>nul || ln -s a j");
+    bool refused = switch root.open_dir_sync(p("fsconf_link/j")) { Ok d -> false, Error e -> e == FsError::SymlinkRefused() };
+    if (!refused) { return 4; }
+    if (!fails_with(root.open_file_sync(p("fsconf_link/j/b/f.txt"), OpenOptions.read()), FsError::SymlinkRefused())) { return 5; }
+    bool followed = switch root.open_file_sync(p("fsconf_link/j/b/f.txt"), OpenOptions.read().following_symlinks()) { Ok f -> true, Error e -> false };
+    if (!followed) { return 6; }
+    bool link = switch root.metadata_sync(p("fsconf_link/j")) { Ok m -> m.is_symlink(), Error e -> false };
+    if (!link) { return 7; }
+    bool target = switch root.metadata_following_sync(p("fsconf_link/j")) { Ok m -> m.is_directory(), Error e -> false };
+    if (!target) { return 8; }
+    if (is_err(root.remove_dir_sync(p("fsconf_link/j"))) && is_err(root.remove_file_sync(p("fsconf_link/j")))) { return 9; }
+    if (is_err(root.remove_file_sync(p("fsconf_link/a/b/f.txt")))) { return 10; }
+    if (is_err(root.remove_dir_sync(p("fsconf_link/a/b")))) { return 11; }
+    if (is_err(root.remove_dir_sync(p("fsconf_link/a")))) { return 12; }
+    if (is_err(root.remove_dir_sync(p("fsconf_link")))) { return 13; }
+    return 0;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(0));
+    }
+
+    [Test]
+    void async_directory_lifecycle() {
+        str source = """
+import std::types;
+import std::sys;
+import std::filesystem;
+namespace app;
+
+Path p(str text) {
+    return switch Path.parse(text) { Ok v -> v, Error e -> Path.unchecked("x", false) };
+}
+
+bool ok(result<bool, FsError> r) {
+    return switch r { Ok v -> v, Error e -> false };
+}
+
+async bool failed(Directory* root, str text) {
+    result<File, FsError> r = await root.open_file(p(text), OpenOptions.read());
+    return switch r { Ok f -> false, Error e -> e == FsError::NotFound() };
+}
+
+async i32 main() {
+    Process.run("rd /s /q fsconf_async 2>nul || rm -rf fsconf_async");
+    result<Directory, FsError> rootr = await Directory.open_root(p("."));
+    return switch rootr {
+        Ok root -> await body(&root),
+        Error e -> 1
+    };
+}
+
+async i32 body(Directory* root) {
+    result<bool, FsError> made = await root.create_dir_all(p("fsconf_async/a/b"));
+    if (!ok(made)) { return 2; }
+
+    result<bool, FsError> saved = await root.write_atomic(p("fsconf_async/a/b/f.txt"), "hello");
+    if (!ok(saved)) { return 3; }
+    result<string, FsError> text = await root.read_to_string(p("fsconf_async/a/b/f.txt"), 1000);
+    i32 len = switch text { Ok s -> (i32)s.length, Error e -> -1 };
+    if (len != 5) { return 4; }
+
+    result<File, FsError> opened = await root.open_file(p("fsconf_async/a/b/f.txt"), OpenOptions.append());
+    i32 appended = switch opened { Ok f -> await append_and_check(&f), Error e -> -1 };
+    if (appended != 0) { return 5; }
+
+    bool missing = await failed(root, "fsconf_async/nope");
+    if (!missing) { return 6; }
+
+    result<Metadata, FsError> info = await root.metadata(p("fsconf_async/a/b/f.txt"));
+    bool sized = switch info { Ok m -> m.is_file() && m.size == 8, Error e -> false };
+    if (!sized) { return 7; }
+
+    result<bool, FsError> moved = await root.rename(p("fsconf_async/a/b/f.txt"), root, p("fsconf_async/g.txt"), false);
+    if (!ok(moved)) { return 8; }
+
+    result<Directory, FsError> sub = await root.open_dir(p("fsconf_async"));
+    i32 count = switch sub { Ok d -> await count_entries(&d), Error e -> -1 };
+    if (count != 2) { return 9; }
+
+    result<bool, FsError> r1 = await root.remove_file(p("fsconf_async/g.txt"));
+    result<bool, FsError> r2 = await root.remove_dir(p("fsconf_async/a/b"));
+    result<bool, FsError> r3 = await root.remove_dir(p("fsconf_async/a"));
+    result<bool, FsError> r4 = await root.remove_dir(p("fsconf_async"));
+    bool cleaned = ok(r1) && ok(r2)
+        && ok(r3) && ok(r4);
+    if (!cleaned) { return 10; }
+    return 0;
+}
+
+async i32 count_entries(Directory* d) {
+    result<DirEntries, FsError> listing = await d.entries();
+    return switch listing { Ok l -> drain(&l), Error e -> -1 };
+}
+
+async i32 append_and_check(File* file) {
+    result<bool, FsError> wrote = await file.write_all("abc");
+    if (!ok(wrote)) { return 1; }
+    result<bool, FsError> synced = await file.sync();
+    if (!ok(synced)) { return 2; }
+    return 0;
+}
+
+i32 drain(DirEntries* l) {
+    mut i32 n = 0;
+    while (true) {
+        optional<DirEntry> e = l.next();
+        bool more = switch e { Value x -> true, Empty -> false };
+        if (!more) { break; }
+        n = n + 1;
+    }
+    return n;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(0));
+    }
+
+    [Test]
+    void large_file_roundtrip_async() {
+        str source = """
+import std::types;
+import std::libc;
+import std::sys;
+import std::filesystem;
+namespace app;
+
+Path p(str text) {
+    return switch Path.parse(text) { Ok v -> v, Error e -> Path.unchecked("x", false) };
+}
+
+bool ok(result<bool, FsError> r) {
+    return switch r { Ok v -> v, Error e -> false };
+}
+
+unsafe i8* make_pattern(i32 size) {
+    i8* data = (i8*)malloc((size_long)size);
+    for (mut i32 i = 0; i < size; i = i + 1) {
+        data[i] = (i8)((i * 31 + (i >> 8)) & 127);
+    }
+    return data;
+}
+
+unsafe bool matches(i8* expected, i8* actual, i32 size) {
+    for (mut i32 i = 0; i < size; i = i + 1) {
+        if (expected[i] != actual[i]) { return false; }
+    }
+    return true;
+}
+
+async i32 main() {
+    Process.run("rd /s /q fsconf_big_async 2>nul || rm -rf fsconf_big_async");
+    result<Directory, FsError> rootr = await Directory.open_root(p("."));
+    return switch rootr {
+        Ok root -> await body(&root),
+        Error e -> 1
+    };
+}
+
+async i32 body(Directory* root) {
+    i32 size = 20971520;
+    if (!ok(await root.create_dir(p("fsconf_big_async")))) { return 2; }
+
+    i8* pattern = make_pattern(size);
+    str payload = { .data = pattern, .length = (size)size };
+
+    result<File, FsError> created = await root.open_file(p("fsconf_big_async/big.bin"), OpenOptions.create());
+    i32 wrote = switch created { Ok f -> await write_all(&f, payload), Error e -> -1 };
+    if (wrote != 0) { return 3; }
+
+    result<Metadata, FsError> info = await root.metadata(p("fsconf_big_async/big.bin"));
+    bool sized = switch info { Ok m -> m.size == (i64)size, Error e -> false };
+    if (!sized) { return 4; }
+
+    result<string, FsError> text = await root.read_to_string(p("fsconf_big_async/big.bin"), (i64)30000000);
+    i32 same = switch text { Ok s -> compare(pattern, s, size), Error e -> -1 };
+    if (same != 0) { return 5; }
+
+    result<string, FsError> capped = await root.read_to_string(p("fsconf_big_async/big.bin"), (i64)1000000);
+    bool refused = switch capped { Ok s -> false, Error e -> e == FsError::FileTooLarge() };
+    if (!refused) { return 6; }
+
+    if (!ok(await root.remove_file(p("fsconf_big_async/big.bin")))) { return 7; }
+    if (!ok(await root.remove_dir(p("fsconf_big_async")))) { return 8; }
+    unsafe { free(pattern); }
+    return 0;
+}
+
+async i32 write_all(File* file, str payload) {
+    result<bool, FsError> r = await file.write_all(payload);
+    return switch r { Ok v -> 0, Error e -> 1 };
+}
+
+i32 compare(i8* expected, string actual, i32 size) {
+    if ((i32)actual.length != size) { return 1; }
+    unsafe {
+        if (!matches(expected, actual.data, size)) { return 2; }
+    }
+    return 0;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(0));
+    }
+
+    [Test]
+    void large_file_roundtrip_sync() {
+        str source = """
+import std::types;
+import std::libc;
+import std::sys;
+import std::filesystem;
+namespace app;
+
+Path p(str text) {
+    return switch Path.parse(text) { Ok v -> v, Error e -> Path.unchecked("x", false) };
+}
+
+bool ok(result<bool, FsError> r) {
+    return switch r { Ok v -> v, Error e -> false };
+}
+
+unsafe i8* make_pattern(i32 size) {
+    i8* data = (i8*)malloc((size_long)size);
+    for (mut i32 i = 0; i < size; i = i + 1) {
+        data[i] = (i8)((i * 31 + (i >> 8)) & 127);
+    }
+    return data;
+}
+
+unsafe bool matches(i8* expected, i8* actual, i32 size) {
+    for (mut i32 i = 0; i < size; i = i + 1) {
+        if (expected[i] != actual[i]) { return false; }
+    }
+    return true;
+}
+
+i32 main() {
+    Process.run("rd /s /q fsconf_big_sync 2>nul || rm -rf fsconf_big_sync");
+    result<Directory, FsError> rootr = Directory.open_root_sync(p("."));
+    return switch rootr {
+        Ok root -> body(&root),
+        Error e -> 1
+    };
+}
+
+i32 body(Directory* root) {
+    i32 size = 20971520;
+    if (!ok(root.create_dir_sync(p("fsconf_big_sync")))) { return 2; }
+
+    i8* pattern = make_pattern(size);
+    str payload = { .data = pattern, .length = (size)size };
+
+    result<File, FsError> created = root.open_file_sync(p("fsconf_big_sync/big.bin"), OpenOptions.create());
+    i32 wrote = switch created { Ok f -> write_all(&f, payload), Error e -> -1 };
+    if (wrote != 0) { return 3; }
+
+    result<string, FsError> text = root.read_to_string_sync(p("fsconf_big_sync/big.bin"), (i64)30000000);
+    i32 same = switch text { Ok s -> compare(pattern, s, size), Error e -> -1 };
+    if (same != 0) { return 4; }
+
+    if (!ok(root.remove_file_sync(p("fsconf_big_sync/big.bin")))) { return 5; }
+    if (!ok(root.remove_dir_sync(p("fsconf_big_sync")))) { return 6; }
+    unsafe { free(pattern); }
+    return 0;
+}
+
+i32 write_all(File* file, str payload) {
+    result<bool, FsError> r = file.write_all_sync(payload);
+    return switch r { Ok v -> 0, Error e -> 1 };
+}
+
+i32 compare(i8* expected, string actual, i32 size) {
+    if ((i32)actual.length != size) { return 1; }
+    unsafe {
+        if (!matches(expected, actual.data, size)) { return 2; }
+    }
+    return 0;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(0));
+    }
+
+    [Test]
+    void random_access_seeded_async() {
+        str source = """
+import std::types;
+import std::libc;
+import std::sys;
+import std::filesystem;
+namespace app;
+
+Path p(str text) {
+    return switch Path.parse(text) { Ok v -> v, Error e -> Path.unchecked("x", false) };
+}
+
+bool ok(result<bool, FsError> r) {
+    return switch r { Ok v -> v, Error e -> false };
+}
+
+i64 mix(i64 seed, i64 i) {
+    i64 x = (i * 1103515245 + seed * 12345 + 12345) & 2147483647;
+    return (x * 1103515245 + 12345) & 2147483647;
+}
+
+unsafe i8* make_zeroed(i32 size) {
+    i8* data = (i8*)malloc((size_long)size);
+    for (mut i32 i = 0; i < size; i = i + 1) { data[i] = 0; }
+    return data;
+}
+
+unsafe void fill(i8* block, i8* model, i64 tag) {
+    for (mut i32 k = 0; k < 512; k = k + 1) {
+        i8 value = (i8)((tag + k) & 127);
+        block[k] = value;
+        model[k] = value;
+    }
+}
+
+unsafe bool matches(i8* expected, i8* actual, i32 size) {
+    for (mut i32 i = 0; i < size; i = i + 1) {
+        if (expected[i] != actual[i]) { return false; }
+    }
+    return true;
+}
+
+i32 compare(i8* expected, string actual, i32 size) {
+    if ((i32)actual.length != size) { return 1; }
+    unsafe {
+        if (!matches(expected, actual.data, size)) { return 2; }
+    }
+    return 0;
+}
+
+async i32 main() {
+    Process.run("rd /s /q fsconf_rand_async 2>nul || rm -rf fsconf_rand_async");
+    result<Directory, FsError> rootr = await Directory.open_root(p("."));
+    return switch rootr {
+        Ok root -> await body(&root),
+        Error e -> 1
+    };
+}
+
+async i32 body(Directory* root) {
+    i32 blocks = 256;
+    i32 size = blocks * 512;
+    if (!ok(await root.create_dir(p("fsconf_rand_async")))) { return 2; }
+    if (await make_file(root, "fsconf_rand_async/data.bin", size) != 0) { return 3; }
+    result<File, FsError> opened = await root.open_file(p("fsconf_rand_async/data.bin"), OpenOptions.read_write());
+    return switch opened { Ok f -> await scatter(root, &f, blocks, size), Error e -> 11 };
+}
+
+async i32 make_file(Directory* root, str path, i32 size) {
+    result<File, FsError> created = await root.open_file(p(path), OpenOptions.create());
+    return switch created { Ok f -> await resize(&f, size), Error e -> 1 };
+}
+
+async i32 resize(File* file, i32 size) {
+    if (!ok(await file.truncate((i64)size))) { return 1; }
+    return 0;
+}
+
+async i32 scatter(Directory* root, File* file, i32 blocks, i32 size) {
+    i8* model = make_zeroed(size);
+    i8* block = make_zeroed(512);
+    for (mut i64 i = 0; i < 2000; i = i + 1) {
+        i64 offset = (mix(42, i) % (i64)blocks) * 512;
+        await file.seek_start(offset);
+        unsafe { fill(block, model + offset, i); }
+        result<i64, FsError> w = await file.write(block, 512);
+        bool wrote = switch w { Ok n -> n == 512, Error e -> false };
+        if (!wrote) { return 5; }
+        if ((mix(42, i) >> 16) % 4 == 0) {
+            i64 back = (mix(7, i) % (i64)blocks) * 512;
+            await file.seek_start(back);
+            result<i64, FsError> r = await file.read(block, 512);
+            bool read = switch r { Ok n -> n == 512, Error e -> false };
+            if (!read) { return 6; }
+            mut bool same = true;
+            unsafe { same = matches(model + back, block, 512); }
+            if (!same) { return 7; }
+        }
+    }
+    result<string, FsError> text = await root.read_to_string(p("fsconf_rand_async/data.bin"), (i64)size);
+    i32 verdict = switch text { Ok s -> compare(model, s, size), Error e -> -1 };
+    if (verdict != 0) { return 8; }
+    if (!ok(await root.remove_file(p("fsconf_rand_async/data.bin")))) { return 9; }
+    if (!ok(await root.remove_dir(p("fsconf_rand_async")))) { return 10; }
+    unsafe { free(model); free(block); }
+    return 0;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(0));
+    }
+
+    [Test]
+    void random_access_seeded_sync() {
+        str source = """
+import std::types;
+import std::libc;
+import std::sys;
+import std::filesystem;
+namespace app;
+
+Path p(str text) {
+    return switch Path.parse(text) { Ok v -> v, Error e -> Path.unchecked("x", false) };
+}
+
+bool ok(result<bool, FsError> r) {
+    return switch r { Ok v -> v, Error e -> false };
+}
+
+i64 mix(i64 seed, i64 i) {
+    i64 x = (i * 1103515245 + seed * 12345 + 12345) & 2147483647;
+    return (x * 1103515245 + 12345) & 2147483647;
+}
+
+unsafe i8* make_zeroed(i32 size) {
+    i8* data = (i8*)malloc((size_long)size);
+    for (mut i32 i = 0; i < size; i = i + 1) { data[i] = 0; }
+    return data;
+}
+
+unsafe void fill(i8* block, i8* model, i64 tag) {
+    for (mut i32 k = 0; k < 512; k = k + 1) {
+        i8 value = (i8)((tag + k) & 127);
+        block[k] = value;
+        model[k] = value;
+    }
+}
+
+unsafe bool matches(i8* expected, i8* actual, i32 size) {
+    for (mut i32 i = 0; i < size; i = i + 1) {
+        if (expected[i] != actual[i]) { return false; }
+    }
+    return true;
+}
+
+i32 compare(i8* expected, string actual, i32 size) {
+    if ((i32)actual.length != size) { return 1; }
+    unsafe {
+        if (!matches(expected, actual.data, size)) { return 2; }
+    }
+    return 0;
+}
+
+i32 main() {
+    Process.run("rd /s /q fsconf_rand_sync 2>nul || rm -rf fsconf_rand_sync");
+    result<Directory, FsError> rootr = Directory.open_root_sync(p("."));
+    return switch rootr {
+        Ok root -> body(&root),
+        Error e -> 1
+    };
+}
+
+i32 body(Directory* root) {
+    i32 blocks = 256;
+    i32 size = blocks * 512;
+    if (!ok(root.create_dir_sync(p("fsconf_rand_sync")))) { return 2; }
+    if (make_file(root, "fsconf_rand_sync/data.bin", size) != 0) { return 3; }
+    result<File, FsError> opened = root.open_file_sync(p("fsconf_rand_sync/data.bin"), OpenOptions.read_write());
+    return switch opened { Ok f -> scatter(root, &f, blocks, size), Error e -> 11 };
+}
+
+i32 make_file(Directory* root, str path, i32 size) {
+    result<File, FsError> created = root.open_file_sync(p(path), OpenOptions.create());
+    return switch created { Ok f -> resize(&f, size), Error e -> 1 };
+}
+
+i32 resize(File* file, i32 size) {
+    if (!ok(file.truncate_sync((i64)size))) { return 1; }
+    return 0;
+}
+
+i32 scatter(Directory* root, File* file, i32 blocks, i32 size) {
+    i8* model = make_zeroed(size);
+    i8* block = make_zeroed(512);
+    for (mut i64 i = 0; i < 2000; i = i + 1) {
+        i64 offset = (mix(42, i) % (i64)blocks) * 512;
+        file.seek_start_sync(offset);
+        unsafe { fill(block, model + offset, i); }
+        result<i64, FsError> w = file.write_sync(block, 512);
+        bool wrote = switch w { Ok n -> n == 512, Error e -> false };
+        if (!wrote) { return 5; }
+        if ((mix(42, i) >> 16) % 4 == 0) {
+            i64 back = (mix(7, i) % (i64)blocks) * 512;
+            file.seek_start_sync(back);
+            result<i64, FsError> r = file.read_sync(block, 512);
+            bool read = switch r { Ok n -> n == 512, Error e -> false };
+            if (!read) { return 6; }
+            mut bool same = true;
+            unsafe { same = matches(model + back, block, 512); }
+            if (!same) { return 7; }
+        }
+    }
+    result<string, FsError> text = root.read_to_string_sync(p("fsconf_rand_sync/data.bin"), (i64)size);
+    i32 verdict = switch text { Ok s -> compare(model, s, size), Error e -> -1 };
+    if (verdict != 0) { return 8; }
+    if (!ok(root.remove_file_sync(p("fsconf_rand_sync/data.bin")))) { return 9; }
+    if (!ok(root.remove_dir_sync(p("fsconf_rand_sync")))) { return 10; }
+    unsafe { free(model); free(block); }
+    return 0;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(0));
+    }
+}
