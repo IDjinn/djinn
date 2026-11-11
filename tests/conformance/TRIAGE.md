@@ -2,15 +2,15 @@
 
 Gerado por `tests/conformance/port_gtests.py` e depois fechado à mão: cada `TEST` foi extraído e executado no djinnc, e a decisão sai do
 resultado. Os fontes C++ saíram do repositório (estão em `31b1a47^`), então a tabela agora é mantida à mão. Só entram testes em Djinn.
-Os 45 bloqueados dependem de recursos que o djinnc ainda não tem (contratos, tipos non-zero, ponteiros anuláveis, `nint` com sufixos).
+Os 30 bloqueados dependem de recursos que o djinnc ainda não tem (contratos e tipos non-zero).
 
 | Decisão | Testes | O que significa |
 |---|---|---|
 | Portar | 459 | Passa no djinnc; está em `tests/conformance/src/suites`, como `[Test]`. |
-| Reescrito | 119 | O comportamento importa e o teste foi reescrito à mão (IR, avaliação constante, pilha, vários arquivos); o destino está no motivo. |
+| Reescrito | 138 | O comportamento importa e o teste foi reescrito à mão (IR, avaliação constante, pilha, vários arquivos); o destino está no motivo. |
 | Reescrever | 0 | O comportamento importa, mas o teste ainda precisa de outra forma. |
-| Bloqueado | 45 | O djinnc não reproduz o comportamento; falta decidir se implementa ou se o recurso sai. |
-| Descartar | 100 | Interno do stage0 ou duplicado. |
+| Bloqueado | 30 | O djinnc não reproduz o comportamento; falta decidir se implementa ou se o recurso sai. |
+| Descartar | 96 | Interno do stage0 ou duplicado. |
 
 ## O que bloqueia
 
@@ -18,21 +18,15 @@ Os 45 bloqueados dependem de recursos que o djinnc ainda não tem (contratos, ti
 |---|---|
 | contratos | 20 |
 | tipos non-zero | 10 |
-| `?.`, `!.`, `??=` não existem e `??` só vale em ponteiro não anulável | 7 |
-| `nint` não tem `MAX_VALUE` nem sufixos de overflow | 3 |
-| ponteiro anulável | 2 |
-| `str` não define `get[]` | 1 |
-| `impl i32 { static ... }` não é chamável como `i32.clamp(...)`: o djinnc lê `i32` como variável | 1 |
-| o djinnc aceita `mut const` sem erro | 1 |
 
 ## aggregates
 
 | Teste | Decisão | Motivo |
 |---|---|---|
-| Destructuring.BasicStructFields | Descartar | desestruturação é proibida no djinnc (`SUBSET.md`, Forbidden) |
-| Destructuring.VariablesVisibleInEnclosingScope | Descartar | desestruturação é proibida no djinnc (`SUBSET.md`, Forbidden) |
-| Destructuring.SingleField | Descartar | desestruturação é proibida no djinnc (`SUBSET.md`, Forbidden) |
-| Destructuring.FromExpression | Descartar | desestruturação é proibida no djinnc (`SUBSET.md`, Forbidden) |
+| Destructuring.BasicStructFields | Reescrito | `ImplTests.destructuring_declares_fields_in_the_enclosing_scope` |
+| Destructuring.VariablesVisibleInEnclosingScope | Reescrito | `ImplTests.destructuring_declares_fields_in_the_enclosing_scope` |
+| Destructuring.SingleField | Reescrito | `ImplTests.destructuring_declares_fields_in_the_enclosing_scope` |
+| Destructuring.FromExpression | Reescrito | `ImplTests.destructuring_declares_fields_in_the_enclosing_scope` |
 | Destructuring.BareBlockStillIntroducesScope | Portar | erro E3002 |
 | Enum.SimpleDefinition | Portar | exit code 0 |
 | Enum.VariantConstruction | Portar | exit code 0 |
@@ -75,7 +69,7 @@ Os 45 bloqueados dependem de recursos que o djinnc ainda não tem (contratos, ti
 | Str.LenField | Portar | exit code 10 |
 | Str.IsEmptyMethodTrue | Portar | exit code 1 |
 | Str.IsEmptyMethodFalse | Portar | exit code 0 |
-| Str.IndexAccess | Bloqueado | `str` não define `get[]` |
+| Str.IndexAccess | Reescrito | `StdTests.str_and_string_indexers_read_bytes` |
 | Str.PassAsParameter | Portar | exit code 4 |
 | Arr.LiteralCreatesArrStruct | Portar | exit code 3 |
 | Arr.IndexRead | Portar | exit code 20 |
@@ -107,7 +101,7 @@ Os 45 bloqueados dependem de recursos que o djinnc ainda não tem (contratos, ti
 | Impl.ConstFieldWithArithmetic | Portar | exit code 36 |
 | Impl.MethodOnStruct | Portar | exit code 42 |
 | Impl.ConstAndMethodTogether | Portar | exit code 30 |
-| Impl.StaticMethodOnPrimitive | Bloqueado | `impl i32 { static ... }` não é chamável como `i32.clamp(...)`: o djinnc lê `i32` como variável |
+| Impl.StaticMethodOnPrimitive | Reescrito | `TypeParameterTests.static_method_on_primitive_type` |
 
 ## arithmetic
 
@@ -393,8 +387,8 @@ Os 45 bloqueados dependem de recursos que o djinnc ainda não tem (contratos, ti
 | BootstrapSubset.PointerParameterFieldReadWrite | Portar | exit code 42 |
 | BootstrapSubset.PointerLocalMethodCall | Portar | exit code 2 |
 | BootstrapSubset.PointerParameterInMethod | Portar | exit code 10 |
-| BootstrapSubset.NullableLinkedListTraversal | Bloqueado | ponteiro anulável (`T*?`) não compara com `null` nem acessa campo no djinnc |
-| BootstrapSubset.LogicalOperatorsShortCircuit | Bloqueado | ponteiro anulável (`T*?`) não compara com `null` nem acessa campo no djinnc |
+| BootstrapSubset.NullableLinkedListTraversal | Reescrito | `NullablePointerTests.walk_linked_list` |
+| BootstrapSubset.LogicalOperatorsShortCircuit | Reescrito | `NullablePointerTests.condition_with_member` |
 | BootstrapSubset.PointerArrayOfStructPointers | Portar | exit code 6 |
 | BootstrapSubset.StructTypesVisibleAcrossFiles | Reescrito | `BootstrapSubsetFilesTests.StructTypesVisibleAcrossFiles`; sem `namespace`: um tipo de namespace de outro arquivo ainda não resolve (E3001) |
 | Diagnostics.BasicError | Descartar | testa a formatação do DiagnosticEngine do stage0 |
@@ -734,7 +728,7 @@ Os 45 bloqueados dependem de recursos que o djinnc ainda não tem (contratos, ti
 | ConstField.ConstFieldDoesNotAffectStructLayout | Portar | exit code 20 |
 | ConstField.ConstFieldAccessViaInstance | Reescrito | `language_rules.djinn` StructRuleTests.a_const_field_is_not_reachable_through_an_instance |
 | ConstField.ConstFieldNegativeValue | Portar | exit code 9 |
-| ConstField.MutAndConstError | Bloqueado | o djinnc aceita `mut const` sem erro |
+| ConstField.MutAndConstError | Reescrito | `ErrorsTests.mutable_constant_is_error` |
 | ConstField.ConstFieldWithoutInitializerError | Portar | erro E2001 |
 | ConstField.MultipleConstFields | Portar | exit code 3 |
 | ConstField.ConstFieldWithMixedRegularFields | Portar | exit code 100 |
@@ -755,11 +749,11 @@ Os 45 bloqueados dependem de recursos que o djinnc ainda não tem (contratos, ti
 | NativeTypes.NdoubleIsF64 | Reescrito | `NativeTypesIrTests.NdoubleIsF64` |
 | NativeTypes.NintMixesWithI64 | Portar | compila sem erros |
 | NativeTypes.TypeofShowsNativeName | Descartar | `typeof(expressão)` não existe; `typeof(Tipo)` devolve um `TypeInfo*` (SizeofTypeofTests.typeof_reports_the_kind_of_a_type) |
-| NativeTypes.NintMaxValueConstant | Bloqueado | `nint` não tem `MAX_VALUE` nem sufixos de overflow (`nints`, `nintt`) no djinnc |
-| NativeTypes.NintTakesOverflowSuffixes | Bloqueado | `nint` não tem `MAX_VALUE` nem sufixos de overflow (`nints`, `nintt`) no djinnc |
+| NativeTypes.NintMaxValueConstant | Reescrito | `TypeParameterTests.native_integer_limits` |
+| NativeTypes.NintTakesOverflowSuffixes | Reescrito | `TypeParameterTests.native_integer_with_overflow_suffixes` |
 | NativeTypes.NfloatTypeofShowsNativeName | Descartar | `typeof(expressão)` não existe; `typeof(Tipo)` devolve um `TypeInfo*` (SizeofTypeofTests.typeof_reports_the_kind_of_a_type) |
 | NativeTypes.NdoubleTypeofShowsNativeName | Descartar | `typeof(expressão)` não existe; `typeof(Tipo)` devolve um `TypeInfo*` (SizeofTypeofTests.typeof_reports_the_kind_of_a_type) |
-| NativeTypes.NintSaturatingArithmetic | Bloqueado | `nint` não tem `MAX_VALUE` nem sufixos de overflow (`nints`, `nintt`) no djinnc |
+| NativeTypes.NintSaturatingArithmetic | Reescrito | `TypeParameterTests.native_integer_with_overflow_suffixes` |
 | NativeTypes.NintNegation | Portar | exit code 5 |
 | NativeTypes.NintAsFunctionSignature | Portar | exit code 42 |
 | NativeTypes.NfloatNdoubleArithmetic | Portar | compila sem erros |
@@ -791,15 +785,15 @@ Os 45 bloqueados dependem de recursos que o djinnc ainda não tem (contratos, ti
 | Nullable.NullLiteralForbiddenOnNonNullableStruct | Portar | erro E3053 |
 | Nullable.NullLiteralForbiddenOnNonNullablePointer | Portar | erro E3053 |
 | Nullable.NullLiteralForbiddenOnInteger | Portar | erro E3053 |
-| Nullable.NullableArraySyntax | Bloqueado | `?.`, `!.`, `??=` não existem e `??` só vale em ponteiro não anulável |
+| Nullable.NullableArraySyntax | Reescrito | `NullablePointerTests.nullable_array_compares_unwraps_and_coalesces` |
 | Nullable.ReassignNullToNullableMutVariable | Portar | compila sem erros |
 | Nullable.ReassignNullToNonNullableErrors | Portar | erro E3053 |
-| Nullable.NullCoalescingParsesAndCompiles | Bloqueado | `?.`, `!.`, `??=` não existem e `??` só vale em ponteiro não anulável |
-| Nullable.NullCoalescingAssignmentDesugars | Bloqueado | `?.`, `!.`, `??=` não existem e `??` só vale em ponteiro não anulável |
-| Nullable.NullConditionalFieldAccessParses | Bloqueado | `?.`, `!.`, `??=` não existem e `??` só vale em ponteiro não anulável |
-| Nullable.NullForgivingFieldAccessParses | Bloqueado | `?.`, `!.`, `??=` não existem e `??` só vale em ponteiro não anulável |
-| Nullable.CastNonNullableToNullableAllowed | Bloqueado | `?.`, `!.`, `??=` não existem e `??` só vale em ponteiro não anulável |
-| Nullable.CastNullableToNonNullableEmitsWarning | Bloqueado | `?.`, `!.`, `??=` não existem e `??` só vale em ponteiro não anulável |
+| Nullable.NullCoalescingParsesAndCompiles | Reescrito | `NullablePointerTests.coalesce_nullable_pointer` |
+| Nullable.NullCoalescingAssignmentDesugars | Reescrito | `NullablePointerTests.coalesce_assignment` |
+| Nullable.NullConditionalFieldAccessParses | Reescrito | `NullablePointerTests.conditional_member_access` |
+| Nullable.NullForgivingFieldAccessParses | Reescrito | `NullablePointerTests.assert_non_null` |
+| Nullable.CastNonNullableToNullableAllowed | Reescrito | `NullablePointerTests.compare_with_null` |
+| Nullable.CastNullableToNonNullableEmitsWarning | Reescrito | `NullablePointerTests.nullable_pointer_converted_to_non_nullable_warns` |
 | Nullable.CastNullableToNullableNoWarning | Portar | compila sem erros |
 | Nullable.CastIntegerToPointerNoWarning | Portar | compila sem erros |
 | PointerCompat.VoidToTyped | Portar | compila sem erros |
