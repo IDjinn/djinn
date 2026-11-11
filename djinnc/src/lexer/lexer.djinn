@@ -36,6 +36,8 @@ struct Lexer {
             i32 c = this.peek(0);
             if (c == 34) {
                 this.read_string(false);
+            } else if (c == 39) {
+                this.read_char_literal();
             } else if (c == 36 && this.at_interpolated_string()) {
                 this.read_interpolated_string();
             } else if (Strings.is_digit(c)) {
@@ -55,6 +57,12 @@ struct Lexer {
         SourceFile* file = this.file;
         Diagnostics* diagnostics = this.diagnostics;
         diagnostics.error(DiagnosticErrors.LEXER, (i32)file.line_of((u32)offset), (i32)file.column_of((u32)offset), message);
+    }
+
+    void char_error(i32 offset, ptr<i8> message) {
+        SourceFile* file = this.file;
+        Diagnostics* diagnostics = this.diagnostics;
+        diagnostics.error(DiagnosticErrors.INVALID_CHAR_LITERAL, (i32)file.line_of((u32)offset), (i32)file.column_of((u32)offset), message);
     }
 
     unsafe i32 peek(i32 offset) {
@@ -409,6 +417,95 @@ struct Lexer {
         this.finish_interpolation_close(start);
         this.emit_text(TokenKind::INTERP_FORMAT, spec, format_start);
         spec.length = 0;
+    }
+
+    i32 continuation_bits() {
+        return this.advance() & 63;
+    }
+
+    i32 read_unicode_escape(i32 start) {
+        mut i32 code_point = 0;
+        if (this.peek(0) != 123) {
+            this.char_error(start, "expected a brace after the unicode escape in a char literal");
+            return 0;
+        }
+        this.advance();
+        while (this.pos < this.length && this.peek(0) != 125 && this.peek(0) != 39) {
+            i32 digit = this.advance();
+            mut i32 value = 0;
+            if (digit >= 48 && digit <= 57) {
+                value = digit - 48;
+            } else if (digit >= 97 && digit <= 102) {
+                value = digit - 87;
+            } else if (digit >= 65 && digit <= 70) {
+                value = digit - 55;
+            } else {
+                this.char_error(start, "invalid hexadecimal digit in a char literal");
+            }
+            code_point = code_point * 16 + value;
+        }
+        if (this.peek(0) == 125) {
+            this.advance();
+        } else {
+            this.char_error(start, "the unicode escape is not closed");
+        }
+        return code_point;
+    }
+
+    i32 read_char_code_point(i32 start) {
+        i32 lead = this.peek(0) & 255;
+        if (lead == 92) {
+            this.advance();
+            i32 escaped = this.advance();
+            if (escaped == 110) { return 10; }
+            if (escaped == 116) { return 9; }
+            if (escaped == 114) { return 13; }
+            if (escaped == 48) { return 0; }
+            if (escaped == 117) { return this.read_unicode_escape(start); }
+            return escaped;
+        }
+        this.advance();
+        if (lead < 128) {
+            return lead;
+        }
+        if (lead < 224) {
+            return ((lead & 31) << 6) | this.continuation_bits();
+        }
+        if (lead < 240) {
+            i32 high = (lead & 15) << 12;
+            i32 middle = this.continuation_bits() << 6;
+            return high | middle | this.continuation_bits();
+        }
+        i32 top = (lead & 7) << 18;
+        i32 upper = this.continuation_bits() << 12;
+        i32 lower = this.continuation_bits() << 6;
+        return top | upper | lower | this.continuation_bits();
+    }
+
+    void read_char_literal() {
+        i32 start = this.pos;
+        this.advance();
+        if (this.pos >= this.length || this.peek(0) == 39) {
+            this.char_error(start, "empty char literal");
+            if (this.peek(0) == 39) {
+                this.advance();
+            }
+            return;
+        }
+        i32 code_point = this.read_char_code_point(start);
+        if (this.peek(0) != 39) {
+            this.char_error(start, "a char literal holds exactly one character");
+            while (this.pos < this.length && this.peek(0) != 39 && this.peek(0) != 10) {
+                this.advance();
+            }
+        }
+        if (this.peek(0) == 39) {
+            this.advance();
+        }
+        ByteBuffer* value = this.scratch;
+        value.length = 0;
+        value.append_int((i64)code_point);
+        this.emit_text(TokenKind::CHAR_LITERAL, value, start);
     }
 
     void emit_text(TokenKind kind, ByteBuffer* value, i32 start) {
