@@ -1146,3 +1146,187 @@ int64_t __djinn_fs_temp_name(const char* leaf, int64_t leaf_length, char* out, i
     int written = snprintf(out, (size_t)capacity, ".%.*s.%016llx.tmp", (int)leaf_length, leaf, (unsigned long long)mix);
     return written < 0 ? -DJFS_INVALID_ARGUMENT : written;
 }
+
+// Asynchronous submission. A request runs the blocking call above on a small worker pool; the caller polls it from a
+// coroutine (suspending between polls) and then collects the result, so the scheduler never blocks on the disk.
+
+#define DJFS_OP_OPEN_ROOT 1
+#define DJFS_OP_OPEN_DIR 2
+#define DJFS_OP_OPEN_FILE 3
+#define DJFS_OP_CLOSE 4
+#define DJFS_OP_READ 5
+#define DJFS_OP_WRITE 6
+#define DJFS_OP_SEEK 7
+#define DJFS_OP_TRUNCATE 8
+#define DJFS_OP_SYNC 9
+#define DJFS_OP_FSTAT 10
+#define DJFS_OP_STAT 11
+#define DJFS_OP_MKDIR 12
+#define DJFS_OP_REMOVE 13
+#define DJFS_OP_RENAME 14
+#define DJFS_OP_LIST_OPEN 15
+
+#define DJFS_WORKERS 4
+
+typedef struct djfs_request
+{
+    int32_t op;
+    int64_t args[7];
+    int64_t result;
+    volatile int32_t done;
+    struct djfs_request* next;
+} djfs_request;
+
+static djfs_request* djfs_queue_head;
+static djfs_request* djfs_queue_tail;
+
+static int64_t djfs_execute(const djfs_request* request)
+{
+    const int64_t* a = request->args;
+    switch (request->op)
+    {
+    case DJFS_OP_OPEN_ROOT: return __djinn_fs_open_root((const char*)(intptr_t)a[0], a[1], (int32_t)a[2]);
+    case DJFS_OP_OPEN_DIR: return __djinn_fs_open_dir(a[0], (const char*)(intptr_t)a[1], a[2], (int32_t)a[3]);
+    case DJFS_OP_OPEN_FILE: return __djinn_fs_open_file(a[0], (const char*)(intptr_t)a[1], a[2], (int32_t)a[3], (int32_t)a[4]);
+    case DJFS_OP_CLOSE: return __djinn_fs_close(a[0]);
+    case DJFS_OP_READ: return __djinn_fs_read(a[0], (void*)(intptr_t)a[1], a[2]);
+    case DJFS_OP_WRITE: return __djinn_fs_write(a[0], (const void*)(intptr_t)a[1], a[2]);
+    case DJFS_OP_SEEK: return __djinn_fs_seek(a[0], a[1], (int32_t)a[2]);
+    case DJFS_OP_TRUNCATE: return __djinn_fs_truncate(a[0], a[1]);
+    case DJFS_OP_SYNC: return __djinn_fs_sync(a[0]);
+    case DJFS_OP_FSTAT: return __djinn_fs_fstat(a[0], (int64_t*)(intptr_t)a[1]);
+    case DJFS_OP_STAT: return __djinn_fs_stat(a[0], (const char*)(intptr_t)a[1], a[2], (int32_t)a[3], (int64_t*)(intptr_t)a[4]);
+    case DJFS_OP_MKDIR: return __djinn_fs_mkdir(a[0], (const char*)(intptr_t)a[1], a[2], (int32_t)a[3]);
+    case DJFS_OP_REMOVE: return __djinn_fs_remove(a[0], (const char*)(intptr_t)a[1], a[2], (int32_t)a[3]);
+    case DJFS_OP_RENAME:
+        return __djinn_fs_rename(a[0], (const char*)(intptr_t)a[1], a[2], a[3], (const char*)(intptr_t)a[4], a[5], (int32_t)a[6]);
+    case DJFS_OP_LIST_OPEN: return __djinn_fs_list_open(a[0]);
+    }
+    return -DJFS_INVALID_ARGUMENT;
+}
+
+#ifdef _WIN32
+
+static CRITICAL_SECTION djfs_lock;
+static CONDITION_VARIABLE djfs_wake;
+static INIT_ONCE djfs_once = INIT_ONCE_STATIC_INIT;
+
+static DWORD WINAPI djfs_worker(LPVOID unused)
+{
+    (void)unused;
+    for (;;)
+    {
+        EnterCriticalSection(&djfs_lock);
+        while (!djfs_queue_head) SleepConditionVariableCS(&djfs_wake, &djfs_lock, INFINITE);
+        djfs_request* request = djfs_queue_head;
+        djfs_queue_head = request->next;
+        if (!djfs_queue_head) djfs_queue_tail = NULL;
+        LeaveCriticalSection(&djfs_lock);
+        request->result = djfs_execute(request);
+        MemoryBarrier();
+        request->done = 1;
+    }
+    return 0;
+}
+
+static BOOL CALLBACK djfs_start(PINIT_ONCE once, PVOID parameter, PVOID* context)
+{
+    (void)once; (void)parameter; (void)context;
+    InitializeCriticalSection(&djfs_lock);
+    InitializeConditionVariable(&djfs_wake);
+    for (int i = 0; i < DJFS_WORKERS; i++)
+    {
+        HANDLE thread = CreateThread(NULL, 0, djfs_worker, NULL, 0, NULL);
+        if (thread) CloseHandle(thread);
+    }
+    return TRUE;
+}
+
+static void djfs_enqueue(djfs_request* request)
+{
+    InitOnceExecuteOnce(&djfs_once, djfs_start, NULL, NULL);
+    EnterCriticalSection(&djfs_lock);
+    if (djfs_queue_tail) djfs_queue_tail->next = request;
+    else djfs_queue_head = request;
+    djfs_queue_tail = request;
+    WakeConditionVariable(&djfs_wake);
+    LeaveCriticalSection(&djfs_lock);
+}
+
+#else
+
+static pthread_mutex_t djfs_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t djfs_wake = PTHREAD_COND_INITIALIZER;
+static pthread_once_t djfs_once = PTHREAD_ONCE_INIT;
+
+static void* djfs_worker(void* unused)
+{
+    (void)unused;
+    for (;;)
+    {
+        pthread_mutex_lock(&djfs_lock);
+        while (!djfs_queue_head) pthread_cond_wait(&djfs_wake, &djfs_lock);
+        djfs_request* request = djfs_queue_head;
+        djfs_queue_head = request->next;
+        if (!djfs_queue_head) djfs_queue_tail = NULL;
+        pthread_mutex_unlock(&djfs_lock);
+        request->result = djfs_execute(request);
+        __atomic_store_n(&request->done, 1, __ATOMIC_RELEASE);
+    }
+    return NULL;
+}
+
+static void djfs_start(void)
+{
+    for (int i = 0; i < DJFS_WORKERS; i++)
+    {
+        pthread_t thread;
+        if (pthread_create(&thread, NULL, djfs_worker, NULL) == 0) pthread_detach(thread);
+    }
+}
+
+static void djfs_enqueue(djfs_request* request)
+{
+    pthread_once(&djfs_once, djfs_start);
+    pthread_mutex_lock(&djfs_lock);
+    if (djfs_queue_tail) djfs_queue_tail->next = request;
+    else djfs_queue_head = request;
+    djfs_queue_tail = request;
+    pthread_cond_signal(&djfs_wake);
+    pthread_mutex_unlock(&djfs_lock);
+}
+
+#endif
+
+int64_t __djinn_fs_submit(int32_t op, int64_t a0, int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5, int64_t a6)
+{
+    djfs_request* request = (djfs_request*)calloc(1, sizeof(djfs_request));
+    if (!request) return -DJFS_OUT_OF_MEMORY;
+    request->op = op;
+    request->args[0] = a0;
+    request->args[1] = a1;
+    request->args[2] = a2;
+    request->args[3] = a3;
+    request->args[4] = a4;
+    request->args[5] = a5;
+    request->args[6] = a6;
+    djfs_enqueue(request);
+    return (int64_t)(intptr_t)request;
+}
+
+int32_t __djinn_fs_poll(int64_t handle)
+{
+#ifdef _WIN32
+    return ((djfs_request*)(intptr_t)handle)->done != 0;
+#else
+    return __atomic_load_n(&((djfs_request*)(intptr_t)handle)->done, __ATOMIC_ACQUIRE) != 0;
+#endif
+}
+
+int64_t __djinn_fs_finish(int64_t handle)
+{
+    djfs_request* request = (djfs_request*)(intptr_t)handle;
+    int64_t result = request->result;
+    free(request);
+    return result;
+}

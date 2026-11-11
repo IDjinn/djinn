@@ -40,9 +40,9 @@ i32 main() {
     bool parent = switch Path.parse("a/b/c.txt") { Ok v -> switch v.parent() { Value q -> q.as_str() == "a/b", Empty -> false }, Error e -> false };
     if (!parent) { return 16; }
 
-    result<Directory, FsError> root = Directory.open_root(Path.unchecked(".", false));
+    result<Directory, FsError> root = Directory.open_root_sync(Path.unchecked(".", false));
     bool refused = switch root {
-        Ok d -> switch d.open_dir(Path.unchecked("/", true)) { Ok x -> false, Error e -> e == FsError::AbsolutePath() },
+        Ok d -> switch d.open_dir_sync(Path.unchecked("/", true)) { Ok x -> false, Error e -> e == FsError::AbsolutePath() },
         Error e -> false
     };
     if (!refused) { return 17; }
@@ -74,7 +74,7 @@ bool fails_with(result<File, FsError> r, FsError wanted) {
 
 i32 main() {
     Process.run("rd /s /q fsconf_flow 2>nul || rm -rf fsconf_flow");
-    result<Directory, FsError> rootr = Directory.open_root(p("."));
+    result<Directory, FsError> rootr = Directory.open_root_sync(p("."));
     return switch rootr {
         Ok root -> body(&root),
         Error e -> 1
@@ -82,45 +82,45 @@ i32 main() {
 }
 
 i32 body(Directory* root) {
-    if (is_err(root.create_dir_all(p("fsconf_flow/a/b")))) { return 2; }
-    if (is_err(root.create_dir_all(p("fsconf_flow/a/b")))) { return 3; }
-    if (is_err(root.write_atomic(p("fsconf_flow/a/b/f.txt"), "hello"))) { return 4; }
-    result<string, FsError> text = root.read_to_string(p("fsconf_flow/a/b/f.txt"), 1000);
+    if (is_err(root.create_dir_all_sync(p("fsconf_flow/a/b")))) { return 2; }
+    if (is_err(root.create_dir_all_sync(p("fsconf_flow/a/b")))) { return 3; }
+    if (is_err(root.write_atomic_sync(p("fsconf_flow/a/b/f.txt"), "hello"))) { return 4; }
+    result<string, FsError> text = root.read_to_string_sync(p("fsconf_flow/a/b/f.txt"), 1000);
     i32 len = switch text { Ok s -> (i32)s.length, Error e -> -1 };
     if (len != 5) { return 5; }
 
-    if (is_err(root.write_atomic(p("fsconf_flow/a/b/f.txt"), "world!"))) { return 6; }
-    result<string, FsError> again = root.read_to_string(p("fsconf_flow/a/b/f.txt"), 1000);
+    if (is_err(root.write_atomic_sync(p("fsconf_flow/a/b/f.txt"), "world!"))) { return 6; }
+    result<string, FsError> again = root.read_to_string_sync(p("fsconf_flow/a/b/f.txt"), 1000);
     i32 len2 = switch again { Ok s -> (i32)s.length, Error e -> -1 };
     if (len2 != 6) { return 7; }
-    result<string, FsError> capped = root.read_to_string(p("fsconf_flow/a/b/f.txt"), 3);
+    result<string, FsError> capped = root.read_to_string_sync(p("fsconf_flow/a/b/f.txt"), 3);
     bool too_large = switch capped { Ok s -> false, Error e -> e == FsError::FileTooLarge() };
     if (!too_large) { return 8; }
 
-    if (!fails_with(root.open_file(p("fsconf_flow/nope"), OpenOptions.read()), FsError::NotFound())) { return 9; }
-    if (!fails_with(root.open_file(p("fsconf_flow/a/b/f.txt"), OpenOptions.create_new()), FsError::AlreadyExists())) { return 10; }
-    if (!fails_with(root.open_file(p("fsconf_flow/a"), OpenOptions.read()), FsError::IsADirectory())) { return 11; }
+    if (!fails_with(root.open_file_sync(p("fsconf_flow/nope"), OpenOptions.read()), FsError::NotFound())) { return 9; }
+    if (!fails_with(root.open_file_sync(p("fsconf_flow/a/b/f.txt"), OpenOptions.create_new()), FsError::AlreadyExists())) { return 10; }
+    if (!fails_with(root.open_file_sync(p("fsconf_flow/a"), OpenOptions.read()), FsError::IsADirectory())) { return 11; }
 
-    result<Directory, FsError> sub = root.open_dir(p("fsconf_flow"));
+    result<Directory, FsError> sub = root.open_dir_sync(p("fsconf_flow"));
     i32 n = switch sub { Ok d -> count_entries(&d), Error e -> -1 };
     if (n != 1) { return 12; }
 
-    if (is_err(root.rename(p("fsconf_flow/a/b/f.txt"), root, p("fsconf_flow/g.txt"), false))) { return 13; }
-    if (is_err(root.write_atomic(p("fsconf_flow/h.txt"), "x"))) { return 14; }
-    if (!is_err(root.rename(p("fsconf_flow/h.txt"), root, p("fsconf_flow/g.txt"), false))) { return 15; }
-    if (is_err(root.rename(p("fsconf_flow/h.txt"), root, p("fsconf_flow/g.txt"), true))) { return 16; }
-    bool is_file = switch root.metadata(p("fsconf_flow/g.txt")) { Ok m -> m.is_file() && m.size == 1, Error e -> false };
+    if (is_err(root.rename_sync(p("fsconf_flow/a/b/f.txt"), root, p("fsconf_flow/g.txt"), false))) { return 13; }
+    if (is_err(root.write_atomic_sync(p("fsconf_flow/h.txt"), "x"))) { return 14; }
+    if (!is_err(root.rename_sync(p("fsconf_flow/h.txt"), root, p("fsconf_flow/g.txt"), false))) { return 15; }
+    if (is_err(root.rename_sync(p("fsconf_flow/h.txt"), root, p("fsconf_flow/g.txt"), true))) { return 16; }
+    bool is_file = switch root.metadata_sync(p("fsconf_flow/g.txt")) { Ok m -> m.is_file() && m.size == 1, Error e -> false };
     if (!is_file) { return 17; }
-    if (is_err(root.remove_file(p("fsconf_flow/g.txt")))) { return 18; }
-    if (!is_err(root.remove_dir(p("fsconf_flow/a")))) { return 19; }
-    if (is_err(root.remove_dir(p("fsconf_flow/a/b")))) { return 20; }
-    if (is_err(root.remove_dir(p("fsconf_flow/a")))) { return 21; }
-    if (is_err(root.remove_dir(p("fsconf_flow")))) { return 22; }
+    if (is_err(root.remove_file_sync(p("fsconf_flow/g.txt")))) { return 18; }
+    if (!is_err(root.remove_dir_sync(p("fsconf_flow/a")))) { return 19; }
+    if (is_err(root.remove_dir_sync(p("fsconf_flow/a/b")))) { return 20; }
+    if (is_err(root.remove_dir_sync(p("fsconf_flow/a")))) { return 21; }
+    if (is_err(root.remove_dir_sync(p("fsconf_flow")))) { return 22; }
     return 0;
 }
 
 i32 count_entries(Directory* d) {
-    result<DirEntries, FsError> r = d.entries();
+    result<DirEntries, FsError> r = d.entries_sync();
     return switch r { Ok l -> drain(&l), Error e -> -1 };
 }
 
@@ -160,7 +160,7 @@ bool fails_with(result<File, FsError> r, FsError wanted) {
 
 i32 main() {
     Process.run("rd /s /q fsconf_link 2>nul || rm -rf fsconf_link");
-    result<Directory, FsError> rootr = Directory.open_root(p("."));
+    result<Directory, FsError> rootr = Directory.open_root_sync(p("."));
     return switch rootr {
         Ok root -> body(&root),
         Error e -> 1
@@ -168,25 +168,120 @@ i32 main() {
 }
 
 i32 body(Directory* root) {
-    if (is_err(root.create_dir_all(p("fsconf_link/a/b")))) { return 2; }
-    if (is_err(root.write_atomic(p("fsconf_link/a/b/f.txt"), "hello"))) { return 3; }
+    if (is_err(root.create_dir_all_sync(p("fsconf_link/a/b")))) { return 2; }
+    if (is_err(root.write_atomic_sync(p("fsconf_link/a/b/f.txt"), "hello"))) { return 3; }
 
     Process.run("cd fsconf_link && mklink /J j a >nul 2>nul || ln -s a j");
-    bool refused = switch root.open_dir(p("fsconf_link/j")) { Ok d -> false, Error e -> e == FsError::SymlinkRefused() };
+    bool refused = switch root.open_dir_sync(p("fsconf_link/j")) { Ok d -> false, Error e -> e == FsError::SymlinkRefused() };
     if (!refused) { return 4; }
-    if (!fails_with(root.open_file(p("fsconf_link/j/b/f.txt"), OpenOptions.read()), FsError::SymlinkRefused())) { return 5; }
-    bool followed = switch root.open_file(p("fsconf_link/j/b/f.txt"), OpenOptions.read().following_symlinks()) { Ok f -> true, Error e -> false };
+    if (!fails_with(root.open_file_sync(p("fsconf_link/j/b/f.txt"), OpenOptions.read()), FsError::SymlinkRefused())) { return 5; }
+    bool followed = switch root.open_file_sync(p("fsconf_link/j/b/f.txt"), OpenOptions.read().following_symlinks()) { Ok f -> true, Error e -> false };
     if (!followed) { return 6; }
-    bool link = switch root.metadata(p("fsconf_link/j")) { Ok m -> m.is_symlink(), Error e -> false };
+    bool link = switch root.metadata_sync(p("fsconf_link/j")) { Ok m -> m.is_symlink(), Error e -> false };
     if (!link) { return 7; }
-    bool target = switch root.metadata_following(p("fsconf_link/j")) { Ok m -> m.is_directory(), Error e -> false };
+    bool target = switch root.metadata_following_sync(p("fsconf_link/j")) { Ok m -> m.is_directory(), Error e -> false };
     if (!target) { return 8; }
-    if (is_err(root.remove_dir(p("fsconf_link/j"))) && is_err(root.remove_file(p("fsconf_link/j")))) { return 9; }
-    if (is_err(root.remove_file(p("fsconf_link/a/b/f.txt")))) { return 10; }
-    if (is_err(root.remove_dir(p("fsconf_link/a/b")))) { return 11; }
-    if (is_err(root.remove_dir(p("fsconf_link/a")))) { return 12; }
-    if (is_err(root.remove_dir(p("fsconf_link")))) { return 13; }
+    if (is_err(root.remove_dir_sync(p("fsconf_link/j"))) && is_err(root.remove_file_sync(p("fsconf_link/j")))) { return 9; }
+    if (is_err(root.remove_file_sync(p("fsconf_link/a/b/f.txt")))) { return 10; }
+    if (is_err(root.remove_dir_sync(p("fsconf_link/a/b")))) { return 11; }
+    if (is_err(root.remove_dir_sync(p("fsconf_link/a")))) { return 12; }
+    if (is_err(root.remove_dir_sync(p("fsconf_link")))) { return 13; }
     return 0;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(0));
+    }
+
+    [Test]
+    void async_directory_lifecycle() {
+        str source = """
+import std::types;
+import std::sys;
+import std::filesystem;
+namespace app;
+
+Path p(str text) {
+    return switch Path.parse(text) { Ok v -> v, Error e -> Path.unchecked("x", false) };
+}
+
+bool ok(result<bool, FsError> r) {
+    return switch r { Ok v -> v, Error e -> false };
+}
+
+async bool failed(Directory* root, str text) {
+    result<File, FsError> r = await root.open_file(p(text), OpenOptions.read());
+    return switch r { Ok f -> false, Error e -> e == FsError::NotFound() };
+}
+
+async i32 main() {
+    Process.run("rd /s /q fsconf_async 2>nul || rm -rf fsconf_async");
+    result<Directory, FsError> rootr = await Directory.open_root(p("."));
+    return switch rootr {
+        Ok root -> await body(&root),
+        Error e -> 1
+    };
+}
+
+async i32 body(Directory* root) {
+    result<bool, FsError> made = await root.create_dir_all(p("fsconf_async/a/b"));
+    if (!ok(made)) { return 2; }
+
+    result<bool, FsError> saved = await root.write_atomic(p("fsconf_async/a/b/f.txt"), "hello");
+    if (!ok(saved)) { return 3; }
+    result<string, FsError> text = await root.read_to_string(p("fsconf_async/a/b/f.txt"), 1000);
+    i32 len = switch text { Ok s -> (i32)s.length, Error e -> -1 };
+    if (len != 5) { return 4; }
+
+    result<File, FsError> opened = await root.open_file(p("fsconf_async/a/b/f.txt"), OpenOptions.append());
+    i32 appended = switch opened { Ok f -> await append_and_check(&f), Error e -> -1 };
+    if (appended != 0) { return 5; }
+
+    bool missing = await failed(root, "fsconf_async/nope");
+    if (!missing) { return 6; }
+
+    result<Metadata, FsError> info = await root.metadata(p("fsconf_async/a/b/f.txt"));
+    bool sized = switch info { Ok m -> m.is_file() && m.size == 8, Error e -> false };
+    if (!sized) { return 7; }
+
+    result<bool, FsError> moved = await root.rename(p("fsconf_async/a/b/f.txt"), root, p("fsconf_async/g.txt"), false);
+    if (!ok(moved)) { return 8; }
+
+    result<Directory, FsError> sub = await root.open_dir(p("fsconf_async"));
+    i32 count = switch sub { Ok d -> await count_entries(&d), Error e -> -1 };
+    if (count != 2) { return 9; }
+
+    result<bool, FsError> r1 = await root.remove_file(p("fsconf_async/g.txt"));
+    result<bool, FsError> r2 = await root.remove_dir(p("fsconf_async/a/b"));
+    result<bool, FsError> r3 = await root.remove_dir(p("fsconf_async/a"));
+    result<bool, FsError> r4 = await root.remove_dir(p("fsconf_async"));
+    bool cleaned = ok(r1) && ok(r2)
+        && ok(r3) && ok(r4);
+    if (!cleaned) { return 10; }
+    return 0;
+}
+
+async i32 count_entries(Directory* d) {
+    result<DirEntries, FsError> listing = await d.entries();
+    return switch listing { Ok l -> drain(&l), Error e -> -1 };
+}
+
+async i32 append_and_check(File* file) {
+    result<bool, FsError> wrote = await file.write_all("abc");
+    if (!ok(wrote)) { return 1; }
+    result<bool, FsError> synced = await file.sync();
+    if (!ok(synced)) { return 2; }
+    return 0;
+}
+
+i32 drain(DirEntries* l) {
+    mut i32 n = 0;
+    while (true) {
+        optional<DirEntry> e = l.next();
+        bool more = switch e { Value x -> true, Empty -> false };
+        if (!more) { break; }
+        n = n + 1;
+    }
+    return n;
 }
 """;
         Verify.source(source).with_std().runs(Expected.exit(0));

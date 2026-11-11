@@ -20,6 +20,9 @@ extern "C" {
     i64 __djinn_fs_list_open(i64 dir);
     i64 __djinn_fs_list_next(i64 list, ListCursor* cursor);
     void __djinn_fs_list_free(i64 list);
+    i64 __djinn_fs_submit(i32 op, i64 a0, i64 a1, i64 a2, i64 a3, i64 a4, i64 a5, i64 a6);
+    i32 __djinn_fs_poll(i64 request);
+    i64 __djinn_fs_finish(i64 request);
     i64 __djinn_fs_temp_name(i8* leaf, i64 leaf_length, i8* out, i64 capacity);
 }
 
@@ -107,5 +110,80 @@ struct Native {
 
     public static unsafe i64 temp_name(str leaf, i8* out, i64 capacity) {
         return __djinn_fs_temp_name(leaf.data, (i64)leaf.length, out, capacity);
+    }
+
+    // Asynchronous requests: submit_* queue the blocking call on the runtime's worker threads and return a request
+    // (or a negative error code). Poll it until it is done, then finish it once to get the call's result.
+    // Every pointer handed over must stay valid until finish.
+    public static unsafe i64 submit_open_root(str path, i32 flags) {
+        return __djinn_fs_submit(1, (i64)path.data, (i64)path.length, (i64)flags, 0, 0, 0, 0);
+    }
+
+    public static unsafe i64 submit_open_dir(i64 dir, str path, i32 flags) {
+        return __djinn_fs_submit(2, dir, (i64)path.data, (i64)path.length, (i64)flags, 0, 0, 0);
+    }
+
+    public static unsafe i64 submit_open_file(i64 dir, str path, i32 flags, i32 mode) {
+        return __djinn_fs_submit(3, dir, (i64)path.data, (i64)path.length, (i64)flags, (i64)mode, 0, 0);
+    }
+
+    public static unsafe i64 submit_close(i64 handle) {
+        return __djinn_fs_submit(4, handle, 0, 0, 0, 0, 0, 0);
+    }
+
+    public static unsafe i64 submit_read(i64 handle, void* buffer, i64 count) {
+        return __djinn_fs_submit(5, handle, (i64)buffer, count, 0, 0, 0, 0);
+    }
+
+    public static unsafe i64 submit_write(i64 handle, void* buffer, i64 count) {
+        return __djinn_fs_submit(6, handle, (i64)buffer, count, 0, 0, 0, 0);
+    }
+
+    public static unsafe i64 submit_seek(i64 handle, i64 offset, i32 whence) {
+        return __djinn_fs_submit(7, handle, offset, (i64)whence, 0, 0, 0, 0);
+    }
+
+    public static unsafe i64 submit_truncate(i64 handle, i64 length) {
+        return __djinn_fs_submit(8, handle, length, 0, 0, 0, 0, 0);
+    }
+
+    public static unsafe i64 submit_sync(i64 handle) {
+        return __djinn_fs_submit(9, handle, 0, 0, 0, 0, 0, 0);
+    }
+
+    public static unsafe i64 submit_fstat(i64 handle, i64* out) {
+        return __djinn_fs_submit(10, handle, (i64)out, 0, 0, 0, 0, 0);
+    }
+
+    public static unsafe i64 submit_stat(i64 dir, str path, i32 flags, i64* out) {
+        return __djinn_fs_submit(11, dir, (i64)path.data, (i64)path.length, (i64)flags, (i64)out, 0, 0);
+    }
+
+    public static unsafe i64 submit_mkdir(i64 dir, str path, i32 mode) {
+        return __djinn_fs_submit(12, dir, (i64)path.data, (i64)path.length, (i64)mode, 0, 0, 0);
+    }
+
+    public static unsafe i64 submit_remove(i64 dir, str path, bool is_directory) {
+        mut i64 flag = 0;
+        if (is_directory) { flag = 1; }
+        return __djinn_fs_submit(13, dir, (i64)path.data, (i64)path.length, flag, 0, 0, 0);
+    }
+
+    public static unsafe i64 submit_rename(i64 from_dir, str from, i64 to_dir, str to, bool replace) {
+        mut i64 flag = 0;
+        if (replace) { flag = 1; }
+        return __djinn_fs_submit(14, from_dir, (i64)from.data, (i64)from.length, to_dir, (i64)to.data, (i64)to.length, flag);
+    }
+
+    public static unsafe i64 submit_list_open(i64 dir) {
+        return __djinn_fs_submit(15, dir, 0, 0, 0, 0, 0, 0);
+    }
+
+    public static unsafe bool poll(i64 request) {
+        return __djinn_fs_poll(request) != 0;
+    }
+
+    public static unsafe i64 finish(i64 request) {
+        return __djinn_fs_finish(request);
     }
 }

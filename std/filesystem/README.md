@@ -24,6 +24,22 @@ Windows failures (`error.djinn`). Operations that return nothing use `result<boo
   the target. `rename(..., replace: false)` fails with `AlreadyExists` instead of overwriting.
 - **`create_new`** is `O_EXCL` / `FILE_CREATE`: it never opens an existing file.
 
+## Async by default
+
+Every operation that touches the disk is `async`: it queues the blocking call on a small worker pool in the runtime
+(`__djinn_fs_submit`, 4 threads, started on first use) and suspends the coroutine until the worker is done, so the
+scheduler never blocks on the filesystem.
+
+```djinn
+result<File, FsError> file = await dir.open_file(path, OpenOptions.read());
+```
+
+The blocking versions keep the same name with a `_sync` suffix (`open_file_sync`, `read_to_string_sync`,
+`sync_sync`...) and run on the calling thread; use them outside coroutines. `Path`, `OpenOptions`, `Metadata` and
+`DirEntries.next` do no I/O and are plain functions.
+
+A request keeps raw pointers (`Path` text, read/write buffers) until it finishes: keep them alive across the `await`.
+
 ## Low level
 
 `std::filesystem::native` holds the `extern "C"` bindings to `runtime/fs_safe.c` and `Native`, thin `unsafe` wrappers over
@@ -34,7 +50,7 @@ raw `i64` handles. Nothing there validates paths or owns handles. (The namespace
 
 - `Path` borrows its text; keep the `str` alive. There is no owned path type or `join` yet.
 - Directory listings are read in full by `entries()`.
-- Calls are blocking.
+- The worker pool has a fixed size and the coroutine polls its request once per scheduler turn.
 - `Directory.open_root` follows links in the leading part of an absolute path (`/tmp` on macOS); only the final
   component is checked.
 - The POSIX half of `runtime/fs_safe.c` (`openat`, `fstatat`, `renameat`...) was written and tested on Windows only; its first
