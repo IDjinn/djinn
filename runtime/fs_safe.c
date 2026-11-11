@@ -746,6 +746,16 @@ static int djfs_link_flag(int follow)
     return follow ? 0 : O_NOFOLLOW;
 }
 
+static int djfs_open_dir_at(int parent, const char* name, int follow)
+{
+    int handle = openat(parent, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | djfs_link_flag(follow));
+    if (handle >= 0 || follow || errno != ENOTDIR) return handle;
+    struct stat info;
+    if (fstatat(parent, name, &info, AT_SYMLINK_NOFOLLOW) == 0 && S_ISLNK(info.st_mode)) errno = ELOOP;
+    else errno = ENOTDIR;
+    return -1;
+}
+
 static int64_t djfs_locate(int64_t dir, const char* path, int64_t length, int follow, djfs_loc* loc)
 {
     char* parts[DJFS_MAX_PARTS];
@@ -763,7 +773,7 @@ static int64_t djfs_locate(int64_t dir, const char* path, int64_t length, int fo
             loc->leaf = parts[i];
             break;
         }
-        int next = openat(loc->parent, parts[i], O_RDONLY | O_DIRECTORY | O_CLOEXEC | djfs_link_flag(follow));
+        int next = djfs_open_dir_at(loc->parent, parts[i], follow);
         if (next < 0)
         {
             int error = errno;
@@ -796,7 +806,7 @@ int64_t __djinn_fs_open_dir(int64_t dir, const char* path, int64_t length, int32
     if (result < 0) return result;
     int handle = loc.leaf == NULL
         ? fcntl(loc.parent, F_DUPFD_CLOEXEC, 0)
-        : openat(loc.parent, loc.leaf, O_RDONLY | O_DIRECTORY | O_CLOEXEC | djfs_link_flag(follow));
+        : djfs_open_dir_at(loc.parent, loc.leaf, follow);
     int error = errno;
     djfs_release(&loc);
     return handle < 0 ? -djfs_from_errno(error) : handle;
