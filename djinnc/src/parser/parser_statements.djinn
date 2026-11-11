@@ -9,9 +9,66 @@ impl Parser {
             if (statement != null) {
                 block.add(statement);
             }
+            this.drain_queued_statements(block);
         }
         this.expect(TokenKind::RBRACE, "expected '}' to close block");
         return block;
+    }
+
+    unsafe void drain_queued_statements(Node* block) {
+        PointerList* queued = this.queued_statements;
+        if (queued == null) {
+            return;
+        }
+        for (mut i32 i = 0; i < queued.length; i = i + 1) {
+            block.add((Node*)queued.get(i));
+        }
+        queued.length = 0;
+    }
+
+    unsafe Node* parse_destructuring() {
+        i32 start = this.advance();
+        this.expect(TokenKind::LBRACE, "expected '{' to list the fields to destructure");
+        PointerList* fields = PointerList.create();
+        while (!this.check(TokenKind::RBRACE) && !this.at_end()) {
+            i32 field_token = this.expect(TokenKind::IDENTIFIER, "expected a field name to destructure");
+            fields.push((ptr)field_token);
+            if (!this.match(TokenKind::COMMA)) {
+                break;
+            }
+        }
+        this.expect(TokenKind::RBRACE, "expected '}' after the destructured fields");
+        this.expect(TokenKind::EQUAL, "expected '=' after the destructured fields");
+        Node* source = this.parse_expression();
+        this.expect(TokenKind::SEMICOLON, "expected ';' after declaration");
+
+        this.hidden_count = this.hidden_count + 1;
+        ByteBuffer* holder_name = ByteBuffer.create();
+        holder_name.append("__destructure");
+        holder_name.append_int((i64)this.hidden_count);
+        Node* holder = Node.create(NodeKind::VAR_DECL, start);
+        holder.set_type(TypeRef.create(TypeKind.AUTO));
+        holder.set_text(holder_name.cstr());
+        holder.set_first(source);
+
+        if (this.queued_statements == null) {
+            this.queued_statements = PointerList.create();
+        }
+        PointerList* queued = this.queued_statements;
+        for (mut i32 i = 0; i < fields.length; i = i + 1) {
+            i32 field_token = (i32)(u64)fields.get(i);
+            Node* holder_reference = Node.create(NodeKind::IDENTIFIER, field_token);
+            holder_reference.set_text(holder_name.cstr());
+            Node* access = Node.create(NodeKind::FIELD_ACCESS, field_token);
+            access.set_first(holder_reference);
+            access.set_text(this.copy_of(field_token));
+            Node* variable = Node.create(NodeKind::VAR_DECL, field_token);
+            variable.set_type(TypeRef.create(TypeKind.AUTO));
+            variable.set_text(this.copy_of(field_token));
+            variable.set_first(access);
+            queued.push((ptr)variable);
+        }
+        return holder;
     }
 
     unsafe Node* parse_statement() {
@@ -193,6 +250,13 @@ impl Parser {
         Node* statement = this.parse_statement();
         if (statement == null) {
             return Node.create_list(NodeKind::BLOCK, token);
+        }
+        PointerList* queued = this.queued_statements;
+        if (queued != null && queued.length > 0) {
+            Node* grouped = Node.create_list(NodeKind::BLOCK, token);
+            grouped.add(statement);
+            this.drain_queued_statements(grouped);
+            return grouped;
         }
         return statement;
     }
