@@ -1,0 +1,174 @@
+namespace conformance;
+
+import testing;
+import djinnc::testing;
+import djinnc;
+
+struct GenericConstraintRuleTests {
+    [Test]
+    void a_constrained_union_accepts_an_implementing_struct() {
+        str source = """
+interface IValue {
+    i32 getValue();
+}
+
+union Wrapper<T> where T : IValue {
+    Some(T),
+    None()
+}
+
+struct Val : IValue {
+    i32 x;
+
+    i32 getValue() {
+        return this.x;
+    }
+}
+
+i32 main() {
+    Val v = { .x = 7 };
+    Wrapper<Val> w = Wrapper<Val>::Some(v);
+    return 7;
+}
+""";
+        Verify.source(source).runs(Expected.exit(7));
+    }
+
+    [Test]
+    void a_constrained_union_rejects_a_struct_without_the_interface() {
+        str source = """
+interface IValue {
+    i32 getValue();
+}
+
+union Wrapper<T> where T : IValue {
+    Some(T),
+    None()
+}
+
+struct Plain {
+    i32 x;
+}
+
+i32 main() {
+    Plain p = { .x = 1 };
+    Wrapper<Plain> w = Wrapper<Plain>::Some(p);
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.INTERFACE_NOT_IMPLEMENTED).at(16, 5));
+    }
+
+    [Test]
+    void a_constraint_naming_an_unknown_interface_is_an_error() {
+        str source = """
+struct Set<K> where K : INonExistent {
+    K key;
+}
+
+i32 main() {
+    Set<i32> s = { 1 };
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.UNKNOWN_INTERFACE).at(6, 5));
+    }
+}
+
+struct UnsignedConstantTests {
+    [Test]
+    void equality_with_a_constant_above_the_signed_maximum() {
+        str source = """
+constexpr u32 LIMIT = 4294967295;
+
+i32 main() {
+    u32 value = 4294967295;
+    if (value == LIMIT) {
+        return 1;
+    }
+    return 0;
+}
+""";
+        Verify.source(source).runs(Expected.exit(1));
+    }
+}
+
+struct BoxedTextTests {
+    [Test]
+    void a_str_variable_boxes_as_str() {
+        str source = """
+i32 main() {
+    str s = "hello";
+    object boxed = s;
+    if (!(boxed is str)) { return 1; }
+    if (boxed.type.kind != 5) { return 2; }
+    return 42;
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void a_string_literal_boxes_as_a_pointer() {
+        str source = """
+i32 main() {
+    object boxed = "hello";
+    if (boxed is str) { return 1; }
+    return (i32)boxed.type.kind;
+}
+""";
+        Verify.source(source).runs(Expected.exit(2));
+    }
+
+    [Test]
+    void variadic_object_arguments_are_told_apart_by_type() {
+        str source = """
+struct Inspector {
+    public static i32 type_id(...args) {
+        object first = args[0];
+        if (first is i32) {
+            return 1;
+        }
+        if (first is f64) {
+            return 2;
+        }
+        return 0;
+    }
+}
+
+i32 main() {
+    return Inspector.type_id(4) * 10 + Inspector.type_id(2.5);
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(12));
+    }
+}
+
+struct StructRuleTests {
+    [Test]
+    void a_const_field_is_not_reachable_through_an_instance() {
+        str source = """
+struct Config {
+    i32 value;
+    const i32 DEFAULT = 5;
+}
+
+i32 main() {
+    Config c = { 10 };
+    return c.DEFAULT;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.UNKNOWN_FIELD).at(8, 13));
+    }
+
+    [Test]
+    void a_scalar_cannot_be_built_with_braces() {
+        str source = """
+i32 main() {
+    i32 x = { 42 };
+    return x;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.LITERAL_NEEDS_CONTEXT).at(2, 13));
+    }
+}

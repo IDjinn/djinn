@@ -1,0 +1,400 @@
+namespace conformance;
+
+import testing;
+import djinnc::testing;
+import djinnc;
+
+struct ThrowsTests {
+    [Test]
+    void throw_with_try_fallback() {
+        str source = """
+struct DivisionByZeroException;
+
+i32 division(i32 value, i32 divisor) throws(DivisionByZeroException) {
+    if (divisor == 0) {
+        throw DivisionByZeroException();
+    }
+    return value / divisor;
+}
+
+i32 main() {
+    i32 result = try division(1, 0) ?: 7;
+    return result;
+}
+""";
+        Verify.source(source).runs(Expected.exit(7));
+    }
+
+    [Test]
+    void try_returns_value_on_success() {
+        str source = """
+struct DivisionByZeroException;
+
+i32 division(i32 value, i32 divisor) throws(DivisionByZeroException) {
+    if (divisor == 0) {
+        throw DivisionByZeroException();
+    }
+    return value / divisor;
+}
+
+i32 main() {
+    i32 result = try division(84, 2) ?: 7;
+    return result;
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void bare_try_rethrows_to_the_caller() {
+        str source = """
+struct Failure;
+
+i32 inner() throws(Failure) {
+    throw Failure();
+}
+
+i32 middle() throws(Failure) {
+    i32 value = try inner();
+    return value;
+}
+
+i32 main() {
+    i32 result = try middle() ?: 7;
+    return result;
+}
+""";
+        Verify.source(source).runs(Expected.exit(7));
+    }
+
+    [Test]
+    void unchecked_throwing_call_in_a_throwing_caller_propagates() {
+        str source = """
+struct Failure;
+
+i32 inner() throws(Failure) {
+    throw Failure();
+}
+
+i32 middle() throws(Failure) {
+    return inner();
+}
+
+i32 main() {
+    i32 result = try middle() ?: 8;
+    return result;
+}
+""";
+        Verify.source(source).runs(Expected.exit(8));
+    }
+
+    [Test]
+    void switch_on_a_throwing_call_takes_the_success_arm() {
+        str source = """
+struct DivisionByZeroException;
+
+i32 division(i32 value, i32 divisor) throws(DivisionByZeroException) {
+    if (divisor == 0) {
+        throw DivisionByZeroException();
+    }
+    return value / divisor;
+}
+
+i32 main() {
+    i32 result = switch division(84, 2) {
+        Result v -> v,
+        DivisionByZeroException e -> 1
+    };
+    return result;
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void switch_on_a_throwing_call_accepts_a_wildcard_for_the_success_arm() {
+        str source = """
+struct DivisionByZeroException;
+
+i32 division(i32 value, i32 divisor) throws(DivisionByZeroException) {
+    if (divisor == 0) {
+        throw DivisionByZeroException();
+    }
+    return value / divisor;
+}
+
+i32 main() {
+    i32 result = switch division(84, 2) {
+        _ v -> v,
+        DivisionByZeroException e -> 1
+    };
+    return result;
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void switch_on_a_throwing_call_takes_the_specific_error_arm() {
+        str source = """
+struct DivisionByZeroException;
+
+i32 division(i32 value, i32 divisor) throws(DivisionByZeroException) {
+    if (divisor == 0) {
+        throw DivisionByZeroException();
+    }
+    return value / divisor;
+}
+
+i32 main() {
+    i32 result = switch division(1, 0) {
+        _ v -> v,
+        DivisionByZeroException e -> 9
+    };
+    return result;
+}
+""";
+        Verify.source(source).runs(Expected.exit(9));
+    }
+
+    [Test]
+    void switch_on_a_throwing_call_takes_the_generic_error_arm() {
+        str source = """
+struct DivisionByZeroException;
+
+i32 division(i32 value, i32 divisor) throws(DivisionByZeroException) {
+    if (divisor == 0) {
+        throw DivisionByZeroException();
+    }
+    return value / divisor;
+}
+
+i32 main() {
+    i32 result = switch division(1, 0) {
+        Result v -> v,
+        Error e -> 42
+    };
+    return result;
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void switch_specific_arm_wins_over_the_generic_error_arm() {
+        str source = """
+struct Specific;
+struct Other;
+
+i32 risky(i32 which) throws(Specific, Other) {
+    if (which == 0) {
+        throw Specific();
+    }
+    throw Other();
+}
+
+i32 main() {
+    i32 first = switch risky(0) {
+        Result v -> v,
+        Specific e -> 10,
+        Error e -> 20
+    };
+    i32 second = switch risky(1) {
+        Result v -> v,
+        Specific e -> 10,
+        Error e -> 20
+    };
+    return first + second;
+}
+""";
+        Verify.source(source).runs(Expected.exit(30));
+    }
+
+    [Test]
+    void a_constexpr_throwing_call_inside_try_takes_the_fallback() {
+        str source = """
+struct DivisionByZeroException;
+
+constexpr i32 division(i32 value, i32 divisor) throws(DivisionByZeroException) {
+    if (divisor == 0) {
+        throw DivisionByZeroException();
+    }
+    return value / divisor;
+}
+
+i32 main() {
+    i32 result = try division(1, 0) ?: 7;
+    return result;
+}
+""";
+        Verify.source(source).runs(Expected.exit(7));
+    }
+
+    [Test]
+    void a_constexpr_throwing_call_with_runtime_arguments_stays_runtime() {
+        str source = """
+struct DivisionByZeroException;
+
+constexpr i32 division(i32 value, i32 divisor) throws(DivisionByZeroException) {
+    if (divisor == 0) {
+        throw DivisionByZeroException();
+    }
+    return value / divisor;
+}
+
+i32 pick(i32 divisor) {
+    return try division(84, divisor) ?: 7;
+}
+
+i32 main() {
+    return pick(2) + pick(0) - 7;
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void a_constexpr_throwing_call_that_succeeds_compiles_clean() {
+        str source = """
+struct DivisionByZeroException;
+
+constexpr i32 division(i32 value, i32 divisor) throws(DivisionByZeroException) {
+    if (divisor == 0) {
+        throw DivisionByZeroException();
+    }
+    return value / divisor;
+}
+
+i32 main() {
+    i32 result = try division(84, 2) ?: 7;
+    return result;
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void a_constexpr_throwing_call_in_a_switch_takes_the_error_arm() {
+        str source = """
+struct DivisionByZeroException;
+
+constexpr i32 division(i32 value, i32 divisor) throws(DivisionByZeroException) {
+    if (divisor == 0) {
+        throw DivisionByZeroException();
+    }
+    return value / divisor;
+}
+
+i32 main() {
+    i32 result = switch division(1, 0) {
+        Result v -> v,
+        DivisionByZeroException e -> 9
+    };
+    return result;
+}
+""";
+        Verify.source(source).runs(Expected.exit(9));
+    }
+
+    [Test]
+    void a_constexpr_throwing_call_in_a_switch_takes_the_success_arm() {
+        str source = """
+struct DivisionByZeroException;
+
+constexpr i32 division(i32 value, i32 divisor) throws(DivisionByZeroException) {
+    if (divisor == 0) {
+        throw DivisionByZeroException();
+    }
+    return value / divisor;
+}
+
+i32 main() {
+    i32 result = switch division(84, 2) {
+        Result v -> v,
+        DivisionByZeroException e -> 9
+    };
+    return result;
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void builtin_errors_are_available_without_std() {
+        str source = """
+i32 fail() throws(DivisionByZero) {
+    throw DivisionByZero();
+}
+
+i32 main() {
+    i32 result = try fail() ?: 42;
+    return result;
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void throw_outside_a_throwing_function_is_an_error() {
+        str source = """
+struct Failure;
+
+i32 main() {
+    throw Failure();
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.THROW_OUTSIDE_THROWS).at(4, 5));
+    }
+
+    [Test]
+    void bare_try_outside_a_throwing_function_is_an_error() {
+        str source = """
+struct Failure;
+
+i32 fail() throws(Failure) {
+    throw Failure();
+}
+
+i32 main() {
+    return try fail();
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.MISSING_TRY).at(8, 12));
+    }
+
+    [Test]
+    void switch_arms_must_agree_on_the_result_type() {
+        str source = """
+struct Failure;
+
+i32 fail() throws(Failure) {
+    throw Failure();
+}
+
+i32 main() {
+    i32 result = switch fail() {
+        Result v -> v,
+        Failure e -> 1.5
+    };
+    return result;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.IMPLICIT_CONVERSION).at(10, 22));
+    }
+
+    [Test]
+    void an_error_escaping_main_is_reported_and_aborts() {
+        str source = """
+struct Failure;
+
+i32 fail() throws(Failure) {
+    throw Failure();
+}
+
+i32 main() throws {
+    return try fail();
+}
+""";
+        Verify.source(source).crashes(Expected.contains("Failure"));
+    }
+}
