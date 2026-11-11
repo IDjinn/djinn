@@ -423,15 +423,10 @@ struct Lexer {
         return this.advance() & 63;
     }
 
-    i32 read_unicode_escape(i32 start) {
-        mut i32 code_point = 0;
-        if (this.peek(0) != 123) {
-            this.char_error(start, "expected a brace after the unicode escape in a char literal");
-            return 0;
-        }
-        this.advance();
-        while (this.pos < this.length && this.peek(0) != 125 && this.peek(0) != 39) {
-            i32 digit = this.advance();
+    i32 read_unicode_escape(i32 start, i32 digits) {
+        mut i64 code_point = 0;
+        for (mut i32 taken = 0; taken < digits; taken = taken + 1) {
+            i32 digit = this.peek(0);
             mut i32 value = 0;
             if (digit >= 48 && digit <= 57) {
                 value = digit - 48;
@@ -440,16 +435,18 @@ struct Lexer {
             } else if (digit >= 65 && digit <= 70) {
                 value = digit - 55;
             } else {
-                this.char_error(start, "invalid hexadecimal digit in a char literal");
+                this.char_error(start, "a unicode escape needs 4 hexadecimal digits after \\u or 8 after \\U");
+                return 0;
             }
-            code_point = code_point * 16 + value;
-        }
-        if (this.peek(0) == 125) {
             this.advance();
-        } else {
-            this.char_error(start, "the unicode escape is not closed");
+            code_point = code_point * 16 + (i64)value;
         }
-        return code_point;
+        bool is_surrogate = code_point >= 55296 && code_point <= 57343;
+        if (code_point > 1114111 || is_surrogate) {
+            this.char_error(start, "the escape is not a Unicode scalar value");
+            return 0;
+        }
+        return (i32)code_point;
     }
 
     i32 read_char_code_point(i32 start) {
@@ -461,7 +458,8 @@ struct Lexer {
             if (escaped == 116) { return 9; }
             if (escaped == 114) { return 13; }
             if (escaped == 48) { return 0; }
-            if (escaped == 117) { return this.read_unicode_escape(start); }
+            if (escaped == 117) { return this.read_unicode_escape(start, 4); }
+            if (escaped == 85) { return this.read_unicode_escape(start, 8); }
             return escaped;
         }
         this.advance();
