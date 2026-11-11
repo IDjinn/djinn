@@ -242,3 +242,25 @@ keeps the block for diagnostics but injects nothing. A target that is not declar
 - Constants of the enclosing struct can be used without the type name inside its methods.
 - A bodyless method is allowed only in `[intrinsic]` and `[no_mangle]` structs. The `coro` primitives (`handle`, `suspend`, `done`, `resume`,
   `destroy`) of an `[intrinsic]` struct map to the LLVM coroutine intrinsics.
+
+## Nullable pointers, hooks and small language additions
+- With `std`, `T*?` is `optional<T*>` (pointer niche). `p == null` and `p != null` compare it (also `null == p` and against a `T*`), and `p.field`
+  / `p.method()` on it check for null and stop with `R10009`. `p!.member` is the same access written out, and is an error on a value that is not
+  nullable (E3041). `p?.member` and `p?.method()` yield a nullable pointer (`null` when `p` is null) and need a pointer-typed member; chains such as
+  `a?.next?.next` work. `a ?? b` accepts a nullable `a` (`b` is a `T*` or a `T*?`), and `a ??= b` assigns when `a` is null.
+- `nints`, `nintt`, `nintw`, `nintc` are `nint` with an overflow mode, like `i32s` / `i32t` / `i32w` / `i32c`. `nint.MAX_VALUE` and `nint.MIN_VALUE` come from `std`.
+- `Type.method(...)` calls a `static` method declared in `impl Type { }` of a primitive (`i32.clamp(x, 0, 9)`).
+- `str[i]` and `string[i]` read a byte and are bound checked (`R10010`); when the text and the index are constants (`const str`, a literal) the
+  index is checked at compile time (E3057) and folded to the byte.
+- `const T X = e;` inside a function is a compile-time constant (same as `constexpr`). `mut const` is an error (E2013), in a struct and in a function.
+- `for (0..5) { }` and `for (1..=3) { }` repeat without a loop variable.
+- `alignof(T)` and `alignof(expr)`, `sizeof(expr)` and `typeof(variable)`, and `expect(value, expected)` (`llvm.expect` for an integer or bool).
+- `$"..."` interpolates `{x}` (`{{` and `}}` are literal braces). With `n` dollar signs, `n` braces delimit the interpolation and fewer braces are literal:
+  `$$"{x} is {{x}}"`. `$"""..."""` and `$$"""..."""` are multi-line forms without escapes.
+- `&function` (a plain, non-generic, non-overloaded function) is its address as `ptr`.
+- Hooks (`std::system`): `System.hook(HookKind.PANIC, &handler)` installs `void handler(i8* message, i8* file, u32 line)`, which runs instead of the
+  default panic report and then the process aborts; it returns the previous handler. `System.unhook(kind)` removes it, and
+  `System.print_default_panic_report` prints the standard report from inside a handler. The macro `hook(panic, handler)` is the short form.
+- Runtime panics are defined once, in `djinnc/src/support/source/runtime_errors.djinn` (`RuntimeErrors`: code and text) and reported as `R<code>: <text>`.
+  `bounds_check(index, length)` is the intrinsic `std` uses to raise `R10010`.
+- `auto { x, y } = expr;` declares `x` and `y` in the enclosing scope from the fields of the same names of `expr`.
