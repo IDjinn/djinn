@@ -115,6 +115,102 @@ struct RangeAnalysis {
         this.visit_children(node, 1);
     }
 
+    // A local the loop only ever counts up (or only down) keeps the bound it had before the loop, because a counter
+    // that wraps is never trusted: wrapped arithmetic and any other write make it a plain forgotten local.
+    unsafe void havoc_loop(Node* condition, Node* step, Node* body) {
+        PointerList* variables = PointerList.create();
+        IdList* kinds = IdList.create();
+        this.classify(condition, variables, kinds);
+        this.classify(step, variables, kinds);
+        this.classify(body, variables, kinds);
+        RangeState* state = this.state;
+        for (mut i32 i = 0; i < variables.length; i = i + 1) {
+            LocalVariable* variable = (LocalVariable*)variables.get(i);
+            u32 kind = kinds.get(i);
+            i32 at = state.find((ptr)variable);
+            if (at >= 0 && kind == 1 && !RangeMath.wide_unsigned(variable.type)) {
+                state.put((ptr)variable, state.low(at), RangeMath.type_max(variable.type));
+            } else if (at >= 0 && kind == 2 && !RangeMath.wide_unsigned(variable.type)) {
+                state.put((ptr)variable, RangeMath.type_min(variable.type), state.high(at));
+            } else {
+                state.remove((ptr)variable);
+            }
+        }
+    }
+
+    // kind 1 only counts up, 2 only counts down, 4 is any other write.
+    unsafe void note_write(Node* target, u32 kind, PointerList* variables, IdList* kinds) {
+        if (target == null || target.kind() != NodeKind::IDENTIFIER || target.symbol_kind() != SymbolKind.LOCAL) {
+            return;
+        }
+        ptr variable = target.symbol();
+        for (mut i32 i = 0; i < variables.length; i = i + 1) {
+            if (variables.get(i) == variable) {
+                u32 seen = kinds.get(i);
+                if (seen != kind) {
+                    kinds.data[i] = 4;
+                }
+                return;
+            }
+        }
+        variables.push(variable);
+        kinds.push(kind);
+    }
+
+    unsafe u32 step_kind(Node* assign) {
+        Node* target = assign.first();
+        Node* value = assign.second();
+        if (value.kind() != NodeKind::BINARY || value.symbol_kind() == SymbolKind.OPERATOR || value.mode() == OverflowMode::WRAPPED) {
+            return 4;
+        }
+        TokenKind op = value.op_kind();
+        Node* counted = value.first();
+        Node* amount = value.second();
+        if ((op != TokenKind::PLUS && op != TokenKind::MINUS) || counted.kind() != NodeKind::IDENTIFIER
+            || counted.symbol() != target.symbol() || amount.kind() != NodeKind::INT_LITERAL || amount.int_value() < 0) {
+            return 4;
+        }
+        LocalVariable* variable = (LocalVariable*)target.symbol();
+        if (Types.common(variable.type, amount.value_type()) != variable.type) {
+            return 4;
+        }
+        if (op == TokenKind::PLUS) {
+            return 1;
+        }
+        return 2;
+    }
+
+    unsafe void classify(Node* node, PointerList* variables, IdList* kinds) {
+        if (node == null) {
+            return;
+        }
+        NodeKind kind = node.kind();
+        if (kind == NodeKind::ASSIGN) {
+            this.note_write(node.first(), this.step_kind(node), variables, kinds);
+        }
+        if (kind == NodeKind::UNARY && (node.op_kind() == TokenKind::PLUS_PLUS || node.op_kind() == TokenKind::MINUS_MINUS)) {
+            mut u32 direction = 2;
+            if (node.op_kind() == TokenKind::PLUS_PLUS) {
+                direction = 1;
+            }
+            if (node.mode() == OverflowMode::WRAPPED) {
+                direction = 4;
+            }
+            this.note_write(node.first(), direction, variables, kinds);
+        }
+        for (mut i32 field = NodeField.FIRST; field <= NodeField.FOURTH; field = field + 1) {
+            u32 stored = node.get_field(field);
+            if (stored != 0) {
+                this.classify(Ast.at((i32)stored), variables, kinds);
+            }
+        }
+        if (node.has_items()) {
+            for (mut i32 i = 0; i < node.count(); i = i + 1) {
+                this.classify(node.child(i), variables, kinds);
+            }
+        }
+    }
+
     unsafe void forget(Node* target) {
         if (target != null && target.kind() == NodeKind::IDENTIFIER && target.symbol_kind() == SymbolKind.LOCAL) {
             RangeState* state = this.state;
@@ -314,9 +410,7 @@ struct RangeAnalysis {
         if (current.dead) {
             return;
         }
-        this.havoc(condition);
-        this.havoc(step);
-        this.havoc(body);
+        this.havoc_loop(condition, step, body);
         RangeState* entry = this.state;
         bool breaks = RangeAnalysis.contains_kind(body, NodeKind::BREAK);
         bool refinable = condition != null && !RangeAnalysis.writes(condition);
@@ -428,8 +522,25 @@ struct RangeAnalysis {
             this.full(type);
             return;
         }
+        if (kind == NodeKind::INTRINSIC && node.op() == Intrinsic.BOUNDS_CHECK) {
+            this.bounds(node);
+            return;
+        }
         this.havoc(node);
         this.full(type);
+    }
+
+    // An index below the smallest possible length can never be out of range; the check runs in u64.
+    unsafe void bounds(Node* node) {
+        this.eval(node.first());
+        bool index_top = this.top;
+        i64 index_low = this.low;
+        i64 index_high = this.high;
+        this.eval(node.second());
+        if (!index_top && !this.top && index_low >= 0 && index_high < this.low) {
+            this.prove(node, Types.integer(64, false), RangeProof.INDEX_IN_BOUNDS);
+        }
+        this.full(node.value_type());
     }
 
     void literal(Node* node, u32 type) {

@@ -16,6 +16,7 @@ with `Node.proof_for(common)` and a proof for another type is ignored.
 | `DIVISOR_NONZERO` | the division-by-zero check of `/` and `%` |
 | `NOT_MINIMUM_DIVIDED` | the `MIN / -1` check of signed `/` |
 | `SHIFT_IN_RANGE` | the shift-count check of `<<` and `>>` |
+| `INDEX_IN_BOUNDS` | the `bounds_check(index, length)` intrinsic, when the index is below the smallest possible length |
 
 ## Soundness rules
 
@@ -23,7 +24,9 @@ with `Node.proof_for(common)` and a proof for another type is ignored.
   the receiver of a field access). Everything else is the full range of its type.
 - Statements the analysis does not model (`switch`, `spawn`, try, async await...) forget every local they assign and
   record no proofs inside.
-- A loop forgets every local it writes before the first iteration, so the entry state covers all iterations. The exit
+- A loop forgets every local it writes before the first iteration, so the entry state covers all iterations. A local
+  the loop only counts up (`i++`, `i += 2`, `i = i + 1`, not wrapped) keeps its lower bound, and one it only counts down
+  keeps its upper bound; any other write, or a step that is not a non-negative literal, forgets it. The exit
   is refined by the negated condition only when the body has no `break`.
 - A comparison refines a local only when the condition contains no assignment. An empty interval marks the path dead.
 - 64-bit unsigned values above `i64.MAX_VALUE` have no `i64` bound and stay unknown.

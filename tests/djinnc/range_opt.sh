@@ -51,7 +51,29 @@ i32 unknown(i32 a, i32 b) { return a + b; }
 [NoInline]
 i32 unknown_divide(i32 a, i32 b) { return a / b; }
 
+[Export]
+[NoInline]
+u32 counted(u32 limit) {
+    mut u32 total = 0;
+    for (mut u32 i = 5; i < 10; i++) {
+        if (i < limit) { total = total + (i - 5); }
+    }
+    return total;
+}
+
+[Export]
+[NoInline]
+i32 walked() {
+    mut i32 hits = 0;
+    for (mut i32 i = 0; i < 4; i++) {
+        bounds_check(i, 4);
+        hits = hits + 1;
+    }
+    return hits;
+}
+
 i32 main() {
+    if (counted(8) != 3 || walked() != 4) { return 1; }
     printf("%d %d %d %d %d %d\n", widened(200, 100), masked(1000), guarded(5), divide(50), unknown(1, 2), unknown_divide(9, 3));
     return 0;
 }
@@ -74,6 +96,11 @@ body "$out/app$exe.ll" unknown_divide | grep -q "__djinn_panic" || fail "an unkn
 [ "$("$out/plain$exe")" = "300 696 6 7 3 3" ] || fail "--no-range-opt must print the same results"
 for name in widened masked guarded divide; do
     body "$out/plain$exe.ll" "$name" | grep -Eq "with.overflow|__djinn_panic" || fail "$name must keep its checks without the range analysis"
+done
+
+checks() { body "$1" "$2" | grep -c "__djinn_panic" || true; }
+for name in counted walked; do
+    [ "$(checks "$out/app$exe.ll" $name)" -lt "$(checks "$out/plain$exe.ll" $name)" ] || fail "$name must lose checks to the loop counter analysis"
 done
 
 proven() { grep -o "range: [0-9]* checks proven" | grep -o "[0-9]*"; }
