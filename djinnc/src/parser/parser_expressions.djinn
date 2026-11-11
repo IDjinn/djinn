@@ -237,6 +237,20 @@ impl Parser {
         return false;
     }
 
+    bool operand_is_expression(bool dotted_names_are_types) {
+        i32 first = this.current();
+        if (this.kind_of(first) != TokenKind::IDENTIFIER) {
+            return this.kind_of(first) == TokenKind::THIS || this.kind_of(first) == TokenKind::INTEGER_LITERAL
+                || this.kind_of(first) == TokenKind::FLOAT_LITERAL || this.kind_of(first) == TokenKind::STRING_LITERAL;
+        }
+        TokenKind after = this.kind_of(this.peek_token(1));
+        if (after == TokenKind::DOT && dotted_names_are_types) {
+            return false;
+        }
+        return after == TokenKind::DOT || after == TokenKind::LBRACKET || after == TokenKind::LPAREN
+            || after == TokenKind::PLUS || after == TokenKind::MINUS || after == TokenKind::SLASH;
+    }
+
     Node* parse_postfix(Node* start) {
         mut Node* expr = start;
         while (!this.failed) {
@@ -453,7 +467,13 @@ impl Parser {
                 this.advance();
                 Node* call = Node.create(NodeKind::INTRINSIC, token);
                 call.set_op(intrinsic);
-                if (intrinsic == Intrinsic.SIZEOF || intrinsic == Intrinsic.TYPEOF) {
+                bool measures_type = intrinsic == Intrinsic.SIZEOF || intrinsic == Intrinsic.TYPEOF || intrinsic == Intrinsic.ALIGNOF;
+                if (measures_type && this.operand_is_expression(intrinsic == Intrinsic.TYPEOF)) {
+                    call.set_first(this.parse_expression());
+                    this.expect(TokenKind::RPAREN, "expected ')' after intrinsic argument");
+                    return call;
+                }
+                if (measures_type) {
                     call.set_type(this.parse_type());
                     if (intrinsic == Intrinsic.TYPEOF && this.check(TokenKind::DOT)) {
                         this.advance();
@@ -465,6 +485,11 @@ impl Parser {
                 }
                 if (intrinsic == Intrinsic.UNLIKELY || intrinsic == Intrinsic.LIKELY || intrinsic == Intrinsic.ASSUME || intrinsic == Intrinsic.PANIC) {
                     call.set_first(this.parse_expression());
+                }
+                if (intrinsic == Intrinsic.EXPECT || intrinsic == Intrinsic.BOUNDS_CHECK) {
+                    call.set_first(this.parse_expression());
+                    this.expect(TokenKind::COMMA, "expected a second argument after the first one");
+                    call.set_second(this.parse_expression());
                 }
                 if (intrinsic == Intrinsic.PREFETCH) {
                     call.set_first(this.parse_expression());

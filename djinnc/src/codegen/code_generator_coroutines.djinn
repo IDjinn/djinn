@@ -254,6 +254,12 @@ impl CodeGenerator {
         if (id == Intrinsic.PREFETCH) {
             return this.generate_prefetch(node);
         }
+        if (id == Intrinsic.EXPECT) {
+            return this.generate_expect(node);
+        }
+        if (id == Intrinsic.BOUNDS_CHECK) {
+            return this.generate_bounds_check(node);
+        }
         ptr condition = this.to_condition(this.gen_expression(node.first()));
         ptr<ptr> args = CodeGenerator.array_of(2);
         args[0] = condition;
@@ -277,6 +283,28 @@ impl CodeGenerator {
 }
 
 impl CodeGenerator {
+    unsafe Value* generate_bounds_check(Node* node) {
+        u32 widest = Types.integer(64, false);
+        ptr index = this.coerce(this.gen_expression(node.first()), widest);
+        ptr length = this.coerce(this.gen_expression(node.second()), widest);
+        ptr outside = LLVMBuildICmp(this.builder, LlvmConst.INT_UGE, index, length, "bounds.outside");
+        this.stop_when(outside, node, RuntimeErrors.INDEX_OUT_OF_RANGE);
+        return Value.create(null, Types.void_type());
+    }
+
+    unsafe Value* generate_expect(Node* node) {
+        u32 type = node.value_type();
+        ptr value = this.coerce(this.gen_expression(node.first()), type);
+        ptr expected = this.coerce(this.gen_expression(node.second()), type);
+        ptr<ptr> args = CodeGenerator.array_of(2);
+        args[0] = value;
+        args[1] = expected;
+        ptr<ptr> overload = CodeGenerator.array_of(1);
+        overload[0] = this.llvm_type(type);
+        ptr hinted = this.coro_intrinsic("llvm.expect", overload, 1, args, 2, "expect");
+        return Value.create(hinted, type);
+    }
+
     unsafe Value* generate_prefetch(Node* node) {
         ptr address = this.gen_expression(node.first()).ref;
         mut u64 access = 0;

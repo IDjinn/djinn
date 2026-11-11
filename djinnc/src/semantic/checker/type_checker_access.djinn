@@ -371,10 +371,38 @@ impl TypeChecker {
             if (id == Intrinsic.ATTRIBUTES) { return this.core_type("AttributeList"); }
             return this.core_type("NameList");
         }
+        if (id == Intrinsic.TYPEOF && node.type() == null) {
+            u32 expression_type = this.check_expression(node.first(), 0);
+            node.set_symbol(SymbolKind.TYPE, (ptr)(u64)expression_type);
+            return Types.pointer_to(this.core_type("TypeInfo"));
+        }
+        if (id == Intrinsic.BOUNDS_CHECK) {
+            u32 index_type = this.check_expression(node.first(), 0);
+            u32 length_type = this.check_expression(node.second(), 0);
+            if (!Types.is_integer(index_type) || !Types.is_integer(length_type)) {
+                this.error_code(node, DiagnosticErrors.INVALID_OPERATOR_OPERAND, "bounds_check needs an integer index and an integer length");
+            }
+            return Types.void_type();
+        }
+        if (id == Intrinsic.EXPECT) {
+            u32 value_type = this.check_expression(node.first(), 0);
+            if (!Types.is_integer(value_type)) {
+                this.error_code(node, DiagnosticErrors.INVALID_OPERATOR_OPERAND, "expect needs an integer or bool value");
+            }
+            this.check_expression(node.second(), value_type);
+            return value_type;
+        }
         if (id == Intrinsic.TYPEOF) {
             TypeRef* reference = node.type();
             SymbolTable* known = this.symbols;
             known.blame = node;
+            if (reference != null && reference.kind == TypeKind.NAMED && reference.args == null && node.text() == null) {
+                LocalVariable* named_variable = this.find_variable(reference.name_atom);
+                if (named_variable != null && known.find_struct(reference.full_atom, reference.name_atom, this.scope) == null) {
+                    node.set_symbol(SymbolKind.TYPE, (ptr)(u64)named_variable.type);
+                    return Types.pointer_to(this.core_type("TypeInfo"));
+                }
+            }
             if (node.text() != null) {
                 return this.check_typeof_method(node, reference);
             }
