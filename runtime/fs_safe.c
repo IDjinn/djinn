@@ -1583,27 +1583,32 @@ static struct
 static pthread_mutex_t djfs_ring_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_once_t djfs_ring_once = PTHREAD_ONCE_INIT;
 
+static pthread_mutex_t djfs_cq_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void djfs_ring_reap(void)
+{
+    pthread_mutex_lock(&djfs_cq_lock);
+    unsigned head = *djfs_ring.cq_head;
+    unsigned tail = __atomic_load_n(djfs_ring.cq_tail, __ATOMIC_ACQUIRE);
+    while (head != tail)
+    {
+        struct io_uring_cqe* cqe = &djfs_ring.cqes[head & *djfs_ring.cq_mask];
+        djfs_request* request = (djfs_request*)(uintptr_t)cqe->user_data;
+        int32_t res = cqe->res;
+        head++;
+        __atomic_store_n(djfs_ring.cq_head, head, __ATOMIC_RELEASE);
+        djfs_complete(request, res < 0 ? -djfs_from_errno(-res) : res);
+    }
+    pthread_mutex_unlock(&djfs_cq_lock);
+}
+
 static void* djfs_ring_thread(void* unused)
 {
     (void)unused;
-    unsigned head = *djfs_ring.cq_head;
     for (;;)
     {
-        unsigned tail = __atomic_load_n(djfs_ring.cq_tail, __ATOMIC_ACQUIRE);
-        if (head == tail)
-        {
-            syscall(__NR_io_uring_enter, djfs_ring.fd, 0, 1, IORING_ENTER_GETEVENTS, NULL, 0);
-            continue;
-        }
-        while (head != tail)
-        {
-            struct io_uring_cqe* cqe = &djfs_ring.cqes[head & *djfs_ring.cq_mask];
-            djfs_request* request = (djfs_request*)(uintptr_t)cqe->user_data;
-            int32_t res = cqe->res;
-            head++;
-            __atomic_store_n(djfs_ring.cq_head, head, __ATOMIC_RELEASE);
-            djfs_complete(request, res < 0 ? -djfs_from_errno(-res) : res);
-        }
+        syscall(__NR_io_uring_enter, djfs_ring.fd, 0, 1, IORING_ENTER_GETEVENTS, NULL, 0);
+        djfs_ring_reap();
     }
     return NULL;
 }
@@ -1688,6 +1693,7 @@ static int djfs_submit_native(djfs_request* request)
         return 1;
     }
     pthread_mutex_unlock(&djfs_ring_lock);
+    djfs_ring_reap();
     return 1;
 }
 

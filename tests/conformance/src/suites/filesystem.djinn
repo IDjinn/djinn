@@ -450,4 +450,228 @@ i32 compare(i8* expected, string actual, i32 size) {
 """;
         Verify.source(source).with_std().runs(Expected.exit(0));
     }
+
+    [Test]
+    void random_access_seeded_async() {
+        str source = """
+import std::types;
+import std::libc;
+import std::sys;
+import std::filesystem;
+namespace app;
+
+Path p(str text) {
+    return switch Path.parse(text) { Ok v -> v, Error e -> Path.unchecked("x", false) };
+}
+
+bool ok(result<bool, FsError> r) {
+    return switch r { Ok v -> v, Error e -> false };
+}
+
+i64 mix(i64 seed, i64 i) {
+    i64 x = (i * 1103515245 + seed * 12345 + 12345) & 2147483647;
+    return (x * 1103515245 + 12345) & 2147483647;
+}
+
+unsafe i8* make_zeroed(i32 size) {
+    i8* data = (i8*)malloc((size_long)size);
+    for (mut i32 i = 0; i < size; i = i + 1) { data[i] = 0; }
+    return data;
+}
+
+unsafe void fill(i8* block, i8* model, i64 tag) {
+    for (mut i32 k = 0; k < 512; k = k + 1) {
+        i8 value = (i8)((tag + k) & 127);
+        block[k] = value;
+        model[k] = value;
+    }
+}
+
+unsafe bool matches(i8* expected, i8* actual, i32 size) {
+    for (mut i32 i = 0; i < size; i = i + 1) {
+        if (expected[i] != actual[i]) { return false; }
+    }
+    return true;
+}
+
+i32 compare(i8* expected, string actual, i32 size) {
+    if ((i32)actual.length != size) { return 1; }
+    unsafe {
+        if (!matches(expected, actual.data, size)) { return 2; }
+    }
+    return 0;
+}
+
+async i32 main() {
+    Process.run("rd /s /q fsconf_rand_async 2>nul || rm -rf fsconf_rand_async");
+    result<Directory, FsError> rootr = await Directory.open_root(p("."));
+    return switch rootr {
+        Ok root -> await body(&root),
+        Error e -> 1
+    };
+}
+
+async i32 body(Directory* root) {
+    i32 blocks = 256;
+    i32 size = blocks * 512;
+    if (!ok(await root.create_dir(p("fsconf_rand_async")))) { return 2; }
+    if (await make_file(root, "fsconf_rand_async/data.bin", size) != 0) { return 3; }
+    result<File, FsError> opened = await root.open_file(p("fsconf_rand_async/data.bin"), OpenOptions.read_write());
+    return switch opened { Ok f -> await scatter(root, &f, blocks, size), Error e -> 11 };
+}
+
+async i32 make_file(Directory* root, str path, i32 size) {
+    result<File, FsError> created = await root.open_file(p(path), OpenOptions.create());
+    return switch created { Ok f -> await resize(&f, size), Error e -> 1 };
+}
+
+async i32 resize(File* file, i32 size) {
+    if (!ok(await file.truncate((i64)size))) { return 1; }
+    return 0;
+}
+
+async i32 scatter(Directory* root, File* file, i32 blocks, i32 size) {
+    i8* model = make_zeroed(size);
+    i8* block = make_zeroed(512);
+    for (mut i64 i = 0; i < 2000; i = i + 1) {
+        i64 offset = (mix(42, i) % (i64)blocks) * 512;
+        await file.seek_start(offset);
+        unsafe { fill(block, model + offset, i); }
+        result<i64, FsError> w = await file.write(block, 512);
+        bool wrote = switch w { Ok n -> n == 512, Error e -> false };
+        if (!wrote) { return 5; }
+        if ((mix(42, i) >> 16) % 4 == 0) {
+            i64 back = (mix(7, i) % (i64)blocks) * 512;
+            await file.seek_start(back);
+            result<i64, FsError> r = await file.read(block, 512);
+            bool read = switch r { Ok n -> n == 512, Error e -> false };
+            if (!read) { return 6; }
+            mut bool same = true;
+            unsafe { same = matches(model + back, block, 512); }
+            if (!same) { return 7; }
+        }
+    }
+    result<string, FsError> text = await root.read_to_string(p("fsconf_rand_async/data.bin"), (i64)size);
+    i32 verdict = switch text { Ok s -> compare(model, s, size), Error e -> -1 };
+    if (verdict != 0) { return 8; }
+    if (!ok(await root.remove_file(p("fsconf_rand_async/data.bin")))) { return 9; }
+    if (!ok(await root.remove_dir(p("fsconf_rand_async")))) { return 10; }
+    unsafe { free(model); free(block); }
+    return 0;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(0));
+    }
+
+    [Test]
+    void random_access_seeded_sync() {
+        str source = """
+import std::types;
+import std::libc;
+import std::sys;
+import std::filesystem;
+namespace app;
+
+Path p(str text) {
+    return switch Path.parse(text) { Ok v -> v, Error e -> Path.unchecked("x", false) };
+}
+
+bool ok(result<bool, FsError> r) {
+    return switch r { Ok v -> v, Error e -> false };
+}
+
+i64 mix(i64 seed, i64 i) {
+    i64 x = (i * 1103515245 + seed * 12345 + 12345) & 2147483647;
+    return (x * 1103515245 + 12345) & 2147483647;
+}
+
+unsafe i8* make_zeroed(i32 size) {
+    i8* data = (i8*)malloc((size_long)size);
+    for (mut i32 i = 0; i < size; i = i + 1) { data[i] = 0; }
+    return data;
+}
+
+unsafe void fill(i8* block, i8* model, i64 tag) {
+    for (mut i32 k = 0; k < 512; k = k + 1) {
+        i8 value = (i8)((tag + k) & 127);
+        block[k] = value;
+        model[k] = value;
+    }
+}
+
+unsafe bool matches(i8* expected, i8* actual, i32 size) {
+    for (mut i32 i = 0; i < size; i = i + 1) {
+        if (expected[i] != actual[i]) { return false; }
+    }
+    return true;
+}
+
+i32 compare(i8* expected, string actual, i32 size) {
+    if ((i32)actual.length != size) { return 1; }
+    unsafe {
+        if (!matches(expected, actual.data, size)) { return 2; }
+    }
+    return 0;
+}
+
+i32 main() {
+    Process.run("rd /s /q fsconf_rand_sync 2>nul || rm -rf fsconf_rand_sync");
+    result<Directory, FsError> rootr = Directory.open_root_sync(p("."));
+    return switch rootr {
+        Ok root -> body(&root),
+        Error e -> 1
+    };
+}
+
+i32 body(Directory* root) {
+    i32 blocks = 256;
+    i32 size = blocks * 512;
+    if (!ok(root.create_dir_sync(p("fsconf_rand_sync")))) { return 2; }
+    if (make_file(root, "fsconf_rand_sync/data.bin", size) != 0) { return 3; }
+    result<File, FsError> opened = root.open_file_sync(p("fsconf_rand_sync/data.bin"), OpenOptions.read_write());
+    return switch opened { Ok f -> scatter(root, &f, blocks, size), Error e -> 11 };
+}
+
+i32 make_file(Directory* root, str path, i32 size) {
+    result<File, FsError> created = root.open_file_sync(p(path), OpenOptions.create());
+    return switch created { Ok f -> resize(&f, size), Error e -> 1 };
+}
+
+i32 resize(File* file, i32 size) {
+    if (!ok(file.truncate_sync((i64)size))) { return 1; }
+    return 0;
+}
+
+i32 scatter(Directory* root, File* file, i32 blocks, i32 size) {
+    i8* model = make_zeroed(size);
+    i8* block = make_zeroed(512);
+    for (mut i64 i = 0; i < 2000; i = i + 1) {
+        i64 offset = (mix(42, i) % (i64)blocks) * 512;
+        file.seek_start_sync(offset);
+        unsafe { fill(block, model + offset, i); }
+        result<i64, FsError> w = file.write_sync(block, 512);
+        bool wrote = switch w { Ok n -> n == 512, Error e -> false };
+        if (!wrote) { return 5; }
+        if ((mix(42, i) >> 16) % 4 == 0) {
+            i64 back = (mix(7, i) % (i64)blocks) * 512;
+            file.seek_start_sync(back);
+            result<i64, FsError> r = file.read_sync(block, 512);
+            bool read = switch r { Ok n -> n == 512, Error e -> false };
+            if (!read) { return 6; }
+            mut bool same = true;
+            unsafe { same = matches(model + back, block, 512); }
+            if (!same) { return 7; }
+        }
+    }
+    result<string, FsError> text = root.read_to_string_sync(p("fsconf_rand_sync/data.bin"), (i64)size);
+    i32 verdict = switch text { Ok s -> compare(model, s, size), Error e -> -1 };
+    if (verdict != 0) { return 8; }
+    if (!ok(root.remove_file_sync(p("fsconf_rand_sync/data.bin")))) { return 9; }
+    if (!ok(root.remove_dir_sync(p("fsconf_rand_sync")))) { return 10; }
+    unsafe { free(model); free(block); }
+    return 0;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(0));
+    }
 }
