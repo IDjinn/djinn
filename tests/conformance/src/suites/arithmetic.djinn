@@ -638,4 +638,196 @@ i32 main() {
 """;
         Verify.source(source).with_std().runs(Expected.exit(42));
     }
+
+    [Test]
+    void CheckedRequiresThrows() {
+        str source = """
+i32 main() {
+    i32c a = 1000c;
+    i32c b = a + 32;
+    return b;
+}
+""";
+        Verify.source(source).with_std().diagnostics(Expected.error(DiagnosticErrors.THROWS_TYPE_MISMATCH));
+    }
+
+    [Test]
+    void SaturatingRuntimeAddClampsToMax() {
+        str source = """
+i32 main() {
+    i32s a = 2000000000s;
+    i32s b = a + 2000000000;
+    return b / 1000000000;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(2));
+    }
+
+    [Test]
+    void SaturatingLiteralClampsAtCompileTime() {
+        str source = """
+i32 main() {
+    i32s a = 3000000000s;
+    return a / 1000000000;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(2));
+    }
+
+    [Test]
+    void WrappedLiteralOutOfRangeStillCompiles() {
+        str source = """
+i32 main() {
+    i32w a = 3000000000w;
+    return a;
+}
+""";
+        Verify.source(source).with_std().compiles();
+    }
+
+    [Test]
+    void ConflictingModesAreRejected() {
+        str source = """
+i32 main() throws {
+    i32w a = 1000w;
+    i32t b = 2000t;
+    i32 c = a + b;
+    return c;
+}
+""";
+        Verify.source(source).with_std().diagnostics(Expected.error(DiagnosticErrors.CONFLICTING_OVERFLOW_MODES));
+    }
+
+    [Test]
+    void WrappedLiteralKeepsCStyleValue() {
+        str source = """
+i32 main() {
+    i32w a = 3000000000w;
+    return 0 - a;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(1294967296));
+    }
+
+    [Test]
+    void HexLiteralSuffixCompiles() {
+        str source = """
+i32 main() {
+    i32w flags = 0xFFFFFFFFw;
+    return 0 - flags;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(1));
+    }
+
+    [Test]
+    void CompoundAssignmentSaturates() {
+        str source = """
+i32 main() {
+    mut i32s a = 2000000000s;
+    a += 1000000000;
+    return a / 1000000000;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(2));
+    }
+
+    [Test]
+    void UnaryNegateSaturatesMinToMax() {
+        str source = """
+i32 main() {
+    i32s m = -2147483648s;
+    i32s n = -m;
+    return n / 1000000000;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(2));
+    }
+
+    [Test]
+    void SaturatingDivIntMinClampsToMax() {
+        str source = """
+i32 main() {
+    i32s m = -2147483648s;
+    i32s q = m / -1s;
+    return q / 1000000000;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(2));
+    }
+
+    [Test]
+    void SaturatingSubClampsToMin() {
+        str source = """
+i32 main() {
+    i32s a = -2000000000s;
+    i32s b = a - 2000000000;
+    return 0 - (b / 1000000000);
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(2));
+    }
+
+    [Test]
+    void SaturatingMulClampsToMax() {
+        str source = """
+i32 main() {
+    i32s a = 2000000000s;
+    i32s b = a * 2;
+    return b / 1000000000;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(2));
+    }
+
+    [Test]
+    void ConstexprSaturatingAdd() {
+        str source = """
+constexpr i32s a = 2000000000s + 2000000000s;
+
+i32 main() {
+    return a / 1000000000;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(2));
+    }
+
+    [Test]
+    void ConstevalTrappedOverflowIsError() {
+        str source = """
+consteval i32t x = 2000000000t + 1000000000t;
+
+i32 main() {
+    return x;
+}
+""";
+        Verify.source(source).with_std().diagnostics(Expected.error(DiagnosticErrors.INVALID_CONSTANT_EXPRESSION));
+    }
+
+    [Test]
+    void NestedModePropagationSaturates() {
+        str source = """
+i32 main() {
+    i32s a = 1000000000s;
+    i32s b = (a + a) + a;
+    return b / 1000000000;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(2));
+    }
+
+    [Test]
+    void CheckedOverflowCaughtByTryFallback() {
+        str source = """
+i32 safeAdd(i32c a, i32c b) throws {
+    return a + b;
+}
+
+i32 main() {
+    i32 result = try safeAdd(2147483647c, 1c) ?: -1;
+    return 0 - result;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(1));
+    }
 }
