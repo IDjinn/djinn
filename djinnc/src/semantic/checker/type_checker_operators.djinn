@@ -226,6 +226,39 @@ impl TypeChecker {
         return Types.i32_type();
     }
 
+    unsafe u32 check_text_index_operator(Node* node, u32 base) {
+        u32 element = this.check_index_operator(node, base);
+        bool indexes_text = base == this.core_type("str") || base == this.core_type("string");
+        bool in_constant_function = this.function != null && this.function.const_kind != 0;
+        if (!indexes_text || in_constant_function || node.symbol_kind() != SymbolKind.INDEX_GET) {
+            return element;
+        }
+        ConstEval* evaluator = this.const_eval;
+        Node* text = node.first();
+        Node* position = node.second();
+        if (!evaluator.evaluate(text, base, base)) {
+            return element;
+        }
+        i64 length = (i64)strlen((ptr<i8>)evaluator.ri);
+        ptr<i8> characters = (ptr<i8>)evaluator.ri;
+        u32 position_type = position.value_type();
+        if (!evaluator.evaluate(position, position_type, position_type)) {
+            return element;
+        }
+        i64 offset = evaluator.ri;
+        if (offset < 0 || offset >= length) {
+            ByteBuffer* message = ByteBuffer.create();
+            message.append(RuntimeErrors.text(RuntimeErrors.INDEX_OUT_OF_RANGE));
+            message.append(": the text is constant, so the index is checked at compile time");
+            this.error_code(node, DiagnosticErrors.CONSTANT_INDEX_OUT_OF_RANGE, message.cstr());
+            return element;
+        }
+        evaluator.ri = (i64)characters[offset];
+        evaluator.rf = (f64)evaluator.ri;
+        evaluator.fold(node, element);
+        return element;
+    }
+
     unsafe u32 check_index_operator(Node* node, u32 base) {
         SymbolTable* symbols = this.symbols;
         StructInfo* owner = symbols.struct_at(Types.struct_index(base));
