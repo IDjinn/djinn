@@ -98,6 +98,10 @@ impl CodeGenerator {
         if (LLVMIsConstant(failed) != 0 && LLVMIsNull(failed) != 0) {
             return;
         }
+        if (this.violated(node, runtime_error)) {
+            this.stop_when(failed, node, runtime_error);
+            return;
+        }
         ptr thrown = this.new_block("error.throw");
         ptr valid = this.new_block("error.valid");
         LLVMBuildCondBr(this.builder, failed, thrown, valid);
@@ -139,7 +143,7 @@ impl CodeGenerator {
     unsafe Value* gen_overflow_arithmetic(Node* node, TokenKind op, u32 common, ptr lhs, ptr rhs) {
         OverflowMode mode = node.mode();
         bool is_signed = Types.is_signed(common);
-        if ((node.proof_for(common) & RangeProof.OVERFLOW_FREE) != 0) {
+        if (this.proven(node, common, RangeProof.OVERFLOW_FREE)) {
             return Value.create(this.unwrapped_arithmetic(op, is_signed, lhs, rhs), common);
         }
         if (mode.detects_overflow()) {
@@ -173,7 +177,7 @@ impl CodeGenerator {
         ptr value = operand.ref;
         OverflowMode mode = node.mode();
         bool negative_literal = node.first().kind() == NodeKind::INT_LITERAL;
-        bool proven = (node.proof_for(type) & RangeProof.OVERFLOW_FREE) != 0;
+        bool proven = this.proven(node, type, RangeProof.OVERFLOW_FREE);
         if (!Types.is_signed(type) || mode == OverflowMode::WRAPPED || negative_literal || proven) {
             return Value.create(LLVMBuildNeg(this.builder, value, "neg"), type);
         }

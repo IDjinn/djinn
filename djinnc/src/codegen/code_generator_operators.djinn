@@ -475,21 +475,34 @@ impl CodeGenerator {
         return LLVMBuildSelect(this.builder, is_minus_one, LLVMConstInt(type, 1, 0), rhs, "rem.divisor");
     }
 
+    // With --verify-ranges a check that the analysis proved redundant stays and reports a compiler bug if it ever fires.
+    unsafe bool proven(Node* node, u32 common, u32 flag) {
+        return !this.verify_ranges && (node.proof_for(common) & flag) != 0;
+    }
+
+    unsafe bool violated(Node* node, i32 runtime_error) {
+        return this.verify_ranges && (node.proof_flags() & RangeProofs.mask_for(runtime_error)) != 0;
+    }
+
     unsafe void stop_when(ptr failed, Node* node, i32 runtime_error) {
         if (LLVMIsConstant(failed) != 0 && LLVMIsNull(failed) != 0) {
             return;
+        }
+        mut i32 reported = runtime_error;
+        if (this.violated(node, runtime_error)) {
+            reported = RuntimeErrors.RANGE_PROOF_VIOLATED;
         }
         ptr stopped = this.new_block("check.failed");
         ptr valid = this.new_block("check.valid");
         LLVMBuildCondBr(this.builder, failed, stopped, valid);
         LLVMPositionBuilderAtEnd(this.builder, stopped);
-        this.call_panic(this.string_constant(RuntimeErrors.report(runtime_error)), node);
+        this.call_panic(this.string_constant(RuntimeErrors.report(reported)), node);
         LLVMBuildUnreachable(this.builder);
         LLVMPositionBuilderAtEnd(this.builder, valid);
     }
 
     void check_nonzero_divisor(Node* node, u32 common, ptr rhs) {
-        if ((node.proof_for(common) & RangeProof.DIVISOR_NONZERO) != 0) {
+        if (this.proven(node, common, RangeProof.DIVISOR_NONZERO)) {
             return;
         }
         this.check_divisor(node, rhs);
@@ -505,7 +518,7 @@ impl CodeGenerator {
     }
 
     void check_shift(Node* node, u32 common, ptr rhs) {
-        if ((node.proof_for(common) & RangeProof.SHIFT_IN_RANGE) != 0) {
+        if (this.proven(node, common, RangeProof.SHIFT_IN_RANGE)) {
             return;
         }
         ptr width = LLVMConstInt(LLVMTypeOf(rhs), (u64)Types.bits(common), 0);
@@ -618,7 +631,7 @@ impl CodeGenerator {
         if (is_signed && node.mode() == OverflowMode::SATURATING) {
             return this.gen_saturating_division(common, lhs, rhs);
         }
-        if (is_signed && (node.proof_for(common) & RangeProof.NOT_MINIMUM_DIVIDED) == 0) {
+        if (is_signed && !this.proven(node, common, RangeProof.NOT_MINIMUM_DIVIDED)) {
             this.check_division_overflow(node, common, lhs, rhs);
             return Value.create(LLVMBuildSDiv(this.builder, lhs, rhs, "sdiv"), common);
         }

@@ -8,7 +8,10 @@ unsafe static mut i32 range_proven_checks = 0;
 struct RangeAnalysis {
     RangeState* state;
     PointerList* excluded;
+    RangeSummary* current;
+    PointerList* summaries;
     i32 quiet;
+    i32 base_quiet;
     bool top;
     i64 low;
     i64 high;
@@ -17,31 +20,141 @@ struct RangeAnalysis {
         return range_proven_checks;
     }
 
-    public static unsafe void run(SymbolTable* symbols) {
+    // Whole-program summaries need every caller in view, so a library, whose public functions have unknown callers,
+    // only gets the per-function analysis. Two collecting passes tighten the summaries before the proving pass.
+    public static unsafe void run(SymbolTable* symbols, bool library) {
         if (ast_proofs == null) {
             ast_proofs = calloc((u64)ast_capacity, 4);
         }
         RangeAnalysis* analysis = (RangeAnalysis*)Memory.zalloc(sizeof(RangeAnalysis));
+        analysis.summaries = PointerList.create();
+        mut i32 passes = 1;
+        if (!library) {
+            analysis.summarize(symbols);
+            passes = 3;
+        }
         PointerList* functions = symbols.functions;
-        for (mut i32 i = 0; i < functions.length; i = i + 1) {
-            FunctionInfo* info = (FunctionInfo*)functions.get(i);
-            if (info.is_extern || info.is_template || info.node == null) {
-                continue;
+        for (mut i32 pass = 0; pass < passes; pass = pass + 1) {
+            analysis.base_quiet = 0;
+            if (pass < passes - 1) {
+                analysis.base_quiet = 1;
             }
-            Node* declaration = info.node;
-            if (declaration.kind() != NodeKind::FUNCTION || declaration.first() == null) {
-                continue;
+            for (mut i32 i = 0; i < functions.length; i = i + 1) {
+                FunctionInfo* info = (FunctionInfo*)functions.get(i);
+                if (info.is_extern || info.is_template || info.node == null) {
+                    continue;
+                }
+                Node* declaration = info.node;
+                if (declaration.kind() != NodeKind::FUNCTION || declaration.first() == null) {
+                    continue;
+                }
+                analysis.function(info, declaration);
             }
-            analysis.function(declaration.first());
+            PointerList* summaries = analysis.summaries;
+            for (mut i32 s = 0; s < summaries.length; s = s + 1) {
+                RangeSummary* summary = (RangeSummary*)summaries.get(s);
+                summary.settle();
+            }
         }
     }
 
-    unsafe void function(Node* body) {
+    unsafe bool summarizable(FunctionInfo* info) {
+        Node* declaration = info.node;
+        if (info.is_extern || info.is_template || info.is_variadic || info.is_instance || info.is_async || info.is_disabled
+            || info.owner != null || declaration == null || declaration.kind() != NodeKind::FUNCTION
+            || declaration.first() == null || info.name_atom == Atoms.MAIN_ATOM) {
+            return false;
+        }
+        PointerList* uses = Attributes.of(declaration);
+        for (mut i32 i = 0; i < uses.length; i = i + 1) {
+            AttributeUse* use = (AttributeUse*)uses.get(i);
+            if (Attributes.llvm_name(use.name) == null || Attributes.named(use.name, "Export")) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    unsafe void summarize(SymbolTable* symbols) {
+        PointerList* functions = symbols.functions;
+        PointerList* summaries = this.summaries;
+        for (mut i32 i = 0; i < functions.length; i = i + 1) {
+            FunctionInfo* info = (FunctionInfo*)functions.get(i);
+            if (this.summarizable(info)) {
+                RangeSummary* summary = RangeSummary.create(info);
+                summary.eligible = true;
+                summary.returns_total = RangeAnalysis.count_kind(info.node.first(), NodeKind::RETURN);
+                info.range_summary = (ptr)summary;
+                summaries.push((ptr)summary);
+            }
+        }
+        for (mut i32 id = 1; id < Ast.node_count(); id = id + 1) {
+            Node* node = Ast.at(id);
+            if (node.symbol_kind() == SymbolKind.FUNCTION && node.symbol() != null) {
+                FunctionInfo* referenced = (FunctionInfo*)node.symbol();
+                if (referenced.range_summary != null) {
+                    RangeSummary* summary = (RangeSummary*)referenced.range_summary;
+                    summary.references = summary.references + 1;
+                }
+            }
+            if (node.kind() == NodeKind::CALL) {
+                Node* callee = node.first();
+                if (callee != null && callee.symbol_kind() == SymbolKind.FUNCTION && callee.symbol() != null) {
+                    FunctionInfo* called = (FunctionInfo*)callee.symbol();
+                    if (called.range_summary != null) {
+                        RangeSummary* summary = (RangeSummary*)called.range_summary;
+                        summary.callee_references = summary.callee_references + 1;
+                    }
+                }
+            }
+        }
+    }
+
+    static unsafe i32 count_kind(Node* node, NodeKind wanted) {
+        if (node == null) {
+            return 0;
+        }
+        mut i32 total = 0;
+        if (node.kind() == wanted) {
+            total = 1;
+        }
+        for (mut i32 field = NodeField.FIRST; field <= NodeField.FOURTH; field = field + 1) {
+            u32 stored = node.get_field(field);
+            if (stored != 0) {
+                total = total + RangeAnalysis.count_kind(Ast.at((i32)stored), wanted);
+            }
+        }
+        if (node.has_items()) {
+            for (mut i32 i = 0; i < node.count(); i = i + 1) {
+                total = total + RangeAnalysis.count_kind(node.child(i), wanted);
+            }
+        }
+        return total;
+    }
+
+    unsafe void function(FunctionInfo* info, Node* declaration) {
+        Node* body = declaration.first();
         this.excluded = PointerList.create();
         this.collect_excluded(body);
         this.state = RangeState.create();
-        this.quiet = 0;
+        this.quiet = this.base_quiet;
+        this.current = (RangeSummary*)info.range_summary;
+        RangeSummary* summary = this.current;
+        if (summary != null && summary.trusted()) {
+            for (mut i32 p = 0; p < declaration.count() && p < summary.count; p = p + 1) {
+                LocalVariable* parameter = (LocalVariable*)declaration.child(p).symbol();
+                if (summary.in_known[p] == 1 && parameter != null && this.entry_tracked(parameter)) {
+                    RangeState* state = this.state;
+                    state.put((ptr)parameter, summary.in_low[p], summary.in_high[p]);
+                }
+            }
+        }
         this.statement(body);
+    }
+
+    unsafe bool entry_tracked(LocalVariable* variable) {
+        PointerList* excluded = this.excluded;
+        return !variable.is_volatile && RangeMath.tracks(variable.type) && !excluded.contains((ptr)variable);
     }
 
     // A local whose address is taken, or that receives a method call, can change behind the analysis.
@@ -346,6 +459,7 @@ struct RangeAnalysis {
         if (kind == NodeKind::RETURN || kind == NodeKind::THROW_STMT) {
             if (node.first() != null) {
                 this.eval(node.first());
+                this.note_return(kind == NodeKind::RETURN);
             }
             RangeState* ended = this.state;
             ended.dead = true;
@@ -373,6 +487,21 @@ struct RangeAnalysis {
             return;
         }
         this.havoc(node);
+    }
+
+    unsafe void note_return(bool returns) {
+        RangeSummary* summary = this.current;
+        if (summary == null || !returns) {
+            return;
+        }
+        FunctionInfo* info = summary.info;
+        summary.returns_seen = summary.returns_seen + 1;
+        if (info.has_throws || info.is_async || !RangeMath.tracks(info.return_type)) {
+            summary.join_return(true, 0, 0);
+            return;
+        }
+        this.convert(info.return_type);
+        summary.join_return(this.top, this.low, this.high);
     }
 
     unsafe void branch(Node* node) {
@@ -494,16 +623,7 @@ struct RangeAnalysis {
             return;
         }
         if (kind == NodeKind::CALL) {
-            this.eval(node.first());
-            for (mut i32 i = 0; i < node.count(); i = i + 1) {
-                Node* argument = node.child(i);
-                if (argument.kind() == NodeKind::NAMED_ARG) {
-                    this.eval(argument.first());
-                } else {
-                    this.eval(argument);
-                }
-            }
-            this.full(type);
+            this.call(node, type);
             return;
         }
         if (kind == NodeKind::FIELD_ACCESS) {
@@ -527,6 +647,46 @@ struct RangeAnalysis {
             return;
         }
         this.havoc(node);
+        this.full(type);
+    }
+
+    unsafe void call(Node* node, u32 type) {
+        Node* callee = node.first();
+        this.eval(callee);
+        mut RangeSummary* summary = (RangeSummary*)0;
+        if (callee.symbol_kind() == SymbolKind.FUNCTION && callee.symbol() != null) {
+            FunctionInfo* called = (FunctionInfo*)callee.symbol();
+            summary = (RangeSummary*)called.range_summary;
+        }
+        mut bool direct = summary != null && summary.eligible && node.count() == summary.count;
+        if (summary != null && !direct) {
+            summary.eligible = false;
+        }
+        for (mut i32 i = 0; i < node.count(); i = i + 1) {
+            Node* argument = node.child(i);
+            if (argument.kind() == NodeKind::NAMED_ARG) {
+                this.eval(argument.first());
+                if (summary != null) {
+                    summary.eligible = false;
+                }
+                direct = false;
+            } else {
+                this.eval(argument);
+                if (direct && this.quiet == this.base_quiet) {
+                    IdList* params = summary.info.param_types;
+                    this.convert(params.get(i));
+                    summary.join_argument(i, this.top, this.low, this.high);
+                }
+            }
+        }
+        if (direct && this.quiet == this.base_quiet) {
+            summary.calls_seen = summary.calls_seen + 1;
+        }
+        if (summary != null && summary.ret_in_known && summary.trusted() && RangeMath.tracks(type)) {
+            this.result(summary.ret_in_low, summary.ret_in_high);
+            this.convert(type);
+            return;
+        }
         this.full(type);
     }
 

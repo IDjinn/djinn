@@ -32,6 +32,22 @@ with `Node.proof_for(common)` and a proof for another type is ignored.
 - 64-bit unsigned values above `i64.MAX_VALUE` have no `i64` bound and stay unknown.
 - All interval arithmetic is checked against `i64` overflow first; a possible overflow falls back to the full range.
 
+## Whole-program summaries
+
+Unless building a library, three passes run: two that only collect, one that records proofs. A free function (not a
+method, not `async`, not variadic, not `main`, no attribute other than the LLVM-mapped ones, never `[Export]`) gets a
+summary of what its callers pass and what it returns. The summary is trusted only when every reference to the function
+in the whole AST is a direct call the analysis walked, with positional arguments: a function whose address is taken
+(`&f`), called with named arguments, or called from code the analysis does not model keeps the full range of its
+parameters. A return range needs every `return` of the function to be visited.
+
+## Verifying the proofs
+
+`--verify-ranges` (or `DJINN_VERIFY_RANGES=1`, which the conformance runner passes down) keeps every check that was
+proven redundant and makes it report `R10012: range proof violated` if it ever fires, so a wrong proof becomes a loud
+failure instead of silent undefined behaviour. The compiler compiling itself, and the whole conformance suite, run
+clean with it.
+
 ## Observing it
 
 `--stats` prints `range: N checks proven` for ahead-of-time builds and for `--run`. `tests/djinnc/range_opt.sh` compares

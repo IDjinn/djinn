@@ -286,4 +286,87 @@ i32 main() {
 """;
         RangeTests.crashes_at_every_level(source, "out of range");
     }
+
+    [Test]
+    void parameters_summarized_over_every_caller_prove_the_body() {
+        str source = """
+i32 bump(i32 n) { return n + 1; }
+i32 scaled(i32 n) { return n * 1000; }
+i32 bounded(i32 n) { return n & 15; }
+
+i32 main() {
+    i32 a = bump(10) + bump(20);
+    i32 b = scaled(bounded(a)) + scaled(bounded(7));
+    return b / 1000 + a + 3;
+}
+""";
+        RangeTests.exits_at_every_level(source, 42);
+    }
+
+    [Test]
+    void one_large_caller_keeps_the_check_in_the_callee() {
+        str source = """
+i32 bump(i32 n) { return n + 1; }
+
+i32 main() {
+    i32 small = bump(10);
+    return bump(2147483647) + small;
+}
+""";
+        RangeTests.crashes_at_every_level(source, "integer overflow");
+    }
+
+    [Test]
+    void a_returned_range_flows_to_the_caller() {
+        str source = """
+i32 low_bits(i32 x) { return x & 15; }
+i32 wide(i32 x) { return x; }
+
+i32 main() {
+    i32 scaled = low_bits(123461) * 1000;
+    return scaled / 1000 + wide(34) + 0;
+}
+""";
+        RangeTests.exits_at_every_level(source, 39);
+    }
+
+    [Test]
+    void an_unbounded_returned_value_keeps_the_check() {
+        str source = """
+i32 pass(i32 x) { return x; }
+
+i32 main() {
+    return pass(2147483647) + pass(1);
+}
+""";
+        RangeTests.crashes_at_every_level(source, "integer overflow");
+    }
+
+    [Test]
+    void a_function_whose_address_is_taken_is_not_summarized() {
+        str source = """
+i32 grow(i32 n) { return n + 1; }
+
+i32 main() {
+    ptr<void> address = &grow;
+    if (address == null) { return 1; }
+    i32 small = grow(1);
+    return grow(2147483647) + small;
+}
+""";
+        RangeTests.crashes_at_every_level(source, "integer overflow");
+    }
+
+    [Test]
+    void a_function_called_with_named_arguments_is_not_summarized() {
+        str source = """
+i32 grow(i32 amount, i32 bonus) { return amount + bonus; }
+
+i32 main() {
+    i32 small = grow(1, 2);
+    return grow(bonus: 2147483647, amount: 5) + small;
+}
+""";
+        RangeTests.crashes_at_every_level(source, "integer overflow");
+    }
 }

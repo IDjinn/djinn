@@ -72,7 +72,18 @@ i32 walked() {
     return hits;
 }
 
+[Export]
+i32 exported_step(i32 n) { return n + 1; }
+
+[NoInline]
+i32 internal_step(i32 n) { return n + 1; }
+
+[NoInline]
+i32 taken_step(i32 n) { return n + 1; }
+
 i32 main() {
+    ptr<void> address = &taken_step;
+    if (address == null || internal_step(10) != 11 || internal_step(20) != 21 || taken_step(1) != 2) { return 1; }
     if (counted(8) != 3 || walked() != 4) { return 1; }
     printf("%d %d %d %d %d %d\n", widened(200, 100), masked(1000), guarded(5), divide(50), unknown(1, 2), unknown_divide(9, 3));
     return 0;
@@ -103,6 +114,12 @@ for name in counted walked; do
     [ "$(checks "$out/app$exe.ll" $name)" -lt "$(checks "$out/plain$exe.ll" $name)" ] || fail "$name must lose checks to the loop counter analysis"
 done
 
+for name in internal_step; do
+    [ "$(checks "$out/app$exe.ll" $name)" -lt "$(checks "$out/plain$exe.ll" $name)" ] || fail "$name is only called with small values and must lose its check"
+done
+[ "$(checks "$out/app$exe.ll" taken_step)" -eq "$(checks "$out/plain$exe.ll" taken_step)" ] || fail "a function whose address is taken must keep its check"
+[ "$(checks "$out/app$exe.ll" exported_step)" -eq "$(checks "$out/plain$exe.ll" exported_step)" ] || fail "an exported function must keep its check"
+
 proven() { grep -o "range: [0-9]* checks proven" | grep -o "[0-9]*"; }
 aot="$("$compiler" "$out/app.djinn" -O1 --stats -o "$out/stats$exe" "${flags[@]}" 2>&1 | proven)"
 [ -n "$aot" ] && [ "$aot" -gt 0 ] || fail "--stats must report the checks proven for an ahead-of-time build"
@@ -116,5 +133,9 @@ jit="$("$compiler" "$out/app.djinn" -O1 --run --stats "${flags[@]}" 2>&1 | prove
 tiered="$("$compiler" "$out/app.djinn" -O1 --run --tiered --stats "${flags[@]}" 2>&1 | proven)"
 [ "$tiered" = "$aot" ] || fail "the tiered JIT must prove the same checks ($tiered vs $aot)"
 "$compiler" "$out/app.djinn" -O1 --run "${flags[@]}" 2>&1 | grep -q "^300 696 6 7 3 3$" || fail "the JIT must print the same results"
+
+"$compiler" "$out/app.djinn" -O1 --verify-ranges -o "$out/verify$exe" "${flags[@]}" > "$out/verify.log" 2>&1 || { cat "$out/verify.log"; fail "--verify-ranges must compile"; }
+[ "$("$out/verify$exe")" = "300 696 6 7 3 3" ] || fail "--verify-ranges must run without a violated proof"
+"$compiler" "$out/app.djinn" -O0 --verify-ranges --run "${flags[@]}" 2>&1 | grep -q "^300 696 6 7 3 3$" || fail "--verify-ranges must also work in the JIT at -O0"
 
 echo "PASS range_opt"
