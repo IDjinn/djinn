@@ -1,56 +1,38 @@
 # Triagem dos testes gtest
 
-Gerado por `tests/conformance/port_gtests.py`: cada `TEST` foi extraído e executado no djinnc, e a decisão sai do
-resultado. Os grupos que falharam foram revisados à mão; os que passaram não tiveram a intenção lida um a um.
+Gerado por `tests/conformance/port_gtests.py` e depois fechado à mão: cada `TEST` foi extraído e executado no djinnc, e a decisão sai do
+resultado. Os fontes C++ saíram do repositório (estão em `31b1a47^`), então a tabela agora é mantida à mão. Só entram testes em Djinn.
+Os 45 bloqueados dependem de recursos que o djinnc ainda não tem (contratos, tipos non-zero, ponteiros anuláveis, `nint` com sufixos).
 
 | Decisão | Testes | O que significa |
 |---|---|---|
-| Portar | 439 | Passa no djinnc; está em `tests/conformance/src/suites`, como `[Test]`. |
-| Reescrito | 66 | O comportamento importa e o teste foi reescrito à mão (IR, avaliação constante, pilha, vários arquivos); o destino está no motivo. |
+| Portar | 459 | Passa no djinnc; está em `tests/conformance/src/suites`, como `[Test]`. |
+| Reescrito | 119 | O comportamento importa e o teste foi reescrito à mão (IR, avaliação constante, pilha, vários arquivos); o destino está no motivo. |
 | Reescrever | 0 | O comportamento importa, mas o teste ainda precisa de outra forma. |
-| Bloqueado | 175 | O djinnc não reproduz o comportamento; falta decidir se implementa ou se o recurso sai. |
-| Descartar | 43 | Interno do stage0 ou duplicado. |
+| Bloqueado | 45 | O djinnc não reproduz o comportamento; falta decidir se implementa ou se o recurso sai. |
+| Descartar | 100 | Interno do stage0 ou duplicado. |
 
 ## O que bloqueia
 
 | Lacuna | Testes |
 |---|---|
-| tipos de erro em `throws` | 32 |
-| modos de overflow | 30 |
 | contratos | 20 |
-| `sizeof`/`typeof`/`alignof` de expressão | 18 |
-| `switch` com bloco e `yield` | 10 |
 | tipos non-zero | 10 |
-| interpolação de string | 8 |
-| tipos anuláveis | 7 |
-| `object` e `...args` com `str` | 6 |
-| desestruturação | 4 |
-| `for` com range | 4 |
-| o djinnc rejeita: undefined variable | 3 |
-| o djinnc não reproduz o comportamento | 3 |
-| tipos nativos | 3 |
-| `const` local | 2 |
-| o djinnc rejeita: struct does not define this operator | 2 |
-| modo release | 2 |
-| o djinnc rejeita: an enum cannot carry a payload: declare it as a union | 2 |
-| o djinnc rejeita: struct does not define operator get[] | 1 |
-| o djinnc rejeita: a struct initializer needs a struct type from its context | 1 |
-| o djinnc rejeita: expected a type | 1 |
-| o djinnc rejeita: expected '(' after function name | 1 |
-| intrínseca `expect` | 1 |
-| enum genérico com restrição | 1 |
-| o djinnc rejeita: expected '{' | 1 |
-| o djinnc rejeita: struct has no such field | 1 |
-| conversão entre ponteiros incompatíveis | 1 |
+| `?.`, `!.`, `??=` não existem e `??` só vale em ponteiro não anulável | 7 |
+| `nint` não tem `MAX_VALUE` nem sufixos de overflow | 3 |
+| ponteiro anulável | 2 |
+| `str` não define `get[]` | 1 |
+| `impl i32 { static ... }` não é chamável como `i32.clamp(...)`: o djinnc lê `i32` como variável | 1 |
+| o djinnc aceita `mut const` sem erro | 1 |
 
 ## aggregates
 
 | Teste | Decisão | Motivo |
 |---|---|---|
-| Destructuring.BasicStructFields | Bloqueado | desestruturação |
-| Destructuring.VariablesVisibleInEnclosingScope | Bloqueado | desestruturação |
-| Destructuring.SingleField | Bloqueado | desestruturação |
-| Destructuring.FromExpression | Bloqueado | desestruturação |
+| Destructuring.BasicStructFields | Descartar | desestruturação é proibida no djinnc (`SUBSET.md`, Forbidden) |
+| Destructuring.VariablesVisibleInEnclosingScope | Descartar | desestruturação é proibida no djinnc (`SUBSET.md`, Forbidden) |
+| Destructuring.SingleField | Descartar | desestruturação é proibida no djinnc (`SUBSET.md`, Forbidden) |
+| Destructuring.FromExpression | Descartar | desestruturação é proibida no djinnc (`SUBSET.md`, Forbidden) |
 | Destructuring.BareBlockStillIntroducesScope | Portar | erro E3002 |
 | Enum.SimpleDefinition | Portar | exit code 0 |
 | Enum.VariantConstruction | Portar | exit code 0 |
@@ -93,7 +75,7 @@ resultado. Os grupos que falharam foram revisados à mão; os que passaram não 
 | Str.LenField | Portar | exit code 10 |
 | Str.IsEmptyMethodTrue | Portar | exit code 1 |
 | Str.IsEmptyMethodFalse | Portar | exit code 0 |
-| Str.IndexAccess | Bloqueado | o djinnc rejeita: struct does not define operator get[] |
+| Str.IndexAccess | Bloqueado | `str` não define `get[]` |
 | Str.PassAsParameter | Portar | exit code 4 |
 | Arr.LiteralCreatesArrStruct | Portar | exit code 3 |
 | Arr.IndexRead | Portar | exit code 20 |
@@ -104,7 +86,7 @@ resultado. Os grupos que falharam foram revisados à mão; os que passaram não 
 | Arr.WithPrintf | Portar | exit code 15 |
 | FixedArray.BasicAllocation | Portar | exit code 42 |
 | FixedArray.WriteAndReadMultiple | Portar | exit code 60 |
-| FixedArray.WithConstSize | Bloqueado | `const` local |
+| FixedArray.WithConstSize | Descartar | `const` local não existe; `constexpr` no tamanho do array é coberto por CompileTime ConstExprUsedInArraySize |
 | FixedArray.LoopFill | Portar | exit code 30 |
 | FixedArray.LargeBuffer | Portar | exit code 99 |
 | String.StructDefinition | Portar | exit code 0 |
@@ -120,12 +102,12 @@ resultado. Os grupos que falharam foram revisados à mão; os que passaram não 
 | Struct.MultipleFieldsPositional | Portar | exit code 6 |
 | Struct.FieldAccessInExpression | Portar | exit code 5 |
 | Struct.StructAsParameter | Portar | exit code 123 |
-| Struct.SimpleBraceInitScalar | Bloqueado | o djinnc rejeita: a struct initializer needs a struct type from its context |
-| Impl.ConstFieldOnPrimitive | Bloqueado | o djinnc rejeita: undefined variable |
-| Impl.ConstFieldWithArithmetic | Bloqueado | o djinnc rejeita: undefined variable |
+| Struct.SimpleBraceInitScalar | Reescrito | `language_rules.djinn` StructRuleTests.a_scalar_cannot_be_built_with_braces |
+| Impl.ConstFieldOnPrimitive | Portar | exit code 214 |
+| Impl.ConstFieldWithArithmetic | Portar | exit code 36 |
 | Impl.MethodOnStruct | Portar | exit code 42 |
 | Impl.ConstAndMethodTogether | Portar | exit code 30 |
-| Impl.StaticMethodOnPrimitive | Bloqueado | o djinnc rejeita: undefined variable |
+| Impl.StaticMethodOnPrimitive | Bloqueado | `impl i32 { static ... }` não é chamável como `i32.clamp(...)`: o djinnc lê `i32` como variável |
 
 ## arithmetic
 
@@ -163,37 +145,37 @@ resultado. Os grupos que falharam foram revisados à mão; os que passaram não 
 | Numbers.CompileTimeOverflowCheck | Descartar | aceitava literais fora da faixa, que agora são erro; coberto por `errors/literal_out_of_range` |
 | Overflow.SuffixDeclarationsCompile | Portar | compila sem erros |
 | Overflow.WrappedIsPlainAdd | Reescrito | `OverflowIrTests.WrappedIsPlainAdd` |
-| Overflow.TrappedEmitsOverflowCheck | Bloqueado | modos de overflow |
-| Overflow.TrappedRuntimeOverflowAborts | Bloqueado | modos de overflow (o erro atual tem outro motivo) |
-| Overflow.CheckedRequiresThrows | Bloqueado | modos de overflow |
-| Overflow.CheckedWithThrowsSetsErrorFlag | Bloqueado | modos de overflow |
-| Overflow.SaturatingUsesSatIntrinsic | Bloqueado | modos de overflow |
-| Overflow.SaturatingRuntimeAddClampsToMax | Bloqueado | modos de overflow (esperado 2, veio 0) |
-| Overflow.SaturatingLiteralClampsAtCompileTime | Bloqueado | modos de overflow |
+| Overflow.TrappedEmitsOverflowCheck | Descartar | coberto por `overflow.djinn` OverflowModeTests.trapped_add_panics |
+| Overflow.TrappedRuntimeOverflowAborts | Descartar | coberto por `overflow.djinn` OverflowModeTests.trapped_add_panics |
+| Overflow.CheckedRequiresThrows | Portar | erro E9003 |
+| Overflow.CheckedWithThrowsSetsErrorFlag | Descartar | coberto por `overflow.djinn` OverflowModeTests.checked_overflow_is_caught_by_try |
+| Overflow.SaturatingUsesSatIntrinsic | Descartar | coberto por `overflow.djinn` OverflowModeTests.saturating_add_clamps |
+| Overflow.SaturatingRuntimeAddClampsToMax | Portar | exit code 2 |
+| Overflow.SaturatingLiteralClampsAtCompileTime | Portar | exit code 2 |
 | Overflow.TrappedLiteralOutOfRangeIsCompileError | Portar | erro E3051 |
-| Overflow.WrappedLiteralOutOfRangeStillCompiles | Bloqueado | modos de overflow |
-| Overflow.ConflictingModesAreRejected | Bloqueado | modos de overflow |
+| Overflow.WrappedLiteralOutOfRangeStillCompiles | Portar | compila sem erros |
+| Overflow.ConflictingModesAreRejected | Portar | erro E3055 |
 | Overflow.PostfixIncrementRespectsMode | Portar | exit code 2 |
-| Overflow.FloatTypeSuffixIsRejected | Bloqueado | modos de overflow (o erro atual tem outro motivo) |
-| Overflow.WrappedLiteralKeepsCStyleValue | Bloqueado | modos de overflow |
-| Overflow.HexLiteralSuffixCompiles | Bloqueado | modos de overflow |
+| Overflow.FloatTypeSuffixIsRejected | Descartar | `f32w` nem é um tipo no djinnc; o lexer devolve erro de sintaxe |
+| Overflow.WrappedLiteralKeepsCStyleValue | Portar | exit code 1294967296 |
+| Overflow.HexLiteralSuffixCompiles | Portar | exit code 1 |
 | Overflow.HexDigitCIsNotASuffix | Portar | exit code 28 |
 | Overflow.BinaryLiteralSuffix | Portar | exit code 10 |
-| Overflow.CompoundAssignmentSaturates | Bloqueado | modos de overflow (esperado 2, veio -1) |
-| Overflow.CompoundAssignmentTrappedAborts | Bloqueado | modos de overflow (o erro atual tem outro motivo) |
-| Overflow.UnaryNegateSaturatesMinToMax | Bloqueado | modos de overflow (esperado 2, veio -2) |
-| Overflow.UnaryNegateTrappedAborts | Bloqueado | modos de overflow (o erro atual tem outro motivo) |
+| Overflow.CompoundAssignmentSaturates | Portar | exit code 2 |
+| Overflow.CompoundAssignmentTrappedAborts | Descartar | coberto por `overflow.djinn` OverflowModeTests.trapped_compound_assignment_panics |
+| Overflow.UnaryNegateSaturatesMinToMax | Portar | exit code 2 |
+| Overflow.UnaryNegateTrappedAborts | Descartar | coberto por `overflow.djinn` OverflowModeTests.trapped_negate_minimum_panics |
 | Overflow.DivIntMinMinusOneTrappedAborts | Portar | exit code diferente de zero |
-| Overflow.SaturatingDivIntMinClampsToMax | Bloqueado | modos de overflow (esperado 2, veio -1073740791) |
+| Overflow.SaturatingDivIntMinClampsToMax | Portar | exit code 2 |
 | Overflow.SaturatingRemIntMinIsZero | Portar | exit code 5 |
-| Overflow.SaturatingSubClampsToMin | Bloqueado | modos de overflow (esperado 2, veio 0) |
-| Overflow.SaturatingMulClampsToMax | Bloqueado | modos de overflow (esperado 2, veio 0) |
-| Overflow.UnsignedSaturatingSubClampsToZero | Bloqueado | modos de overflow |
-| Overflow.UnsignedTrappedAddAborts | Bloqueado | modos de overflow |
-| Overflow.ConstexprSaturatingAdd | Bloqueado | modos de overflow (esperado 2, veio 0) |
-| Overflow.ConstevalTrappedOverflowIsError | Bloqueado | modos de overflow |
-| Overflow.NestedModePropagationSaturates | Bloqueado | modos de overflow (esperado 2, veio -1) |
-| Overflow.CheckedOverflowCaughtByTryFallback | Bloqueado | modos de overflow (esperado 1, veio -2147483648) |
+| Overflow.SaturatingSubClampsToMin | Portar | exit code 2 |
+| Overflow.SaturatingMulClampsToMax | Portar | exit code 2 |
+| Overflow.UnsignedSaturatingSubClampsToZero | Descartar | coberto por `overflow.djinn` OverflowModeTests.saturating_unsigned_clamps_both_ends |
+| Overflow.UnsignedTrappedAddAborts | Descartar | coberto por `overflow.djinn` OverflowModeTests.trapped_unsigned_subtract_panics |
+| Overflow.ConstexprSaturatingAdd | Portar | exit code 2 |
+| Overflow.ConstevalTrappedOverflowIsError | Portar | erro E3051 |
+| Overflow.NestedModePropagationSaturates | Portar | exit code 2 |
+| Overflow.CheckedOverflowCaughtByTryFallback | Portar | exit code 1 |
 | Overflow.CheckedNoOverflowReturnsValue | Portar | exit code 1032 |
 | Overflow.ModeIsNotTypeIdentity | Portar | exit code 100 |
 | Overflow.StructFieldWithMode | Portar | exit code 42 |
@@ -202,7 +184,7 @@ resultado. Os grupos que falharam foram revisados à mão; os que passaram não 
 | Math.IntegerSubNegative | Portar | exit code -7 |
 | Math.IntegerSumFunction | Portar | compila sem erros; as asserções sobre a AST do stage0 não valem para o djinnc |
 | Math.IntegerSum | Portar | exit code 5 |
-| Math.IntegerSumWithAnonStructReturn | Bloqueado | o djinnc rejeita: expected a type |
+| Math.IntegerSumWithAnonStructReturn | Descartar | struct anônimo no retorno não existe no djinnc |
 
 ## async
 
@@ -222,16 +204,16 @@ resultado. Os grupos que falharam foram revisados à mão; os que passaram não 
 | Async.ChainedAsyncMain | Portar | exit code 35 |
 | Async.AwaitResultAsArgument | Portar | exit code 20 |
 | Async.AwaitWithLocalComputation | Portar | exit code 33 |
-| Async.Yield_BasicYield | Bloqueado | `switch` com bloco e `yield` |
-| Async.Yield_MultipleYields | Bloqueado | `switch` com bloco e `yield` |
-| Async.Yield_WithComputation | Bloqueado | `switch` com bloco e `yield` |
+| Async.Yield_BasicYield | Descartar | `yield` não existe no djinnc (`SUBSET.md`) |
+| Async.Yield_MultipleYields | Descartar | `yield` não existe no djinnc (`SUBSET.md`) |
+| Async.Yield_WithComputation | Descartar | `yield` não existe no djinnc (`SUBSET.md`) |
 | Spawn.BasicSpawnParse | Reescrito | `SpawnIrTests.BasicSpawnParse` |
 | EventLoop.AsyncMainGeneratesRuntimeCalls | Reescrito | `EventLoopIrTests.AsyncMainGeneratesRuntimeCalls` |
 | EventLoop.CoroWrappersGenerated | Reescrito | `EventLoopIrTests.CoroWrappersGenerated` |
 | Async.NonAsyncMainStillWorks | Portar | exit code 77 |
 | Async.NonAsyncMainWithRuntime | Reescrito | `AsyncIrTests.NonAsyncMainWithRuntime` |
 | Spawn.MultipleSpawnsParse | Portar | compila sem erros |
-| Spawn.WithYieldParse | Bloqueado | `switch` com bloco e `yield` |
+| Spawn.WithYieldParse | Descartar | `yield` não existe no djinnc (`SUBSET.md`) |
 
 ## compile_time
 
@@ -249,7 +231,7 @@ resultado. Os grupos que falharam foram revisados à mão; os que passaram não 
 | Attributes.ErrorOnUnknownAttribute | Portar | erro E8002 |
 | Attributes.ErrorOnUnknownStructAttribute | Portar | erro E8002 |
 | Attributes.WarningWhenFunctionAttributeOnStruct | Portar | aviso E8001 |
-| Attributes.WarningWhenStructAttributeOnMethod | Bloqueado | o djinnc não reproduz o comportamento |
+| Attributes.WarningWhenStructAttributeOnMethod | Descartar | `[Align]` vale em função no djinnc (CompileTime AlignOnFunctionSetsFunctionAlignment) |
 | Attributes.NoWarningWhenAttributeOnValidTarget | Portar | compila sem erros |
 | Attributes.DeprecatedValidOnAnyTarget | Portar | compila sem erros |
 | ConstEvalVM.IntegerLiteral | Reescrito | `ConstEvalVMTests.IntegerLiteral` |
@@ -322,7 +304,7 @@ resultado. Os grupos que falharam foram revisados à mão; os que passaram não 
 | CompileTimeIf.ConstevalErrorOnRuntimeExpr | Portar | erro E3051 |
 | CompileTimeIf.ExplicitConstexprWithElseIf | Portar | exit code 42 |
 | CompileTimeIf.NoWarningOnMixedExpr | Portar | exit code 42 |
-| Intrinsic.IntrinsicConstevalVariable | Bloqueado | o djinnc rejeita: expected '(' after function name |
+| Intrinsic.IntrinsicConstevalVariable | Descartar | variável `[intrinsic] consteval` era do stage0; `Target.is_debug()` a substitui |
 | Intrinsic.ConstexprStructFieldAccess | Portar | exit code 42 |
 | Intrinsic.ConstexprStructAllFieldsAreConst | Portar | exit code 99 |
 | Contracts.RequirePasses | Bloqueado | contratos (`require`/`ensure`) |
@@ -339,23 +321,23 @@ resultado. Os grupos que falharam foram revisados à mão; os que passaram não 
 | Contracts.EnforcementStrictRequiresTryEverywhere | Bloqueado | contratos (`require`/`ensure`) (o erro atual tem outro motivo) |
 | Contracts.EnforcementStrictAcceptsBareTryPropagation | Bloqueado | contratos (`require`/`ensure`) |
 | Contracts.EnforcementOffDisablesAllChecks | Bloqueado | contratos (`require`/`ensure`) |
-| Intrinsics.SizeofI32 | Bloqueado | `sizeof`/`typeof`/`alignof` de expressão |
-| Intrinsics.SizeofI64 | Bloqueado | `sizeof`/`typeof`/`alignof` de expressão |
-| Intrinsics.SizeofI8 | Bloqueado | `sizeof`/`typeof`/`alignof` de expressão |
-| Intrinsics.SizeofStruct | Bloqueado | `sizeof`/`typeof`/`alignof` de expressão |
-| Intrinsics.AlignofI32 | Bloqueado | `sizeof`/`typeof`/`alignof` de expressão |
-| Intrinsics.AlignofI64 | Bloqueado | `sizeof`/`typeof`/`alignof` de expressão |
+| Intrinsics.SizeofI32 | Reescrito | `sizeof_typeof.djinn` SizeofTypeofTests.sizeof_primitives |
+| Intrinsics.SizeofI64 | Reescrito | `sizeof_typeof.djinn` SizeofTypeofTests.sizeof_primitives |
+| Intrinsics.SizeofI8 | Reescrito | `sizeof_typeof.djinn` SizeofTypeofTests.sizeof_primitives |
+| Intrinsics.SizeofStruct | Reescrito | `sizeof_typeof.djinn` SizeofTypeofTests.sizeof_struct |
+| Intrinsics.AlignofI32 | Reescrito | `sizeof_typeof.djinn` SizeofTypeofTests.alignof_is_not_an_intrinsic; `alignof` não existe no djinnc |
+| Intrinsics.AlignofI64 | Reescrito | `sizeof_typeof.djinn` SizeofTypeofTests.alignof_is_not_an_intrinsic; `alignof` não existe no djinnc |
 | Intrinsics.Likely | Portar | exit code 42 |
 | Intrinsics.Unlikely | Portar | exit code 99 |
-| Intrinsics.Expect | Bloqueado | intrínseca `expect` |
-| Intrinsics.SizeofF32 | Bloqueado | `sizeof`/`typeof`/`alignof` de expressão |
-| Intrinsics.SizeofF64 | Bloqueado | `sizeof`/`typeof`/`alignof` de expressão |
-| Intrinsics.SizeofGenericStructI32 | Bloqueado | `sizeof`/`typeof`/`alignof` de expressão |
-| Intrinsics.SizeofGenericStructI64 | Bloqueado | `sizeof`/`typeof`/`alignof` de expressão |
-| Intrinsics.SizeofGenericStructPoint | Bloqueado | `sizeof`/`typeof`/`alignof` de expressão |
-| Intrinsics.TypeofI32 | Bloqueado | `sizeof`/`typeof`/`alignof` de expressão |
-| Intrinsics.TypeofF64 | Bloqueado | `sizeof`/`typeof`/`alignof` de expressão |
-| Intrinsics.TypeofStruct | Bloqueado | `sizeof`/`typeof`/`alignof` de expressão |
+| Intrinsics.Expect | Descartar | `expect` não existe; `likely`/`unlikely` são cobertos por IntrinsicsTests.Likely e Unlikely |
+| Intrinsics.SizeofF32 | Reescrito | `sizeof_typeof.djinn` SizeofTypeofTests.sizeof_primitives |
+| Intrinsics.SizeofF64 | Reescrito | `sizeof_typeof.djinn` SizeofTypeofTests.sizeof_primitives |
+| Intrinsics.SizeofGenericStructI32 | Reescrito | `sizeof_typeof.djinn` SizeofTypeofTests.sizeof_generic_struct_instances |
+| Intrinsics.SizeofGenericStructI64 | Reescrito | `sizeof_typeof.djinn` SizeofTypeofTests.sizeof_generic_struct_instances |
+| Intrinsics.SizeofGenericStructPoint | Reescrito | `sizeof_typeof.djinn` SizeofTypeofTests.sizeof_generic_struct_instances |
+| Intrinsics.TypeofI32 | Reescrito | `sizeof_typeof.djinn` SizeofTypeofTests.typeof_reports_the_kind_of_a_type |
+| Intrinsics.TypeofF64 | Reescrito | `sizeof_typeof.djinn` SizeofTypeofTests.typeof_reports_the_kind_of_a_type |
+| Intrinsics.TypeofStruct | Reescrito | `sizeof_typeof.djinn` SizeofTypeofTests.typeof_reports_the_kind_of_a_type |
 | Macro.SimpleExprMacro | Portar | aviso E6001 |
 | Macro.MultipleParameters | Portar | exit code 42 |
 | Macro.PrecedencePreserved | Portar | exit code 25 |
@@ -411,8 +393,8 @@ resultado. Os grupos que falharam foram revisados à mão; os que passaram não 
 | BootstrapSubset.PointerParameterFieldReadWrite | Portar | exit code 42 |
 | BootstrapSubset.PointerLocalMethodCall | Portar | exit code 2 |
 | BootstrapSubset.PointerParameterInMethod | Portar | exit code 10 |
-| BootstrapSubset.NullableLinkedListTraversal | Bloqueado | o djinnc rejeita: struct does not define this operator |
-| BootstrapSubset.LogicalOperatorsShortCircuit | Bloqueado | o djinnc rejeita: struct does not define this operator |
+| BootstrapSubset.NullableLinkedListTraversal | Bloqueado | ponteiro anulável (`T*?`) não compara com `null` nem acessa campo no djinnc |
+| BootstrapSubset.LogicalOperatorsShortCircuit | Bloqueado | ponteiro anulável (`T*?`) não compara com `null` nem acessa campo no djinnc |
 | BootstrapSubset.PointerArrayOfStructPointers | Portar | exit code 6 |
 | BootstrapSubset.StructTypesVisibleAcrossFiles | Reescrito | `BootstrapSubsetFilesTests.StructTypesVisibleAcrossFiles`; sem `namespace`: um tipo de namespace de outro arquivo ainda não resolve (E3001) |
 | Diagnostics.BasicError | Descartar | testa a formatação do DiagnosticEngine do stage0 |
@@ -466,7 +448,7 @@ resultado. Os grupos que falharam foram revisados à mão; os que passaram não 
 | Object.ObjectStructDefinition | Portar | exit code 0 |
 | Object.TypeInfoKindInt | Portar | exit code 0 |
 | Object.TypeInfoKindFloat | Portar | exit code 1 |
-| Object.TypeInfoKindPointer | Bloqueado | `object` e `...args` com `str` (esperado 5, veio 2) |
+| Object.TypeInfoKindPointer | Reescrito | `language_rules.djinn` BoxedTextTests.a_string_literal_boxes_as_a_pointer; um literal é `i8*`, kind 2 |
 | Object.VariadicMethodCompiles | Portar | exit code 0 |
 | Object.VariadicEmptyArgs | Portar | exit code 0 |
 | Object.VariadicArgsLength | Portar | exit code 3 |
@@ -475,15 +457,15 @@ resultado. Os grupos que falharam foram revisados à mão; os que passaram não 
 | Object.SyncPrintIntViaVariadic | Portar | exit code 42 |
 | Object.BoxingIRContainsKind | Reescrito | `ObjectIrTests.BoxingIRContainsKind` |
 | Object.AutoBoxPrimitiveToObject | Portar | exit code 0 |
-| Object.AutoBoxStringToObject | Bloqueado | `object` e `...args` com `str` (esperado 5, veio 2) |
+| Object.AutoBoxStringToObject | Reescrito | `language_rules.djinn` BoxedTextTests.a_string_literal_boxes_as_a_pointer; um literal é `i8*`, kind 2 |
 | Object.AutoBoxStructToObject | Portar | exit code 8 |
 | Object.AutoBoxStructToObjectKind | Portar | exit code 3 |
 | Object.AutoBoxFloatToObject | Portar | exit code 1 |
 | Object.IsExpressionWithAutoBoxedPrimitive | Portar | exit code 1 |
 | Object.IsExpressionBindingWithAutoBoxed | Portar | exit code 99 |
 | Object.NoWarningOnLiteralBoxing | Portar | compila sem erros |
-| Object.WarningOnVariableBoxing | Bloqueado | `object` e `...args` com `str` |
-| Object.WarningOnStructBoxing | Bloqueado | `object` e `...args` com `str` |
+| Object.WarningOnVariableBoxing | Descartar | o djinnc não avisa ao empacotar em `object` |
+| Object.WarningOnStructBoxing | Descartar | o djinnc não avisa ao empacotar em `object` |
 
 ## control_flow
 
@@ -518,16 +500,16 @@ resultado. Os grupos que falharam foram revisados à mão; os que passaram não 
 | ControlFlow.RangeForWithBreak | Portar | exit code 5 |
 | ControlFlow.RangeForWithContinue | Portar | exit code 9 |
 | ControlFlow.RangeForNested | Portar | exit code 12 |
-| ControlFlow.RangeForAnonymous | Bloqueado | `for` com range |
-| ControlFlow.RangeForAnonymousNested | Bloqueado | `for` com range |
+| ControlFlow.RangeForAnonymous | Descartar | o `for` de intervalo do djinnc exige a variável; coberto por ControlFlowTests.RangeFor* |
+| ControlFlow.RangeForAnonymousNested | Descartar | o `for` de intervalo do djinnc exige a variável; coberto por ControlFlowTests.RangeFor* |
 | ControlFlow.RangeForVariableAccess | Portar | exit code 6 |
 | ControlFlow.RangeForInclusiveEnd | Portar | exit code 6 |
 | ControlFlow.RangeForInclusiveEndSum | Portar | exit code 55 |
 | ControlFlow.RangeForBracketClosed | Portar | exit code 5 |
 | ControlFlow.RangeForBracketHalfOpen | Portar | exit code 4 |
 | ControlFlow.RangeForBracketClosedSum | Portar | exit code 55 |
-| ControlFlow.RangeForAnonymousInclusive | Bloqueado | `for` com range |
-| ControlFlow.RangeForAnonymousBracketClosed | Bloqueado | `for` com range |
+| ControlFlow.RangeForAnonymousInclusive | Descartar | o `for` de intervalo do djinnc exige a variável; coberto por ControlFlowTests.RangeFor* |
+| ControlFlow.RangeForAnonymousBracketClosed | Descartar | o `for` de intervalo do djinnc exige a variável; coberto por ControlFlowTests.RangeFor* |
 | ControlFlow.SwitchStatementCase1 | Portar | exit code 10 |
 | ControlFlow.SwitchStatementCase2 | Portar | exit code 20 |
 | ControlFlow.SwitchStatementDefault | Portar | exit code 0 |
@@ -537,55 +519,55 @@ resultado. Os grupos que falharam foram revisados à mão; os que passaram não 
 | ControlFlow.FactorialIterative | Portar | exit code 120 |
 | ControlFlow.NestedLoopsWithBreak | Portar | exit code 15 |
 | ControlFlow.WhileWithMultipleConditions | Portar | exit code 10 |
-| ErrorHandling.ThrowWithTryFallback | Bloqueado | tipos de erro em `throws` |
-| ErrorHandling.TryReturnsValueOnSuccess | Bloqueado | tipos de erro em `throws` |
-| ErrorHandling.BuiltinExceptionAvailableWithoutStd | Bloqueado | tipos de erro em `throws` |
-| ErrorHandling.RethrowsPropagation | Bloqueado | tipos de erro em `throws` |
-| ErrorHandling.UncheckedThrowingCallInThrowingCallerPropagates | Bloqueado | tipos de erro em `throws` |
-| ErrorHandling.DerivedErrorAcceptedByBaseThrowsClause | Bloqueado | tipos de erro em `throws` |
-| ErrorHandling.DerivedErrorAcceptedByIntermediateBase | Bloqueado | tipos de erro em `throws` |
-| ErrorHandling.ErrorAliasChain | Bloqueado | tipos de erro em `throws` |
-| ErrorHandling.DivisionByZeroThrowsInThrowingFunction | Bloqueado | tipos de erro em `throws` |
-| ErrorHandling.InterpolatedErrorMessage | Bloqueado | tipos de erro em `throws` |
-| ErrorHandling.ConsoleFormatBuildsString | Bloqueado | tipos de erro em `throws` |
-| ErrorHandling.MissingTryDiagnostic | Bloqueado | tipos de erro em `throws` (o erro atual tem outro motivo) |
-| ErrorHandling.ThrowOutsideThrowsDiagnostic | Bloqueado | tipos de erro em `throws` (o erro atual tem outro motivo) |
-| ErrorHandling.ThrowsTypeMismatchDiagnostic | Bloqueado | tipos de erro em `throws` (o erro atual tem outro motivo) |
-| ErrorHandling.ThrowNonErrorTypeDiagnostic | Bloqueado | tipos de erro em `throws` |
+| ErrorHandling.ThrowWithTryFallback | Reescrito | `error_handling.djinn` ThrowsTests.throw_with_try_fallback |
+| ErrorHandling.TryReturnsValueOnSuccess | Reescrito | `error_handling.djinn` ThrowsTests.try_returns_value_on_success |
+| ErrorHandling.BuiltinExceptionAvailableWithoutStd | Reescrito | `error_handling.djinn` ThrowsTests.builtin_errors_are_available_without_std |
+| ErrorHandling.RethrowsPropagation | Reescrito | `error_handling.djinn` ThrowsTests.bare_try_rethrows_to_the_caller |
+| ErrorHandling.UncheckedThrowingCallInThrowingCallerPropagates | Reescrito | `error_handling.djinn` ThrowsTests.unchecked_throwing_call_in_a_throwing_caller_propagates |
+| ErrorHandling.DerivedErrorAcceptedByBaseThrowsClause | Descartar | tipos de erro não têm hierarquia no djinnc (`SUBSET.md`: um erro é qualquer struct listada em `throws`) |
+| ErrorHandling.DerivedErrorAcceptedByIntermediateBase | Descartar | tipos de erro não têm hierarquia no djinnc (`SUBSET.md`: um erro é qualquer struct listada em `throws`) |
+| ErrorHandling.ErrorAliasChain | Descartar | tipos de erro não têm hierarquia no djinnc (`SUBSET.md`: um erro é qualquer struct listada em `throws`) |
+| ErrorHandling.DivisionByZeroThrowsInThrowingFunction | Portar | exit code -3 |
+| ErrorHandling.InterpolatedErrorMessage | Descartar | erros do djinnc não carregam mensagem |
+| ErrorHandling.ConsoleFormatBuildsString | Portar | exit code 1 |
+| ErrorHandling.MissingTryDiagnostic | Reescrito | `errors.djinn` ErrorsTests.error_missing_try |
+| ErrorHandling.ThrowOutsideThrowsDiagnostic | Reescrito | `error_handling.djinn` ThrowsTests.throw_outside_a_throwing_function_is_an_error |
+| ErrorHandling.ThrowsTypeMismatchDiagnostic | Reescrito | `errors.djinn` ErrorsTests.error_throw_not_listed |
+| ErrorHandling.ThrowNonErrorTypeDiagnostic | Descartar | qualquer struct é um tipo de erro no djinnc; não há o que rejeitar |
 | ErrorHandling.TryOnNonThrowingDiagnostic | Portar | erro E9004 |
-| ErrorHandling.TryWithoutFallbackOutsideThrowsDiagnostic | Bloqueado | tipos de erro em `throws` (o erro atual tem outro motivo) |
-| ErrorHandling.ConstexprCallThatAlwaysThrowsIsCompileError | Bloqueado | tipos de erro em `throws` (o erro atual tem outro motivo) |
-| ErrorHandling.ConstexprCallInsideTryIsSilentAndTakesFallback | Bloqueado | tipos de erro em `throws` |
-| ErrorHandling.ConstexprCallWithRuntimeArgumentsStaysRuntime | Bloqueado | tipos de erro em `throws` |
-| ErrorHandling.ConstexprCallThatSucceedsHasNoDiagnostics | Bloqueado | tipos de erro em `throws` |
-| ErrorHandling.SwitchOnThrowingCallSuccessArm | Bloqueado | tipos de erro em `throws` |
-| ErrorHandling.SwitchOnThrowingCallWildcardSuccess | Bloqueado | tipos de erro em `throws` |
-| ErrorHandling.SwitchOnThrowingCallSpecificErrorArm | Bloqueado | tipos de erro em `throws` |
-| ErrorHandling.SwitchOnThrowingCallGenericErrorArm | Bloqueado | tipos de erro em `throws` |
-| ErrorHandling.SwitchOnThrowingCallSpecificArmBeforeErrorArm | Bloqueado | tipos de erro em `throws` |
-| ErrorHandling.SwitchOnThrowingCallDerivedErrorMatchesBaseArm | Bloqueado | tipos de erro em `throws` |
-| ErrorHandling.SwitchOnThrowingCallNoArmMatchesPropagates | Bloqueado | tipos de erro em `throws` |
-| ErrorHandling.SwitchOnThrowingCallUnhandledAbortsOutsideThrows | Bloqueado | tipos de erro em `throws` |
-| ErrorHandling.SwitchOnConstexprThrowingCallTakesErrorArm | Bloqueado | tipos de erro em `throws` |
-| ErrorHandling.SwitchArmsTypeMismatchDiagnostic | Bloqueado | tipos de erro em `throws` (o erro atual tem outro motivo) |
-| ErrorHandling.SwitchBlockArmReturnDiagnostic | Bloqueado | `switch` com bloco e `yield` (o erro atual tem outro motivo) |
-| ErrorHandling.SwitchOnThrowingCallBlockArmSuccessContinues | Bloqueado | `switch` com bloco e `yield` |
-| ErrorHandling.SwitchBlockArmWithoutDivergenceDiagnostic | Bloqueado | `switch` com bloco e `yield` (o erro atual tem outro motivo) |
-| ErrorHandling.SwitchBlockArmYieldContinuesAfterSwitch | Bloqueado | `switch` com bloco e `yield` |
-| ErrorHandling.SwitchBlockArmYieldAfterStatements | Bloqueado | `switch` com bloco e `yield` |
-| ErrorHandling.YieldWithValueOutsideSwitchArmDiagnostic | Bloqueado | `switch` com bloco e `yield` (o erro atual tem outro motivo) |
-| RuntimeErrors.TrappedOverflowReportHasLocationValuesAndTrace | Bloqueado | modos de overflow |
+| ErrorHandling.TryWithoutFallbackOutsideThrowsDiagnostic | Reescrito | `error_handling.djinn` ThrowsTests.bare_try_outside_a_throwing_function_is_an_error |
+| ErrorHandling.ConstexprCallThatAlwaysThrowsIsCompileError | Descartar | o djinnc não avalia a chamada para diagnosticar; a chamada lança em tempo de execução |
+| ErrorHandling.ConstexprCallInsideTryIsSilentAndTakesFallback | Reescrito | `error_handling.djinn` ThrowsTests.a_constexpr_throwing_call_inside_try_takes_the_fallback |
+| ErrorHandling.ConstexprCallWithRuntimeArgumentsStaysRuntime | Reescrito | `error_handling.djinn` ThrowsTests.a_constexpr_throwing_call_with_runtime_arguments_stays_runtime |
+| ErrorHandling.ConstexprCallThatSucceedsHasNoDiagnostics | Reescrito | `error_handling.djinn` ThrowsTests.a_constexpr_throwing_call_that_succeeds_compiles_clean; achou um defeito: a chamada `constexpr` dobrada em constante deixava o `try` sem chamada (E9004), corrigido em `type_checker_calls.djinn` |
+| ErrorHandling.SwitchOnThrowingCallSuccessArm | Reescrito | `error_handling.djinn` ThrowsTests.switch_on_a_throwing_call_takes_the_success_arm |
+| ErrorHandling.SwitchOnThrowingCallWildcardSuccess | Reescrito | `error_handling.djinn` ThrowsTests.switch_on_a_throwing_call_accepts_a_wildcard_for_the_success_arm |
+| ErrorHandling.SwitchOnThrowingCallSpecificErrorArm | Reescrito | `error_handling.djinn` ThrowsTests.switch_on_a_throwing_call_takes_the_specific_error_arm |
+| ErrorHandling.SwitchOnThrowingCallGenericErrorArm | Reescrito | `error_handling.djinn` ThrowsTests.switch_on_a_throwing_call_takes_the_generic_error_arm |
+| ErrorHandling.SwitchOnThrowingCallSpecificArmBeforeErrorArm | Reescrito | `error_handling.djinn` ThrowsTests.switch_specific_arm_wins_over_the_generic_error_arm |
+| ErrorHandling.SwitchOnThrowingCallDerivedErrorMatchesBaseArm | Descartar | tipos de erro não têm hierarquia no djinnc (`SUBSET.md`: um erro é qualquer struct listada em `throws`) |
+| ErrorHandling.SwitchOnThrowingCallNoArmMatchesPropagates | Descartar | o djinnc recusa o `switch` que não cobre todos os erros; coberto por `errors.djinn` ErrorsTests.error_switch_not_exhaustive |
+| ErrorHandling.SwitchOnThrowingCallUnhandledAbortsOutsideThrows | Descartar | o djinnc recusa o `switch` que não cobre todos os erros; coberto por `errors.djinn` ErrorsTests.error_switch_not_exhaustive |
+| ErrorHandling.SwitchOnConstexprThrowingCallTakesErrorArm | Reescrito | `error_handling.djinn` ThrowsTests.a_constexpr_throwing_call_in_a_switch_takes_the_error_arm e a_constexpr_throwing_call_in_a_switch_takes_the_success_arm |
+| ErrorHandling.SwitchArmsTypeMismatchDiagnostic | Reescrito | `error_handling.djinn` ThrowsTests.switch_arms_must_agree_on_the_result_type |
+| ErrorHandling.SwitchBlockArmReturnDiagnostic | Descartar | braço de `switch` com bloco e `yield` não existe no djinnc; o braço é uma expressão |
+| ErrorHandling.SwitchOnThrowingCallBlockArmSuccessContinues | Descartar | braço de `switch` com bloco e `yield` não existe no djinnc; o braço é uma expressão |
+| ErrorHandling.SwitchBlockArmWithoutDivergenceDiagnostic | Descartar | braço de `switch` com bloco e `yield` não existe no djinnc; o braço é uma expressão |
+| ErrorHandling.SwitchBlockArmYieldContinuesAfterSwitch | Descartar | braço de `switch` com bloco e `yield` não existe no djinnc; o braço é uma expressão |
+| ErrorHandling.SwitchBlockArmYieldAfterStatements | Descartar | braço de `switch` com bloco e `yield` não existe no djinnc; o braço é uma expressão |
+| ErrorHandling.YieldWithValueOutsideSwitchArmDiagnostic | Descartar | braço de `switch` com bloco e `yield` não existe no djinnc; o braço é uma expressão |
+| RuntimeErrors.TrappedOverflowReportHasLocationValuesAndTrace | Descartar | o aborto por overflow é coberto por OverflowModeTests.trapped_*; o djinnc não imprime operandos nem tem a chamada mínima do modo release |
 | RuntimeErrors.DivisionByZeroReportShowsOperands | Reescrito | `CrashTests.DivisionByZeroReportShowsOperands`; o djinnc não mostra os operandos; confere a causa, o local e a pilha |
-| RuntimeErrors.NegateOverflowReport | Bloqueado | modos de overflow |
-| RuntimeErrors.VariableHistoryShowsLastAssignments | Bloqueado | modos de overflow |
+| RuntimeErrors.NegateOverflowReport | Descartar | o aborto por overflow é coberto por OverflowModeTests.trapped_*; o djinnc não imprime operandos nem tem a chamada mínima do modo release |
+| RuntimeErrors.VariableHistoryShowsLastAssignments | Descartar | o djinnc não rastreia o histórico de variáveis |
 | RuntimeErrors.StackTraceShowsIntermediateFrames | Reescrito | `CrashTests.StackTraceShowsIntermediateFrames`; com divisão por zero no lugar de `i32t` |
 | RuntimeErrors.ShadowStackCallsAppearInIr | Reescrito | `RuntimeErrorsIrTests.ShadowStackCallsAppearInIr`; com `-g`; o djinnc não emite `__djinn_frame_set_line` nem `__djinn_var_track` |
-| RuntimeErrors.NormalRunHasEmptyReport | Bloqueado | modos de overflow |
-| RuntimeErrors.UncaughtExceptionEscapingMainReportsAndAborts | Bloqueado | tipos de erro em `throws` |
-| RuntimeErrors.UncaughtExceptionReleaseReportHasNoStackTrace | Bloqueado | tipos de erro em `throws` |
+| RuntimeErrors.NormalRunHasEmptyReport | Descartar | coberto por qualquer teste que roda e sai com o código esperado |
+| RuntimeErrors.UncaughtExceptionEscapingMainReportsAndAborts | Reescrito | `error_handling.djinn` ThrowsTests.an_error_escaping_main_is_reported_and_aborts |
+| RuntimeErrors.UncaughtExceptionReleaseReportHasNoStackTrace | Reescrito | `error_handling.djinn` ThrowsTests.an_error_escaping_main_is_reported_and_aborts; o relatório do djinnc não tem versão sem pilha |
 | RuntimeErrors.ReleaseModeOmitsShadowStackAndVarTracking | Reescrito | `RuntimeErrorsIrTests.ReleaseModeOmitsShadowStackAndVarTracking`; sem `-g`, o IR não leva a pilha de chamadas nem o rastreio de variáveis |
-| RuntimeErrors.ReleaseModeTrapUsesMinimalCall | Bloqueado | modo release (`__djinn_runtime_error_min`) |
-| RuntimeErrors.ReleaseModeTrapReportKeepsLocationAndValues | Bloqueado | modo release |
+| RuntimeErrors.ReleaseModeTrapUsesMinimalCall | Descartar | o aborto por overflow é coberto por OverflowModeTests.trapped_*; o djinnc não imprime operandos nem tem a chamada mínima do modo release |
+| RuntimeErrors.ReleaseModeTrapReportKeepsLocationAndValues | Descartar | o aborto por overflow é coberto por OverflowModeTests.trapped_*; o djinnc não imprime operandos nem tem a chamada mínima do modo release |
 
 ## functions
 
@@ -632,16 +614,16 @@ resultado. Os grupos que falharam foram revisados à mão; os que passaram não 
 | GenericConstraints.ParseWhereClauseSingleConstraint | Portar | compila sem erros; as asserções sobre a AST do stage0 não valem para o djinnc |
 | GenericConstraints.ParseWhereClauseMultipleConstraintsSameParam | Portar | compila sem erros; as asserções sobre a AST do stage0 não valem para o djinnc |
 | GenericConstraints.ParseWhereClauseMultipleParams | Portar | compila sem erros; as asserções sobre a AST do stage0 não valem para o djinnc |
-| GenericConstraints.ParseWhereClauseOnEnum | Bloqueado | o djinnc rejeita: an enum cannot carry a payload: declare it as a union |
+| GenericConstraints.ParseWhereClauseOnEnum | Reescrito | `language_rules.djinn` GenericConstraintRuleTests.a_constrained_union_accepts_an_implementing_struct; o enum com carga virou `union` |
 | GenericConstraints.ParseWhereClauseOnInterface | Portar | compila sem erros; as asserções sobre a AST do stage0 não valem para o djinnc |
-| GenericConstraints.UndefinedConstraintInterfaceError | Bloqueado | o djinnc não reproduz o comportamento |
+| GenericConstraints.UndefinedConstraintInterfaceError | Reescrito | `language_rules.djinn` GenericConstraintRuleTests.a_constraint_naming_an_unknown_interface_is_an_error; o erro sai na instanciação |
 | GenericConstraints.ConstraintSatisfied | Portar | exit code 0 |
 | GenericConstraints.ConstraintViolated | Portar | erro E3050 |
 | GenericConstraints.NoConstraintNoValidation | Portar | exit code 0 |
 | GenericConstraints.MultipleConstraintsSatisfied | Portar | exit code 0 |
 | GenericConstraints.MultipleConstraintsPartiallyViolated | Portar | erro E3050 |
-| GenericConstraints.EnumConstraintSatisfied | Bloqueado | o djinnc rejeita: an enum cannot carry a payload: declare it as a union |
-| GenericConstraints.EnumConstraintViolated | Bloqueado | enum genérico com restrição (o erro atual tem outro motivo) |
+| GenericConstraints.EnumConstraintSatisfied | Reescrito | `language_rules.djinn` GenericConstraintRuleTests.a_constrained_union_accepts_an_implementing_struct; o enum com carga virou `union` |
+| GenericConstraints.EnumConstraintViolated | Reescrito | `language_rules.djinn` GenericConstraintRuleTests.a_constrained_union_rejects_a_struct_without_the_interface |
 | GenericConstraints.WhereClauseWithImplements | Portar | exit code 1 |
 | FullCompilation.StructGeneric | Portar | exit code 0 |
 | GenericStruct.TwoParameters | Portar | exit code 0 |
@@ -659,7 +641,7 @@ resultado. Os grupos que falharam foram revisados à mão; os que passaram não 
 | GenericStruct.GenericStructAsParameter | Portar | exit code 77 |
 | GenericStruct.ThreeParametersFieldSum | Portar | exit code 60 |
 | Interface.BasicDefinition | Portar | compila sem erros; as asserções sobre a AST do stage0 não valem para o djinnc |
-| Interface.SameNameInterfaceDefinition | Bloqueado | o djinnc rejeita: expected '{' (a function without a body is only allowed in [intrinsic] and [no_mangle] structs) |
+| Interface.SameNameInterfaceDefinition | Descartar | a source não é válida (método sem corpo em struct); não testa regra do djinnc |
 | Interface.GenericInterface | Portar | compila sem erros; as asserções sobre a AST do stage0 não valem para o djinnc |
 | Interface.StructImplementsInterface | Portar | compila sem erros; as asserções sobre a AST do stage0 não valem para o djinnc |
 | Interface.StructImplementsMultipleInterfaces | Portar | compila sem erros; as asserções sobre a AST do stage0 não valem para o djinnc |
@@ -716,16 +698,16 @@ resultado. Os grupos que falharam foram revisados à mão; os que passaram não 
 
 | Teste | Decisão | Motivo |
 |---|---|---|
-| StringInterpolation.SimpleIdentifier | Bloqueado | interpolação de string (`{nome}` vira `{0}`) |
-| StringInterpolation.MultipleArgs | Bloqueado | interpolação de string (`{nome}` vira `{0}`) |
-| StringInterpolation.MixedWithExplicitPositional | Bloqueado | interpolação de string (`{nome}` vira `{0}`) |
+| StringInterpolation.SimpleIdentifier | Reescrito | `interpolation.djinn` StringInterpolationTests.simple_identifier |
+| StringInterpolation.MultipleArgs | Reescrito | `interpolation.djinn` StringInterpolationTests.multiple_arguments |
+| StringInterpolation.MixedWithExplicitPositional | Descartar | só `$"..."` interpola no djinnc; o formato posicional `{0}` do `Console` é coberto por StdTests.console |
 | StringInterpolation.NoInterpolationLeavesStringUnchanged | Reescrito | `StringInterpolationIrTests.NoInterpolationLeavesStringUnchanged` |
-| StringInterpolation.FieldAccessInsideBraces | Bloqueado | interpolação de string (`{nome}` vira `{0}`) |
-| StringInterpolation.BlockStringTripleQuoted | Bloqueado | interpolação de string (`{nome}` vira `{0}`) |
+| StringInterpolation.FieldAccessInsideBraces | Reescrito | `interpolation.djinn` StringInterpolationTests.field_access_inside_braces |
+| StringInterpolation.BlockStringTripleQuoted | Descartar | `$"""` não existe; o bloco sem escapes é coberto por StringInterpolationIrTests.BlockStringNoEscapes |
 | StringInterpolation.BlockStringNoEscapes | Reescrito | `StringInterpolationIrTests.BlockStringNoEscapes` |
-| StringInterpolation.ArithmeticExpressionInsideBraces | Bloqueado | interpolação de string (`{nome}` vira `{0}`) |
-| StringInterpolation.FunctionCallExpandsAsArgument | Bloqueado | interpolação de string (`{nome}` vira `{0}`) |
-| StringInterpolation.RepeatedExpressionEvaluatedTwice | Bloqueado | interpolação de string (`{nome}` vira `{0}`) |
+| StringInterpolation.ArithmeticExpressionInsideBraces | Reescrito | `interpolation.djinn` StringInterpolationTests.arithmetic_expression_inside_braces |
+| StringInterpolation.FunctionCallExpandsAsArgument | Reescrito | `interpolation.djinn` StringInterpolationTests.function_call_inside_braces |
+| StringInterpolation.RepeatedExpressionEvaluatedTwice | Reescrito | `interpolation.djinn` StringInterpolationTests.repeated_expression_is_evaluated_each_time |
 | StringInterpolation.EmptyBracesPreserved | Reescrito | `StringInterpolationIrTests.EmptyBracesPreserved` |
 | StringInterpolation.NonCallStringLiteralNotInterpolated | Reescrito | `StringInterpolationIrTests.NonCallStringLiteralNotInterpolated` |
 
@@ -750,34 +732,34 @@ resultado. Os grupos que falharam foram revisados à mão; os que passaram não 
 | ConstField.ConstFieldUsedInStaticMethod | Portar | exit code 0 |
 | ConstField.ConstFieldWithPublicModifier | Portar | exit code 42 |
 | ConstField.ConstFieldDoesNotAffectStructLayout | Portar | exit code 20 |
-| ConstField.ConstFieldAccessViaInstance | Bloqueado | o djinnc rejeita: struct has no such field |
+| ConstField.ConstFieldAccessViaInstance | Reescrito | `language_rules.djinn` StructRuleTests.a_const_field_is_not_reachable_through_an_instance |
 | ConstField.ConstFieldNegativeValue | Portar | exit code 9 |
-| ConstField.MutAndConstError | Bloqueado | o djinnc não reproduz o comportamento |
+| ConstField.MutAndConstError | Bloqueado | o djinnc aceita `mut const` sem erro |
 | ConstField.ConstFieldWithoutInitializerError | Portar | erro E2001 |
 | ConstField.MultipleConstFields | Portar | exit code 3 |
 | ConstField.ConstFieldWithMixedRegularFields | Portar | exit code 100 |
 | IsExpression.ObjectIsI32True | Portar | exit code 1 |
 | IsExpression.ObjectIsI32False | Portar | exit code 0 |
 | IsExpression.ObjectIsF64 | Portar | exit code 1 |
-| IsExpression.ObjectIsStr | Bloqueado | `object` e `...args` com `str` (esperado 1, veio 0) |
+| IsExpression.ObjectIsStr | Reescrito | `language_rules.djinn` BoxedTextTests.a_str_variable_boxes_as_str |
 | IsExpression.NegatedIsExpression | Portar | exit code 1 |
 | IsExpression.ErrorOnNonObjectOperand | Portar | erro E3036 |
-| IsExpression.MultipleTypeChecks | Bloqueado | `object` e `...args` com `str` (esperado 3, veio 0) |
+| IsExpression.MultipleTypeChecks | Reescrito | `language_rules.djinn` BoxedTextTests.variadic_object_arguments_are_told_apart_by_type; um `str` passado em `...args` chega como ponteiro, então o caso `str` não vale |
 | IsExpression.IRContainsIsCheck | Reescrito | `IsExpressionIrTests.IRContainsIsCheck`; o IR do djinnc nomeia a comparação `is.match` |
 | IsExpression.BindingExtractsI32Value | Portar | exit code 42 |
 | IsExpression.BindingNotUsedWhenTypeMismatch | Portar | exit code -1 |
 | IsExpression.BindingWithDifferentTypes | Portar | exit code 99 |
 | NativeTypes.DeclarationsCompile | Portar | compila sem erros |
-| NativeTypes.NintIsPointerSized | Bloqueado | `sizeof`/`typeof`/`alignof` de expressão |
+| NativeTypes.NintIsPointerSized | Reescrito | `sizeof_typeof.djinn` SizeofTypeofTests.sizeof_nint_is_pointer_sized |
 | NativeTypes.NfloatIsF32 | Reescrito | `NativeTypesIrTests.NfloatIsF32` |
 | NativeTypes.NdoubleIsF64 | Reescrito | `NativeTypesIrTests.NdoubleIsF64` |
 | NativeTypes.NintMixesWithI64 | Portar | compila sem erros |
-| NativeTypes.TypeofShowsNativeName | Bloqueado | `sizeof`/`typeof`/`alignof` de expressão |
-| NativeTypes.NintMaxValueConstant | Bloqueado | tipos nativos (`nint`) |
-| NativeTypes.NintTakesOverflowSuffixes | Bloqueado | tipos nativos (`nint`) |
-| NativeTypes.NfloatTypeofShowsNativeName | Bloqueado | `sizeof`/`typeof`/`alignof` de expressão |
-| NativeTypes.NdoubleTypeofShowsNativeName | Bloqueado | `sizeof`/`typeof`/`alignof` de expressão |
-| NativeTypes.NintSaturatingArithmetic | Bloqueado | tipos nativos (`nint`) |
+| NativeTypes.TypeofShowsNativeName | Descartar | `typeof(expressão)` não existe; `typeof(Tipo)` devolve um `TypeInfo*` (SizeofTypeofTests.typeof_reports_the_kind_of_a_type) |
+| NativeTypes.NintMaxValueConstant | Bloqueado | `nint` não tem `MAX_VALUE` nem sufixos de overflow (`nints`, `nintt`) no djinnc |
+| NativeTypes.NintTakesOverflowSuffixes | Bloqueado | `nint` não tem `MAX_VALUE` nem sufixos de overflow (`nints`, `nintt`) no djinnc |
+| NativeTypes.NfloatTypeofShowsNativeName | Descartar | `typeof(expressão)` não existe; `typeof(Tipo)` devolve um `TypeInfo*` (SizeofTypeofTests.typeof_reports_the_kind_of_a_type) |
+| NativeTypes.NdoubleTypeofShowsNativeName | Descartar | `typeof(expressão)` não existe; `typeof(Tipo)` devolve um `TypeInfo*` (SizeofTypeofTests.typeof_reports_the_kind_of_a_type) |
+| NativeTypes.NintSaturatingArithmetic | Bloqueado | `nint` não tem `MAX_VALUE` nem sufixos de overflow (`nints`, `nintt`) no djinnc |
 | NativeTypes.NintNegation | Portar | exit code 5 |
 | NativeTypes.NintAsFunctionSignature | Portar | exit code 42 |
 | NativeTypes.NfloatNdoubleArithmetic | Portar | compila sem erros |
@@ -792,7 +774,7 @@ resultado. Os grupos que falharam foram revisados à mão; os que passaram não 
 | NonZero.RejectsIncrementAndDecrement | Bloqueado | tipos non-zero (`i32n`) |
 | NonZero.RejectsDeclarationWithoutInitializer | Bloqueado | tipos non-zero (`i32n`) |
 | NonZero.CombinesWithOverflowSuffix | Portar | compila sem erros |
-| NonZero.RejectsSuffixOnFloatType | Bloqueado | modos de overflow (o erro atual tem outro motivo) |
+| NonZero.RejectsSuffixOnFloatType | Descartar | `f32w` nem é um tipo no djinnc; coberto como Overflow.FloatTypeSuffixIsRejected |
 | NonZero.DivisionByNonZeroRuns | Portar | exit code 10 |
 | NonZero.DivisionByConstantSkipsZeroCheck | Reescrito | `NonZeroIrTests.DivisionByConstantSkipsZeroCheck`; o IR do djinnc nomeia o teste `div.zero` |
 | NonZero.DivisionByUnknownStillChecked | Reescrito | `NonZeroIrTests.DivisionByUnknownStillChecked`; o IR do djinnc nomeia o teste `div.zero` |
@@ -809,24 +791,24 @@ resultado. Os grupos que falharam foram revisados à mão; os que passaram não 
 | Nullable.NullLiteralForbiddenOnNonNullableStruct | Portar | erro E3053 |
 | Nullable.NullLiteralForbiddenOnNonNullablePointer | Portar | erro E3053 |
 | Nullable.NullLiteralForbiddenOnInteger | Portar | erro E3053 |
-| Nullable.NullableArraySyntax | Bloqueado | tipos anuláveis |
+| Nullable.NullableArraySyntax | Bloqueado | `?.`, `!.`, `??=` não existem e `??` só vale em ponteiro não anulável |
 | Nullable.ReassignNullToNullableMutVariable | Portar | compila sem erros |
 | Nullable.ReassignNullToNonNullableErrors | Portar | erro E3053 |
-| Nullable.NullCoalescingParsesAndCompiles | Bloqueado | tipos anuláveis |
-| Nullable.NullCoalescingAssignmentDesugars | Bloqueado | tipos anuláveis |
-| Nullable.NullConditionalFieldAccessParses | Bloqueado | tipos anuláveis |
-| Nullable.NullForgivingFieldAccessParses | Bloqueado | tipos anuláveis |
-| Nullable.CastNonNullableToNullableAllowed | Bloqueado | tipos anuláveis |
-| Nullable.CastNullableToNonNullableEmitsWarning | Bloqueado | tipos anuláveis (o erro atual tem outro motivo) |
+| Nullable.NullCoalescingParsesAndCompiles | Bloqueado | `?.`, `!.`, `??=` não existem e `??` só vale em ponteiro não anulável |
+| Nullable.NullCoalescingAssignmentDesugars | Bloqueado | `?.`, `!.`, `??=` não existem e `??` só vale em ponteiro não anulável |
+| Nullable.NullConditionalFieldAccessParses | Bloqueado | `?.`, `!.`, `??=` não existem e `??` só vale em ponteiro não anulável |
+| Nullable.NullForgivingFieldAccessParses | Bloqueado | `?.`, `!.`, `??=` não existem e `??` só vale em ponteiro não anulável |
+| Nullable.CastNonNullableToNullableAllowed | Bloqueado | `?.`, `!.`, `??=` não existem e `??` só vale em ponteiro não anulável |
+| Nullable.CastNullableToNonNullableEmitsWarning | Bloqueado | `?.`, `!.`, `??=` não existem e `??` só vale em ponteiro não anulável |
 | Nullable.CastNullableToNullableNoWarning | Portar | compila sem erros |
 | Nullable.CastIntegerToPointerNoWarning | Portar | compila sem erros |
 | PointerCompat.VoidToTyped | Portar | compila sem erros |
 | PointerCompat.TypedToVoid | Portar | compila sem erros |
-| PointerCompat.IncompatibleTypes | Bloqueado | conversão entre ponteiros incompatíveis (o erro atual tem outro motivo) |
+| PointerCompat.IncompatibleTypes | Descartar | coberto por `errors.djinn` pointer_to_other_pointer_type_variable e _argument |
 | PointerCompat.IncompatibleTypesHumanReadableMessage | Portar | compila sem erros |
 | PointerCompat.SameType | Portar | compila sem erros |
 | PointerField.ComparesWithLocalInsideNamespace | Portar | exit code 1 |
-| UnsignedCompare.EqualsConstantAboveI32Max | Bloqueado | `const` local |
+| UnsignedCompare.EqualsConstantAboveI32Max | Reescrito | `language_rules.djinn` UnsignedConstantTests.equality_with_a_constant_above_the_signed_maximum; `const` virou `constexpr` |
 | UnsignedCompare.OrderingUsesUnsignedPredicates | Portar | exit code 1 |
 | UnsignedCompare.CastWidensWithZeroExtension | Portar | exit code 1 |
 | UnsignedCompare.SignedStillOrdersNegatives | Portar | exit code 1 |

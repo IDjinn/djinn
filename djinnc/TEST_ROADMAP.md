@@ -475,7 +475,7 @@ como `contracts are not supported yet`, e essa lista fica no script.
 
 Estado:
 
-1. **Adiado por decisão:** as lacunas da tabela de `TRIAGE.md` ficam para quando os recursos existirem; os 175 casos seguem listados lá.
+1. **Feito:** os 175 bloqueados foram reavaliados contra o djinnc atual: 20 passavam e foram portados, 53 viraram testes novos em Djinn (`error_handling`, `interpolation`, `sizeof_typeof`, `language_rules`), 57 foram descartados (recurso inexistente ou já coberto). Restam 45 em `TRIAGE.md`, que esperam contratos, tipos non-zero, ponteiros anuláveis e `nint` com sufixos.
 2. **Feito:** `tests/**/*.cpp` está congelado. `tests/frozen_cpp_tests.txt` guarda cada arquivo e o número de `TEST`; `tools/check_frozen_cpp_tests.py` reprova arquivo novo ou caso a mais, e o CTest o roda como `djinn_cpp_tests_frozen`. `--update` regrava o manifesto depois de migrar ou apagar casos.
 3. **Feito:** os 87 casos de "reescrever" viraram 66 `[Test]` (IR, avaliação de constantes, pilha de chamadas, vários arquivos; destino de cada um em `tests/conformance/rewritten.txt`) e 21 bloqueados com o motivo na triagem (interpolação de string, modos de overflow, tipos non-zero, modo release, `throws`). `port_gtests.py` não reescreve mais as suítes: elas são editadas à mão (`--write-suites` volta ao comportamento antigo).
 4. **Em andamento:** 44 dos casos que só compilavam agora também rodam e conferem o exit code ou a saída. Sobram os que só declaram interfaces ou usam sufixos de overflow e tipos non-zero, que o djinnc aceita sem aplicar.
