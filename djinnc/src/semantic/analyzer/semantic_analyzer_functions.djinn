@@ -88,7 +88,7 @@ impl SemanticAnalyzer {
         return owner == null || (!owner.is_template && owner.origin == null);
     }
 
-    public unsafe FunctionInfo* instantiate_function(FunctionInfo* template, IdList* args, Node* blame) {
+    public unsafe FunctionInfo* instantiate_function(FunctionInfo* template, IdList* args, IdList* modes, Node* blame) {
         SymbolTable* symbols = this.symbols;
         GenericParams* params = template.generics;
         if (args.length != params.count()) {
@@ -101,6 +101,10 @@ impl SemanticAnalyzer {
         for (mut i32 a = 0; a < args.length; a = a + 1) {
             key_text.append_char(58);
             key_text.append_int((i64)args.get(a));
+            if (modes != null && modes.get(a) != 0) {
+                key_text.append_char(109);
+                key_text.append_int((i64)modes.get(a));
+            }
         }
         AtomTable* atoms = Ast.atoms();
         u32 key = atoms.intern_copy(key_text.cstr(), (u32)strlen(key_text.cstr()));
@@ -126,6 +130,12 @@ impl SemanticAnalyzer {
         for (mut i32 a = 0; a < args.length; a = a + 1) {
             bindings.put(names.get(a), args.get(a));
         }
+        U32Map* mode_bindings = U32Map.create(Memory.arena(), 8);
+        if (modes != null) {
+            for (mut i32 a = 0; a < args.length; a = a + 1) {
+                mode_bindings.put(names.get(a), modes.get(a));
+            }
+        }
         U32Map* saved_bindings = symbols.bindings;
         u32 saved_scope = this.scope;
         this.scope = template.namespace_id;
@@ -145,6 +155,7 @@ impl SemanticAnalyzer {
         name.append_char(62);
         info.name = name.cstr();
         info.bindings = bindings;
+        info.mode_bindings = mode_bindings;
         symbols.add_function_instance(info);
         instances.put(key, (u32)(registered.length - 1));
         this.check_bounds(params, args, blame);

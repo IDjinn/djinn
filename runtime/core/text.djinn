@@ -83,10 +83,140 @@ unsafe void __djinn_text_u64(void* handle, u64 value) {
     i32 count = snprintf(builder.data + (i64)builder.length, 32, "%llu", value);
     djinn_text_advance(builder, count);
 }
+unsafe i32 djinn_float_text(i8* out, f64 value, i32 single) {
+    if (value != value) {
+        memcpy(out, "NaN", 3);
+        return 3;
+    }
+    mut i32 n = 0;
+    mut f64 magnitude = value;
+    if (value < 0.0 || (value == 0.0 && 1.0 / value < 0.0)) {
+        out[n] = 45;
+        n = n + 1;
+        magnitude = 0.0 - value;
+    }
+    if (magnitude > 1.7976931348623157e308) {
+        memcpy(out + n, "Infinity", 8);
+        return n + 8;
+    }
+    if (magnitude == 0.0) {
+        out[n] = 48;
+        return n + 1;
+    }
+    i8* raw = out + 32;
+    i8* digits = out + 64;
+    mut i32 limit = 17;
+    if (single != 0) {
+        limit = 9;
+    }
+    mut i32 precision = 0;
+    mut bool found = false;
+    while (!found) {
+        snprintf(raw, 32, "%.*e", precision, magnitude);
+        mut f64 parsed = 0.0;
+        if (single != 0) {
+            parsed = (f64)strtof(raw, (void*)0);
+        } else {
+            parsed = strtod(raw, (void*)0);
+        }
+        found = parsed == magnitude || precision >= limit - 1;
+        if (!found) {
+            precision = precision + 1;
+        }
+    }
+    mut i32 digit_count = 0;
+    mut i32 at = 0;
+    while (raw[at] != 101) {
+        if (raw[at] != 46) {
+            digits[digit_count] = raw[at];
+            digit_count = digit_count + 1;
+        }
+        at = at + 1;
+    }
+    at = at + 1;
+    bool negative_exponent = raw[at] == 45;
+    at = at + 1;
+    mut i32 exponent = 0;
+    while (raw[at] != 0) {
+        exponent = exponent * 10 + (raw[at] - 48);
+        at = at + 1;
+    }
+    if (negative_exponent) {
+        exponent = 0 - exponent;
+    }
+    if (exponent > -5 && exponent < 15) {
+        if (exponent >= 0) {
+            i32 whole = exponent + 1;
+            for (mut i32 i = 0; i < whole; i = i + 1) {
+                if (i < digit_count) {
+                    out[n] = digits[i];
+                } else {
+                    out[n] = 48;
+                }
+                n = n + 1;
+            }
+            if (digit_count > whole) {
+                out[n] = 46;
+                n = n + 1;
+                for (mut i32 i = whole; i < digit_count; i = i + 1) {
+                    out[n] = digits[i];
+                    n = n + 1;
+                }
+            }
+        } else {
+            out[n] = 48;
+            out[n + 1] = 46;
+            n = n + 2;
+            for (mut i32 i = 0; i < 0 - exponent - 1; i = i + 1) {
+                out[n] = 48;
+                n = n + 1;
+            }
+            for (mut i32 i = 0; i < digit_count; i = i + 1) {
+                out[n] = digits[i];
+                n = n + 1;
+            }
+        }
+    } else {
+        out[n] = digits[0];
+        n = n + 1;
+        if (digit_count > 1) {
+            out[n] = 46;
+            n = n + 1;
+            for (mut i32 i = 1; i < digit_count; i = i + 1) {
+                out[n] = digits[i];
+                n = n + 1;
+            }
+        }
+        out[n] = 69;
+        n = n + 1;
+        mut i32 shown = exponent;
+        if (exponent < 0) {
+            out[n] = 45;
+            shown = 0 - exponent;
+        } else {
+            out[n] = 43;
+        }
+        n = n + 1;
+        if (shown >= 100) {
+            out[n] = (i8)(48 + shown / 100);
+            n = n + 1;
+        }
+        out[n] = (i8)(48 + (shown / 10) % 10);
+        out[n + 1] = (i8)(48 + shown % 10);
+        n = n + 2;
+    }
+    return n;
+}
 unsafe void __djinn_text_f64(void* handle, f64 value) {
     djinn_text_builder* builder = (djinn_text_builder*)handle;
-    djinn_text_reserve(builder, 32);
-    i32 count = snprintf(builder.data + (i64)builder.length, 32, "%g", value);
+    djinn_text_reserve(builder, 96);
+    i32 count = djinn_float_text(builder.data + (i64)builder.length, value, 0);
+    djinn_text_advance(builder, count);
+}
+unsafe void __djinn_text_f32(void* handle, f32 value) {
+    djinn_text_builder* builder = (djinn_text_builder*)handle;
+    djinn_text_reserve(builder, 96);
+    i32 count = djinn_float_text(builder.data + (i64)builder.length, (f64)value, 1);
     djinn_text_advance(builder, count);
 }
 unsafe void __djinn_text_bool(void* handle, i32 value) {
@@ -168,6 +298,17 @@ void __djinn_text_bool_format(void* handle, i32 value, u64 format) {
     u32 start = builder.length;
     __djinn_text_bool(handle, value);
     djinn_text_pad(builder, start, format, 0);
+}
+void __djinn_text_f32_format(void* handle, f32 value, u64 format) {
+    djinn_text_builder* builder = (djinn_text_builder*)handle;
+    u32 start = builder.length;
+    if (((format >> 16) & 4) == 0) {
+        __djinn_text_f32(handle, value);
+    } else {
+        __djinn_text_f64_format(handle, (f64)value, format);
+        return;
+    }
+    djinn_text_pad(builder, start, format, 1);
 }
 void __djinn_text_f64_format(void* handle, f64 value, u64 format) {
     djinn_text_builder* builder = (djinn_text_builder*)handle;
