@@ -52,7 +52,7 @@ that history.
 
 ## Forbidden
 
-`ensure`/`require` contracts, closures, destructuring.
+`ensure`/`require` contracts and closures.
 
 ## Errors
 

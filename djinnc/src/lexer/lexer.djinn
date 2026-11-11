@@ -33,12 +33,12 @@ struct Lexer {
                 break;
             }
 
-            i32 c = this.peek(0);
-            if (c == 34) {
+            char c = this.peek(0);
+            if (c == '"') {
                 this.read_string(false);
-            } else if (c == 39) {
+            } else if (c == '\'') {
                 this.read_char_literal();
-            } else if (c == 36 && this.at_interpolated_string()) {
+            } else if (c == '$' && this.at_interpolated_string()) {
                 this.read_interpolated_string();
             } else if (Strings.is_digit(c)) {
                 this.read_number();
@@ -65,19 +65,18 @@ struct Lexer {
         diagnostics.error(DiagnosticErrors.INVALID_CHAR_LITERAL, (i32)file.line_of((u32)offset), (i32)file.column_of((u32)offset), message);
     }
 
-    unsafe i32 peek(i32 offset) {
+    unsafe char peek(i32 offset) {
         i32 at = this.pos + offset;
         if (at >= this.length) {
-            return 0;
+            return '\0';
         }
-        i8 c = this.source[at];
-        return c;
+        return Strings.char_at(this.source, at);
     }
 
-    i32 advance() {
-        i32 c = this.peek(0);
+    char advance() {
+        char c = this.peek(0);
         this.pos = this.pos + 1;
-        if (c == 10) {
+        if (c == '\n') {
             SourceFile* file = this.file;
             file.add_line_start((u32)this.pos);
         }
@@ -97,11 +96,11 @@ struct Lexer {
 
     void skip_trivia() {
         while (this.pos < this.length) {
-            i32 c = this.peek(0);
-            if (c == 32 || c == 9 || c == 10 || c == 13) {
+            char c = this.peek(0);
+            if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
                 this.advance();
-            } else if (c == 47 && this.peek(1) == 47) {
-                while (this.pos < this.length && this.peek(0) != 10) {
+            } else if (c == '/' && this.peek(1) == '/') {
+                while (this.pos < this.length && this.peek(0) != '\n') {
                     this.advance();
                 }
             } else {
@@ -123,9 +122,9 @@ struct Lexer {
     }
 
     void read_suffix(bool allowC) {
-        i32 c = this.peek(0);
-        bool isSuffix = c == 117 || c == 105 || c == 119 || c == 116 || c == 115;
-        if (isSuffix || (allowC && c == 99)) {
+        char c = this.peek(0);
+        bool isSuffix = c == 'u' || c == 'i' || c == 'w' || c == 't' || c == 's';
+        if (isSuffix || (allowC && c == 'c')) {
             this.advance();
         }
     }
@@ -133,10 +132,10 @@ struct Lexer {
     void read_number() {
         i32 start = this.pos;
 
-        if (this.peek(0) == 48 && (this.peek(1) == 120 || this.peek(1) == 88)) {
+        if (this.peek(0) == '0' && (this.peek(1) == 'x' || this.peek(1) == 'X')) {
             this.advance();
             this.advance();
-            while (Strings.is_hex_digit(this.peek(0)) || this.peek(0) == 95 || this.peek(0) == 39) {
+            while (Strings.is_hex_digit(this.peek(0)) || this.peek(0) == '_' || this.peek(0) == '\'') {
                 this.advance();
             }
             this.read_suffix(false);
@@ -144,10 +143,10 @@ struct Lexer {
             return;
         }
 
-        if (this.peek(0) == 48 && (this.peek(1) == 98 || this.peek(1) == 66)) {
+        if (this.peek(0) == '0' && (this.peek(1) == 'b' || this.peek(1) == 'B')) {
             this.advance();
             this.advance();
-            while (this.peek(0) == 48 || this.peek(0) == 49 || this.peek(0) == 95 || this.peek(0) == 39) {
+            while (this.peek(0) == '0' || this.peek(0) == '1' || this.peek(0) == '_' || this.peek(0) == '\'') {
                 this.advance();
             }
             this.read_suffix(true);
@@ -155,23 +154,23 @@ struct Lexer {
             return;
         }
 
-        while (Strings.is_digit(this.peek(0)) || this.peek(0) == 95 || this.peek(0) == 39) {
+        while (Strings.is_digit(this.peek(0)) || this.peek(0) == '_' || this.peek(0) == '\'') {
             this.advance();
         }
 
         mut bool isFloat = false;
-        if (this.peek(0) == 46 && Strings.is_digit(this.peek(1))) {
+        if (this.peek(0) == '.' && Strings.is_digit(this.peek(1))) {
             isFloat = true;
             this.advance();
-            while (Strings.is_digit(this.peek(0)) || this.peek(0) == 95 || this.peek(0) == 39) {
+            while (Strings.is_digit(this.peek(0)) || this.peek(0) == '_' || this.peek(0) == '\'') {
                 this.advance();
             }
         }
 
-        if (this.peek(0) == 101 || this.peek(0) == 69) {
+        if (this.peek(0) == 'e' || this.peek(0) == 'E') {
             isFloat = true;
             this.advance();
-            if (this.peek(0) == 43 || this.peek(0) == 45) {
+            if (this.peek(0) == '+' || this.peek(0) == '-') {
                 this.advance();
             }
             if (!Strings.is_digit(this.peek(0))) {
@@ -193,15 +192,15 @@ struct Lexer {
 
     bool at_interpolated_string() {
         mut i32 offset = 0;
-        while (this.peek(offset) == 36) {
+        while (this.peek(offset) == '$') {
             offset = offset + 1;
         }
-        return this.peek(offset) == 34;
+        return this.peek(offset) == '"';
     }
 
     void read_interpolated_string() {
         mut i32 dollars = 0;
-        while (this.peek(0) == 36) {
+        while (this.peek(0) == '$') {
             this.advance();
             dollars = dollars + 1;
         }
@@ -211,7 +210,7 @@ struct Lexer {
         this.interpolation_braces = outer_braces;
     }
 
-    i32 count_run(i32 character) {
+    i32 count_run(char character) {
         mut i32 run = 0;
         while (this.peek(run) == character) {
             run = run + 1;
@@ -222,7 +221,7 @@ struct Lexer {
     void finish_interpolation_close(i32 start) {
         mut i32 remaining = this.interpolation_braces - 1;
         while (remaining > 0) {
-            if (this.peek(0) != 125) {
+            if (this.peek(0) != '}') {
                 this.error_at(start, "an interpolation opened with several braces must close with the same number of braces");
                 return;
             }
@@ -233,9 +232,9 @@ struct Lexer {
 
     bool at_string_end(bool is_block) {
         if (!is_block) {
-            return this.peek(0) == 34;
+            return this.peek(0) == '"';
         }
-        return this.peek(0) == 34 && this.peek(1) == 34 && this.peek(2) == 34;
+        return this.peek(0) == '"' && this.peek(1) == '"' && this.peek(2) == '"';
     }
 
     void read_string(bool interpolating) {
@@ -247,12 +246,12 @@ struct Lexer {
         ByteBuffer* value = this.scratch;
         value.length = 0;
 
-        if (!interpolating && this.peek(1) == 34 && this.peek(2) == 34) {
+        if (!interpolating && this.peek(1) == '"' && this.peek(2) == '"') {
             this.advance();
             this.advance();
             this.advance();
             while (this.pos < this.length) {
-                if (this.peek(0) == 34 && this.peek(1) == 34 && this.peek(2) == 34) {
+                if (this.peek(0) == '"' && this.peek(1) == '"' && this.peek(2) == '"') {
                     this.advance();
                     this.advance();
                     this.advance();
@@ -266,7 +265,7 @@ struct Lexer {
             return;
         }
 
-        bool is_block = interpolating && this.peek(1) == 34 && this.peek(2) == 34;
+        bool is_block = interpolating && this.peek(1) == '"' && this.peek(2) == '"';
         if (is_block) {
             this.advance();
             this.advance();
@@ -274,22 +273,22 @@ struct Lexer {
         this.advance();
         mut bool interpolated = false;
         while (this.pos < this.length && !this.at_string_end(is_block)) {
-            if (!is_block && this.peek(0) == 92) {
+            if (!is_block && this.peek(0) == '\\') {
                 this.advance();
-                i32 escaped = this.advance();
-                if (escaped == 110) {
-                    value.append_char(10);
-                } else if (escaped == 116) {
-                    value.append_char(9);
+                char escaped = this.advance();
+                if (escaped == 'n') {
+                    value.append_char('\n');
+                } else if (escaped == 't') {
+                    value.append_char('\t');
                 } else {
                     value.append_char(escaped);
                 }
-            } else if (counted_braces && this.peek(0) == 125) {
+            } else if (counted_braces && this.peek(0) == '}') {
                 value.append_char(this.advance());
-            } else if (counted_braces && this.peek(0) == 123 && this.count_run(123) < this.interpolation_braces) {
+            } else if (counted_braces && this.peek(0) == '{' && this.count_run('{') < this.interpolation_braces) {
                 value.append_char(this.advance());
-            } else if (counted_braces && this.peek(0) == 123) {
-                mut i32 literal_braces = this.count_run(123) - this.interpolation_braces;
+            } else if (counted_braces && this.peek(0) == '{') {
+                mut i32 literal_braces = this.count_run('{') - this.interpolation_braces;
                 while (literal_braces > 0) {
                     value.append_char(this.advance());
                     literal_braces = literal_braces - 1;
@@ -306,18 +305,18 @@ struct Lexer {
                 value.length = 0;
                 this.advance();
                 this.read_interpolated_expression(start);
-            } else if (interpolating && this.peek(0) == 123 && this.peek(1) == 123) {
+            } else if (interpolating && this.peek(0) == '{' && this.peek(1) == '{') {
                 this.advance();
                 this.advance();
-                value.append_char(123);
-            } else if (interpolating && this.peek(0) == 125 && this.peek(1) == 125) {
+                value.append_char('{');
+            } else if (interpolating && this.peek(0) == '}' && this.peek(1) == '}') {
                 this.advance();
                 this.advance();
-                value.append_char(125);
-            } else if (interpolating && this.peek(0) == 125) {
+                value.append_char('}');
+            } else if (interpolating && this.peek(0) == '}') {
                 this.error_at(this.pos, "a single '}' in an interpolated string must be written '}}'");
                 this.advance();
-            } else if (interpolating && this.peek(0) == 123) {
+            } else if (interpolating && this.peek(0) == '{') {
                 if (interpolated) {
                     this.emit_text(TokenKind::INTERP_MIDDLE, value, start);
                 } else {
@@ -362,13 +361,13 @@ struct Lexer {
                 this.error_at(start, "unterminated string interpolation");
                 return;
             }
-            i32 c = this.peek(0);
-            if (c == 125 && depth == 0) {
+            char c = this.peek(0);
+            if (c == '}' && depth == 0) {
                 this.advance();
                 this.finish_interpolation_close(start);
                 return;
             }
-            if (c == 58 && this.peek(1) != 58 && depth == 0 && nesting == 0) {
+            if (c == ':' && this.peek(1) != ':' && depth == 0 && nesting == 0) {
                 if (ternaries > 0) {
                     ternaries = ternaries - 1;
                     this.read_symbol();
@@ -377,24 +376,24 @@ struct Lexer {
                     this.read_interpolation_format(start);
                     return;
                 }
-            } else if (c == 34) {
+            } else if (c == '"') {
                 this.read_string(false);
-            } else if (c == 36 && this.at_interpolated_string()) {
+            } else if (c == '$' && this.at_interpolated_string()) {
                 this.read_interpolated_string();
             } else if (Strings.is_digit(c)) {
                 this.read_number();
             } else if (Strings.is_ident_start(c)) {
                 this.read_identifier();
             } else {
-                if (c == 123) {
+                if (c == '{') {
                     depth = depth + 1;
-                } else if (c == 125) {
+                } else if (c == '}') {
                     depth = depth - 1;
-                } else if (c == 40 || c == 91) {
+                } else if (c == '(' || c == '[') {
                     nesting = nesting + 1;
-                } else if (c == 41 || c == 93) {
+                } else if (c == ')' || c == ']') {
                     nesting = nesting - 1;
-                } else if (c == 63 && this.peek(1) != 63 && this.peek(1) != 46) {
+                } else if (c == '?' && this.peek(1) != '?' && this.peek(1) != '.') {
                     ternaries = ternaries + 1;
                 }
                 this.read_symbol();
@@ -406,10 +405,10 @@ struct Lexer {
         i32 format_start = this.pos;
         ByteBuffer* spec = this.scratch;
         spec.length = 0;
-        while (this.pos < this.length && this.peek(0) != 125 && this.peek(0) != 34) {
+        while (this.pos < this.length && this.peek(0) != '}' && this.peek(0) != '"') {
             spec.append_char(this.advance());
         }
-        if (this.peek(0) != 125) {
+        if (this.peek(0) != '}') {
             this.error_at(start, "unterminated string interpolation");
             return;
         }
@@ -420,20 +419,20 @@ struct Lexer {
     }
 
     i32 continuation_bits() {
-        return this.advance() & 63;
+        return (i32)this.advance() & 63;
     }
 
     i32 read_unicode_escape(i32 start, i32 digits) {
         mut i64 code_point = 0;
         for (mut i32 taken = 0; taken < digits; taken = taken + 1) {
-            i32 digit = this.peek(0);
+            char digit = this.peek(0);
             mut i32 value = 0;
-            if (digit >= 48 && digit <= 57) {
-                value = digit - 48;
-            } else if (digit >= 97 && digit <= 102) {
-                value = digit - 87;
-            } else if (digit >= 65 && digit <= 70) {
-                value = digit - 55;
+            if (digit >= '0' && digit <= '9') {
+                value = (i32)digit - (i32)'0';
+            } else if (digit >= 'a' && digit <= 'f') {
+                value = (i32)digit - (i32)'a' + 10;
+            } else if (digit >= 'A' && digit <= 'F') {
+                value = (i32)digit - (i32)'A' + 10;
             } else {
                 this.char_error(start, "a unicode escape needs 4 hexadecimal digits after \\u or 8 after \\U");
                 return 0;
@@ -450,17 +449,17 @@ struct Lexer {
     }
 
     i32 read_char_code_point(i32 start) {
-        i32 lead = this.peek(0) & 255;
-        if (lead == 92) {
+        i32 lead = (i32)this.peek(0) & 255;
+        if (lead == (i32)'\\') {
             this.advance();
-            i32 escaped = this.advance();
-            if (escaped == 110) { return 10; }
-            if (escaped == 116) { return 9; }
-            if (escaped == 114) { return 13; }
-            if (escaped == 48) { return 0; }
-            if (escaped == 117) { return this.read_unicode_escape(start, 4); }
-            if (escaped == 85) { return this.read_unicode_escape(start, 8); }
-            return escaped;
+            char escaped = this.advance();
+            if (escaped == 'n') { return 10; }
+            if (escaped == 't') { return 9; }
+            if (escaped == 'r') { return 13; }
+            if (escaped == '0') { return 0; }
+            if (escaped == 'u') { return this.read_unicode_escape(start, 4); }
+            if (escaped == 'U') { return this.read_unicode_escape(start, 8); }
+            return (i32)escaped;
         }
         this.advance();
         if (lead < 128) {
@@ -483,21 +482,21 @@ struct Lexer {
     void read_char_literal() {
         i32 start = this.pos;
         this.advance();
-        if (this.pos >= this.length || this.peek(0) == 39) {
+        if (this.pos >= this.length || this.peek(0) == '\'') {
             this.char_error(start, "empty char literal");
-            if (this.peek(0) == 39) {
+            if (this.peek(0) == '\'') {
                 this.advance();
             }
             return;
         }
         i32 code_point = this.read_char_code_point(start);
-        if (this.peek(0) != 39) {
+        if (this.peek(0) != '\'') {
             this.char_error(start, "a char literal holds exactly one character");
-            while (this.pos < this.length && this.peek(0) != 39 && this.peek(0) != 10) {
+            while (this.pos < this.length && this.peek(0) != '\'' && this.peek(0) != '\n') {
                 this.advance();
             }
         }
-        if (this.peek(0) == 39) {
+        if (this.peek(0) == '\'') {
             this.advance();
         }
         ByteBuffer* value = this.scratch;
