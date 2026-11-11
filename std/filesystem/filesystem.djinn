@@ -1,0 +1,468 @@
+import std::types;
+import std::libc;
+import std::filesystem::native;
+
+namespace std::filesystem;
+
+enum FileKind {
+    RegularFile(),
+    Dir(),
+    Link(),
+    Other()
+}
+
+FileKind fs_kind_from_code(i64 code) {
+    if (code == 0) { return FileKind::RegularFile(); }
+    if (code == 1) { return FileKind::Dir(); }
+    if (code == 2) { return FileKind::Link(); }
+    return FileKind::Other();
+}
+
+result<i64, FsError> fs_checked(i64 code) {
+    if (code < 0) { return result::Error(fs_error_from_code(0 - code)); }
+    return result::Ok(code);
+}
+
+result<bool, FsError> fs_checked_done(i64 code) {
+    if (code < 0) { return result::Error(fs_error_from_code(0 - code)); }
+    return result::Ok(true);
+}
+
+struct Metadata {
+    FileKind kind;
+    i64 size;
+    i64 modified_ns;
+    i32 permissions;
+
+    public bool is_file() {
+        return switch this.kind { RegularFile -> true, Dir -> false, Link -> false, Other -> false };
+    }
+
+    public bool is_directory() {
+        return switch this.kind { RegularFile -> false, Dir -> true, Link -> false, Other -> false };
+    }
+
+    public bool is_symlink() {
+        return switch this.kind { RegularFile -> false, Dir -> false, Link -> true, Other -> false };
+    }
+}
+
+// How a file is opened. A symbolic link at any component is refused unless following_symlinks() is asked for;
+// even then the walk is limited to what the link points at, it is not checked to stay inside the directory.
+struct OpenOptions {
+    i32 flags;
+    i32 mode;
+
+    public static OpenOptions read() {
+        return { .flags = 1, .mode = 420 };
+    }
+
+    public static OpenOptions read_write() {
+        return { .flags = 3, .mode = 420 };
+    }
+
+    public static OpenOptions create() {
+        return { .flags = 22, .mode = 420 };
+    }
+
+    public static OpenOptions create_new() {
+        return { .flags = 10, .mode = 420 };
+    }
+
+    public static OpenOptions append() {
+        return { .flags = 38, .mode = 420 };
+    }
+
+    public OpenOptions following_symlinks() {
+        return { .flags = this.flags | 64, .mode = this.mode };
+    }
+
+    public OpenOptions with_mode(i32 mode) {
+        return { .flags = this.flags, .mode = mode };
+    }
+}
+
+// An open regular file. Closed when it goes out of scope.
+struct File : Disposable {
+    mut i64 handle;
+
+    public void disposable() {
+        if (this.handle >= 0) {
+            unsafe { Native.close(this.handle); }
+            this.handle = -1;
+        }
+    }
+
+    public bool is_open() {
+        return this.handle >= 0;
+    }
+
+    public result<i64, FsError> read(void* buffer, i64 count) {
+        if (this.handle < 0) { return result::Error(FsError::Closed()); }
+        unsafe { return fs_checked(Native.read(this.handle, buffer, count)); }
+    }
+
+    public result<i64, FsError> write(void* buffer, i64 count) {
+        if (this.handle < 0) { return result::Error(FsError::Closed()); }
+        unsafe { return fs_checked(Native.write(this.handle, buffer, count)); }
+    }
+
+    public result<bool, FsError> write_all(str data) {
+        if (this.handle < 0) { return result::Error(FsError::Closed()); }
+        mut i64 done = 0;
+        i64 total = (i64)data.length;
+        unsafe {
+            while (done < total) {
+                i64 step = Native.write(this.handle, data.data + done, total - done);
+                if (step < 0) { return result::Error(fs_error_from_code(0 - step)); }
+                if (step == 0) { return result::Error(FsError::IoError()); }
+                done = done + step;
+            }
+        }
+        return result::Ok(true);
+    }
+
+    public result<string, FsError> read_to_string(i64 max_bytes) {
+        if (this.handle < 0) { return result::Error(FsError::Closed()); }
+        mut i64 capacity = 4096;
+        unsafe {
+            i64 hint = fs_file_size(this.handle);
+            if (hint >= 0 && hint < max_bytes) { capacity = hint + 1; }
+        }
+        mut i64 length = 0;
+        unsafe {
+            mut i8* data = (i8*)malloc((size_long)capacity);
+            if (data == (i8*)0) { return result::Error(FsError::OutOfMemory()); }
+            while (true) {
+                if (length == capacity) {
+                    if (length > max_bytes) { free(data); return result::Error(FsError::FileTooLarge()); }
+                    capacity = capacity * 2;
+                    i8* grown = (i8*)realloc(data, (size_long)capacity);
+                    if (grown == (i8*)0) { free(data); return result::Error(FsError::OutOfMemory()); }
+                    data = grown;
+                }
+                i64 step = Native.read(this.handle, data + length, capacity - length);
+                if (step < 0) { free(data); return result::Error(fs_error_from_code(0 - step)); }
+                if (step == 0) { break; }
+                length = length + step;
+                if (length > max_bytes) { free(data); return result::Error(FsError::FileTooLarge()); }
+            }
+            return result::Ok({ .data = data, .length = (size)length, .capacity = (size)capacity });
+        }
+    }
+
+    public result<i64, FsError> seek_start(i64 offset) {
+        if (this.handle < 0) { return result::Error(FsError::Closed()); }
+        unsafe { return fs_checked(Native.seek(this.handle, offset, 0)); }
+    }
+
+    public result<i64, FsError> seek_end(i64 offset) {
+        if (this.handle < 0) { return result::Error(FsError::Closed()); }
+        unsafe { return fs_checked(Native.seek(this.handle, offset, 2)); }
+    }
+
+    public result<i64, FsError> position() {
+        if (this.handle < 0) { return result::Error(FsError::Closed()); }
+        unsafe { return fs_checked(Native.seek(this.handle, 0, 1)); }
+    }
+
+    public result<Metadata, FsError> metadata() {
+        if (this.handle < 0) { return result::Error(FsError::Closed()); }
+        unsafe { return fs_metadata_of(this.handle); }
+    }
+
+    public result<bool, FsError> truncate(i64 length) {
+        if (this.handle < 0) { return result::Error(FsError::Closed()); }
+        unsafe { return fs_checked_done(Native.truncate(this.handle, length)); }
+    }
+
+    public result<bool, FsError> sync() {
+        if (this.handle < 0) { return result::Error(FsError::Closed()); }
+        unsafe { return fs_checked_done(Native.sync(this.handle)); }
+    }
+
+    public result<bool, FsError> close() {
+        if (this.handle < 0) { return result::Error(FsError::Closed()); }
+        i64 handle = this.handle;
+        this.handle = -1;
+        unsafe { return fs_checked_done(Native.close(handle)); }
+    }
+}
+
+unsafe i64 fs_file_size(i64 handle) {
+    i64* out = (i64*)malloc(32);
+    if (out == (i64*)0) { return -1; }
+    i64 code = Native.fstat(handle, out);
+    i64 size = out[1];
+    free(out);
+    if (code < 0) { return -1; }
+    return size;
+}
+
+unsafe result<Metadata, FsError> fs_metadata_from(i64 code, i64* out) {
+    if (code < 0) {
+        free(out);
+        return result::Error(fs_error_from_code(0 - code));
+    }
+    Metadata value = { .kind = fs_kind_from_code(out[0]), .size = out[1], .modified_ns = out[2], .permissions = (i32)out[3] };
+    free(out);
+    return result::Ok(value);
+}
+
+unsafe result<Metadata, FsError> fs_metadata_of(i64 handle) {
+    i64* out = (i64*)malloc(32);
+    if (out == (i64*)0) { return result::Error(FsError::OutOfMemory()); }
+    return fs_metadata_from(Native.fstat(handle, out), out);
+}
+
+struct DirEntry {
+    str name;
+    FileKind kind;
+}
+
+// The entries of a directory, read once when entries() is called. DirEntry names stay valid until this is closed.
+struct DirEntries : Disposable {
+    mut i64 list;
+    ListCursor* cursor;
+
+    public void disposable() {
+        if (this.list > 0) {
+            unsafe {
+                Native.list_free(this.list);
+                free(this.cursor);
+            }
+            this.list = 0;
+        }
+    }
+
+    public optional<DirEntry> next() {
+        if (this.list <= 0) { return optional::Empty(); }
+        unsafe {
+            if (Native.list_next(this.list, this.cursor) == 0) { return optional::Empty(); }
+            str text = { .data = this.cursor.name, .length = (size)this.cursor.length };
+            return optional::Value({ .name = text, .kind = fs_kind_from_code((i64)this.cursor.kind) });
+        }
+    }
+}
+
+// A directory capability. Every path given to it is relative and is resolved one component at a time without
+// following symbolic links, so nothing it opens can lie outside of it. Create the first one with open_root.
+struct Directory : Disposable {
+    mut i64 handle;
+
+    public void disposable() {
+        if (this.handle >= 0) {
+            unsafe { Native.close(this.handle); }
+            this.handle = -1;
+        }
+    }
+
+    public static result<Directory, FsError> open_root(Path path) {
+        unsafe {
+            i64 code = Native.open_root(path.text, 0);
+            if (code < 0) { return result::Error(fs_error_from_code(0 - code)); }
+            return result::Ok({ .handle = code });
+        }
+    }
+
+    public static result<Directory, FsError> open_root_following(Path path) {
+        unsafe {
+            i64 code = Native.open_root(path.text, 64);
+            if (code < 0) { return result::Error(fs_error_from_code(0 - code)); }
+            return result::Ok({ .handle = code });
+        }
+    }
+
+    public result<Directory, FsError> open_dir(Path path) {
+        if (this.handle < 0) { return result::Error(FsError::Closed()); }
+        if (path.absolute) { return result::Error(FsError::AbsolutePath()); }
+        unsafe {
+            i64 code = Native.open_dir(this.handle, path.text, 0);
+            if (code < 0) { return result::Error(fs_error_from_code(0 - code)); }
+            return result::Ok({ .handle = code });
+        }
+    }
+
+    public result<Directory, FsError> open_dir_following(Path path) {
+        if (this.handle < 0) { return result::Error(FsError::Closed()); }
+        if (path.absolute) { return result::Error(FsError::AbsolutePath()); }
+        unsafe {
+            i64 code = Native.open_dir(this.handle, path.text, 64);
+            if (code < 0) { return result::Error(fs_error_from_code(0 - code)); }
+            return result::Ok({ .handle = code });
+        }
+    }
+
+    public result<File, FsError> open_file(Path path, OpenOptions options) {
+        if (this.handle < 0) { return result::Error(FsError::Closed()); }
+        if (path.absolute) { return result::Error(FsError::AbsolutePath()); }
+        unsafe {
+            i64 code = Native.open_file(this.handle, path.text, options.flags, options.mode);
+            if (code < 0) { return result::Error(fs_error_from_code(0 - code)); }
+            return result::Ok({ .handle = code });
+        }
+    }
+
+    public result<Metadata, FsError> metadata(Path path) {
+        if (this.handle < 0) { return result::Error(FsError::Closed()); }
+        if (path.absolute) { return result::Error(FsError::AbsolutePath()); }
+        unsafe {
+            i64* out = (i64*)malloc(32);
+            if (out == (i64*)0) { return result::Error(FsError::OutOfMemory()); }
+            return fs_metadata_from(Native.stat(this.handle, path.text, 0, out), out);
+        }
+    }
+
+    public result<Metadata, FsError> metadata_following(Path path) {
+        if (this.handle < 0) { return result::Error(FsError::Closed()); }
+        if (path.absolute) { return result::Error(FsError::AbsolutePath()); }
+        unsafe {
+            i64* out = (i64*)malloc(32);
+            if (out == (i64*)0) { return result::Error(FsError::OutOfMemory()); }
+            return fs_metadata_from(Native.stat(this.handle, path.text, 64, out), out);
+        }
+    }
+
+    public result<bool, FsError> create_dir(Path path) {
+        if (this.handle < 0) { return result::Error(FsError::Closed()); }
+        if (path.absolute) { return result::Error(FsError::AbsolutePath()); }
+        unsafe { return fs_checked_done(Native.mkdir(this.handle, path.text, 493)); }
+    }
+
+    public result<bool, FsError> create_dir_all(Path path) {
+        if (this.handle < 0) { return result::Error(FsError::Closed()); }
+        if (path.absolute) { return result::Error(FsError::AbsolutePath()); }
+        str text = path.text;
+        unsafe {
+            for (mut size i = 0; i <= text.length; i = i + 1) {
+                bool boundary = i == text.length || text.data[i] == 47;
+                if (!boundary) { continue; }
+                i64 code = Native.mkdir(this.handle, text.slice(0, i), 493);
+                if (code < 0 && code != -2) { return result::Error(fs_error_from_code(0 - code)); }
+            }
+        }
+        result<Metadata, FsError> final = this.metadata(path);
+        return switch final {
+            Ok info -> fs_dir_or_exists(info),
+            Error error -> result::Error(error)
+        };
+    }
+
+    public result<bool, FsError> remove_file(Path path) {
+        if (this.handle < 0) { return result::Error(FsError::Closed()); }
+        if (path.absolute) { return result::Error(FsError::AbsolutePath()); }
+        unsafe { return fs_checked_done(Native.remove(this.handle, path.text, false)); }
+    }
+
+    public result<bool, FsError> remove_dir(Path path) {
+        if (this.handle < 0) { return result::Error(FsError::Closed()); }
+        if (path.absolute) { return result::Error(FsError::AbsolutePath()); }
+        unsafe { return fs_checked_done(Native.remove(this.handle, path.text, true)); }
+    }
+
+    // Moves from -> to, where to is relative to target. With replace the move is atomic over an existing file;
+    // without it an existing destination makes the call fail with AlreadyExists.
+    public result<bool, FsError> rename(Path from, Directory* target, Path to, bool replace) {
+        if (this.handle < 0 || target.handle < 0) { return result::Error(FsError::Closed()); }
+        if (from.absolute || to.absolute) { return result::Error(FsError::AbsolutePath()); }
+        unsafe { return fs_checked_done(Native.rename(this.handle, from.text, target.handle, to.text, replace)); }
+    }
+
+    public result<DirEntries, FsError> entries() {
+        if (this.handle < 0) { return result::Error(FsError::Closed()); }
+        unsafe {
+            i64 code = Native.list_open(this.handle);
+            if (code < 0) { return result::Error(fs_error_from_code(0 - code)); }
+            ListCursor* cursor = (ListCursor*)malloc(sizeof(ListCursor));
+            if (cursor == (ListCursor*)0) {
+                Native.list_free(code);
+                return result::Error(FsError::OutOfMemory());
+            }
+            return result::Ok({ .list = code, .cursor = cursor });
+        }
+    }
+
+    public result<string, FsError> read_to_string(Path path, i64 max_bytes) {
+        result<File, FsError> opened = this.open_file(path, OpenOptions.read());
+        return switch opened {
+            Ok file -> file.read_to_string(max_bytes),
+            Error error -> result::Error(error)
+        };
+    }
+
+    // Replaces the file with data all-or-nothing: the data goes to a temporary file next to it, is flushed to disk,
+    // and is renamed over the target, so readers see the old or the new content and never a partial file.
+    public result<bool, FsError> write_atomic(Path path, str data) {
+        if (this.handle < 0) { return result::Error(FsError::Closed()); }
+        if (path.absolute) { return result::Error(FsError::AbsolutePath()); }
+        str leaf = path.file_name();
+        optional<Path> parent = path.parent();
+        return switch parent {
+            Value folder -> this.write_atomic_in_parent(folder, leaf, data),
+            Empty -> fs_write_atomic(this.handle, leaf, data)
+        };
+    }
+
+    result<bool, FsError> write_atomic_in_parent(Path folder, str leaf, str data) {
+        result<Directory, FsError> opened = this.open_dir(folder);
+        return switch opened {
+            Ok directory -> fs_write_atomic(directory.handle, leaf, data),
+            Error error -> result::Error(error)
+        };
+    }
+
+    public result<bool, FsError> close() {
+        if (this.handle < 0) { return result::Error(FsError::Closed()); }
+        i64 handle = this.handle;
+        this.handle = -1;
+        unsafe { return fs_checked_done(Native.close(handle)); }
+    }
+}
+
+result<bool, FsError> fs_dir_or_exists(Metadata info) {
+    if (info.is_directory()) { return result::Ok(true); }
+    return result::Error(FsError::AlreadyExists());
+}
+
+result<bool, FsError> fs_write_atomic(i64 dir, str leaf, str data) {
+    unsafe {
+        i8* name = (i8*)malloc(320);
+        if (name == (i8*)0) { return result::Error(FsError::OutOfMemory()); }
+        mut i64 opened = -2;
+        mut str temp = { .data = name, .length = 0 };
+        mut i32 attempt = 0;
+        while (opened == -2 && attempt < 16) {
+            i64 length = Native.temp_name(leaf, name, 320);
+            if (length < 0) { free(name); return result::Error(fs_error_from_code(0 - length)); }
+            temp = { .data = name, .length = (size)length };
+            opened = Native.open_file(dir, temp, 10, 384);
+            attempt = attempt + 1;
+        }
+        if (opened < 0) { free(name); return result::Error(fs_error_from_code(0 - opened)); }
+
+        mut i64 failure = 0;
+        mut i64 done = 0;
+        i64 total = (i64)data.length;
+        while (failure == 0 && done < total) {
+            i64 step = Native.write(opened, data.data + done, total - done);
+            if (step <= 0) {
+                failure = step;
+                if (step == 0) { failure = -15; }
+            } else {
+                done = done + step;
+            }
+        }
+        if (failure == 0) { failure = Native.sync(opened); }
+        i64 closed = Native.close(opened);
+        if (failure == 0) { failure = closed; }
+        if (failure == 0) { failure = Native.rename(dir, temp, dir, leaf, true); }
+        if (failure < 0) {
+            Native.remove(dir, temp, false);
+            free(name);
+            return result::Error(fs_error_from_code(0 - failure));
+        }
+        free(name);
+        Native.sync(dir);
+        return result::Ok(true);
+    }
+}

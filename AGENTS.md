@@ -47,4 +47,6 @@ Files in `std/` directory
 - `collections/range.djinn` — `range` struct (start, end, step, bounds) with length(), contains(), is_empty()
 - `sys/console.djinn`, `sys/io.djinn`, `sys/debug.djinn` — I/O, assertions
 - `sys/libc.djinn` — FFI bindings (malloc, free, printf, memcpy, etc.)
+- `filesystem/` — `std::filesystem`: validated `Path`, `Directory` capability, `File`, `FsError`; `std::filesystem::native` for
+  the unsafe layer (see `std/filesystem/README.md`)
 - `builtin/coro.djinn` — coroutine utilities

@@ -1,0 +1,194 @@
+namespace conformance;
+
+import testing;
+import djinnc::testing;
+import djinnc;
+
+struct FilesystemTests {
+    [Test]
+    void path_validation() {
+        str source = """
+import std::types;
+import std::filesystem;
+namespace app;
+
+bool bad(str text, FsError wanted) {
+    return switch Path.parse(text) { Ok v -> false, Error e -> e == wanted };
+}
+
+i32 main() {
+    if (!bad("", FsError::InvalidPath())) { return 1; }
+    if (!bad("a/../../x", FsError::PathEscapes())) { return 2; }
+    if (!bad("..", FsError::PathEscapes())) { return 3; }
+    if (!bad("a//b", FsError::InvalidPath())) { return 4; }
+    if (!bad("a/", FsError::InvalidPath())) { return 5; }
+    if (!bad("a:b", FsError::InvalidPath())) { return 6; }
+    if (!bad("file:stream", FsError::InvalidPath())) { return 7; }
+    if (!bad("dir/CON.txt", FsError::InvalidPath())) { return 8; }
+    if (!bad("lpt1", FsError::InvalidPath())) { return 9; }
+    if (!bad("trailing.", FsError::InvalidPath())) { return 10; }
+    if (!bad("what?", FsError::InvalidPath())) { return 11; }
+
+    bool relative = switch Path.parse("a/./b.txt") { Ok v -> !v.is_absolute(), Error e -> false };
+    if (!relative) { return 12; }
+    bool absolute = switch Path.parse("/etc/passwd") { Ok v -> v.is_absolute(), Error e -> false };
+    if (!absolute) { return 13; }
+    bool drive = switch Path.parse("C:/Users") { Ok v -> v.is_absolute(), Error e -> false };
+    if (!drive) { return 14; }
+    bool name = switch Path.parse("a/b/c.txt") { Ok v -> v.file_name() == "c.txt", Error e -> false };
+    if (!name) { return 15; }
+    bool parent = switch Path.parse("a/b/c.txt") { Ok v -> switch v.parent() { Value q -> q.as_str() == "a/b", Empty -> false }, Error e -> false };
+    if (!parent) { return 16; }
+
+    result<Directory, FsError> root = Directory.open_root(Path.unchecked(".", false));
+    bool refused = switch root {
+        Ok d -> switch d.open_dir(Path.unchecked("/", true)) { Ok x -> false, Error e -> e == FsError::AbsolutePath() },
+        Error e -> false
+    };
+    if (!refused) { return 17; }
+    return 0;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(0));
+    }
+
+    [Test]
+    void directory_capability_lifecycle() {
+        str source = """
+import std::types;
+import std::sys;
+import std::filesystem;
+namespace app;
+
+Path p(str text) {
+    return switch Path.parse(text) { Ok v -> v, Error e -> Path.unchecked("x", false) };
+}
+
+bool is_err(result<bool, FsError> r) {
+    return switch r { Ok v -> false, Error e -> true };
+}
+
+bool fails_with(result<File, FsError> r, FsError wanted) {
+    return switch r { Ok f -> false, Error e -> e == wanted };
+}
+
+i32 main() {
+    Process.run("rd /s /q fsconf_flow 2>nul || rm -rf fsconf_flow");
+    result<Directory, FsError> rootr = Directory.open_root(p("."));
+    return switch rootr {
+        Ok root -> body(&root),
+        Error e -> 1
+    };
+}
+
+i32 body(Directory* root) {
+    if (is_err(root.create_dir_all(p("fsconf_flow/a/b")))) { return 2; }
+    if (is_err(root.create_dir_all(p("fsconf_flow/a/b")))) { return 3; }
+    if (is_err(root.write_atomic(p("fsconf_flow/a/b/f.txt"), "hello"))) { return 4; }
+    result<string, FsError> text = root.read_to_string(p("fsconf_flow/a/b/f.txt"), 1000);
+    i32 len = switch text { Ok s -> (i32)s.length, Error e -> -1 };
+    if (len != 5) { return 5; }
+
+    if (is_err(root.write_atomic(p("fsconf_flow/a/b/f.txt"), "world!"))) { return 6; }
+    result<string, FsError> again = root.read_to_string(p("fsconf_flow/a/b/f.txt"), 1000);
+    i32 len2 = switch again { Ok s -> (i32)s.length, Error e -> -1 };
+    if (len2 != 6) { return 7; }
+    result<string, FsError> capped = root.read_to_string(p("fsconf_flow/a/b/f.txt"), 3);
+    bool too_large = switch capped { Ok s -> false, Error e -> e == FsError::FileTooLarge() };
+    if (!too_large) { return 8; }
+
+    if (!fails_with(root.open_file(p("fsconf_flow/nope"), OpenOptions.read()), FsError::NotFound())) { return 9; }
+    if (!fails_with(root.open_file(p("fsconf_flow/a/b/f.txt"), OpenOptions.create_new()), FsError::AlreadyExists())) { return 10; }
+    if (!fails_with(root.open_file(p("fsconf_flow/a"), OpenOptions.read()), FsError::IsADirectory())) { return 11; }
+
+    result<Directory, FsError> sub = root.open_dir(p("fsconf_flow"));
+    i32 n = switch sub { Ok d -> count_entries(&d), Error e -> -1 };
+    if (n != 1) { return 12; }
+
+    if (is_err(root.rename(p("fsconf_flow/a/b/f.txt"), root, p("fsconf_flow/g.txt"), false))) { return 13; }
+    if (is_err(root.write_atomic(p("fsconf_flow/h.txt"), "x"))) { return 14; }
+    if (!is_err(root.rename(p("fsconf_flow/h.txt"), root, p("fsconf_flow/g.txt"), false))) { return 15; }
+    if (is_err(root.rename(p("fsconf_flow/h.txt"), root, p("fsconf_flow/g.txt"), true))) { return 16; }
+    bool is_file = switch root.metadata(p("fsconf_flow/g.txt")) { Ok m -> m.is_file() && m.size == 1, Error e -> false };
+    if (!is_file) { return 17; }
+    if (is_err(root.remove_file(p("fsconf_flow/g.txt")))) { return 18; }
+    if (!is_err(root.remove_dir(p("fsconf_flow/a")))) { return 19; }
+    if (is_err(root.remove_dir(p("fsconf_flow/a/b")))) { return 20; }
+    if (is_err(root.remove_dir(p("fsconf_flow/a")))) { return 21; }
+    if (is_err(root.remove_dir(p("fsconf_flow")))) { return 22; }
+    return 0;
+}
+
+i32 count_entries(Directory* d) {
+    result<DirEntries, FsError> r = d.entries();
+    return switch r { Ok l -> drain(&l), Error e -> -1 };
+}
+
+i32 drain(DirEntries* l) {
+    mut i32 n = 0;
+    while (true) {
+        optional<DirEntry> e = l.next();
+        bool more = switch e { Value x -> true, Empty -> false };
+        if (!more) { break; }
+        n = n + 1;
+    }
+    return n;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(0));
+    }
+
+    [Test]
+    void symlinks_are_refused_unless_followed() {
+        str source = """
+import std::types;
+import std::sys;
+import std::filesystem;
+namespace app;
+
+Path p(str text) {
+    return switch Path.parse(text) { Ok v -> v, Error e -> Path.unchecked("x", false) };
+}
+
+bool is_err(result<bool, FsError> r) {
+    return switch r { Ok v -> false, Error e -> true };
+}
+
+bool fails_with(result<File, FsError> r, FsError wanted) {
+    return switch r { Ok f -> false, Error e -> e == wanted };
+}
+
+i32 main() {
+    Process.run("rd /s /q fsconf_link 2>nul || rm -rf fsconf_link");
+    result<Directory, FsError> rootr = Directory.open_root(p("."));
+    return switch rootr {
+        Ok root -> body(&root),
+        Error e -> 1
+    };
+}
+
+i32 body(Directory* root) {
+    if (is_err(root.create_dir_all(p("fsconf_link/a/b")))) { return 2; }
+    if (is_err(root.write_atomic(p("fsconf_link/a/b/f.txt"), "hello"))) { return 3; }
+
+    Process.run("cd fsconf_link && mklink /J j a >nul 2>nul || ln -s a j");
+    bool refused = switch root.open_dir(p("fsconf_link/j")) { Ok d -> false, Error e -> e == FsError::SymlinkRefused() };
+    if (!refused) { return 4; }
+    if (!fails_with(root.open_file(p("fsconf_link/j/b/f.txt"), OpenOptions.read()), FsError::SymlinkRefused())) { return 5; }
+    bool followed = switch root.open_file(p("fsconf_link/j/b/f.txt"), OpenOptions.read().following_symlinks()) { Ok f -> true, Error e -> false };
+    if (!followed) { return 6; }
+    bool link = switch root.metadata(p("fsconf_link/j")) { Ok m -> m.is_symlink(), Error e -> false };
+    if (!link) { return 7; }
+    bool target = switch root.metadata_following(p("fsconf_link/j")) { Ok m -> m.is_directory(), Error e -> false };
+    if (!target) { return 8; }
+    if (is_err(root.remove_dir(p("fsconf_link/j")))) { return 9; }
+    if (is_err(root.remove_file(p("fsconf_link/a/b/f.txt")))) { return 10; }
+    if (is_err(root.remove_dir(p("fsconf_link/a/b")))) { return 11; }
+    if (is_err(root.remove_dir(p("fsconf_link/a")))) { return 12; }
+    if (is_err(root.remove_dir(p("fsconf_link")))) { return 13; }
+    return 0;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(0));
+    }
+}
