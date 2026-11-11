@@ -1,6 +1,6 @@
 # Djinn
 
-[![Build](https://github.com/IDjinn/djinn-lang-v3/actions/workflows/build.yml/badge.svg)](https://github.com/IDjinn/djinn-lang-v3/actions/workflows/build.yml)
+[![Build](https://github.com/IDjinn/djinn-lang-v3/actions/workflows/ci.yml/badge.svg)](https://github.com/IDjinn/djinn-lang-v3/actions/workflows/ci.yml)
 
 A compiled, statically-typed systems language that targets LLVM IR with a C runtime. Inspired by C, C++ and C#, Djinn
 focuses on developer experience, simplicity, and high performance — with async-by-default codegen.
@@ -132,20 +132,12 @@ Lives under `std/`:
 ## Architecture
 
 ```
-lexer/        Lexer, Token, TokenType
-parser/       AST nodes (Declaration, Statement, Type, Generic, Scope)
-binder/       Symbol table, scope, ownership tracking, type validation
-generator/    LLVM IR generation, intrinsics, name mangling
-evaluator/    Compile-time bytecode VM (ConstVM, ConstValue)
-visitor/      Statement/Declaration visitors
-diagnostics/  Error reporting with suggestions and error codes
-lsp/          Language Server Protocol implementation
-lib/          .djlib library format (writer/reader)
+djinnc/       Self-hosted compiler (lexer, parser, semantic analysis, LLVM codegen, driver), written in Djinn
 std/          Standard library (.djinn sources)
 runtime/      C runtime (event loop, thread pool, coroutine wrappers)
-tests/        GoogleTest suite of the stage0 compiler (frozen: no new C++ tests,
-              see tools/check_frozen_cpp_tests.py) and tests/conformance,
-              the Djinn test suite for djinnc where every new test goes
+libs/         Libraries built with djinnc (testing)
+djinn-lsp/    Language server, written in Djinn
+tests/        tests/conformance (the Djinn test suite, where every new test goes) and tests/djinnc
 docs/         Fumadocs documentation site
 ```
 
