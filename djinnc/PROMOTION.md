@@ -23,7 +23,7 @@ Regra do projeto: builds e testes são rodados pelo usuário (`AGENTS.md`). A re
 | 1 — Este documento | Feito |
 | 2 — Tirar o stage0 do caminho (branch `feature/promote-djinnc`) | Feito no código, **não executado**: `bootstrap.sh/.ps1` com `--seed`, `tools/build_runtime.sh/.ps1`, `debug_tests.sh`, `playground.*`, `docker/run.sh`, regra do seed no `SUBSET.md`, CTest `djinnc_bootstrap` retirado do `CMakeLists.txt` |
 | 3 — Portão: verificação e seed | Feito: Windows e Linux verdes; tag `stage0-final` (`fb79a49`) e Release com os seeds de Windows e Linux publicadas |
-| 4 — Remoção do C++ | Pendente (depende da 3) |
+| 4 — Remoção do C++ | Feito: compilador C++, LSP em C++, CMake, testes gtest congelados, `.run`, `ext/c4core` e googletest removidos; `Dockerfile` e `docker/run.sh` migrados para o seed. Recuperável pela tag `stage0-final` |
 | 5 — Documentação final | Pendente (depende da 4) |
 
 ## Por que o stage0 ainda não podia sair

@@ -1,18 +1,18 @@
 # Using djinnc (self-hosted compiler)
 
-`djinnc` is the Djinn compiler written in Djinn. The C++ compiler (`djinn`, called *stage0*) builds it; the result is
+`djinnc` is the Djinn compiler written in Djinn. A seed `djinnc` (release `stage0-final`) builds it; the result is
 *stage1*. Stage1 can build `djinnc/` again (*stage2*), and stage2 builds it once more (*stage3*). The bootstrap is
 correct when the IR of stage2 and stage3 is identical (fixpoint).
 
 ```
-stage0 (C++)  --compiles-->  djinnc/  =>  stage1
+seed          --compiles-->  djinnc/  =>  stage1
 stage1        --compiles-->  djinnc/  =>  stage2
 stage2        --compiles-->  djinnc/  =>  stage3     stage2.ll == stage3.ll
 ```
 
 ## Requirements
 
-- The stage0 executable (`djinn` / `djinn.exe`, target `djinn` of the root CMake project).
+- A seed `djinnc` (the `stage0-final` release, or any later `djinnc`) to build the compiler; `tools/bootstrap.sh --seed <djinnc>` does the whole chain.
 - LLVM 21 with the C API shared library (`LLVM-C.dll` / `libLLVM-C.so`). `native-libs` in
   [djinn.proj](djinn.proj) points to the local install; adjust `-L...` to your machine.
 - `clang` on `PATH` (or `DJINN_CLANG`), used to link. Windows: the clang that ships with Visual Studio is enough.
@@ -50,8 +50,7 @@ Several `.djinn` files can be passed at once; they share types and namespaces an
 the output is deterministic.
 
 The runtime (the `.c` files in `runtime/`) is compiled together with the program unless you pass a prebuilt library.
-`--runtime-dir` is the directory that holds those two files (the CMake build copies `runtime/` into the build
-directory).
+`--runtime-dir` is the directory that holds those two files (normally the repository `runtime/` directory).
 
 ## Options
 
@@ -59,7 +58,7 @@ directory).
 |---|---|
 | `-o <path>` | Output executable (default `a.out`). |
 | `--runtime-dir <dir>` | Directory with the runtime `.c` sources (default `runtime`). |
-| `--runtime-lib <lib>` | Link a prebuilt runtime instead of recompiling it (CMake target `djinn_runtime`). |
+| `--runtime-lib <lib>` | Link a prebuilt runtime instead of recompiling it (built by `tools/build_runtime.sh`). |
 | `--link-arg <arg>` | Extra linker argument; repeatable. |
 | `-O0`, `-O1`, `-O2`, `-O3`, `-Os`, `-Oz` | Optimization level: runs `default<ON>` through `LLVMRunPasses` and sets the backend codegen level. Without it the pipeline is `default<O0>`. |
 | `--lld` | Call the linker directly: `lld-link` on Windows, `ld.lld` on POSIX. Needs `--runtime-lib`. |
@@ -97,11 +96,11 @@ Objects are emitted directly through LLVM-C (`LLVMTargetMachineEmitToFile`); onl
 
 ### Linking with a prebuilt runtime and lld
 
-`--runtime-lib` needs a release (non-ASan) build of the runtime. With the CMake project:
+`--runtime-lib` needs a release (non-ASan) build of the runtime. Build it with the script:
 
 ```bash
-cmake --build <build dir> --target djinn_runtime
-djinnc program.djinn -o program --runtime-lib <build dir>/djinn_runtime.lib --lld
+bash tools/build_runtime.sh --out build/runtime
+djinnc program.djinn -o program --runtime-lib build/runtime/djinn_runtime.lib --lld
 ```
 
 On Windows, with `--lld`, the `-L<dir>` and `-l<name>` entries of `native-libs` are translated to `/libpath:<dir>` and
@@ -168,7 +167,7 @@ tests/djinnc/fixpoint.sh <stage1 djinnc> <runtime dir> [runtime lib]
 [tools/bootstrap.sh](../tools/bootstrap.sh) (PowerShell wrapper: [tools/bootstrap.ps1](../tools/bootstrap.ps1)) does the
 whole chain:
 
-1. stage0 builds stage1.
+1. The seed builds stage1.
 2. stage1 builds stage2, stage2 builds stage3.
 3. The IR of stage2 and stage3 is compared (fixpoint).
 4. Every sample is compiled and run with stage1, stage2 and stage3; exit code and stdout must match the expectation
@@ -178,31 +177,13 @@ whole chain:
    bytes fails the run.
 
 ```bash
-tools/bootstrap.sh --stage0 <path to djinn> --runtime-dir <runtime dir> [--runtime-lib <lib> --lld] [--out <dir>]
+tools/bootstrap.sh --seed <path to djinnc> --runtime-dir <runtime dir> [--runtime-lib <lib> --lld] [--out <dir>]
 tools/bootstrap.sh ... --update-ref        # rewrite the benchmark reference on the reference machine
 ```
 
-Outputs (stages, IR, sample logs, `bench.json`) go to `build/bootstrap` unless `--out` is given. CMake registers the same
-script as the `djinnc_bootstrap` CTest (label `bootstrap`) when `bash` is available:
-
-```bash
-ctest --test-dir <build dir> -L bootstrap
-```
-
-### Stage0 tests
-
-The C++ compiler has its own GoogleTest suite (target `tests`). It is slow (each test compiles and links a program),
-so filter by suite while iterating:
-
-```bash
-<build dir>/tests --gtest_filter='ConstExpr.*:FunctionContext.*'
-```
-
-On Windows debug builds, the ASan runtime DLL (`clang_rt.asan_dynamic-x86_64.dll`) must be on `PATH`.
 
 ## Troubleshooting
 
-- **`No .djinn files found`** from `djinn`: pass `-r` when giving a directory.
 - **`LLVM-C.dll` not found** when running djinnc: add the LLVM `bin` directory to `PATH`.
 - **Undefined `__asan_*` symbols** when linking a prebuilt runtime: the library was built with ASan; use a release build.
 - **`undefined symbol: LLVM...` with `--lld` on Windows**: the `-L`/`-l` of `native-libs` were not translated, which
