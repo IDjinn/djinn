@@ -59,4 +59,93 @@ i32 main() {
 """;
         Verify.source(source).crashes(Expected.contains("division by zero").and_contains("at inner (").and_contains("at outer (").and_contains("at main ("));
     }
+
+    [Test]
+    void assert_non_null_of_null_panics() {
+        str source = """
+struct Node {
+    i32 value;
+}
+
+i32 main() {
+    Node*? p = null;
+    return p!.value;
+}
+""";
+        Verify.source(source).with_std().crashes(Expected.contains("R10009: null pointer dereference"));
+    }
+
+    [Test]
+    void panic_hook_intercepts_panic() {
+        str source = """
+import std::system;
+import std::libc;
+import std::types;
+namespace app;
+
+void on_panic(i8* message, i8* file, u32 line) {
+    printf("intercepted: %s at line %d
+", message, line);
+}
+
+i32 main() {
+    System.hook(HookKind.PANIC, &on_panic);
+    i32 divisor = 0;
+    return 10 / divisor;
+}
+""";
+        Verify.source(source).with_std().crashes(Expected.contains("intercepted: R10001: division by zero at line 14"));
+    }
+
+    [Test]
+    void panic_hook_can_print_default_report() {
+        str source = """
+import std::system;
+import std::types;
+namespace app;
+
+void on_panic(i8* message, i8* file, u32 line) {
+    System.print_default_panic_report(message, file, line);
+}
+
+i32 main() {
+    System.hook(HookKind.PANIC, &on_panic);
+    System.unhook(HookKind.PANIC);
+    hook(panic, on_panic);
+    i32 divisor = 0;
+    return 10 / divisor;
+}
+""";
+        Verify.source(source).with_std().crashes(Expected.contains("runtime error: panic").and_contains("division by zero"));
+    }
+
+    [Test]
+    void str_indexer_is_bound_checked() {
+        str source = """
+import std::types;
+namespace app;
+
+i32 main() {
+    str text = "abc";
+    size position = 3;
+    return (i32)text[position];
+}
+""";
+        Verify.source(source).with_std().crashes(Expected.contains("R10010: index out of range"));
+    }
+
+    [Test]
+    void string_indexer_is_bound_checked() {
+        str source = """
+import std::types;
+namespace app;
+
+i32 main() {
+    string owned = "xyz";
+    size position = 5;
+    return (i32)owned[position];
+}
+""";
+        Verify.source(source).with_std().crashes(Expected.contains("R10010: index out of range"));
+    }
 }

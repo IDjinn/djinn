@@ -35,6 +35,10 @@ struct CodeGenerator {
 
     ConstEval* const_eval;
 
+    Node* pre_evaluated_unwrap_node;
+
+    ptr pre_evaluated_unwrap_pointer;
+
     public static unsafe CodeGenerator* create(Diagnostics* diagnostics, ptr<i8> module_name) {
         CodeGenerator* gen = (CodeGenerator*)Memory.zalloc(sizeof(CodeGenerator));
         gen.context = LLVMContextCreate();
@@ -260,6 +264,10 @@ struct CodeGenerator {
             return Value.create(this.int_constant(this.llvm_type(type), node.int_value()), type);
         }
         if (kind == NodeKind::NULL_LITERAL) {
+            SymbolTable* nullables = this.symbols;
+            if (nullables.nullable_value_payload(type) != 0) {
+                return this.gen_empty_nullable(type);
+            }
             return Value.create(LLVMConstNull(this.llvm_type(type)), type);
         }
         if (kind == NodeKind::IDENTIFIER) {
@@ -316,8 +324,11 @@ struct CodeGenerator {
         if (kind == NodeKind::LET_EXPR) {
             return this.gen_let(node);
         }
-        if (kind == NodeKind::INTRINSIC && node.op() != Intrinsic.SIZEOF) {
+        if (kind == NodeKind::INTRINSIC && node.op() != Intrinsic.SIZEOF && node.op() != Intrinsic.ALIGNOF) {
             return this.gen_intrinsic(node);
+        }
+        if (kind == NodeKind::INTRINSIC && node.op() == Intrinsic.ALIGNOF) {
+            return this.gen_alignof(node);
         }
         if (kind == NodeKind::INTRINSIC) {
             return this.gen_sizeof(node);

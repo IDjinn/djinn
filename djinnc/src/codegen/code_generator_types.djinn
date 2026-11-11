@@ -191,6 +191,64 @@ impl CodeGenerator {
         return true;
     }
 
+    unsafe Node* nullable_variant(u32 nullable_type, bool with_value) {
+        StructInfo* info = this.struct_of(nullable_type);
+        Node* declaration = info.node;
+        Node* first = declaration.child(0);
+        Node* second = declaration.child(1);
+        bool first_is_empty = first.count() == 0;
+        if (with_value == first_is_empty) {
+            return second;
+        }
+        return first;
+    }
+
+    unsafe ptr nullable_tag_constant(u32 nullable_type, bool with_value) {
+        Node* variant = this.nullable_variant(nullable_type, with_value);
+        return LLVMConstInt(LLVMIntTypeInContext(this.context, 32), (u64)variant.first().int_value(), 0);
+    }
+
+    unsafe Value* gen_empty_nullable(u32 nullable_type) {
+        ptr llvm = this.llvm_type(nullable_type);
+        ptr slot = this.create_slot(nullable_type, "empty.value");
+        LLVMBuildStore(this.builder, LLVMConstNull(llvm), slot);
+        LLVMBuildStore(this.builder, this.nullable_tag_constant(nullable_type, false), LLVMBuildStructGEP2(this.builder, llvm, slot, 0, "empty.tag"));
+        return Value.create(LLVMBuildLoad2(this.builder, llvm, slot, "empty.load"), nullable_type);
+    }
+
+    unsafe ptr wrap_in_nullable(ptr payload, u32 payload_type, u32 nullable_type) {
+        ptr llvm = this.llvm_type(nullable_type);
+        ptr slot = this.create_slot(nullable_type, "wrapped.value");
+        LLVMBuildStore(this.builder, LLVMConstNull(llvm), slot);
+        LLVMBuildStore(this.builder, this.nullable_tag_constant(nullable_type, true), LLVMBuildStructGEP2(this.builder, llvm, slot, 0, "wrapped.tag"));
+        Node* variant = this.nullable_variant(nullable_type, true);
+        LLVMBuildStore(this.builder, payload, this.payload_address(nullable_type, llvm, slot, variant, 0));
+        return LLVMBuildLoad2(this.builder, llvm, slot, "wrapped.load");
+    }
+
+    unsafe ptr nullable_presence(Value* value) {
+        SymbolTable* symbols = this.symbols;
+        if (symbols.nullable_value_payload(value.type) == 0) {
+            ptr pointer = this.pointer_inside_nullable_value(value);
+            return LLVMBuildICmp(this.builder, LlvmConst.INT_NE, pointer, LLVMConstNull(LLVMTypeOf(pointer)), "present");
+        }
+        ptr tag = LLVMBuildExtractValue(this.builder, value.ref, 0, "nullable.tag");
+        return LLVMBuildICmp(this.builder, LlvmConst.INT_NE, tag, this.nullable_tag_constant(value.type, false), "present");
+    }
+
+    unsafe ptr nullable_content(Value* value) {
+        SymbolTable* symbols = this.symbols;
+        u32 payload_type = symbols.nullable_value_payload(value.type);
+        if (payload_type == 0) {
+            return this.pointer_inside_nullable_value(value);
+        }
+        ptr llvm = this.llvm_type(value.type);
+        ptr slot = this.create_slot(value.type, "spilled.value");
+        LLVMBuildStore(this.builder, value.ref, slot);
+        Node* variant = this.nullable_variant(value.type, true);
+        return LLVMBuildLoad2(this.builder, this.llvm_type(payload_type), this.payload_address(value.type, llvm, slot, variant, 0), "nullable.content");
+    }
+
     ptr load_tag(u32 enum_type, ptr enum_llvm, ptr slot, ptr<i8> name) {
         ptr i32_type = LLVMIntTypeInContext(this.context, 32);
         StructInfo* info = this.struct_of(enum_type);

@@ -9,9 +9,66 @@ impl Parser {
             if (statement != null) {
                 block.add(statement);
             }
+            this.drain_queued_statements(block);
         }
         this.expect(TokenKind::RBRACE, "expected '}' to close block");
         return block;
+    }
+
+    unsafe void drain_queued_statements(Node* block) {
+        PointerList* queued = this.queued_statements;
+        if (queued == null) {
+            return;
+        }
+        for (mut i32 i = 0; i < queued.length; i = i + 1) {
+            block.add((Node*)queued.get(i));
+        }
+        queued.length = 0;
+    }
+
+    unsafe Node* parse_destructuring() {
+        i32 start = this.advance();
+        this.expect(TokenKind::LBRACE, "expected '{' to list the fields to destructure");
+        PointerList* fields = PointerList.create();
+        while (!this.check(TokenKind::RBRACE) && !this.at_end()) {
+            i32 field_token = this.expect(TokenKind::IDENTIFIER, "expected a field name to destructure");
+            fields.push((ptr)field_token);
+            if (!this.match(TokenKind::COMMA)) {
+                break;
+            }
+        }
+        this.expect(TokenKind::RBRACE, "expected '}' after the destructured fields");
+        this.expect(TokenKind::EQUAL, "expected '=' after the destructured fields");
+        Node* source = this.parse_expression();
+        this.expect(TokenKind::SEMICOLON, "expected ';' after declaration");
+
+        this.hidden_count = this.hidden_count + 1;
+        ByteBuffer* holder_name = ByteBuffer.create();
+        holder_name.append("__destructure");
+        holder_name.append_int((i64)this.hidden_count);
+        Node* holder = Node.create(NodeKind::VAR_DECL, start);
+        holder.set_type(TypeRef.create(TypeKind.AUTO));
+        holder.set_text(holder_name.cstr());
+        holder.set_first(source);
+
+        if (this.queued_statements == null) {
+            this.queued_statements = PointerList.create();
+        }
+        PointerList* queued = this.queued_statements;
+        for (mut i32 i = 0; i < fields.length; i = i + 1) {
+            i32 field_token = (i32)(u64)fields.get(i);
+            Node* holder_reference = Node.create(NodeKind::IDENTIFIER, field_token);
+            holder_reference.set_text(holder_name.cstr());
+            Node* access = Node.create(NodeKind::FIELD_ACCESS, field_token);
+            access.set_first(holder_reference);
+            access.set_text(this.copy_of(field_token));
+            Node* variable = Node.create(NodeKind::VAR_DECL, field_token);
+            variable.set_type(TypeRef.create(TypeKind.AUTO));
+            variable.set_text(this.copy_of(field_token));
+            variable.set_first(access);
+            queued.push((ptr)variable);
+        }
+        return holder;
     }
 
     unsafe Node* parse_statement() {
@@ -96,6 +153,23 @@ impl Parser {
             return spawned;
         }
 
+        if (this.kind_of(token) == TokenKind::AUTO && this.kind_of(this.peek_token(1)) == TokenKind::LBRACE) {
+            return this.parse_destructuring();
+        }
+
+        bool mutable_before_const = this.kind_of(token) == TokenKind::MUT && this.kind_of(this.peek_token(1)) == TokenKind::CONST;
+        if (this.kind_of(token) == TokenKind::CONST || mutable_before_const) {
+            if (mutable_before_const) {
+                this.diagnostics.error(DiagnosticErrors.MUTABLE_CONSTANT, this.line_of(token), this.column_of(token), "a constant cannot be 'mut'");
+                this.advance();
+            }
+            this.advance();
+            Node* local_constant = this.parse_variable_declaration();
+            local_constant.set_op(1);
+            this.expect(TokenKind::SEMICOLON, "expected ';' after declaration");
+            return local_constant;
+        }
+
         if (this.kind_of(token) == TokenKind::CONSTEXPR || this.kind_of(token) == TokenKind::CONSTEVAL) {
             this.advance();
             Node* constant = this.parse_variable_declaration();
@@ -145,7 +219,7 @@ impl Parser {
         return node;
     }
 
-    Node* parse_switch_expression() {
+    unsafe Node* parse_switch_expression() {
         i32 start = this.advance();
         Node* node = Node.create_list(NodeKind::SWITCH_EXPR, start);
         node.set_first(this.parse_expression());
@@ -154,6 +228,10 @@ impl Parser {
             i32 label = this.current();
             Node* arm = Node.create_list(NodeKind::MATCH_ARM, label);
             arm.set_text(this.qualified_name());
+            PointerList* alternatives = PointerList.create();
+            while (this.match(TokenKind::PIPE)) {
+                alternatives.push((ptr)this.qualified_name());
+            }
             while (this.check(TokenKind::IDENTIFIER)) {
                 i32 binding_token = this.advance();
                 Node* binding = Node.create(NodeKind::PARAMETER, binding_token);
@@ -163,6 +241,11 @@ impl Parser {
             this.expect(TokenKind::THIN_ARROW, "expected '->' after match pattern");
             arm.set_first(this.parse_expression());
             node.add(arm);
+            for (mut i32 a = 0; a < alternatives.length; a = a + 1) {
+                Node* alternative = Node.clone(arm);
+                alternative.set_text((ptr<i8>)alternatives.get(a));
+                node.add(alternative);
+            }
             if (!this.check(TokenKind::RBRACE)) {
                 this.expect(TokenKind::COMMA, "expected ',' between match arms");
             }
@@ -176,6 +259,13 @@ impl Parser {
         Node* statement = this.parse_statement();
         if (statement == null) {
             return Node.create_list(NodeKind::BLOCK, token);
+        }
+        PointerList* queued = this.queued_statements;
+        if (queued != null && queued.length > 0) {
+            Node* grouped = Node.create_list(NodeKind::BLOCK, token);
+            grouped.add(statement);
+            this.drain_queued_statements(grouped);
+            return grouped;
         }
         return statement;
     }
@@ -339,6 +429,21 @@ impl Parser {
 
     Node* parse_range_for(i32 start, Node* variable) {
         this.advance();
+        return this.parse_range_bounds_for(start, variable);
+    }
+
+    Node* parse_anonymous_range_for(i32 start) {
+        this.hidden_count = this.hidden_count + 1;
+        ByteBuffer* counter_name = ByteBuffer.create();
+        counter_name.append("__repeat");
+        counter_name.append_int((i64)this.hidden_count);
+        Node* counter = Node.create(NodeKind::VAR_DECL, start);
+        counter.set_type(TypeRef.create(TypeKind.AUTO));
+        counter.set_text(counter_name.cstr());
+        return this.parse_range_bounds_for(start, counter);
+    }
+
+    Node* parse_range_bounds_for(i32 start, Node* variable) {
         if (!this.range_ahead()) {
             return this.parse_collection_for(start, variable);
         }
@@ -412,6 +517,9 @@ impl Parser {
         this.expect(TokenKind::LPAREN, "expected '(' after for");
 
         if (!this.check(TokenKind::SEMICOLON)) {
+            if (!this.is_declaration_start() && this.range_ahead()) {
+                return this.parse_anonymous_range_for(start);
+            }
             if (this.is_declaration_start()) {
                 node.set_first(this.parse_variable_declaration());
                 if (this.check(TokenKind::IN)) {

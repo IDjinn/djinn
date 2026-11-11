@@ -50,6 +50,11 @@ struct TypeChecker {
         diagnostics.error_span(code, at.file_name(), at.line(), at.column(), at.length(), message);
     }
 
+    void warning_code(Node* at, i32 code, ptr<i8> message) {
+        Diagnostics* diagnostics = this.diagnostics;
+        diagnostics.warning_in(code, at.file_name(), at.line(), at.column(), message);
+    }
+
     public u32 resolve_type(TypeRef* ref, Node* at) {
         SymbolTable* symbols = this.symbols;
         symbols.blame = at;
@@ -104,6 +109,15 @@ struct TypeChecker {
         return !diagnostics.failed();
     }
 
+    unsafe u32 value_inside_nullable_context(u32 expected) {
+        SymbolTable* symbols = this.symbols;
+        u32 payload = symbols.nullable_value_payload(expected);
+        if (payload != 0) {
+            return payload;
+        }
+        return expected;
+    }
+
     public u32 check_expression(Node* node, u32 expected) {
         u32 type = this.compute_expression(node, expected);
         node.set_value_type(type);
@@ -118,10 +132,13 @@ struct TypeChecker {
             case INT_LITERAL:
                 bool negated = this.negated_literal;
                 this.negated_literal = false;
-                if (expected != 0 && Types.is_integer(expected)) {
+                if (node.flag()) {
+                    return Types.char_type();
+                }
+                if (expected != 0 && Types.is_integer(expected) && !Types.is_char(expected)) {
                     this.require_literal_fits(node, expected, negated);
                 }
-                if (expected != 0 && (Types.is_float(expected) || Types.is_integer(expected))) {
+                if (expected != 0 && !Types.is_char(expected) && (Types.is_float(expected) || Types.is_integer(expected))) {
                     return expected;
                 }
                 if (node.int_value() > 2147483647) {
@@ -141,7 +158,7 @@ struct TypeChecker {
                 }
                 return Types.byte_pointer();
             case ARRAY_LITERAL:
-                return this.check_array_literal(node, expected);
+                return this.check_array_literal(node, this.value_inside_nullable_context(expected));
             case BOOL_LITERAL:
                 return Types.bool_type();
             case NULL_LITERAL:
@@ -178,7 +195,7 @@ struct TypeChecker {
             case SWITCH_EXPR:
                 return this.check_switch_expression(node, expected);
             case STRUCT_INIT:
-                return this.check_struct_init(node, expected);
+                return this.check_struct_init(node, this.value_inside_nullable_context(expected));
             case IS_EXPR:
                 return this.check_is(node);
             case AWAIT_EXPR:
@@ -199,13 +216,30 @@ struct TypeChecker {
         return Types.i32_type();
     }
 
+    unsafe u32 measured_type_of_operand(Node* node) {
+        TypeRef* reference = node.type();
+        if (reference.kind == TypeKind.NAMED && reference.args == null) {
+            LocalVariable* variable = this.find_variable(reference.name_atom);
+            SymbolTable* symbols = this.symbols;
+            if (variable != null && symbols.find_struct(reference.full_atom, reference.name_atom, this.scope) == null) {
+                return variable.type;
+            }
+        }
+        return this.resolve_type(reference, node);
+    }
+
     unsafe u32 check_intrinsic_expression(Node* node) {
-        if (node.op() != Intrinsic.SIZEOF) {
+        if (node.op() != Intrinsic.SIZEOF && node.op() != Intrinsic.ALIGNOF) {
             return this.check_intrinsic(node);
         }
-        u32 measured = this.resolve_type(node.type(), node);
+        mut u32 measured = 0;
+        if (node.type() == null) {
+            measured = this.check_expression(node.first(), 0);
+        } else {
+            measured = this.measured_type_of_operand(node);
+        }
         if (Types.is_void(measured) || measured == Types.auto_type()) {
-            this.error_code(node, DiagnosticErrors.NOT_SUPPORTED_YET, "sizeof of this type is not supported yet");
+            this.error_code(node, DiagnosticErrors.NOT_SUPPORTED_YET, "sizeof and alignof of this type are not supported yet");
         }
         node.set_symbol(SymbolKind.TYPE, (ptr)(u64)measured);
         return Types.integer(Target.pointer_bits(), false);

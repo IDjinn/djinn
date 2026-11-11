@@ -342,6 +342,20 @@ const char* __djinn_error_stack_text(void);
 // Unrecoverable failure (a bug, not an error value): prints the message with the live stack and aborts.
 void __djinn_panic(const char* message, const char* file, uint32_t line);
 
+// Hooks let a program intercept runtime events (std::system, System.hook). Each kind has one handler; set and take
+// return the previous handler. The PANIC hook, void handler(const char* message, const char* file, uint32_t line),
+// runs instead of the default report and the process aborts when it returns (like Rust's panic::set_hook). A panic
+// raised inside the hook falls back to the default report.
+enum
+{
+    DJINN_HOOK_PANIC = 0,
+    DJINN_HOOK_COUNT = 1
+};
+typedef void (*djinn_panic_hook_function)(const char* message, const char* file, uint32_t line);
+void* __djinn_hook_set(int32_t kind, void* handler);
+void* __djinn_hook_take(int32_t kind);
+void __djinn_panic_default_report(const char* message, const char* file, uint32_t line);
+
 extern void __djinn_coro_resume(void* handle);
 extern int __djinn_coro_done(void* handle);
 extern void __djinn_coro_destroy(void* handle);

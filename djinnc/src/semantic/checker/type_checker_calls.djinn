@@ -310,7 +310,7 @@ impl TypeChecker {
 
     u32 check_null(u32 expected) {
         SymbolTable* symbols = this.symbols;
-        if (expected != 0 && symbols.nullable_payload(expected) != 0) {
+        if (expected != 0 && (symbols.nullable_payload(expected) != 0 || symbols.nullable_value_payload(expected) != 0)) {
             return expected;
         }
         return Types.pointer_to(Types.void_type());
@@ -318,7 +318,8 @@ impl TypeChecker {
 
     bool wraps_pointer(u32 passed, u32 wanted) {
         SymbolTable* symbols = this.symbols;
-        return Types.is_pointer(passed) && symbols.nullable_payload(wanted) == passed;
+        return (Types.is_pointer(passed) && symbols.nullable_payload(wanted) == passed)
+            || (passed != 0 && symbols.nullable_value_payload(wanted) == passed);
     }
 
     void require_safe_pointer(Node* value, u32 passed, u32 wanted) {
@@ -329,6 +330,8 @@ impl TypeChecker {
             this.error_code(value, DiagnosticErrors.VALUE_TYPE_MISMATCH, "null needs a nullable pointer; declare it as 'T*?'");
         } else if (Types.is_nullable_pointer(passed)) {
             this.error_code(value, DiagnosticErrors.VALUE_TYPE_MISMATCH, "a nullable pointer cannot be used as 'T*' without a cast");
+        } else if (this.symbols.nullable_payload(passed) == wanted) {
+            this.warning_code(value, DiagnosticWarnings.NULLABLE_TO_NON_NULLABLE, "a nullable pointer is converted to a non-nullable one; check it against null or use '!.'");
         }
     }
 
@@ -472,8 +475,12 @@ impl TypeChecker {
             callee.set_symbol(SymbolKind.FUNCTION, (ptr)info);
         } else if (callee.kind() == NodeKind::FIELD_ACCESS) {
             Node* base = callee.first();
-            if (this.is_struct_name(base)) {
-                StructInfo* owner = symbols.find_struct(base.text_atom(), base.name(), this.scope);
+            StructInfo* primitive_owner = this.primitive_owner_named_by(base);
+            if (primitive_owner != null || this.is_struct_name(base)) {
+                mut StructInfo* owner = primitive_owner;
+                if (owner == null) {
+                    owner = symbols.find_struct(base.text_atom(), base.name(), this.scope);
+                }
                 base.set_symbol(SymbolKind.STRUCT_NAME, (ptr)owner);
                 info = symbols.find_method(owner, callee.name());
                 info = this.apply_named_arguments(node, info);
@@ -495,7 +502,7 @@ impl TypeChecker {
                 }
                 callee.set_symbol(SymbolKind.STATIC_METHOD, (ptr)info);
             } else {
-                StructInfo* owner = this.struct_of_base(base);
+                StructInfo* owner = this.struct_of_base(callee, base);
                 if (owner == null) {
                     return Types.i32_type();
                 }

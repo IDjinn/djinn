@@ -1667,4 +1667,90 @@ i32 main() {
 """;
         Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.RETURN_MISMATCH).at(5, 19));
     }
+
+    [Test]
+    void mutable_constant_is_error() {
+        str source = """
+struct Limits {
+    mut const i32 MAXIMUM = 10;
+}
+
+i32 main() {
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.MUTABLE_CONSTANT).at(2, 5));
+    }
+
+    [Test]
+    void switch_arm_catches_several_error_types() {
+        str source = """
+struct NotFound {
+    i32 code;
+}
+
+struct Denied {
+    i32 code;
+}
+
+struct Broken {
+    i32 code;
+}
+
+i32 risky(i32 mode) throws(NotFound, Denied, Broken) {
+    if (mode == 1) {
+        throw NotFound { .code = 4 };
+    }
+    if (mode == 2) {
+        throw Denied { .code = 7 };
+    }
+    if (mode == 3) {
+        throw Broken { .code = 9 };
+    }
+    return 10;
+}
+
+i32 handle(i32 mode) {
+    return switch risky(mode) {
+        Result v -> v,
+        NotFound | Denied e -> e.code + 100,
+        Broken b -> b.code
+    };
+}
+
+i32 main() {
+    return handle(0) + handle(1) + handle(2) + handle(3);
+}
+""";
+        Verify.source(source).runs(Expected.exit(230));
+    }
+
+    [Test]
+    void switch_arm_with_several_error_types_must_cover_the_call() {
+        str source = """
+struct NotFound {
+    i32 code;
+}
+
+struct Denied {
+    i32 code;
+}
+
+struct Broken {
+    i32 code;
+}
+
+i32 risky() throws(NotFound, Denied, Broken) {
+    return 1;
+}
+
+i32 main() {
+    return switch risky() {
+        Result v -> v,
+        NotFound | Denied e -> e.code
+    };
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.SWITCH_NOT_EXHAUSTIVE));
+    }
 }

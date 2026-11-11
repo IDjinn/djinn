@@ -80,7 +80,7 @@ impl CodeGenerator {
     }
 
     // Leaves the function with a core error ('Overflow', 'DivisionByZero') so the caller can catch it with 'try' or 'switch'.
-    unsafe void throw_core_error_when(ptr failed, Node* node, ptr<i8> name, ptr<i8> text) {
+    unsafe void throw_core_error_when(ptr failed, Node* node, ptr<i8> name, i32 runtime_error) {
         if (LLVMIsConstant(failed) != 0 && LLVMIsNull(failed) != 0) {
             return;
         }
@@ -93,7 +93,7 @@ impl CodeGenerator {
         u32 type = this.symbols_core_type(name);
         ptr llvm = this.llvm_type(type);
         ptr slot = LLVMBuildAlloca(this.alloca_builder, llvm, "error.value");
-        LLVMBuildStore(this.builder, this.string_constant(text), LLVMBuildStructGEP2(this.builder, llvm, slot, 0, "error.message"));
+        LLVMBuildStore(this.builder, this.string_constant(RuntimeErrors.report(runtime_error)), LLVMBuildStructGEP2(this.builder, llvm, slot, 0, "error.message"));
         this.emit_stack_capture(node);
         if (current.throws_any) {
             this.emit_exit(this.build_record(current, 1, this.error_value_from(type, slot)));
@@ -104,10 +104,6 @@ impl CodeGenerator {
         LLVMPositionBuilderAtEnd(this.builder, valid);
     }
 
-    unsafe void throw_overflow_when(ptr failed, Node* node) {
-        this.throw_core_error_when(failed, node, "Overflow", "integer overflow");
-    }
-
     // 'c' always throws; no suffix throws when the function can hand Overflow to its caller; 't' always stops.
     unsafe bool overflow_is_thrown(Node* node) {
         OverflowMode mode = node.mode();
@@ -116,14 +112,14 @@ impl CodeGenerator {
 
     unsafe void overflow_when(ptr failed, Node* node) {
         if (this.overflow_is_thrown(node)) {
-            this.throw_overflow_when(failed, node);
+            this.throw_core_error_when(failed, node, "Overflow", RuntimeErrors.INTEGER_OVERFLOW);
             return;
         }
         if (node.mode() == OverflowMode::NONE) {
-            this.stop_when(failed, node, "integer overflow (use the w suffix to wrap, the s suffix to saturate or throws(Overflow) to catch it)");
+            this.stop_when(failed, node, RuntimeErrors.INTEGER_OVERFLOW_UNHANDLED);
             return;
         }
-        this.stop_when(failed, node, "integer overflow");
+        this.stop_when(failed, node, RuntimeErrors.INTEGER_OVERFLOW);
     }
 
     unsafe Value* gen_overflow_arithmetic(Node* node, TokenKind op, u32 common, ptr lhs, ptr rhs) {

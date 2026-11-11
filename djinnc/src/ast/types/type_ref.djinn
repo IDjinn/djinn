@@ -8,6 +8,7 @@ struct TypeRef {
     i32 bits;
     bool is_signed;
     bool nullable;
+    bool is_char;
     OverflowMode mode;
     TypeRef* element;
     PointerList* args;
@@ -80,8 +81,27 @@ struct TypeRef {
         TypeRef* copy = TypeRef.create(template.kind);
         copy.bits = template.bits;
         copy.is_signed = template.is_signed;
+        copy.is_char = template.is_char;
         copy.mode = template.mode;
         return copy;
+    }
+
+    static unsafe TypeRef* native_integer_with_suffixes(ptr<i8> text, i32 length) {
+        mut OverflowMode mode = OverflowMode::NONE;
+        for (mut i32 position = 4; position < length; position = position + 1) {
+            i32 suffix = text[position];
+            bool validSuffix = suffix == 119 || suffix == 116 || suffix == 99 || suffix == 115 || suffix == 110;
+            if (!validSuffix) {
+                return (TypeRef*)0;
+            }
+            OverflowMode chosen = OverflowModes.from_suffix(suffix);
+            if (chosen != OverflowMode::NONE) {
+                mode = chosen;
+            }
+        }
+        TypeRef* native = TypeRef.integer((i32)Target.pointer_bits(), true);
+        native.mode = mode;
+        return native;
     }
 
     public static unsafe TypeRef* from_primitive_name(ptr<i8> text, i32 length) {
@@ -94,8 +114,16 @@ struct TypeRef {
         if (Strings.equals(text, length, "bool")) {
             return TypeRef.integer(1, false);
         }
+        if (Strings.equals(text, length, "char")) {
+            TypeRef* character = TypeRef.integer(32, false);
+            character.is_char = true;
+            return character;
+        }
         if (Strings.equals(text, length, "nint")) {
             return TypeRef.integer((i32)Target.pointer_bits(), true);
+        }
+        if (length > 4 && Strings.starts_with(text, 0, length, "nint")) {
+            return TypeRef.native_integer_with_suffixes(text, length);
         }
         if (Strings.equals(text, length, "isize")) {
             return TypeRef.integer(32, true);
@@ -175,6 +203,8 @@ struct TypeRef {
         } else if (this.kind == TypeKind.INTEGER) {
             if (this.bits == 1) {
                 out.append("bool");
+            } else if (this.is_char) {
+                out.append("char");
             } else {
                 if (this.is_signed) {
                     out.append_char(105);

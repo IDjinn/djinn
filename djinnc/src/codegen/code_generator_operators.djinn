@@ -21,6 +21,9 @@ impl CodeGenerator {
             LLVMBuildStore(this.builder, length, LLVMBuildStructGEP2(this.builder, destination, view, 1, "view.length.ptr"));
             return LLVMBuildLoad2(this.builder, destination, view, "view.value");
         }
+        if (from != 0 && symbols.nullable_value_payload(target) == from) {
+            return this.wrap_in_nullable(ref, from, target);
+        }
         if (Types.is_pointer(from) && symbols.nullable_payload(target) == from) {
             ptr wrapped = this.create_slot(target, "nullable.value");
             LLVMBuildStore(this.builder, ref, LLVMBuildStructGEP2(this.builder, destination, wrapped, 0, "nullable.slot"));
@@ -87,10 +90,15 @@ impl CodeGenerator {
         return LLVMBuildICmp(this.builder, LlvmConst.INT_NE, ref, zero, "tobool");
     }
 
-    Value* gen_unary(Node* node) {
+    unsafe Value* gen_unary(Node* node) {
         TokenKind op = node.op_kind();
 
         if (op == TokenKind::AMPERSAND) {
+            Node* addressed = node.first();
+            if (addressed.kind() == NodeKind::IDENTIFIER && addressed.symbol_kind() == SymbolKind.FUNCTION) {
+                FunctionInfo* addressed_function = (FunctionInfo*)addressed.symbol();
+                return Value.create(addressed_function.function, node.value_type());
+            }
             return Value.create(this.gen_address(node.first()), node.value_type());
         }
         if (op == TokenKind::STAR) {
@@ -101,6 +109,12 @@ impl CodeGenerator {
             return this.gen_count(node);
         }
 
+        if (op == TokenKind::BANG_DOT) {
+            return this.gen_null_checked_unwrap(node);
+        }
+        if (op == TokenKind::QUESTION_DOT) {
+            return this.gen_conditional_member_access(node);
+        }
         if (node.symbol_kind() == SymbolKind.OPERATOR) {
             return this.gen_operator_call(node, false);
         }
@@ -234,8 +248,12 @@ impl CodeGenerator {
 
     unsafe Value* gen_coalesce(Node* node) {
         Value* left = this.gen_expression(node.first());
-        u32 type = left.type;
-        ptr present = LLVMBuildICmp(this.builder, LlvmConst.INT_NE, left.ref, LLVMConstNull(LLVMTypeOf(left.ref)), "present");
+        u32 type = node.value_type();
+        ptr present = this.nullable_presence(left);
+        mut ptr left_result = this.nullable_content(left);
+        if (type == left.type) {
+            left_result = left.ref;
+        }
         ptr left_block = LLVMGetInsertBlock(this.builder);
         ptr right_block = this.new_block("coalesce.rhs");
         ptr end_block = this.new_block("coalesce.end");
@@ -250,12 +268,75 @@ impl CodeGenerator {
         ptr merged = LLVMBuildPhi(this.builder, this.llvm_type(type), "coalesce");
         ptr<ptr> values = CodeGenerator.array_of(2);
         ptr<ptr> blocks = CodeGenerator.array_of(2);
-        values[0] = left.ref;
+        values[0] = left_result;
         blocks[0] = left_block;
         values[1] = right;
         blocks[1] = right_end;
         LLVMAddIncoming(merged, values, blocks, 2);
         return Value.create(merged, type);
+    }
+
+    unsafe u32 pointer_type_inside_nullable_type(u32 type) {
+        if (Types.is_nullable_pointer(type)) {
+            return Types.pointer_to(Types.element(type));
+        }
+        SymbolTable* symbols = this.symbols;
+        return symbols.nullable_payload(type);
+    }
+
+    unsafe ptr pointer_inside_nullable_value(Value* value) {
+        if (value.type != 0 && !Types.is_pointer(value.type) && this.pointer_type_inside_nullable_type(value.type) != 0) {
+            return LLVMBuildExtractValue(this.builder, value.ref, 0, "nullable.pointer");
+        }
+        return value.ref;
+    }
+
+    unsafe Value* gen_conditional_member_access(Node* node) {
+        Node* chain = node.first();
+        mut Node* access = chain;
+        if (chain.kind() == NodeKind::CALL) {
+            access = chain.first();
+        }
+        Node* unwrap = access.first();
+        u32 result_type = node.value_type();
+
+        Value* nullable_base = this.gen_expression(unwrap.first());
+        ptr base_pointer = this.pointer_inside_nullable_value(nullable_base);
+        ptr present = LLVMBuildICmp(this.builder, LlvmConst.INT_NE, base_pointer, LLVMConstNull(LLVMTypeOf(base_pointer)), "conditional.present");
+        ptr base_block = LLVMGetInsertBlock(this.builder);
+        ptr member_block = this.new_block("conditional.member");
+        ptr end_block = this.new_block("conditional.end");
+        LLVMBuildCondBr(this.builder, present, member_block, end_block);
+
+        LLVMPositionBuilderAtEnd(this.builder, member_block);
+        this.pre_evaluated_unwrap_node = unwrap;
+        this.pre_evaluated_unwrap_pointer = base_pointer;
+        Value* member_value = this.gen_expression(chain);
+        this.pre_evaluated_unwrap_node = (Node*)0;
+        ptr member_result = this.coerce(member_value, result_type);
+        ptr member_end = LLVMGetInsertBlock(this.builder);
+        LLVMBuildBr(this.builder, end_block);
+
+        LLVMPositionBuilderAtEnd(this.builder, end_block);
+        ptr merged = LLVMBuildPhi(this.builder, this.llvm_type(result_type), "conditional");
+        ptr<ptr> values = CodeGenerator.array_of(2);
+        ptr<ptr> blocks = CodeGenerator.array_of(2);
+        values[0] = LLVMConstNull(this.llvm_type(result_type));
+        blocks[0] = base_block;
+        values[1] = member_result;
+        blocks[1] = member_end;
+        LLVMAddIncoming(merged, values, blocks, 2);
+        return Value.create(merged, result_type);
+    }
+
+    unsafe Value* gen_null_checked_unwrap(Node* node) {
+        if (node == this.pre_evaluated_unwrap_node) {
+            return Value.create(this.pre_evaluated_unwrap_pointer, node.value_type());
+        }
+        Value* operand = this.gen_expression(node.first());
+        ptr missing = LLVMBuildNot(this.builder, this.nullable_presence(operand), "unwrap.null");
+        this.stop_when(missing, node, RuntimeErrors.NULL_POINTER_UNWRAP);
+        return Value.create(this.nullable_content(operand), node.value_type());
     }
 
     Value* gen_binary(Node* node) {
@@ -272,12 +353,32 @@ impl CodeGenerator {
         }
         u32 view = this.symbols_core_type("str");
         if (op == TokenKind::PLUS && node.first().value_type() == view && node.second().value_type() == view) {
-            this.call_panic(this.string_constant("str concatenation is only available at compile time"), node);
+            this.call_panic(this.string_constant(RuntimeErrors.report(RuntimeErrors.RUNTIME_STR_CONCATENATION)), node);
             return this.gen_expression(node.first());
         }
 
         Value* left = this.gen_expression(node.first());
         Value* right = this.gen_expression(node.second());
+
+        SymbolTable* nullables = this.symbols;
+        bool compares_nullable_value = nullables.nullable_value_payload(left.type) != 0 || nullables.nullable_value_payload(right.type) != 0;
+        if ((op == TokenKind::EQUAL_EQUAL || op == TokenKind::BANG_EQUAL) && compares_nullable_value) {
+            mut Value* operand = left;
+            if (nullables.nullable_value_payload(left.type) == 0) {
+                operand = right;
+            }
+            ptr present = this.nullable_presence(operand);
+            if (op == TokenKind::EQUAL_EQUAL) {
+                return Value.create(LLVMBuildNot(this.builder, present, "is.null"), Types.bool_type());
+            }
+            return Value.create(present, Types.bool_type());
+        }
+        if ((op == TokenKind::EQUAL_EQUAL || op == TokenKind::BANG_EQUAL)
+            && (this.pointer_type_inside_nullable_type(left.type) != 0 || this.pointer_type_inside_nullable_type(right.type) != 0)) {
+            ptr pointer_left = this.pointer_inside_nullable_value(left);
+            ptr pointer_right = this.pointer_inside_nullable_value(right);
+            return this.gen_comparison(node, Types.pointer_to(Types.void_type()), pointer_left, pointer_right);
+        }
 
         if (Types.is_pointer(left.type) && Types.is_integer(right.type)
             && (op == TokenKind::PLUS || op == TokenKind::MINUS)) {
@@ -374,7 +475,7 @@ impl CodeGenerator {
         return LLVMBuildSelect(this.builder, is_minus_one, LLVMConstInt(type, 1, 0), rhs, "rem.divisor");
     }
 
-    unsafe void stop_when(ptr failed, Node* node, ptr<i8> message) {
+    unsafe void stop_when(ptr failed, Node* node, i32 runtime_error) {
         if (LLVMIsConstant(failed) != 0 && LLVMIsNull(failed) != 0) {
             return;
         }
@@ -382,7 +483,7 @@ impl CodeGenerator {
         ptr valid = this.new_block("check.valid");
         LLVMBuildCondBr(this.builder, failed, stopped, valid);
         LLVMPositionBuilderAtEnd(this.builder, stopped);
-        this.call_panic(this.string_constant(message), node);
+        this.call_panic(this.string_constant(RuntimeErrors.report(runtime_error)), node);
         LLVMBuildUnreachable(this.builder);
         LLVMPositionBuilderAtEnd(this.builder, valid);
     }
@@ -390,16 +491,16 @@ impl CodeGenerator {
     void check_divisor(Node* node, ptr rhs) {
         ptr is_zero = LLVMBuildICmp(this.builder, LlvmConst.INT_EQ, rhs, LLVMConstNull(LLVMTypeOf(rhs)), "div.zero");
         if (this.can_throw("DivisionByZero")) {
-            this.throw_core_error_when(is_zero, node, "DivisionByZero", "division by zero");
+            this.throw_core_error_when(is_zero, node, "DivisionByZero", RuntimeErrors.DIVISION_BY_ZERO);
             return;
         }
-        this.stop_when(is_zero, node, "division by zero");
+        this.stop_when(is_zero, node, RuntimeErrors.DIVISION_BY_ZERO);
     }
 
     void check_shift(Node* node, u32 common, ptr rhs) {
         ptr width = LLVMConstInt(LLVMTypeOf(rhs), (u64)Types.bits(common), 0);
         ptr too_far = LLVMBuildICmp(this.builder, LlvmConst.INT_UGE, rhs, width, "shift.range");
-        this.stop_when(too_far, node, "shift amount is out of range");
+        this.stop_when(too_far, node, RuntimeErrors.SHIFT_OUT_OF_RANGE);
     }
 
     static f64 power_of_two(u32 exponent) {
@@ -439,7 +540,7 @@ impl CodeGenerator {
         ptr above = LLVMBuildFCmp(this.builder, lower_predicate, value, LLVMConstReal(type, lower), "cast.above");
         ptr below = LLVMBuildFCmp(this.builder, LlvmConst.REAL_OLT, value, LLVMConstReal(type, upper), "cast.below");
         ptr in_range = LLVMBuildAnd(this.builder, above, below, "cast.in_range");
-        this.stop_when(LLVMBuildNot(this.builder, in_range, "cast.invalid"), node, "float value is out of range for the integer type");
+        this.stop_when(LLVMBuildNot(this.builder, in_range, "cast.invalid"), node, RuntimeErrors.FLOAT_CAST_OUT_OF_RANGE);
     }
 
     // A narrowing cast is valid when extending the truncated value back gives the original. Casts that keep or widen the
@@ -459,7 +560,7 @@ impl CodeGenerator {
                 ptr is_zero = LLVMBuildFCmp(this.builder, LlvmConst.REAL_OEQ, value, LLVMConstNull(type), "bool.zero");
                 ptr is_one = LLVMBuildFCmp(this.builder, LlvmConst.REAL_OEQ, value, LLVMConstReal(type, 1.0), "bool.one");
                 ptr binary = LLVMBuildOr(this.builder, is_zero, is_one, "bool.binary");
-                this.stop_when(LLVMBuildNot(this.builder, binary, "bool.invalid"), node, "only 0 or 1 can be converted to bool");
+                this.stop_when(LLVMBuildNot(this.builder, binary, "bool.invalid"), node, RuntimeErrors.BOOL_CAST_INVALID);
                 return;
             }
             if (Types.bits(from) == 1) {
@@ -467,7 +568,7 @@ impl CodeGenerator {
             }
             ptr two = LLVMConstInt(type, 2, 0);
             ptr invalid = LLVMBuildICmp(this.builder, LlvmConst.INT_UGE, value, two, "bool.range");
-            this.stop_when(invalid, node, "only 0 or 1 can be converted to bool");
+            this.stop_when(invalid, node, RuntimeErrors.BOOL_CAST_INVALID);
             return;
         }
         if (!Types.is_integer(from) || Types.bits(from) == 1) {
@@ -482,7 +583,7 @@ impl CodeGenerator {
             }
             ptr widened = LLVMBuildCast(this.builder, opcode, narrow, type, "cast.widen");
             ptr changed = LLVMBuildICmp(this.builder, LlvmConst.INT_NE, widened, value, "cast.changed");
-            this.stop_when(changed, node, "integer value does not fit in the target type");
+            this.stop_when(changed, node, RuntimeErrors.INTEGER_CAST_TRUNCATED);
         }
     }
 
@@ -496,10 +597,10 @@ impl CodeGenerator {
         ptr is_minimum = LLVMBuildICmp(this.builder, LlvmConst.INT_EQ, lhs, minimum, "div.is_minimum");
         ptr overflow = LLVMBuildAnd(this.builder, is_minus_one, is_minimum, "div.overflow");
         if (this.overflow_is_thrown(node)) {
-            this.throw_overflow_when(overflow, node);
+            this.throw_core_error_when(overflow, node, "Overflow", RuntimeErrors.INTEGER_OVERFLOW);
             return;
         }
-        this.stop_when(overflow, node, "integer overflow: the minimum value divided by -1");
+        this.stop_when(overflow, node, RuntimeErrors.DIVISION_OVERFLOW);
     }
 
     Value* gen_division(Node* node, bool is_signed, u32 common, ptr lhs, ptr rhs) {

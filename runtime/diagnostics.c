@@ -509,7 +509,23 @@ const char* __djinn_error_stack_text(void)
     return copy;
 }
 
-void __djinn_panic(const char* message, const char* file, const uint32_t line)
+static void* djinn_hook_handlers[DJINN_HOOK_COUNT];
+static int djinn_panic_hook_running = 0;
+
+void* __djinn_hook_set(const int32_t kind, void* handler)
+{
+    if (kind < 0 || kind >= DJINN_HOOK_COUNT) return NULL;
+    void* previous = djinn_hook_handlers[kind];
+    djinn_hook_handlers[kind] = handler;
+    return previous;
+}
+
+void* __djinn_hook_take(const int32_t kind)
+{
+    return __djinn_hook_set(kind, NULL);
+}
+
+void __djinn_panic_default_report(const char* message, const char* file, const uint32_t line)
 {
     char* report = __djinn_last_error_report;
     int used = djinn_report_append(report, 0, "djinn runtime error: panic\n");
@@ -520,6 +536,20 @@ void __djinn_panic(const char* message, const char* file, const uint32_t line)
     fputs(report, stderr);
     fflush(stderr);
     if (djinn_shadow_stack.depth == 0) djinn_native_stack(2);
+}
+
+void __djinn_panic(const char* message, const char* file, const uint32_t line)
+{
+    const djinn_panic_hook_function hook = (djinn_panic_hook_function)djinn_hook_handlers[DJINN_HOOK_PANIC];
+    if (hook != NULL && !djinn_panic_hook_running)
+    {
+        djinn_panic_hook_running = 1;
+        hook(message, file, line);
+        fflush(stdout);
+        fflush(stderr);
+        djinn_abort();
+    }
+    __djinn_panic_default_report(message, file, line);
     djinn_abort();
 }
 

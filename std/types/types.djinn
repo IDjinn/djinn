@@ -206,6 +206,13 @@ struct str {
         return this.data;
     }
 
+    operator get[](str text, size index) -> i8 {
+        bounds_check(index, text.length);
+        unsafe {
+            return text.data[index];
+        }
+    }
+
     public unsafe i8* toCString() {
         i8* copy = __djinn_malloc(this.length + 1);
         memcpy(copy, this.data, this.length);
@@ -254,6 +261,13 @@ struct string : Disposable {
         return this.data;
     }
 
+    operator get[](string text, size index) -> i8 {
+        bounds_check(index, text.length);
+        unsafe {
+            return text.data[index];
+        }
+    }
+
     public unsafe i8* toCString() {
         i8* copy = __djinn_malloc(this.length + 1);
         memcpy(copy, this.data, this.length);
@@ -274,7 +288,77 @@ bool isSpace(i8 c) {
     return c == 32 || c == 9 || c == 10 || c == 13;
 }
 
+size encodeChar(i8* out, char value) {
+    unsafe {
+        u32 code = (u32)value;
+        if (code < 128) {
+            out[0] = (i8)code;
+            return 1;
+        }
+        if (code < 2048) {
+            out[0] = (i8)(u8)(192 | (code >> 6));
+            out[1] = (i8)(u8)(128 | (code & 63));
+            return 2;
+        }
+        if (code < 65536) {
+            out[0] = (i8)(u8)(224 | (code >> 12));
+            out[1] = (i8)(u8)(128 | ((code >> 6) & 63));
+            out[2] = (i8)(u8)(128 | (code & 63));
+            return 3;
+        }
+        out[0] = (i8)(u8)(240 | (code >> 18));
+        out[1] = (i8)(u8)(128 | ((code >> 12) & 63));
+        out[2] = (i8)(u8)(128 | ((code >> 6) & 63));
+        out[3] = (i8)(u8)(128 | (code & 63));
+        return 4;
+    }
+}
+
 impl Hashable for str, string {
+    bool startsWith(char value) {
+        unsafe {
+            mut u64 buffer = 0;
+            i8* bytes = (i8*)&buffer;
+            size count = encodeChar(bytes, value);
+            str encoded = { .data = bytes, .length = count };
+            return this.startsWith(encoded);
+        }
+    }
+
+    bool endsWith(char value) {
+        unsafe {
+            mut u64 buffer = 0;
+            i8* bytes = (i8*)&buffer;
+            size count = encodeChar(bytes, value);
+            str encoded = { .data = bytes, .length = count };
+            return this.endsWith(encoded);
+        }
+    }
+
+    i32 indexOf(char value) {
+        unsafe {
+            mut u64 buffer = 0;
+            i8* bytes = (i8*)&buffer;
+            size count = encodeChar(bytes, value);
+            str encoded = { .data = bytes, .length = count };
+            return this.indexOf(encoded);
+        }
+    }
+
+    i32 lastIndexOf(char value) {
+        unsafe {
+            mut u64 buffer = 0;
+            i8* bytes = (i8*)&buffer;
+            size count = encodeChar(bytes, value);
+            str encoded = { .data = bytes, .length = count };
+            return this.lastIndexOf(encoded);
+        }
+    }
+
+    bool contains(char value) {
+        return this.indexOf(value) >= 0;
+    }
+
     u64 hash() {
         return __djinn_hash_string(this.data, this.length);
     }
@@ -465,15 +549,55 @@ impl Hashable for str, string {
     }
 }
 
+bool charEqualsText(char value, i8* data, u32 length) {
+    unsafe {
+        if (length == 0 || length > 4) {
+            return false;
+        }
+        u32 code = (u32)value;
+        if (code < 128) {
+            return length == 1 && data[0] == (i8)code;
+        }
+        mut u64 buffer = 0;
+        i8* bytes = (i8*)&buffer;
+        size count = encodeChar(bytes, value);
+        if (count != length) {
+            return false;
+        }
+        for (mut size i = 0; i < count; i = i + 1) {
+            if (bytes[i] != data[i]) {
+                return false;
+            }
+        }
+        return true;
+    }
+}
+
 impl Equatable for str {
     operator ==(str left, str right) -> bool {
         return __djinn_compare_strings(left.data, right.data, (i32)left.length, (i32)right.length) == 1;
+    }
+
+    operator ==(char left, str right) -> bool {
+        return charEqualsText(left, right.data, right.length);
+    }
+
+    operator ==(str left, char right) -> bool {
+        return charEqualsText(right, left.data, left.length);
     }
 }
 
 impl Equatable for string {
     operator ==(string left, string right) -> bool {
         return __djinn_compare_strings(left.data, right.data, (i32)left.length, (i32)right.length) == 1;
+    }
+
+    operator ==(char left, string right) -> bool {
+        return charEqualsText(left, right.data, right.length);
+    }
+
+    operator ==(string left, char right) -> bool {
+        return charEqualsText(right, left.data, left.length);
     }
 }
 

@@ -96,7 +96,7 @@ impl TypeChecker {
                 this.require_unsafe(node, "indexing a pointer");
             }
             if (held == 0 && Types.is_struct(base)) {
-                return this.check_index_operator(node, base);
+                return this.check_text_index_operator(node, base);
             }
             this.check_expression(node.second(), Types.i64_type());
             if (held != 0) {
@@ -125,7 +125,24 @@ impl TypeChecker {
         return Types.i32_type();
     }
 
-    unsafe StructInfo* struct_of_base(Node* base) {
+    unsafe u32 pointer_type_inside_nullable_type(u32 type) {
+        if (Types.is_nullable_pointer(type)) {
+            return Types.pointer_to(Types.element(type));
+        }
+        SymbolTable* symbols = this.symbols;
+        return symbols.nullable_payload(type);
+    }
+
+    unsafe u32 payload_inside_nullable_type(u32 type) {
+        u32 pointer = this.pointer_type_inside_nullable_type(type);
+        if (pointer != 0) {
+            return pointer;
+        }
+        SymbolTable* symbols = this.symbols;
+        return symbols.nullable_value_payload(type);
+    }
+
+    unsafe StructInfo* struct_of_base(Node* parent, Node* base) {
         mut u32 type = 0;
         if (this.is_addressable(base)) {
             type = this.check_lvalue(base);
@@ -135,6 +152,16 @@ impl TypeChecker {
                 this.error_code(base, DiagnosticErrors.INVALID_MEMBER_ACCESS, "member access needs a struct or a pointer to one");
                 return (StructInfo*)0;
             }
+        }
+        u32 unwrapped = this.payload_inside_nullable_type(type);
+        bool wraps_nullable_pointer_in_optional = !Types.is_pointer(type);
+        if (unwrapped != 0 && wraps_nullable_pointer_in_optional) {
+            Node* unwrap = Node.create(NodeKind::UNARY, base.token);
+            unwrap.set_op_kind(TokenKind::BANG_DOT);
+            unwrap.set_first(base);
+            unwrap.set_value_type(unwrapped);
+            parent.set_first(unwrap);
+            type = unwrapped;
         }
         mut u32 target = type;
         if (Types.is_pointer(type)) {
@@ -162,7 +189,7 @@ impl TypeChecker {
             this.error_code(node, DiagnosticErrors.INVALID_MEMBER_ACCESS, "a struct constant cannot be used as a variable");
             return Types.i32_type();
         }
-        StructInfo* info = this.struct_of_base(base);
+        StructInfo* info = this.struct_of_base(node, base);
         if (info == null) {
             return Types.i32_type();
         }
@@ -225,6 +252,19 @@ impl TypeChecker {
         StructInfo* owner = current.owner;
         SymbolTable* symbols = this.symbols;
         return symbols.find_field(owner, node.name());
+    }
+
+    unsafe StructInfo* primitive_owner_named_by(Node* base) {
+        if (base.kind() != NodeKind::IDENTIFIER || this.find_variable(base.name()) != null || this.is_struct_name(base)) {
+            return (StructInfo*)0;
+        }
+        ptr<i8> text = base.text();
+        TypeRef* reference = TypeRef.from_primitive_name(text, (i32)strlen(text));
+        if (reference == null || reference.kind == TypeKind.VOID || reference.kind == TypeKind.AUTO) {
+            return (StructInfo*)0;
+        }
+        SymbolTable* symbols = this.symbols;
+        return symbols.primitive_owner(this.resolve_type(reference, base));
     }
 
     unsafe Node* primitive_constant(Node* base, Node* member) {
@@ -340,10 +380,38 @@ impl TypeChecker {
             if (id == Intrinsic.ATTRIBUTES) { return this.core_type("AttributeList"); }
             return this.core_type("NameList");
         }
+        if (id == Intrinsic.TYPEOF && node.type() == null) {
+            u32 expression_type = this.check_expression(node.first(), 0);
+            node.set_symbol(SymbolKind.TYPE, (ptr)(u64)expression_type);
+            return Types.pointer_to(this.core_type("TypeInfo"));
+        }
+        if (id == Intrinsic.BOUNDS_CHECK) {
+            u32 index_type = this.check_expression(node.first(), 0);
+            u32 length_type = this.check_expression(node.second(), 0);
+            if (!Types.is_integer(index_type) || !Types.is_integer(length_type)) {
+                this.error_code(node, DiagnosticErrors.INVALID_OPERATOR_OPERAND, "bounds_check needs an integer index and an integer length");
+            }
+            return Types.void_type();
+        }
+        if (id == Intrinsic.EXPECT) {
+            u32 value_type = this.check_expression(node.first(), 0);
+            if (!Types.is_integer(value_type)) {
+                this.error_code(node, DiagnosticErrors.INVALID_OPERATOR_OPERAND, "expect needs an integer or bool value");
+            }
+            this.check_expression(node.second(), value_type);
+            return value_type;
+        }
         if (id == Intrinsic.TYPEOF) {
             TypeRef* reference = node.type();
             SymbolTable* known = this.symbols;
             known.blame = node;
+            if (reference != null && reference.kind == TypeKind.NAMED && reference.args == null && node.text() == null) {
+                LocalVariable* named_variable = this.find_variable(reference.name_atom);
+                if (named_variable != null && known.find_struct(reference.full_atom, reference.name_atom, this.scope) == null) {
+                    node.set_symbol(SymbolKind.TYPE, (ptr)(u64)named_variable.type);
+                    return Types.pointer_to(this.core_type("TypeInfo"));
+                }
+            }
             if (node.text() != null) {
                 return this.check_typeof_method(node, reference);
             }

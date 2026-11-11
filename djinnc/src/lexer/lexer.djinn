@@ -9,6 +9,7 @@ struct Lexer {
     TokenList* tokens;
     AtomTable* atoms;
     ByteBuffer* scratch;
+    i32 interpolation_braces;
 
     public static unsafe Lexer* create(SourceFile* file, TokenList* tokens, Diagnostics* diagnostics) {
         Lexer* lexer = (Lexer*)Memory.zalloc(sizeof(Lexer));
@@ -35,9 +36,10 @@ struct Lexer {
             i32 c = this.peek(0);
             if (c == 34) {
                 this.read_string(false);
-            } else if (c == 36 && this.peek(1) == 34) {
-                this.advance();
-                this.read_string(true);
+            } else if (c == 39) {
+                this.read_char_literal();
+            } else if (c == 36 && this.at_interpolated_string()) {
+                this.read_interpolated_string();
             } else if (Strings.is_digit(c)) {
                 this.read_number();
             } else if (Strings.is_ident_start(c)) {
@@ -55,6 +57,12 @@ struct Lexer {
         SourceFile* file = this.file;
         Diagnostics* diagnostics = this.diagnostics;
         diagnostics.error(DiagnosticErrors.LEXER, (i32)file.line_of((u32)offset), (i32)file.column_of((u32)offset), message);
+    }
+
+    void char_error(i32 offset, ptr<i8> message) {
+        SourceFile* file = this.file;
+        Diagnostics* diagnostics = this.diagnostics;
+        diagnostics.error(DiagnosticErrors.INVALID_CHAR_LITERAL, (i32)file.line_of((u32)offset), (i32)file.column_of((u32)offset), message);
     }
 
     unsafe i32 peek(i32 offset) {
@@ -183,11 +191,59 @@ struct Lexer {
         this.emit(TokenKind::INTEGER_LITERAL, start, this.pos - start);
     }
 
+    bool at_interpolated_string() {
+        mut i32 offset = 0;
+        while (this.peek(offset) == 36) {
+            offset = offset + 1;
+        }
+        return this.peek(offset) == 34;
+    }
+
+    void read_interpolated_string() {
+        mut i32 dollars = 0;
+        while (this.peek(0) == 36) {
+            this.advance();
+            dollars = dollars + 1;
+        }
+        i32 outer_braces = this.interpolation_braces;
+        this.interpolation_braces = dollars;
+        this.read_string(true);
+        this.interpolation_braces = outer_braces;
+    }
+
+    i32 count_run(i32 character) {
+        mut i32 run = 0;
+        while (this.peek(run) == character) {
+            run = run + 1;
+        }
+        return run;
+    }
+
+    void finish_interpolation_close(i32 start) {
+        mut i32 remaining = this.interpolation_braces - 1;
+        while (remaining > 0) {
+            if (this.peek(0) != 125) {
+                this.error_at(start, "an interpolation opened with several braces must close with the same number of braces");
+                return;
+            }
+            this.advance();
+            remaining = remaining - 1;
+        }
+    }
+
+    bool at_string_end(bool is_block) {
+        if (!is_block) {
+            return this.peek(0) == 34;
+        }
+        return this.peek(0) == 34 && this.peek(1) == 34 && this.peek(2) == 34;
+    }
+
     void read_string(bool interpolating) {
         mut i32 start = this.pos;
         if (interpolating) {
-            start = start - 1;
+            start = start - this.interpolation_braces;
         }
+        bool counted_braces = interpolating && this.interpolation_braces > 1;
         ByteBuffer* value = this.scratch;
         value.length = 0;
 
@@ -210,10 +266,15 @@ struct Lexer {
             return;
         }
 
+        bool is_block = interpolating && this.peek(1) == 34 && this.peek(2) == 34;
+        if (is_block) {
+            this.advance();
+            this.advance();
+        }
         this.advance();
         mut bool interpolated = false;
-        while (this.pos < this.length && this.peek(0) != 34) {
-            if (this.peek(0) == 92) {
+        while (this.pos < this.length && !this.at_string_end(is_block)) {
+            if (!is_block && this.peek(0) == 92) {
                 this.advance();
                 i32 escaped = this.advance();
                 if (escaped == 110) {
@@ -223,6 +284,28 @@ struct Lexer {
                 } else {
                     value.append_char(escaped);
                 }
+            } else if (counted_braces && this.peek(0) == 125) {
+                value.append_char(this.advance());
+            } else if (counted_braces && this.peek(0) == 123 && this.count_run(123) < this.interpolation_braces) {
+                value.append_char(this.advance());
+            } else if (counted_braces && this.peek(0) == 123) {
+                mut i32 literal_braces = this.count_run(123) - this.interpolation_braces;
+                while (literal_braces > 0) {
+                    value.append_char(this.advance());
+                    literal_braces = literal_braces - 1;
+                }
+                for (mut i32 opened = 1; opened < this.interpolation_braces; opened = opened + 1) {
+                    this.advance();
+                }
+                if (interpolated) {
+                    this.emit_text(TokenKind::INTERP_MIDDLE, value, start);
+                } else {
+                    this.emit_text(TokenKind::INTERP_BEGIN, value, start);
+                }
+                interpolated = true;
+                value.length = 0;
+                this.advance();
+                this.read_interpolated_expression(start);
             } else if (interpolating && this.peek(0) == 123 && this.peek(1) == 123) {
                 this.advance();
                 this.advance();
@@ -249,8 +332,12 @@ struct Lexer {
             }
         }
 
-        if (this.peek(0) == 34) {
+        if (this.at_string_end(is_block)) {
             this.advance();
+            if (is_block) {
+                this.advance();
+                this.advance();
+            }
         } else {
             this.error_at(start, "unterminated string literal");
         }
@@ -278,6 +365,7 @@ struct Lexer {
             i32 c = this.peek(0);
             if (c == 125 && depth == 0) {
                 this.advance();
+                this.finish_interpolation_close(start);
                 return;
             }
             if (c == 58 && this.peek(1) != 58 && depth == 0 && nesting == 0) {
@@ -291,9 +379,8 @@ struct Lexer {
                 }
             } else if (c == 34) {
                 this.read_string(false);
-            } else if (c == 36 && this.peek(1) == 34) {
-                this.advance();
-                this.read_string(true);
+            } else if (c == 36 && this.at_interpolated_string()) {
+                this.read_interpolated_string();
             } else if (Strings.is_digit(c)) {
                 this.read_number();
             } else if (Strings.is_ident_start(c)) {
@@ -327,8 +414,96 @@ struct Lexer {
             return;
         }
         this.advance();
+        this.finish_interpolation_close(start);
         this.emit_text(TokenKind::INTERP_FORMAT, spec, format_start);
         spec.length = 0;
+    }
+
+    i32 continuation_bits() {
+        return this.advance() & 63;
+    }
+
+    i32 read_unicode_escape(i32 start, i32 digits) {
+        mut i64 code_point = 0;
+        for (mut i32 taken = 0; taken < digits; taken = taken + 1) {
+            i32 digit = this.peek(0);
+            mut i32 value = 0;
+            if (digit >= 48 && digit <= 57) {
+                value = digit - 48;
+            } else if (digit >= 97 && digit <= 102) {
+                value = digit - 87;
+            } else if (digit >= 65 && digit <= 70) {
+                value = digit - 55;
+            } else {
+                this.char_error(start, "a unicode escape needs 4 hexadecimal digits after \\u or 8 after \\U");
+                return 0;
+            }
+            this.advance();
+            code_point = code_point * 16 + (i64)value;
+        }
+        bool is_surrogate = code_point >= 55296 && code_point <= 57343;
+        if (code_point > 1114111 || is_surrogate) {
+            this.char_error(start, "the escape is not a Unicode scalar value");
+            return 0;
+        }
+        return (i32)code_point;
+    }
+
+    i32 read_char_code_point(i32 start) {
+        i32 lead = this.peek(0) & 255;
+        if (lead == 92) {
+            this.advance();
+            i32 escaped = this.advance();
+            if (escaped == 110) { return 10; }
+            if (escaped == 116) { return 9; }
+            if (escaped == 114) { return 13; }
+            if (escaped == 48) { return 0; }
+            if (escaped == 117) { return this.read_unicode_escape(start, 4); }
+            if (escaped == 85) { return this.read_unicode_escape(start, 8); }
+            return escaped;
+        }
+        this.advance();
+        if (lead < 128) {
+            return lead;
+        }
+        if (lead < 224) {
+            return ((lead & 31) << 6) | this.continuation_bits();
+        }
+        if (lead < 240) {
+            i32 high = (lead & 15) << 12;
+            i32 middle = this.continuation_bits() << 6;
+            return high | middle | this.continuation_bits();
+        }
+        i32 top = (lead & 7) << 18;
+        i32 upper = this.continuation_bits() << 12;
+        i32 lower = this.continuation_bits() << 6;
+        return top | upper | lower | this.continuation_bits();
+    }
+
+    void read_char_literal() {
+        i32 start = this.pos;
+        this.advance();
+        if (this.pos >= this.length || this.peek(0) == 39) {
+            this.char_error(start, "empty char literal");
+            if (this.peek(0) == 39) {
+                this.advance();
+            }
+            return;
+        }
+        i32 code_point = this.read_char_code_point(start);
+        if (this.peek(0) != 39) {
+            this.char_error(start, "a char literal holds exactly one character");
+            while (this.pos < this.length && this.peek(0) != 39 && this.peek(0) != 10) {
+                this.advance();
+            }
+        }
+        if (this.peek(0) == 39) {
+            this.advance();
+        }
+        ByteBuffer* value = this.scratch;
+        value.length = 0;
+        value.append_int((i64)code_point);
+        this.emit_text(TokenKind::CHAR_LITERAL, value, start);
     }
 
     void emit_text(TokenKind kind, ByteBuffer* value, i32 start) {
