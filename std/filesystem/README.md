@@ -27,7 +27,7 @@ Windows failures (`error.djinn`). Operations that return nothing use `result<boo
 ## Async by default
 
 Every operation that touches the disk is `async`: it queues the blocking call on a small worker pool in the runtime
-(`__djinn_fs_submit`, 4 threads, started on first use) and suspends the coroutine until the worker is done, so the
+(`__djinn_fs_submit`, 4 threads, started on first use). The coroutine is marked as waiting and the worker puts it back on the ready queue when the call returns, so the
 scheduler never blocks on the filesystem.
 
 ```djinn

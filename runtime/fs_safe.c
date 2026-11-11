@@ -1147,8 +1147,11 @@ int64_t __djinn_fs_temp_name(const char* leaf, int64_t leaf_length, char* out, i
     return written < 0 ? -DJFS_INVALID_ARGUMENT : written;
 }
 
-// Asynchronous submission. A request runs the blocking call above on a small worker pool; the caller polls it from a
-// coroutine (suspending between polls) and then collects the result, so the scheduler never blocks on the disk.
+// Asynchronous submission. A request runs the blocking call above on a small worker pool. The submitting coroutine is
+// marked as waiting and suspends; the worker puts it back on the ready queue when the call returns, so the scheduler
+// never blocks on the disk and never polls for it.
+
+void __djinn_mark_waiting(void* handle);
 
 #define DJFS_OP_OPEN_ROOT 1
 #define DJFS_OP_OPEN_DIR 2
@@ -1167,6 +1170,7 @@ int64_t __djinn_fs_temp_name(const char* leaf, int64_t leaf_length, char* out, i
 #define DJFS_OP_LIST_OPEN 15
 
 #define DJFS_WORKERS 4
+#define DJFS_SPIN 2000
 
 typedef struct djfs_request
 {
@@ -1174,11 +1178,12 @@ typedef struct djfs_request
     int64_t args[7];
     int64_t result;
     volatile int32_t done;
+    void* coro;
     struct djfs_request* next;
 } djfs_request;
 
-static djfs_request* djfs_queue_head;
-static djfs_request* djfs_queue_tail;
+static djfs_request* volatile djfs_queue_head;
+static djfs_request* volatile djfs_queue_tail;
 
 static int64_t djfs_execute(const djfs_request* request)
 {
@@ -1211,11 +1216,22 @@ static CRITICAL_SECTION djfs_lock;
 static CONDITION_VARIABLE djfs_wake;
 static INIT_ONCE djfs_once = INIT_ONCE_STATIC_INIT;
 
+static volatile LONG djfs_spinning;
+
+static void djfs_spin(void)
+{
+    if (djfs_queue_head) return;
+    if (InterlockedCompareExchange(&djfs_spinning, 1, 0) != 0) return;
+    for (int i = 0; i < DJFS_SPIN && !djfs_queue_head; i++) YieldProcessor();
+    InterlockedExchange(&djfs_spinning, 0);
+}
+
 static DWORD WINAPI djfs_worker(LPVOID unused)
 {
     (void)unused;
     for (;;)
     {
+        djfs_spin();
         EnterCriticalSection(&djfs_lock);
         while (!djfs_queue_head) SleepConditionVariableCS(&djfs_wake, &djfs_lock, INFINITE);
         djfs_request* request = djfs_queue_head;
@@ -1223,8 +1239,10 @@ static DWORD WINAPI djfs_worker(LPVOID unused)
         if (!djfs_queue_head) djfs_queue_tail = NULL;
         LeaveCriticalSection(&djfs_lock);
         request->result = djfs_execute(request);
+        void* coro = request->coro;
         MemoryBarrier();
         request->done = 1;
+        djinn_enqueue_task(&djinn_rt.ready_queue, coro);
     }
     return 0;
 }
@@ -1246,10 +1264,12 @@ static void djfs_enqueue(djfs_request* request)
 {
     InitOnceExecuteOnce(&djfs_once, djfs_start, NULL, NULL);
     EnterCriticalSection(&djfs_lock);
+    int was_empty = djfs_queue_head == NULL;
     if (djfs_queue_tail) djfs_queue_tail->next = request;
     else djfs_queue_head = request;
     djfs_queue_tail = request;
-    WakeConditionVariable(&djfs_wake);
+    MemoryBarrier();
+    if (!was_empty || djfs_spinning == 0) WakeConditionVariable(&djfs_wake);
     LeaveCriticalSection(&djfs_lock);
 }
 
@@ -1259,11 +1279,30 @@ static pthread_mutex_t djfs_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t djfs_wake = PTHREAD_COND_INITIALIZER;
 static pthread_once_t djfs_once = PTHREAD_ONCE_INIT;
 
+static volatile int djfs_spinning;
+
+static void djfs_spin(void)
+{
+    if (djfs_queue_head) return;
+    int expected = 0;
+    if (!__atomic_compare_exchange_n(&djfs_spinning, &expected, 1, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) return;
+    for (int i = 0; i < DJFS_SPIN && !djfs_queue_head; i++)
+    {
+#if defined(__x86_64__) || defined(__i386__)
+        __builtin_ia32_pause();
+#elif defined(__aarch64__)
+        __asm__ volatile("yield");
+#endif
+    }
+    __atomic_store_n(&djfs_spinning, 0, __ATOMIC_SEQ_CST);
+}
+
 static void* djfs_worker(void* unused)
 {
     (void)unused;
     for (;;)
     {
+        djfs_spin();
         pthread_mutex_lock(&djfs_lock);
         while (!djfs_queue_head) pthread_cond_wait(&djfs_wake, &djfs_lock);
         djfs_request* request = djfs_queue_head;
@@ -1271,7 +1310,9 @@ static void* djfs_worker(void* unused)
         if (!djfs_queue_head) djfs_queue_tail = NULL;
         pthread_mutex_unlock(&djfs_lock);
         request->result = djfs_execute(request);
+        void* coro = request->coro;
         __atomic_store_n(&request->done, 1, __ATOMIC_RELEASE);
+        djinn_enqueue_task(&djinn_rt.ready_queue, coro);
     }
     return NULL;
 }
@@ -1289,17 +1330,19 @@ static void djfs_enqueue(djfs_request* request)
 {
     pthread_once(&djfs_once, djfs_start);
     pthread_mutex_lock(&djfs_lock);
+    int was_empty = djfs_queue_head == NULL;
     if (djfs_queue_tail) djfs_queue_tail->next = request;
     else djfs_queue_head = request;
     djfs_queue_tail = request;
-    pthread_cond_signal(&djfs_wake);
+    if (!was_empty || __atomic_load_n(&djfs_spinning, __ATOMIC_SEQ_CST) == 0) pthread_cond_signal(&djfs_wake);
     pthread_mutex_unlock(&djfs_lock);
 }
 
 #endif
 
-int64_t __djinn_fs_submit(int32_t op, int64_t a0, int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5, int64_t a6)
+int64_t __djinn_fs_submit(int32_t op, int64_t a0, int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5, int64_t a6, void* coro)
 {
+    if (!coro) return -DJFS_INVALID_ARGUMENT;
     djfs_request* request = (djfs_request*)calloc(1, sizeof(djfs_request));
     if (!request) return -DJFS_OUT_OF_MEMORY;
     request->op = op;
@@ -1310,21 +1353,15 @@ int64_t __djinn_fs_submit(int32_t op, int64_t a0, int64_t a1, int64_t a2, int64_
     request->args[4] = a4;
     request->args[5] = a5;
     request->args[6] = a6;
+    request->coro = coro;
+    __djinn_mark_waiting(coro);
     djfs_enqueue(request);
     return (int64_t)(intptr_t)request;
 }
 
-int32_t __djinn_fs_poll(int64_t handle)
-{
-#ifdef _WIN32
-    return ((djfs_request*)(intptr_t)handle)->done != 0;
-#else
-    return __atomic_load_n(&((djfs_request*)(intptr_t)handle)->done, __ATOMIC_ACQUIRE) != 0;
-#endif
-}
-
 int64_t __djinn_fs_finish(int64_t handle)
 {
+    if (handle < 0) return handle;
     djfs_request* request = (djfs_request*)(intptr_t)handle;
     int64_t result = request->result;
     free(request);

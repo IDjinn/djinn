@@ -98,29 +98,35 @@ struct File : Disposable {
     }
 
     public async result<i64, FsError> read(void* buffer, i64 count) {
+        void* task = std::builtin::coro.handle();
         if (this.handle < 0) { return result::Error(FsError::Closed()); }
         mut i64 request = 0;
-        unsafe { request = Native.submit_read(this.handle, buffer, count); }
-        i64 code = await fs_wait(request);
+        unsafe { request = Native.submit_read(this.handle, buffer, count, task); }
+        if (request >= 0) { std::builtin::coro.suspend(); }
+        i64 code = fs_collect(request);
         return fs_checked(code);
     }
 
     public async result<i64, FsError> write(void* buffer, i64 count) {
+        void* task = std::builtin::coro.handle();
         if (this.handle < 0) { return result::Error(FsError::Closed()); }
         mut i64 request = 0;
-        unsafe { request = Native.submit_write(this.handle, buffer, count); }
-        i64 code = await fs_wait(request);
+        unsafe { request = Native.submit_write(this.handle, buffer, count, task); }
+        if (request >= 0) { std::builtin::coro.suspend(); }
+        i64 code = fs_collect(request);
         return fs_checked(code);
     }
 
     public async result<bool, FsError> write_all(str data) {
+        void* task = std::builtin::coro.handle();
         if (this.handle < 0) { return result::Error(FsError::Closed()); }
         mut i64 done = 0;
         i64 total = (i64)data.length;
         while (done < total) {
             mut i64 request = 0;
-            unsafe { request = Native.submit_write(this.handle, data.data + done, total - done); }
-            i64 step = await fs_wait(request);
+            unsafe { request = Native.submit_write(this.handle, data.data + done, total - done, task); }
+            if (request >= 0) { std::builtin::coro.suspend(); }
+            i64 step = fs_collect(request);
             if (step < 0) { return result::Error(fs_error_from_code(0 - step)); }
             if (step == 0) { return result::Error(FsError::IoError()); }
             done = done + step;
@@ -129,6 +135,7 @@ struct File : Disposable {
     }
 
     public async result<string, FsError> read_to_string(i64 max_bytes) {
+        void* task = std::builtin::coro.handle();
         if (this.handle < 0) { return result::Error(FsError::Closed()); }
         mut i64 capacity = 4096;
         i64 hint = await fs_file_size_async(this.handle);
@@ -151,8 +158,9 @@ struct File : Disposable {
                 data = grown;
             }
             mut i64 request = 0;
-            unsafe { request = Native.submit_read(this.handle, data + length, capacity - length); }
-            i64 step = await fs_wait(request);
+            unsafe { request = Native.submit_read(this.handle, data + length, capacity - length, task); }
+            if (request >= 0) { std::builtin::coro.suspend(); }
+            i64 step = fs_collect(request);
             if (step < 0) {
                 unsafe { free(data); }
                 return result::Error(fs_error_from_code(0 - step));
@@ -168,62 +176,76 @@ struct File : Disposable {
     }
 
     public async result<i64, FsError> seek_start(i64 offset) {
+        void* task = std::builtin::coro.handle();
         if (this.handle < 0) { return result::Error(FsError::Closed()); }
         mut i64 request = 0;
-        unsafe { request = Native.submit_seek(this.handle, offset, 0); }
-        i64 code = await fs_wait(request);
+        unsafe { request = Native.submit_seek(this.handle, offset, 0, task); }
+        if (request >= 0) { std::builtin::coro.suspend(); }
+        i64 code = fs_collect(request);
         return fs_checked(code);
     }
 
     public async result<i64, FsError> seek_end(i64 offset) {
+        void* task = std::builtin::coro.handle();
         if (this.handle < 0) { return result::Error(FsError::Closed()); }
         mut i64 request = 0;
-        unsafe { request = Native.submit_seek(this.handle, offset, 2); }
-        i64 code = await fs_wait(request);
+        unsafe { request = Native.submit_seek(this.handle, offset, 2, task); }
+        if (request >= 0) { std::builtin::coro.suspend(); }
+        i64 code = fs_collect(request);
         return fs_checked(code);
     }
 
     public async result<i64, FsError> position() {
+        void* task = std::builtin::coro.handle();
         if (this.handle < 0) { return result::Error(FsError::Closed()); }
         mut i64 request = 0;
-        unsafe { request = Native.submit_seek(this.handle, 0, 1); }
-        i64 code = await fs_wait(request);
+        unsafe { request = Native.submit_seek(this.handle, 0, 1, task); }
+        if (request >= 0) { std::builtin::coro.suspend(); }
+        i64 code = fs_collect(request);
         return fs_checked(code);
     }
 
     public async result<Metadata, FsError> metadata() {
+        void* task = std::builtin::coro.handle();
         if (this.handle < 0) { return result::Error(FsError::Closed()); }
         i64* out = fs_new_stat();
         if (!fs_is_set(out)) { return result::Error(FsError::OutOfMemory()); }
         mut i64 request = 0;
-        unsafe { request = Native.submit_fstat(this.handle, out); }
-        i64 code = await fs_wait(request);
+        unsafe { request = Native.submit_fstat(this.handle, out, task); }
+        if (request >= 0) { std::builtin::coro.suspend(); }
+        i64 code = fs_collect(request);
         unsafe { return fs_metadata_from(code, out); }
     }
 
     public async result<bool, FsError> truncate(i64 length) {
+        void* task = std::builtin::coro.handle();
         if (this.handle < 0) { return result::Error(FsError::Closed()); }
         mut i64 request = 0;
-        unsafe { request = Native.submit_truncate(this.handle, length); }
-        i64 code = await fs_wait(request);
+        unsafe { request = Native.submit_truncate(this.handle, length, task); }
+        if (request >= 0) { std::builtin::coro.suspend(); }
+        i64 code = fs_collect(request);
         return fs_checked_done(code);
     }
 
     public async result<bool, FsError> sync() {
+        void* task = std::builtin::coro.handle();
         if (this.handle < 0) { return result::Error(FsError::Closed()); }
         mut i64 request = 0;
-        unsafe { request = Native.submit_sync(this.handle); }
-        i64 code = await fs_wait(request);
+        unsafe { request = Native.submit_sync(this.handle, task); }
+        if (request >= 0) { std::builtin::coro.suspend(); }
+        i64 code = fs_collect(request);
         return fs_checked_done(code);
     }
 
     public async result<bool, FsError> close() {
+        void* task = std::builtin::coro.handle();
         if (this.handle < 0) { return result::Error(FsError::Closed()); }
         i64 handle = this.handle;
         this.handle = -1;
         mut i64 request = 0;
-        unsafe { request = Native.submit_close(handle); }
-        i64 code = await fs_wait(request);
+        unsafe { request = Native.submit_close(handle, task); }
+        if (request >= 0) { std::builtin::coro.suspend(); }
+        i64 code = fs_collect(request);
         return fs_checked_done(code);
     }
 
@@ -388,83 +410,100 @@ struct Directory : Disposable {
     }
 
     public static async result<Directory, FsError> open_root(Path path) {
+        void* task = std::builtin::coro.handle();
         mut i64 request = 0;
-        unsafe { request = Native.submit_open_root(path.text, 0); }
-        i64 code = await fs_wait(request);
+        unsafe { request = Native.submit_open_root(path.text, 0, task); }
+        if (request >= 0) { std::builtin::coro.suspend(); }
+        i64 code = fs_collect(request);
         if (code < 0) { return result::Error(fs_error_from_code(0 - code)); }
         return result::Ok({ .handle = code });
     }
 
     public static async result<Directory, FsError> open_root_following(Path path) {
+        void* task = std::builtin::coro.handle();
         mut i64 request = 0;
-        unsafe { request = Native.submit_open_root(path.text, 64); }
-        i64 code = await fs_wait(request);
+        unsafe { request = Native.submit_open_root(path.text, 64, task); }
+        if (request >= 0) { std::builtin::coro.suspend(); }
+        i64 code = fs_collect(request);
         if (code < 0) { return result::Error(fs_error_from_code(0 - code)); }
         return result::Ok({ .handle = code });
     }
 
     public async result<Directory, FsError> open_dir(Path path) {
+        void* task = std::builtin::coro.handle();
         if (this.handle < 0) { return result::Error(FsError::Closed()); }
         if (path.absolute) { return result::Error(FsError::AbsolutePath()); }
         mut i64 request = 0;
-        unsafe { request = Native.submit_open_dir(this.handle, path.text, 0); }
-        i64 code = await fs_wait(request);
+        unsafe { request = Native.submit_open_dir(this.handle, path.text, 0, task); }
+        if (request >= 0) { std::builtin::coro.suspend(); }
+        i64 code = fs_collect(request);
         if (code < 0) { return result::Error(fs_error_from_code(0 - code)); }
         return result::Ok({ .handle = code });
     }
 
     public async result<Directory, FsError> open_dir_following(Path path) {
+        void* task = std::builtin::coro.handle();
         if (this.handle < 0) { return result::Error(FsError::Closed()); }
         if (path.absolute) { return result::Error(FsError::AbsolutePath()); }
         mut i64 request = 0;
-        unsafe { request = Native.submit_open_dir(this.handle, path.text, 64); }
-        i64 code = await fs_wait(request);
+        unsafe { request = Native.submit_open_dir(this.handle, path.text, 64, task); }
+        if (request >= 0) { std::builtin::coro.suspend(); }
+        i64 code = fs_collect(request);
         if (code < 0) { return result::Error(fs_error_from_code(0 - code)); }
         return result::Ok({ .handle = code });
     }
 
     public async result<File, FsError> open_file(Path path, OpenOptions options) {
+        void* task = std::builtin::coro.handle();
         if (this.handle < 0) { return result::Error(FsError::Closed()); }
         if (path.absolute) { return result::Error(FsError::AbsolutePath()); }
         mut i64 request = 0;
-        unsafe { request = Native.submit_open_file(this.handle, path.text, options.flags, options.mode); }
-        i64 code = await fs_wait(request);
+        unsafe { request = Native.submit_open_file(this.handle, path.text, options.flags, options.mode, task); }
+        if (request >= 0) { std::builtin::coro.suspend(); }
+        i64 code = fs_collect(request);
         if (code < 0) { return result::Error(fs_error_from_code(0 - code)); }
         return result::Ok({ .handle = code });
     }
 
     public async result<Metadata, FsError> metadata(Path path) {
+        void* task = std::builtin::coro.handle();
         if (this.handle < 0) { return result::Error(FsError::Closed()); }
         if (path.absolute) { return result::Error(FsError::AbsolutePath()); }
         i64* out = fs_new_stat();
         if (!fs_is_set(out)) { return result::Error(FsError::OutOfMemory()); }
         mut i64 request = 0;
-        unsafe { request = Native.submit_stat(this.handle, path.text, 0, out); }
-        i64 code = await fs_wait(request);
+        unsafe { request = Native.submit_stat(this.handle, path.text, 0, out, task); }
+        if (request >= 0) { std::builtin::coro.suspend(); }
+        i64 code = fs_collect(request);
         unsafe { return fs_metadata_from(code, out); }
     }
 
     public async result<Metadata, FsError> metadata_following(Path path) {
+        void* task = std::builtin::coro.handle();
         if (this.handle < 0) { return result::Error(FsError::Closed()); }
         if (path.absolute) { return result::Error(FsError::AbsolutePath()); }
         i64* out = fs_new_stat();
         if (!fs_is_set(out)) { return result::Error(FsError::OutOfMemory()); }
         mut i64 request = 0;
-        unsafe { request = Native.submit_stat(this.handle, path.text, 64, out); }
-        i64 code = await fs_wait(request);
+        unsafe { request = Native.submit_stat(this.handle, path.text, 64, out, task); }
+        if (request >= 0) { std::builtin::coro.suspend(); }
+        i64 code = fs_collect(request);
         unsafe { return fs_metadata_from(code, out); }
     }
 
     public async result<bool, FsError> create_dir(Path path) {
+        void* task = std::builtin::coro.handle();
         if (this.handle < 0) { return result::Error(FsError::Closed()); }
         if (path.absolute) { return result::Error(FsError::AbsolutePath()); }
         mut i64 request = 0;
-        unsafe { request = Native.submit_mkdir(this.handle, path.text, 493); }
-        i64 code = await fs_wait(request);
+        unsafe { request = Native.submit_mkdir(this.handle, path.text, 493, task); }
+        if (request >= 0) { std::builtin::coro.suspend(); }
+        i64 code = fs_collect(request);
         return fs_checked_done(code);
     }
 
     public async result<bool, FsError> create_dir_all(Path path) {
+        void* task = std::builtin::coro.handle();
         if (this.handle < 0) { return result::Error(FsError::Closed()); }
         if (path.absolute) { return result::Error(FsError::AbsolutePath()); }
         str text = path.text;
@@ -476,8 +515,9 @@ struct Directory : Disposable {
             }
             if (boundary) {
                 mut i64 request = 0;
-                unsafe { request = Native.submit_mkdir(this.handle, text.slice(0, i), 493); }
-                i64 code = await fs_wait(request);
+                unsafe { request = Native.submit_mkdir(this.handle, text.slice(0, i), 493, task); }
+                if (request >= 0) { std::builtin::coro.suspend(); }
+                i64 code = fs_collect(request);
                 if (code < 0 && code != -2) { return result::Error(fs_error_from_code(0 - code)); }
             }
             i = i + 1;
@@ -490,37 +530,45 @@ struct Directory : Disposable {
     }
 
     public async result<bool, FsError> remove_file(Path path) {
+        void* task = std::builtin::coro.handle();
         if (this.handle < 0) { return result::Error(FsError::Closed()); }
         if (path.absolute) { return result::Error(FsError::AbsolutePath()); }
         mut i64 request = 0;
-        unsafe { request = Native.submit_remove(this.handle, path.text, false); }
-        i64 code = await fs_wait(request);
+        unsafe { request = Native.submit_remove(this.handle, path.text, false, task); }
+        if (request >= 0) { std::builtin::coro.suspend(); }
+        i64 code = fs_collect(request);
         return fs_checked_done(code);
     }
 
     public async result<bool, FsError> remove_dir(Path path) {
+        void* task = std::builtin::coro.handle();
         if (this.handle < 0) { return result::Error(FsError::Closed()); }
         if (path.absolute) { return result::Error(FsError::AbsolutePath()); }
         mut i64 request = 0;
-        unsafe { request = Native.submit_remove(this.handle, path.text, true); }
-        i64 code = await fs_wait(request);
+        unsafe { request = Native.submit_remove(this.handle, path.text, true, task); }
+        if (request >= 0) { std::builtin::coro.suspend(); }
+        i64 code = fs_collect(request);
         return fs_checked_done(code);
     }
 
     public async result<bool, FsError> rename(Path from, Directory* target, Path to, bool replace) {
+        void* task = std::builtin::coro.handle();
         if (this.handle < 0 || target.handle < 0) { return result::Error(FsError::Closed()); }
         if (from.absolute || to.absolute) { return result::Error(FsError::AbsolutePath()); }
         mut i64 request = 0;
-        unsafe { request = Native.submit_rename(this.handle, from.text, target.handle, to.text, replace); }
-        i64 code = await fs_wait(request);
+        unsafe { request = Native.submit_rename(this.handle, from.text, target.handle, to.text, replace, task); }
+        if (request >= 0) { std::builtin::coro.suspend(); }
+        i64 code = fs_collect(request);
         return fs_checked_done(code);
     }
 
     public async result<DirEntries, FsError> entries() {
+        void* task = std::builtin::coro.handle();
         if (this.handle < 0) { return result::Error(FsError::Closed()); }
         mut i64 request = 0;
-        unsafe { request = Native.submit_list_open(this.handle); }
-        i64 code = await fs_wait(request);
+        unsafe { request = Native.submit_list_open(this.handle, task); }
+        if (request >= 0) { std::builtin::coro.suspend(); }
+        i64 code = fs_collect(request);
         if (code < 0) { return result::Error(fs_error_from_code(0 - code)); }
         ListCursor* cursor = fs_new_cursor();
         if (!fs_is_set(cursor)) {
@@ -560,12 +608,14 @@ struct Directory : Disposable {
     }
 
     public async result<bool, FsError> close() {
+        void* task = std::builtin::coro.handle();
         if (this.handle < 0) { return result::Error(FsError::Closed()); }
         i64 handle = this.handle;
         this.handle = -1;
         mut i64 request = 0;
-        unsafe { request = Native.submit_close(handle); }
-        i64 code = await fs_wait(request);
+        unsafe { request = Native.submit_close(handle, task); }
+        if (request >= 0) { std::builtin::coro.suspend(); }
+        i64 code = fs_collect(request);
         return fs_checked_done(code);
     }
 
@@ -779,24 +829,19 @@ result<bool, FsError> fs_write_atomic(i64 dir, str leaf, str data) {
     }
 }
 
-// Suspends the calling coroutine until the worker has finished the request, then returns the call's result.
-async i64 fs_wait(i64 request) {
-    if (request < 0) { return request; }
-    while (true) {
-        mut bool done = false;
-        unsafe { done = Native.poll(request); }
-        if (done) { break; }
-        std::builtin::coro.suspend();
-    }
+// Reads the result of a finished request (or the submit error itself).
+i64 fs_collect(i64 request) {
     unsafe { return Native.finish(request); }
 }
 
 async i64 fs_file_size_async(i64 handle) {
+    void* task = std::builtin::coro.handle();
     i64* out = fs_new_stat();
     if (!fs_is_set(out)) { return -1; }
     mut i64 request = 0;
-    unsafe { request = Native.submit_fstat(handle, out); }
-    i64 code = await fs_wait(request);
+    unsafe { request = Native.submit_fstat(handle, out, task); }
+    if (request >= 0) { std::builtin::coro.suspend(); }
+    i64 code = fs_collect(request);
     mut i64 size = -1;
     unsafe {
         if (code >= 0) { size = out[1]; }
@@ -806,6 +851,7 @@ async i64 fs_file_size_async(i64 handle) {
 }
 
 async result<bool, FsError> fs_write_atomic_async(i64 dir, str leaf, str data) {
+    void* task = std::builtin::coro.handle();
     i8* name = fs_new_bytes(320);
     if (!fs_is_set(name)) { return result::Error(FsError::OutOfMemory()); }
     mut i64 opened = -2;
@@ -820,8 +866,9 @@ async result<bool, FsError> fs_write_atomic_async(i64 dir, str leaf, str data) {
         }
         temp = { .data = name, .length = (size)length };
         mut i64 request = 0;
-        unsafe { request = Native.submit_open_file(dir, temp, 10, 384); }
-        opened = await fs_wait(request);
+        unsafe { request = Native.submit_open_file(dir, temp, 10, 384, task); }
+        if (request >= 0) { std::builtin::coro.suspend(); }
+        opened = fs_collect(request);
         attempt = attempt + 1;
     }
     if (opened < 0) {
@@ -834,8 +881,9 @@ async result<bool, FsError> fs_write_atomic_async(i64 dir, str leaf, str data) {
     i64 total = (i64)data.length;
     while (failure == 0 && done < total) {
         mut i64 request = 0;
-        unsafe { request = Native.submit_write(opened, data.data + done, total - done); }
-        i64 step = await fs_wait(request);
+        unsafe { request = Native.submit_write(opened, data.data + done, total - done, task); }
+        if (request >= 0) { std::builtin::coro.suspend(); }
+        i64 step = fs_collect(request);
         if (step <= 0) {
             failure = step;
             if (step == 0) { failure = -15; }
@@ -845,29 +893,34 @@ async result<bool, FsError> fs_write_atomic_async(i64 dir, str leaf, str data) {
     }
     if (failure == 0) {
         mut i64 request = 0;
-        unsafe { request = Native.submit_sync(opened); }
-        failure = await fs_wait(request);
+        unsafe { request = Native.submit_sync(opened, task); }
+        if (request >= 0) { std::builtin::coro.suspend(); }
+        failure = fs_collect(request);
     }
     mut i64 close_request = 0;
-    unsafe { close_request = Native.submit_close(opened); }
-    i64 closed = await fs_wait(close_request);
+    unsafe { close_request = Native.submit_close(opened, task); }
+    if (close_request >= 0) { std::builtin::coro.suspend(); }
+    i64 closed = fs_collect(close_request);
     if (failure == 0) { failure = closed; }
     if (failure == 0) {
         mut i64 request = 0;
-        unsafe { request = Native.submit_rename(dir, temp, dir, leaf, true); }
-        failure = await fs_wait(request);
+        unsafe { request = Native.submit_rename(dir, temp, dir, leaf, true, task); }
+        if (request >= 0) { std::builtin::coro.suspend(); }
+        failure = fs_collect(request);
     }
     if (failure < 0) {
         mut i64 request = 0;
-        unsafe { request = Native.submit_remove(dir, temp, false); }
-        i64 ignored = await fs_wait(request);
+        unsafe { request = Native.submit_remove(dir, temp, false, task); }
+        if (request >= 0) { std::builtin::coro.suspend(); }
+        i64 ignored = fs_collect(request);
         unsafe { free(name); }
         return result::Error(fs_error_from_code(0 - failure));
     }
     unsafe { free(name); }
     mut i64 flush = 0;
-    unsafe { flush = Native.submit_sync(dir); }
-    i64 flushed = await fs_wait(flush);
+    unsafe { flush = Native.submit_sync(dir, task); }
+    if (flush >= 0) { std::builtin::coro.suspend(); }
+    i64 flushed = fs_collect(flush);
     return result::Ok(true);
 }
 
