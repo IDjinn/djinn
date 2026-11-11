@@ -286,4 +286,168 @@ i32 drain(DirEntries* l) {
 """;
         Verify.source(source).with_std().runs(Expected.exit(0));
     }
+
+    [Test]
+    void large_file_roundtrip_async() {
+        str source = """
+import std::types;
+import std::libc;
+import std::sys;
+import std::filesystem;
+namespace app;
+
+Path p(str text) {
+    return switch Path.parse(text) { Ok v -> v, Error e -> Path.unchecked("x", false) };
+}
+
+bool ok(result<bool, FsError> r) {
+    return switch r { Ok v -> v, Error e -> false };
+}
+
+unsafe i8* make_pattern(i32 size) {
+    i8* data = (i8*)malloc((size_long)size);
+    for (mut i32 i = 0; i < size; i = i + 1) {
+        data[i] = (i8)((i * 31 + (i >> 8)) & 127);
+    }
+    return data;
+}
+
+unsafe bool matches(i8* expected, i8* actual, i32 size) {
+    for (mut i32 i = 0; i < size; i = i + 1) {
+        if (expected[i] != actual[i]) { return false; }
+    }
+    return true;
+}
+
+async i32 main() {
+    Process.run("rd /s /q fsconf_big_async 2>nul || rm -rf fsconf_big_async");
+    result<Directory, FsError> rootr = await Directory.open_root(p("."));
+    return switch rootr {
+        Ok root -> await body(&root),
+        Error e -> 1
+    };
+}
+
+async i32 body(Directory* root) {
+    i32 size = 20971520;
+    if (!ok(await root.create_dir(p("fsconf_big_async")))) { return 2; }
+
+    i8* pattern = make_pattern(size);
+    str payload = { .data = pattern, .length = (size)size };
+
+    result<File, FsError> created = await root.open_file(p("fsconf_big_async/big.bin"), OpenOptions.create());
+    i32 wrote = switch created { Ok f -> await write_all(&f, payload), Error e -> -1 };
+    if (wrote != 0) { return 3; }
+
+    result<Metadata, FsError> info = await root.metadata(p("fsconf_big_async/big.bin"));
+    bool sized = switch info { Ok m -> m.size == (i64)size, Error e -> false };
+    if (!sized) { return 4; }
+
+    result<string, FsError> text = await root.read_to_string(p("fsconf_big_async/big.bin"), (i64)30000000);
+    i32 same = switch text { Ok s -> compare(pattern, s, size), Error e -> -1 };
+    if (same != 0) { return 5; }
+
+    result<string, FsError> capped = await root.read_to_string(p("fsconf_big_async/big.bin"), (i64)1000000);
+    bool refused = switch capped { Ok s -> false, Error e -> e == FsError::FileTooLarge() };
+    if (!refused) { return 6; }
+
+    if (!ok(await root.remove_file(p("fsconf_big_async/big.bin")))) { return 7; }
+    if (!ok(await root.remove_dir(p("fsconf_big_async")))) { return 8; }
+    unsafe { free(pattern); }
+    return 0;
+}
+
+async i32 write_all(File* file, str payload) {
+    result<bool, FsError> r = await file.write_all(payload);
+    return switch r { Ok v -> 0, Error e -> 1 };
+}
+
+i32 compare(i8* expected, string actual, i32 size) {
+    if ((i32)actual.length != size) { return 1; }
+    unsafe {
+        if (!matches(expected, actual.data, size)) { return 2; }
+    }
+    return 0;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(0));
+    }
+
+    [Test]
+    void large_file_roundtrip_sync() {
+        str source = """
+import std::types;
+import std::libc;
+import std::sys;
+import std::filesystem;
+namespace app;
+
+Path p(str text) {
+    return switch Path.parse(text) { Ok v -> v, Error e -> Path.unchecked("x", false) };
+}
+
+bool ok(result<bool, FsError> r) {
+    return switch r { Ok v -> v, Error e -> false };
+}
+
+unsafe i8* make_pattern(i32 size) {
+    i8* data = (i8*)malloc((size_long)size);
+    for (mut i32 i = 0; i < size; i = i + 1) {
+        data[i] = (i8)((i * 31 + (i >> 8)) & 127);
+    }
+    return data;
+}
+
+unsafe bool matches(i8* expected, i8* actual, i32 size) {
+    for (mut i32 i = 0; i < size; i = i + 1) {
+        if (expected[i] != actual[i]) { return false; }
+    }
+    return true;
+}
+
+i32 main() {
+    Process.run("rd /s /q fsconf_big_sync 2>nul || rm -rf fsconf_big_sync");
+    result<Directory, FsError> rootr = Directory.open_root_sync(p("."));
+    return switch rootr {
+        Ok root -> body(&root),
+        Error e -> 1
+    };
+}
+
+i32 body(Directory* root) {
+    i32 size = 20971520;
+    if (!ok(root.create_dir_sync(p("fsconf_big_sync")))) { return 2; }
+
+    i8* pattern = make_pattern(size);
+    str payload = { .data = pattern, .length = (size)size };
+
+    result<File, FsError> created = root.open_file_sync(p("fsconf_big_sync/big.bin"), OpenOptions.create());
+    i32 wrote = switch created { Ok f -> write_all(&f, payload), Error e -> -1 };
+    if (wrote != 0) { return 3; }
+
+    result<string, FsError> text = root.read_to_string_sync(p("fsconf_big_sync/big.bin"), (i64)30000000);
+    i32 same = switch text { Ok s -> compare(pattern, s, size), Error e -> -1 };
+    if (same != 0) { return 4; }
+
+    if (!ok(root.remove_file_sync(p("fsconf_big_sync/big.bin")))) { return 5; }
+    if (!ok(root.remove_dir_sync(p("fsconf_big_sync")))) { return 6; }
+    unsafe { free(pattern); }
+    return 0;
+}
+
+i32 write_all(File* file, str payload) {
+    result<bool, FsError> r = file.write_all_sync(payload);
+    return switch r { Ok v -> 0, Error e -> 1 };
+}
+
+i32 compare(i8* expected, string actual, i32 size) {
+    if ((i32)actual.length != size) { return 1; }
+    unsafe {
+        if (!matches(expected, actual.data, size)) { return 2; }
+    }
+    return 0;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(0));
+    }
 }

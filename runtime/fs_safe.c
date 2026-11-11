@@ -116,6 +116,7 @@ typedef struct
 #define DJFS_FILE_DIRECTORY_FILE 0x1
 #define DJFS_FILE_NON_DIRECTORY_FILE 0x40
 #define DJFS_FILE_SYNC 0x20
+#define DJFS_ASYNC_OPEN 0x80000000u
 #define DJFS_FILE_OPEN_REPARSE 0x00200000
 #define DJFS_DISP_OPEN 1
 #define DJFS_DISP_CREATE 2
@@ -204,7 +205,7 @@ static djfs_status djfs_open_nt(HANDLE root, const char* name, ACCESS_MASK acces
     InitializeObjectAttributes(&attributes, &text, DJFS_OBJ_CASE_INSENSITIVE, root, NULL);
     IO_STATUS_BLOCK status_block;
     return djfs_nt_create(out, access | SYNCHRONIZE | FILE_READ_ATTRIBUTES, &attributes, &status_block, NULL, FILE_ATTRIBUTE_NORMAL,
-                          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, disposition, options | DJFS_FILE_SYNC, NULL, 0);
+                          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, disposition, (options & DJFS_ASYNC_OPEN) ? (options & ~DJFS_ASYNC_OPEN) : (options | DJFS_FILE_SYNC), NULL, 0);
 }
 
 static int djfs_is_link(HANDLE handle)
@@ -213,6 +214,38 @@ static int djfs_is_link(HANDLE handle)
     if (!GetFileInformationByHandleEx(handle, FileAttributeTagInfo, &info, sizeof(info))) return 0;
     if (!(info.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) return 0;
     return info.ReparseTag == DJFS_TAG_SYMLINK || info.ReparseTag == DJFS_TAG_MOUNT_POINT;
+}
+
+// A file opened for overlapped I/O. Overlapped handles have no file pointer, so the position lives here.
+typedef struct
+{
+    HANDLE handle;
+    HANDLE event;
+    int64_t position;
+    int append;
+} djfs_file;
+
+#define DJFS_FILE(h) ((djfs_file*)(intptr_t)(h))
+
+static int djfs_iocp_attach(HANDLE handle);
+
+static void djfs_offset(OVERLAPPED* overlapped, int64_t position)
+{
+    overlapped->Offset = (DWORD)((uint64_t)position & 0xFFFFFFFFu);
+    overlapped->OffsetHigh = (DWORD)((uint64_t)position >> 32);
+}
+
+static void djfs_advance(djfs_file* file, int64_t done)
+{
+    if (file->append)
+    {
+        LARGE_INTEGER size;
+        if (GetFileSizeEx(file->handle, &size)) file->position = size.QuadPart;
+    }
+    else
+    {
+        file->position += done;
+    }
 }
 
 typedef struct
@@ -372,7 +405,7 @@ int64_t __djinn_fs_open_file(int64_t dir, const char* path, int64_t length, int3
     else if (flags & DJFS_TRUNCATE) disposition = DJFS_DISP_OVERWRITE;
 
     HANDLE handle = NULL;
-    result = djfs_open_checked(&loc, access, disposition, DJFS_FILE_NON_DIRECTORY_FILE, follow, &handle);
+    result = djfs_open_checked(&loc, access, disposition, DJFS_FILE_NON_DIRECTORY_FILE | DJFS_ASYNC_OPEN, follow, &handle);
     djfs_release(&loc);
     if (result < 0) return result;
     if (GetFileType(handle) != FILE_TYPE_DISK)
@@ -380,44 +413,101 @@ int64_t __djinn_fs_open_file(int64_t dir, const char* path, int64_t length, int3
         CloseHandle(handle);
         return -DJFS_NOT_REGULAR_FILE;
     }
-    return (int64_t)(intptr_t)handle;
+    djfs_file* file = (djfs_file*)calloc(1, sizeof(djfs_file));
+    if (!file)
+    {
+        CloseHandle(handle);
+        return -DJFS_OUT_OF_MEMORY;
+    }
+    file->handle = handle;
+    file->event = CreateEventW(NULL, TRUE, FALSE, NULL);
+    file->append = (flags & DJFS_APPEND) != 0;
+    if (!file->event || !djfs_iocp_attach(handle))
+    {
+        if (file->event) CloseHandle(file->event);
+        CloseHandle(handle);
+        free(file);
+        return -DJFS_UNSUPPORTED;
+    }
+    return (int64_t)(intptr_t)file;
 }
 
-int64_t __djinn_fs_close(int64_t handle)
+int64_t __djinn_fs_close_dir(int64_t handle)
 {
     return CloseHandle((HANDLE)(intptr_t)handle) ? 0 : -djfs_from_win32(GetLastError());
 }
 
-int64_t __djinn_fs_read(int64_t handle, void* buffer, int64_t count)
+int64_t __djinn_fs_close(int64_t handle)
+{
+    djfs_file* file = DJFS_FILE(handle);
+    BOOL closed = CloseHandle(file->handle);
+    DWORD error = GetLastError();
+    CloseHandle(file->event);
+    free(file);
+    return closed ? 0 : -djfs_from_win32(error);
+}
+
+static int64_t djfs_transfer(djfs_file* file, void* buffer, int64_t count, int writing)
 {
     if (count < 0) return -DJFS_INVALID_ARGUMENT;
     if (count > 0x40000000) count = 0x40000000;
-    DWORD done = 0;
-    if (!ReadFile((HANDLE)(intptr_t)handle, buffer, (DWORD)count, &done, NULL))
+    OVERLAPPED overlapped;
+    memset(&overlapped, 0, sizeof(overlapped));
+    ResetEvent(file->event);
+    overlapped.hEvent = (HANDLE)((uintptr_t)file->event | 1);
+    djfs_offset(&overlapped, file->position);
+    BOOL started = writing ? WriteFile(file->handle, buffer, (DWORD)count, NULL, &overlapped)
+                           : ReadFile(file->handle, buffer, (DWORD)count, NULL, &overlapped);
+    DWORD error = started ? ERROR_SUCCESS : GetLastError();
+    if (!started && error != ERROR_IO_PENDING)
     {
-        DWORD error = GetLastError();
         if (error == ERROR_HANDLE_EOF || error == ERROR_BROKEN_PIPE) return 0;
         return -djfs_from_win32(error);
     }
+    WaitForSingleObject(file->event, INFINITE);
+    DWORD done = 0;
+    if (!GetOverlappedResult(file->handle, &overlapped, &done, FALSE))
+    {
+        error = GetLastError();
+        if (error == ERROR_HANDLE_EOF || error == ERROR_BROKEN_PIPE) return 0;
+        return -djfs_from_win32(error);
+    }
+    djfs_advance(file, done);
     return done;
+}
+
+int64_t __djinn_fs_read(int64_t handle, void* buffer, int64_t count)
+{
+    return djfs_transfer(DJFS_FILE(handle), buffer, count, 0);
 }
 
 int64_t __djinn_fs_write(int64_t handle, const void* buffer, int64_t count)
 {
-    if (count < 0) return -DJFS_INVALID_ARGUMENT;
-    if (count > 0x40000000) count = 0x40000000;
-    DWORD done = 0;
-    if (!WriteFile((HANDLE)(intptr_t)handle, buffer, (DWORD)count, &done, NULL)) return -djfs_from_win32(GetLastError());
-    return done;
+    return djfs_transfer(DJFS_FILE(handle), (void*)buffer, count, 1);
 }
 
 int64_t __djinn_fs_seek(int64_t handle, int64_t offset, int32_t whence)
 {
-    if (whence < 0 || whence > 2) return -DJFS_INVALID_ARGUMENT;
-    LARGE_INTEGER distance, result;
-    distance.QuadPart = offset;
-    if (!SetFilePointerEx((HANDLE)(intptr_t)handle, distance, &result, (DWORD)whence)) return -djfs_from_win32(GetLastError());
-    return result.QuadPart;
+    djfs_file* file = DJFS_FILE(handle);
+    int64_t base = 0;
+    if (whence == 1)
+    {
+        base = file->position;
+    }
+    else if (whence == 2)
+    {
+        LARGE_INTEGER size;
+        if (!GetFileSizeEx(file->handle, &size)) return -djfs_from_win32(GetLastError());
+        base = size.QuadPart;
+    }
+    else if (whence != 0)
+    {
+        return -DJFS_INVALID_ARGUMENT;
+    }
+    int64_t target = base + offset;
+    if (target < 0) return -DJFS_INVALID_ARGUMENT;
+    file->position = target;
+    return target;
 }
 
 int64_t __djinn_fs_truncate(int64_t handle, int64_t length)
@@ -425,13 +515,24 @@ int64_t __djinn_fs_truncate(int64_t handle, int64_t length)
     FILE_END_OF_FILE_INFO info;
     info.EndOfFile.QuadPart = length;
     if (length < 0) return -DJFS_INVALID_ARGUMENT;
-    if (!SetFileInformationByHandle((HANDLE)(intptr_t)handle, FileEndOfFileInfo, &info, sizeof(info))) return -djfs_from_win32(GetLastError());
+    if (!SetFileInformationByHandle(DJFS_FILE(handle)->handle, FileEndOfFileInfo, &info, sizeof(info))) return -djfs_from_win32(GetLastError());
+    return 0;
+}
+
+int64_t __djinn_fs_sync_dir(int64_t handle)
+{
+    if (!FlushFileBuffers((HANDLE)(intptr_t)handle))
+    {
+        DWORD error = GetLastError();
+        if (error == ERROR_ACCESS_DENIED || error == ERROR_INVALID_FUNCTION) return 0;
+        return -djfs_from_win32(error);
+    }
     return 0;
 }
 
 int64_t __djinn_fs_sync(int64_t handle)
 {
-    if (!FlushFileBuffers((HANDLE)(intptr_t)handle))
+    if (!FlushFileBuffers(DJFS_FILE(handle)->handle))
     {
         DWORD error = GetLastError();
         if (error == ERROR_ACCESS_DENIED || error == ERROR_INVALID_FUNCTION) return 0;
@@ -446,10 +547,9 @@ static int64_t djfs_filetime_ns(FILETIME time)
     return (ticks - 116444736000000000LL) * 100;
 }
 
-int64_t __djinn_fs_fstat(int64_t handle, int64_t* out)
+static int64_t djfs_fstat_handle(HANDLE native, int64_t* out)
 {
     BY_HANDLE_FILE_INFORMATION info;
-    HANDLE native = (HANDLE)(intptr_t)handle;
     if (!GetFileInformationByHandle(native, &info)) return -djfs_from_win32(GetLastError());
     int64_t kind = 0;
     if (djfs_is_link(native)) kind = 2;
@@ -462,6 +562,11 @@ int64_t __djinn_fs_fstat(int64_t handle, int64_t* out)
     return 0;
 }
 
+int64_t __djinn_fs_fstat(int64_t handle, int64_t* out)
+{
+    return djfs_fstat_handle(DJFS_FILE(handle)->handle, out);
+}
+
 int64_t __djinn_fs_stat(int64_t dir, const char* path, int64_t length, int32_t flags, int64_t* out)
 {
     djfs_loc loc;
@@ -470,7 +575,7 @@ int64_t __djinn_fs_stat(int64_t dir, const char* path, int64_t length, int32_t f
     if (result < 0) return result;
     if (loc.leaf == NULL)
     {
-        result = __djinn_fs_fstat((int64_t)(intptr_t)loc.parent, out);
+        result = djfs_fstat_handle(loc.parent, out);
         djfs_release(&loc);
         return result;
     }
@@ -478,7 +583,7 @@ int64_t __djinn_fs_stat(int64_t dir, const char* path, int64_t length, int32_t f
     djfs_status status = djfs_open_nt(loc.parent, loc.leaf, 0, DJFS_DISP_OPEN, djfs_link_option(follow), &handle);
     djfs_release(&loc);
     if (status < 0) return -djfs_from_status(status);
-    result = __djinn_fs_fstat((int64_t)(intptr_t)handle, out);
+    result = djfs_fstat_handle(handle, out);
     CloseHandle(handle);
     return result;
 }
@@ -863,6 +968,12 @@ int64_t __djinn_fs_close(int64_t handle)
     return close((int)handle) == 0 ? 0 : -djfs_from_errno(errno);
 }
 
+int64_t __djinn_fs_close_dir(int64_t handle)
+{
+    return __djinn_fs_close(handle);
+}
+
+
 int64_t __djinn_fs_read(int64_t handle, void* buffer, int64_t count)
 {
     if (count < 0) return -DJFS_INVALID_ARGUMENT;
@@ -896,6 +1007,13 @@ int64_t __djinn_fs_truncate(int64_t handle, int64_t length)
 {
     if (length < 0) return -DJFS_INVALID_ARGUMENT;
     return ftruncate((int)handle, (off_t)length) == 0 ? 0 : -djfs_from_errno(errno);
+}
+
+int64_t __djinn_fs_sync(int64_t handle);
+
+int64_t __djinn_fs_sync_dir(int64_t handle)
+{
+    return __djinn_fs_sync(handle);
 }
 
 int64_t __djinn_fs_sync(int64_t handle)
@@ -1168,12 +1286,17 @@ void __djinn_mark_waiting(void* handle);
 #define DJFS_OP_REMOVE 13
 #define DJFS_OP_RENAME 14
 #define DJFS_OP_LIST_OPEN 15
+#define DJFS_OP_CLOSE_DIR 16
+#define DJFS_OP_SYNC_DIR 17
 
 #define DJFS_WORKERS 4
 #define DJFS_SPIN 2000
 
 typedef struct djfs_request
 {
+#ifdef _WIN32
+    OVERLAPPED overlapped;
+#endif
     int32_t op;
     int64_t args[7];
     int64_t result;
@@ -1194,11 +1317,13 @@ static int64_t djfs_execute(const djfs_request* request)
     case DJFS_OP_OPEN_DIR: return __djinn_fs_open_dir(a[0], (const char*)(intptr_t)a[1], a[2], (int32_t)a[3]);
     case DJFS_OP_OPEN_FILE: return __djinn_fs_open_file(a[0], (const char*)(intptr_t)a[1], a[2], (int32_t)a[3], (int32_t)a[4]);
     case DJFS_OP_CLOSE: return __djinn_fs_close(a[0]);
+    case DJFS_OP_CLOSE_DIR: return __djinn_fs_close_dir(a[0]);
     case DJFS_OP_READ: return __djinn_fs_read(a[0], (void*)(intptr_t)a[1], a[2]);
     case DJFS_OP_WRITE: return __djinn_fs_write(a[0], (const void*)(intptr_t)a[1], a[2]);
     case DJFS_OP_SEEK: return __djinn_fs_seek(a[0], a[1], (int32_t)a[2]);
     case DJFS_OP_TRUNCATE: return __djinn_fs_truncate(a[0], a[1]);
     case DJFS_OP_SYNC: return __djinn_fs_sync(a[0]);
+    case DJFS_OP_SYNC_DIR: return __djinn_fs_sync_dir(a[0]);
     case DJFS_OP_FSTAT: return __djinn_fs_fstat(a[0], (int64_t*)(intptr_t)a[1]);
     case DJFS_OP_STAT: return __djinn_fs_stat(a[0], (const char*)(intptr_t)a[1], a[2], (int32_t)a[3], (int64_t*)(intptr_t)a[4]);
     case DJFS_OP_MKDIR: return __djinn_fs_mkdir(a[0], (const char*)(intptr_t)a[1], a[2], (int32_t)a[3]);
@@ -1340,6 +1465,242 @@ static void djfs_enqueue(djfs_request* request)
 
 #endif
 
+static void djfs_complete(djfs_request* request, int64_t result)
+{
+    void* coro = request->coro;
+    request->result = result;
+#ifdef _WIN32
+    MemoryBarrier();
+    request->done = 1;
+#else
+    __atomic_store_n(&request->done, 1, __ATOMIC_RELEASE);
+#endif
+    djinn_enqueue_task(&djinn_rt.ready_queue, coro);
+}
+
+#ifdef _WIN32
+
+// Reads and writes go straight to the kernel as overlapped I/O; one thread reaps the completion port and resumes the
+// coroutines, so a pending transfer does not hold a worker.
+static HANDLE djfs_iocp;
+static INIT_ONCE djfs_iocp_once = INIT_ONCE_STATIC_INIT;
+
+static DWORD WINAPI djfs_iocp_thread(LPVOID unused)
+{
+    (void)unused;
+    for (;;)
+    {
+        DWORD transferred = 0;
+        ULONG_PTR key = 0;
+        LPOVERLAPPED overlapped = NULL;
+        BOOL succeeded = GetQueuedCompletionStatus(djfs_iocp, &transferred, &key, &overlapped, INFINITE);
+        if (!overlapped) continue;
+        djfs_request* request = (djfs_request*)overlapped;
+        int64_t result = transferred;
+        if (!succeeded)
+        {
+            DWORD error = GetLastError();
+            result = (error == ERROR_HANDLE_EOF || error == ERROR_BROKEN_PIPE) ? 0 : -djfs_from_win32(error);
+        }
+        else
+        {
+            djfs_advance(DJFS_FILE(request->args[0]), result);
+        }
+        djfs_complete(request, result);
+    }
+    return 0;
+}
+
+static BOOL CALLBACK djfs_iocp_start(PINIT_ONCE once, PVOID parameter, PVOID* context)
+{
+    (void)once; (void)parameter; (void)context;
+    djfs_iocp = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 1);
+    if (!djfs_iocp) return FALSE;
+    HANDLE thread = CreateThread(NULL, 0, djfs_iocp_thread, NULL, 0, NULL);
+    if (!thread) return FALSE;
+    CloseHandle(thread);
+    return TRUE;
+}
+
+static int djfs_iocp_attach(HANDLE handle)
+{
+    if (!InitOnceExecuteOnce(&djfs_iocp_once, djfs_iocp_start, NULL, NULL)) return 0;
+    return CreateIoCompletionPort(handle, djfs_iocp, 0, 0) != NULL;
+}
+
+static int djfs_submit_native(djfs_request* request)
+{
+    if (request->op != DJFS_OP_READ && request->op != DJFS_OP_WRITE) return 0;
+    djfs_file* file = DJFS_FILE(request->args[0]);
+    void* buffer = (void*)(intptr_t)request->args[1];
+    int64_t count = request->args[2];
+    if (count < 0)
+    {
+        djfs_complete(request, -DJFS_INVALID_ARGUMENT);
+        return 1;
+    }
+    if (count > 0x40000000) count = 0x40000000;
+    djfs_offset(&request->overlapped, file->position);
+    BOOL started = request->op == DJFS_OP_WRITE ? WriteFile(file->handle, buffer, (DWORD)count, NULL, &request->overlapped)
+                                                : ReadFile(file->handle, buffer, (DWORD)count, NULL, &request->overlapped);
+    if (started) return 1;
+    DWORD error = GetLastError();
+    if (error == ERROR_IO_PENDING) return 1;
+    djfs_complete(request, (error == ERROR_HANDLE_EOF || error == ERROR_BROKEN_PIPE) ? 0 : -djfs_from_win32(error));
+    return 1;
+}
+
+#elif defined(__linux__) && defined(__has_include)
+#if __has_include(<linux/io_uring.h>)
+#define DJFS_URING 1
+#endif
+#endif
+
+#ifdef DJFS_URING
+
+#include <linux/io_uring.h>
+#include <sys/mman.h>
+#include <sys/syscall.h>
+
+// Regular files are not pollable, so reads and writes are submitted to io_uring and one thread reaps the completion
+// queue. When the kernel has no io_uring the requests fall back to the worker pool.
+static struct
+{
+    int fd;
+    int ready;
+    unsigned entries;
+    unsigned* sq_head;
+    unsigned* sq_tail;
+    unsigned* sq_mask;
+    unsigned* sq_array;
+    struct io_uring_sqe* sqes;
+    unsigned* cq_head;
+    unsigned* cq_tail;
+    unsigned* cq_mask;
+    struct io_uring_cqe* cqes;
+} djfs_ring;
+
+static pthread_mutex_t djfs_ring_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_once_t djfs_ring_once = PTHREAD_ONCE_INIT;
+
+static void* djfs_ring_thread(void* unused)
+{
+    (void)unused;
+    unsigned head = *djfs_ring.cq_head;
+    for (;;)
+    {
+        unsigned tail = __atomic_load_n(djfs_ring.cq_tail, __ATOMIC_ACQUIRE);
+        if (head == tail)
+        {
+            syscall(__NR_io_uring_enter, djfs_ring.fd, 0, 1, IORING_ENTER_GETEVENTS, NULL, 0);
+            continue;
+        }
+        while (head != tail)
+        {
+            struct io_uring_cqe* cqe = &djfs_ring.cqes[head & *djfs_ring.cq_mask];
+            djfs_request* request = (djfs_request*)(uintptr_t)cqe->user_data;
+            int32_t res = cqe->res;
+            head++;
+            __atomic_store_n(djfs_ring.cq_head, head, __ATOMIC_RELEASE);
+            djfs_complete(request, res < 0 ? -djfs_from_errno(-res) : res);
+        }
+    }
+    return NULL;
+}
+
+static void djfs_ring_start(void)
+{
+    struct io_uring_params params;
+    memset(&params, 0, sizeof(params));
+    int fd = (int)syscall(__NR_io_uring_setup, 256, &params);
+    if (fd < 0) return;
+    size_t sq_size = params.sq_off.array + params.sq_entries * sizeof(unsigned);
+    size_t cq_size = params.cq_off.cqes + params.cq_entries * sizeof(struct io_uring_cqe);
+    int single = (params.features & IORING_FEAT_SINGLE_MMAP) != 0;
+    if (single && cq_size > sq_size) sq_size = cq_size;
+    char* sq = (char*)mmap(NULL, sq_size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_POPULATE, fd, IORING_OFF_SQ_RING);
+    if (sq == MAP_FAILED) { close(fd); return; }
+    char* cq = sq;
+    if (!single)
+    {
+        cq = (char*)mmap(NULL, cq_size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_POPULATE, fd, IORING_OFF_CQ_RING);
+        if (cq == MAP_FAILED) { close(fd); return; }
+    }
+    void* sqes = mmap(NULL, params.sq_entries * sizeof(struct io_uring_sqe), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_POPULATE, fd, IORING_OFF_SQES);
+    if (sqes == MAP_FAILED) { close(fd); return; }
+    djfs_ring.fd = fd;
+    djfs_ring.entries = params.sq_entries;
+    djfs_ring.sq_head = (unsigned*)(sq + params.sq_off.head);
+    djfs_ring.sq_tail = (unsigned*)(sq + params.sq_off.tail);
+    djfs_ring.sq_mask = (unsigned*)(sq + params.sq_off.ring_mask);
+    djfs_ring.sq_array = (unsigned*)(sq + params.sq_off.array);
+    djfs_ring.sqes = (struct io_uring_sqe*)sqes;
+    djfs_ring.cq_head = (unsigned*)(cq + params.cq_off.head);
+    djfs_ring.cq_tail = (unsigned*)(cq + params.cq_off.tail);
+    djfs_ring.cq_mask = (unsigned*)(cq + params.cq_off.ring_mask);
+    djfs_ring.cqes = (struct io_uring_cqe*)(cq + params.cq_off.cqes);
+    pthread_t thread;
+    if (pthread_create(&thread, NULL, djfs_ring_thread, NULL) != 0) { close(fd); return; }
+    pthread_detach(thread);
+    djfs_ring.ready = 1;
+}
+
+static int djfs_submit_native(djfs_request* request)
+{
+    if (request->op != DJFS_OP_READ && request->op != DJFS_OP_WRITE) return 0;
+    pthread_once(&djfs_ring_once, djfs_ring_start);
+    if (!djfs_ring.ready) return 0;
+    int64_t count = request->args[2];
+    if (count < 0)
+    {
+        djfs_complete(request, -DJFS_INVALID_ARGUMENT);
+        return 1;
+    }
+    if (count > 0x7ffff000) count = 0x7ffff000;
+
+    pthread_mutex_lock(&djfs_ring_lock);
+    unsigned tail = *djfs_ring.sq_tail;
+    unsigned head = __atomic_load_n(djfs_ring.sq_head, __ATOMIC_ACQUIRE);
+    if (tail - head >= djfs_ring.entries)
+    {
+        pthread_mutex_unlock(&djfs_ring_lock);
+        return 0;
+    }
+    unsigned index = tail & *djfs_ring.sq_mask;
+    struct io_uring_sqe* sqe = &djfs_ring.sqes[index];
+    memset(sqe, 0, sizeof(*sqe));
+    sqe->opcode = request->op == DJFS_OP_WRITE ? IORING_OP_WRITE : IORING_OP_READ;
+    sqe->fd = (int)request->args[0];
+    sqe->addr = (uint64_t)(uintptr_t)request->args[1];
+    sqe->len = (uint32_t)count;
+    sqe->off = (uint64_t)-1;
+    sqe->user_data = (uint64_t)(uintptr_t)request;
+    djfs_ring.sq_array[index] = index;
+    __atomic_store_n(djfs_ring.sq_tail, tail + 1, __ATOMIC_RELEASE);
+    long submitted = syscall(__NR_io_uring_enter, djfs_ring.fd, 1, 0, 0, NULL, 0);
+    if (submitted < 1)
+    {
+        int error = errno;
+        __atomic_store_n(djfs_ring.sq_tail, tail, __ATOMIC_RELEASE);
+        pthread_mutex_unlock(&djfs_ring_lock);
+        if (submitted < 0 && error != EINTR && error != EAGAIN && error != EBUSY) djfs_complete(request, -djfs_from_errno(error));
+        else return 0;
+        return 1;
+    }
+    pthread_mutex_unlock(&djfs_ring_lock);
+    return 1;
+}
+
+#elif !defined(_WIN32)
+
+static int djfs_submit_native(djfs_request* request)
+{
+    (void)request;
+    return 0;
+}
+
+#endif
+
 int64_t __djinn_fs_submit(int32_t op, int64_t a0, int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5, int64_t a6, void* coro)
 {
     if (!coro) return -DJFS_INVALID_ARGUMENT;
@@ -1355,7 +1716,7 @@ int64_t __djinn_fs_submit(int32_t op, int64_t a0, int64_t a1, int64_t a2, int64_
     request->args[6] = a6;
     request->coro = coro;
     __djinn_mark_waiting(coro);
-    djfs_enqueue(request);
+    if (!djfs_submit_native(request)) djfs_enqueue(request);
     return (int64_t)(intptr_t)request;
 }
 

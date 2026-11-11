@@ -26,9 +26,12 @@ Windows failures (`error.djinn`). Operations that return nothing use `result<boo
 
 ## Async by default
 
-Every operation that touches the disk is `async`: it queues the blocking call on a small worker pool in the runtime
-(`__djinn_fs_submit`, 4 threads, started on first use). The coroutine is marked as waiting and the worker puts it back on the ready queue when the call returns, so the
-scheduler never blocks on the filesystem.
+Every operation that touches the disk is `async`. `read` and `write` go to the kernel's asynchronous I/O (IOCP on
+Windows, io_uring on Linux), and a completion thread puts the waiting coroutine back on the ready queue when the
+transfer finishes. The other operations (open, stat, mkdir, rename, remove, listing, sync) have no asynchronous form in
+the OS, so they run on a small worker pool (`__djinn_fs_submit`, 4 threads, started on first use) that wakes the
+coroutine the same way. Kernels without io_uring, and macOS, run reads and writes on the pool too. The scheduler never
+blocks on the filesystem.
 
 ```djinn
 result<File, FsError> file = await dir.open_file(path, OpenOptions.read());
@@ -50,7 +53,7 @@ raw `i64` handles. Nothing there validates paths or owns handles. (The namespace
 
 - `Path` borrows its text; keep the `str` alive. There is no owned path type or `join` yet.
 - Directory listings are read in full by `entries()`.
-- The worker pool has a fixed size and the coroutine polls its request once per scheduler turn.
+- Only `read` and `write` are natively asynchronous; the rest share a worker pool of fixed size.
 - `Directory.open_root` follows links in the leading part of an absolute path (`/tmp` on macOS); only the final
   component is checked.
 - The POSIX half of `runtime/fs_safe.c` (`openat`, `fstatat`, `renameat`...) was written and tested on Windows only; its first
