@@ -488,6 +488,13 @@ impl CodeGenerator {
         LLVMPositionBuilderAtEnd(this.builder, valid);
     }
 
+    void check_nonzero_divisor(Node* node, u32 common, ptr rhs) {
+        if ((node.proof_for(common) & RangeProof.DIVISOR_NONZERO) != 0) {
+            return;
+        }
+        this.check_divisor(node, rhs);
+    }
+
     void check_divisor(Node* node, ptr rhs) {
         ptr is_zero = LLVMBuildICmp(this.builder, LlvmConst.INT_EQ, rhs, LLVMConstNull(LLVMTypeOf(rhs)), "div.zero");
         if (this.can_throw("DivisionByZero")) {
@@ -498,6 +505,9 @@ impl CodeGenerator {
     }
 
     void check_shift(Node* node, u32 common, ptr rhs) {
+        if ((node.proof_for(common) & RangeProof.SHIFT_IN_RANGE) != 0) {
+            return;
+        }
         ptr width = LLVMConstInt(LLVMTypeOf(rhs), (u64)Types.bits(common), 0);
         ptr too_far = LLVMBuildICmp(this.builder, LlvmConst.INT_UGE, rhs, width, "shift.range");
         this.stop_when(too_far, node, RuntimeErrors.SHIFT_OUT_OF_RANGE);
@@ -604,11 +614,11 @@ impl CodeGenerator {
     }
 
     Value* gen_division(Node* node, bool is_signed, u32 common, ptr lhs, ptr rhs) {
-        this.check_divisor(node, rhs);
+        this.check_nonzero_divisor(node, common, rhs);
         if (is_signed && node.mode() == OverflowMode::SATURATING) {
             return this.gen_saturating_division(common, lhs, rhs);
         }
-        if (is_signed) {
+        if (is_signed && (node.proof_for(common) & RangeProof.NOT_MINIMUM_DIVIDED) == 0) {
             this.check_division_overflow(node, common, lhs, rhs);
             return Value.create(LLVMBuildSDiv(this.builder, lhs, rhs, "sdiv"), common);
         }
@@ -616,7 +626,7 @@ impl CodeGenerator {
     }
 
     Value* gen_remainder(Node* node, bool is_signed, u32 common, ptr lhs, ptr rhs) {
-        this.check_divisor(node, rhs);
+        this.check_nonzero_divisor(node, common, rhs);
         if (is_signed) { return Value.create(LLVMBuildSRem(this.builder, lhs, this.remainder_divisor(rhs), "srem"), common); }
         return Value.create(LLVMBuildURem(this.builder, lhs, rhs, "urem"), common);
     }

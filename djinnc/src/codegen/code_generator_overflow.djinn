@@ -51,6 +51,20 @@ impl CodeGenerator {
         return LLVMBuildMul(this.builder, lhs, rhs, "mul");
     }
 
+    // The range analysis proved the result fits the type, so the operation can never wrap and LLVM may rely on it.
+    unsafe ptr unwrapped_arithmetic(TokenKind op, bool is_signed, ptr lhs, ptr rhs) {
+        ptr result = this.plain_arithmetic(op, lhs, rhs);
+        if (LLVMIsAInstruction(result) == null) {
+            return result;
+        }
+        if (is_signed) {
+            LLVMSetNSW(result, 1);
+        } else {
+            LLVMSetNUW(result, 1);
+        }
+        return result;
+    }
+
     unsafe ptr saturating_multiply(ptr lhs, ptr rhs, bool is_signed) {
         ptr type = LLVMTypeOf(lhs);
         mut ptr<i8> name = "llvm.umul.with.overflow";
@@ -125,6 +139,9 @@ impl CodeGenerator {
     unsafe Value* gen_overflow_arithmetic(Node* node, TokenKind op, u32 common, ptr lhs, ptr rhs) {
         OverflowMode mode = node.mode();
         bool is_signed = Types.is_signed(common);
+        if ((node.proof_for(common) & RangeProof.OVERFLOW_FREE) != 0) {
+            return Value.create(this.unwrapped_arithmetic(op, is_signed, lhs, rhs), common);
+        }
         if (mode.detects_overflow()) {
             ptr pair = this.overflow_intrinsic(this.checked_intrinsic_name(op, is_signed), lhs, rhs);
             ptr result = LLVMBuildExtractValue(this.builder, pair, 0, "ovf.result");
@@ -156,7 +173,8 @@ impl CodeGenerator {
         ptr value = operand.ref;
         OverflowMode mode = node.mode();
         bool negative_literal = node.first().kind() == NodeKind::INT_LITERAL;
-        if (!Types.is_signed(type) || mode == OverflowMode::WRAPPED || negative_literal) {
+        bool proven = (node.proof_for(type) & RangeProof.OVERFLOW_FREE) != 0;
+        if (!Types.is_signed(type) || mode == OverflowMode::WRAPPED || negative_literal || proven) {
             return Value.create(LLVMBuildNeg(this.builder, value, "neg"), type);
         }
         ptr llvm = LLVMTypeOf(value);
