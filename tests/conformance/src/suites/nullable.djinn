@@ -1,0 +1,196 @@
+namespace conformance;
+
+import testing;
+import djinnc::testing;
+import djinnc;
+
+struct NullablePointerTests {
+    [Test]
+    void compare_with_null() {
+        str source = """
+struct Box {
+    i32 value;
+}
+
+i32 main() {
+    Box local = { .value = 7 };
+    mut Box*? maybe = null;
+    if (maybe != null) { return 1; }
+    if (!(maybe == null)) { return 2; }
+    maybe = &local;
+    if (maybe == null) { return 3; }
+    if (null == maybe) { return 4; }
+    return 0;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(0));
+    }
+
+    [Test]
+    void walk_linked_list() {
+        str source = """
+struct Node {
+    i32 value;
+    Node*? next;
+}
+
+i32 sum(Node*? head) {
+    mut i32 total = 0;
+    mut Node*? current = head;
+    while (current != null) {
+        total = total + current.value;
+        current = current.next;
+    }
+    return total;
+}
+
+i32 main() {
+    Node last = { .value = 5, .next = null };
+    Node first = { .value = 7, .next = &last };
+    return sum(&first);
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(12));
+    }
+
+    [Test]
+    void condition_with_member() {
+        str source = """
+struct Node {
+    i32 value;
+    Node*? next;
+}
+
+i32 main() {
+    Node last = { .value = 5, .next = null };
+    Node*? p = &last;
+    if (p != null && p.value == 5) { return 3; }
+    return 0;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(3));
+    }
+
+    [Test]
+    void assert_non_null() {
+        str source = """
+struct Node {
+    i32 value;
+}
+
+i32 main() {
+    Node local = { .value = 9 };
+    Node*? p = &local;
+    return p!.value;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(9));
+    }
+
+    [Test]
+    void assert_on_non_nullable_is_error() {
+        str source = """
+struct Node {
+    i32 value;
+}
+
+i32 main() {
+    Node local = { .value = 9 };
+    Node* p = &local;
+    return p!.value;
+}
+""";
+        Verify.source(source).with_std().diagnostics(Expected.error(DiagnosticErrors.INVALID_OPERATOR_OPERAND).at(8, 13));
+    }
+
+    [Test]
+    void coalesce_nullable_pointer() {
+        str source = """
+struct Box {
+    i32 value;
+}
+
+i32 main() {
+    Box first = { .value = 4 };
+    Box second = { .value = 6 };
+    Box*? missing = null;
+    Box* chosen = missing ?? &second;
+    Box*? still = missing ?? null;
+    if (still != null) { return 1; }
+    Box*? present = &first;
+    Box* kept = present ?? &second;
+    return chosen.value + kept.value;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(10));
+    }
+
+    [Test]
+    void coalesce_assignment() {
+        str source = """
+struct Box {
+    i32 value;
+}
+
+i32 main() {
+    Box first = { .value = 4 };
+    Box second = { .value = 6 };
+    mut Box*? slot = null;
+    slot ??= &first;
+    slot ??= &second;
+    return slot!.value;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(4));
+    }
+
+    [Test]
+    void conditional_member_access() {
+        str source = """
+struct Node {
+    i32 value;
+    Node*? next;
+    Node*? successor() { return this.next; }
+}
+
+i32 main() {
+    Node last = { .value = 5, .next = null };
+    Node first = { .value = 7, .next = &last };
+    Node*? start = &first;
+    Node*? none = null;
+    Node*? second = start?.next;
+    if (second == null) { return 1; }
+    Node*? beyond = start?.next?.next;
+    if (beyond != null) { return 2; }
+    Node*? from_none = none?.next?.next;
+    if (from_none != null) { return 3; }
+    Node*? by_call = start?.successor();
+    if (by_call == null) { return 4; }
+    return second!.value + by_call!.value;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(10));
+    }
+
+    [Test]
+    void conditional_access_on_non_nullable_is_error() {
+        str source = """
+struct Inner {
+    i32 value;
+}
+
+struct Outer {
+    Inner* inner;
+}
+
+i32 main() {
+    Inner leaf = { .value = 5 };
+    Outer holder = { .inner = &leaf };
+    Outer* pointer = &holder;
+    Inner* chained = pointer?.inner;
+    return 0;
+}
+""";
+        Verify.source(source).with_std().diagnostics(Expected.error(DiagnosticErrors.INVALID_OPERATOR_OPERAND).at(13, 29));
+    }
+}

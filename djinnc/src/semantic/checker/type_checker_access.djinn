@@ -125,7 +125,15 @@ impl TypeChecker {
         return Types.i32_type();
     }
 
-    unsafe StructInfo* struct_of_base(Node* base) {
+    unsafe u32 pointer_type_inside_nullable_type(u32 type) {
+        if (Types.is_nullable_pointer(type)) {
+            return Types.pointer_to(Types.element(type));
+        }
+        SymbolTable* symbols = this.symbols;
+        return symbols.nullable_payload(type);
+    }
+
+    unsafe StructInfo* struct_of_base(Node* parent, Node* base) {
         mut u32 type = 0;
         if (this.is_addressable(base)) {
             type = this.check_lvalue(base);
@@ -135,6 +143,16 @@ impl TypeChecker {
                 this.error_code(base, DiagnosticErrors.INVALID_MEMBER_ACCESS, "member access needs a struct or a pointer to one");
                 return (StructInfo*)0;
             }
+        }
+        u32 unwrapped = this.pointer_type_inside_nullable_type(type);
+        bool wraps_nullable_pointer_in_optional = !Types.is_pointer(type);
+        if (unwrapped != 0 && wraps_nullable_pointer_in_optional) {
+            Node* unwrap = Node.create(NodeKind::UNARY, base.token);
+            unwrap.set_op_kind(TokenKind::BANG_DOT);
+            unwrap.set_first(base);
+            unwrap.set_value_type(unwrapped);
+            parent.set_first(unwrap);
+            type = unwrapped;
         }
         mut u32 target = type;
         if (Types.is_pointer(type)) {
@@ -162,7 +180,7 @@ impl TypeChecker {
             this.error_code(node, DiagnosticErrors.INVALID_MEMBER_ACCESS, "a struct constant cannot be used as a variable");
             return Types.i32_type();
         }
-        StructInfo* info = this.struct_of_base(base);
+        StructInfo* info = this.struct_of_base(node, base);
         if (info == null) {
             return Types.i32_type();
         }

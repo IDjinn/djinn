@@ -1,10 +1,56 @@
 namespace djinnc;
 
 impl TypeChecker {
+    unsafe FunctionInfo* function_named_by_address_of(Node* operand) {
+        if (operand.kind() != NodeKind::IDENTIFIER || this.find_variable(operand.name()) != null || this.is_struct_name(operand)) {
+            return (FunctionInfo*)0;
+        }
+        SymbolTable* symbols = this.symbols;
+        FunctionInfo* candidate = symbols.find_function(operand.text_atom(), operand.name(), this.scope);
+        if (candidate == null || candidate.is_template || candidate.overload != null) {
+            return (FunctionInfo*)0;
+        }
+        return candidate;
+    }
+
+    Node* conditional_access_of(Node* conditional) {
+        Node* chain = conditional.first();
+        if (chain.kind() == NodeKind::CALL) {
+            return chain.first();
+        }
+        return chain;
+    }
+
+    unsafe u32 check_conditional_member_access(Node* node) {
+        Node* chain = node.first();
+        Node* access = this.conditional_access_of(node);
+        u32 chain_type = this.check_expression(chain, 0);
+        Node* checked_base = access.first();
+        bool base_was_unwrapped = checked_base.kind() == NodeKind::UNARY && checked_base.op_kind() == TokenKind::BANG_DOT;
+        if (!base_was_unwrapped) {
+            this.error_code(node, DiagnosticErrors.INVALID_OPERATOR_OPERAND, "the operand of '?.' must be a nullable pointer");
+            return chain_type;
+        }
+        SymbolTable* symbols = this.symbols;
+        if (Types.is_pointer(chain_type) && Types.is_safe_pointer(chain_type)) {
+            return symbols.nullable_of_pointer(chain_type, this.scope);
+        }
+        if (this.pointer_type_inside_nullable_type(chain_type) != 0) {
+            return chain_type;
+        }
+        this.error_code(node, DiagnosticErrors.INVALID_OPERATOR_OPERAND, "'?.' needs a member of pointer type, because its result is a nullable pointer");
+        return chain_type;
+    }
+
     u32 check_unary(Node* node, u32 expected) {
         TokenKind op = node.op_kind();
 
         if (op == TokenKind::AMPERSAND) {
+            FunctionInfo* addressed_function = this.function_named_by_address_of(node.first());
+            if (addressed_function != null) {
+                node.first().set_symbol(SymbolKind.FUNCTION, (ptr)addressed_function);
+                return Types.pointer_to(Types.void_type());
+            }
             u32 addressed = this.check_lvalue(node.first());
             Node* operand = node.first();
             if (operand.symbol_kind() == SymbolKind.PROPERTY_GET || operand.symbol_kind() == SymbolKind.INDEX_GET) {
@@ -17,6 +63,18 @@ impl TypeChecker {
         }
         if (op == TokenKind::PLUS_PLUS || op == TokenKind::MINUS_MINUS) {
             return this.check_count(node);
+        }
+        if (op == TokenKind::QUESTION_DOT) {
+            return this.check_conditional_member_access(node);
+        }
+        if (op == TokenKind::BANG_DOT) {
+            u32 nullable = this.check_expression(node.first(), 0);
+            u32 target = this.pointer_type_inside_nullable_type(nullable);
+            if (target == 0) {
+                this.error_code(node, DiagnosticErrors.INVALID_OPERATOR_OPERAND, "the operand of '!.' must be a nullable pointer");
+                return nullable;
+            }
+            return target;
         }
 
         Node* negated = node.first();
@@ -255,6 +313,24 @@ impl TypeChecker {
         return method.return_type;
     }
 
+    bool compares_nullable_pointers(u32 left, u32 right) {
+        u32 left_target = this.pointer_type_inside_nullable_type(left);
+        u32 right_target = this.pointer_type_inside_nullable_type(right);
+        if (left_target == 0 && right_target == 0) {
+            return false;
+        }
+        if (left_target != 0 && right_target != 0) {
+            return left_target == right_target;
+        }
+        mut u32 other = right;
+        mut u32 target = left_target;
+        if (left_target == 0) {
+            other = left;
+            target = right_target;
+        }
+        return Types.is_pointer(other) && (other == target || Types.is_void(Types.element(other)));
+    }
+
     u32 check_binary(Node* node, u32 expected) {
         TokenKind op = node.op_kind();
         if (op == TokenKind::AND_AND || op == TokenKind::OR_OR) {
@@ -271,11 +347,16 @@ impl TypeChecker {
 
         if (op == TokenKind::QUESTION_QUESTION) {
             u32 pointer = this.check_expression(node.first(), expected);
-            if (!Types.is_pointer(pointer)) {
+            u32 pointer_inside_nullable = this.pointer_type_inside_nullable_type(pointer);
+            if (!Types.is_pointer(pointer) && pointer_inside_nullable == 0) {
                 this.error_code(node, DiagnosticErrors.INVALID_OPERATOR_OPERAND, "the left operand of ?? must be a pointer");
                 return pointer;
             }
             u32 fallback = this.check_expression(node.second(), pointer);
+            bool left_is_wrapped_nullable = !Types.is_pointer(pointer);
+            if (left_is_wrapped_nullable && fallback == pointer_inside_nullable) {
+                return pointer_inside_nullable;
+            }
             if (Types.is_nullable_pointer(pointer) && Types.is_safe_pointer(fallback)) {
                 return fallback;
             }
@@ -295,6 +376,10 @@ impl TypeChecker {
         } else {
             left = this.check_expression(node.first(), hint);
             right = this.check_expression(node.second(), left);
+        }
+
+        if ((op == TokenKind::EQUAL_EQUAL || op == TokenKind::BANG_EQUAL) && this.compares_nullable_pointers(left, right)) {
+            return Types.bool_type();
         }
 
         if (Types.is_pointer(left) && Types.is_integer(right) && (op == TokenKind::PLUS || op == TokenKind::MINUS)) {
