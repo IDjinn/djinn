@@ -1,0 +1,106 @@
+namespace djinnc;
+
+// What every caller passes to a free function and what it returns, joined over the whole program. A summary is only
+// trusted when every reference to the function was seen as a direct call, so a function whose address is taken, or
+// that is called from code the analysis does not walk, keeps the full range of its parameter types.
+struct RangeSummary {
+    FunctionInfo* info;
+    bool eligible;
+    i32 references;
+    i32 callee_references;
+    i32 calls_seen;
+    i32 returns_total;
+    i32 returns_seen;
+    i32 count;
+    ptr<i64> in_low;
+    ptr<i64> in_high;
+    ptr<u8> in_known;
+    ptr<i64> out_low;
+    ptr<i64> out_high;
+    ptr<u8> out_state;
+    bool ret_in_known;
+    i64 ret_in_low;
+    i64 ret_in_high;
+    u8 ret_state;
+    i64 ret_out_low;
+    i64 ret_out_high;
+
+    public static unsafe RangeSummary* create(FunctionInfo* info) {
+        RangeSummary* summary = (RangeSummary*)Memory.zalloc(sizeof(RangeSummary));
+        IdList* params = info.param_types;
+        summary.info = info;
+        summary.count = params.length;
+        summary.in_low = (ptr<i64>)Memory.zalloc((u64)(params.length + 1) * 8);
+        summary.in_high = (ptr<i64>)Memory.zalloc((u64)(params.length + 1) * 8);
+        summary.in_known = (ptr<u8>)Memory.zalloc((u64)(params.length + 1));
+        summary.out_low = (ptr<i64>)Memory.zalloc((u64)(params.length + 1) * 8);
+        summary.out_high = (ptr<i64>)Memory.zalloc((u64)(params.length + 1) * 8);
+        summary.out_state = (ptr<u8>)Memory.zalloc((u64)(params.length + 1));
+        return summary;
+    }
+
+    public bool trusted() {
+        return this.eligible && this.references == this.callee_references;
+    }
+
+    // out_state: 0 nothing seen yet, 1 a known interval, 2 anything.
+    public unsafe void join_argument(i32 index, bool top, i64 low, i64 high) {
+        if (this.out_state[index] == 2) {
+            return;
+        }
+        if (top) {
+            this.out_state[index] = 2;
+            return;
+        }
+        if (this.out_state[index] == 0) {
+            this.out_state[index] = 1;
+            this.out_low[index] = low;
+            this.out_high[index] = high;
+            return;
+        }
+        this.out_low[index] = RangeMath.lesser(this.out_low[index], low);
+        this.out_high[index] = RangeMath.greater(this.out_high[index], high);
+    }
+
+    public unsafe void join_return(bool top, i64 low, i64 high) {
+        if (this.ret_state == 2) {
+            return;
+        }
+        if (top) {
+            this.ret_state = 2;
+            return;
+        }
+        if (this.ret_state == 0) {
+            this.ret_state = 1;
+            this.ret_out_low = low;
+            this.ret_out_high = high;
+            return;
+        }
+        this.ret_out_low = RangeMath.lesser(this.ret_out_low, low);
+        this.ret_out_high = RangeMath.greater(this.ret_out_high, high);
+    }
+
+    // Ends a pass: what the callers passed becomes what the next pass assumes, but only when every call was seen.
+    public unsafe void settle() {
+        bool complete = this.trusted() && this.calls_seen == this.callee_references;
+        for (mut i32 i = 0; i < this.count; i = i + 1) {
+            this.in_known[i] = 0;
+            if (complete && this.out_state[i] == 1) {
+                this.in_known[i] = 1;
+                this.in_low[i] = this.out_low[i];
+                this.in_high[i] = this.out_high[i];
+            }
+            this.out_state[i] = 0;
+        }
+        this.ret_in_known = false;
+        bool returned = this.trusted() && this.returns_total > 0 && this.returns_seen == this.returns_total;
+        if (returned && this.ret_state == 1) {
+            this.ret_in_known = true;
+            this.ret_in_low = this.ret_out_low;
+            this.ret_in_high = this.ret_out_high;
+        }
+        this.ret_state = 0;
+        this.calls_seen = 0;
+        this.returns_seen = 0;
+    }
+}

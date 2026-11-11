@@ -1,0 +1,116 @@
+namespace djinnc;
+
+struct RangeState {
+    ptr<ptr> keys;
+    ptr<i64> lows;
+    ptr<i64> highs;
+    i32 count;
+    i32 capacity;
+    bool dead;
+
+    public static unsafe RangeState* create() {
+        return (RangeState*)Memory.zalloc(sizeof(RangeState));
+    }
+
+    public unsafe RangeState* copy() {
+        RangeState* clone = RangeState.create();
+        clone.dead = this.dead;
+        for (mut i32 i = 0; i < this.count; i = i + 1) {
+            clone.put(this.keys[i], this.lows[i], this.highs[i]);
+        }
+        return clone;
+    }
+
+    public unsafe i32 find(ptr key) {
+        for (mut i32 i = 0; i < this.count; i = i + 1) {
+            if (this.keys[i] == key) {
+                return i;
+            }
+        }
+        return 0 - 1;
+    }
+
+    public unsafe i64 low(i32 index) {
+        return this.lows[index];
+    }
+
+    public unsafe i64 high(i32 index) {
+        return this.highs[index];
+    }
+
+    unsafe void grow() {
+        if (this.count < this.capacity) {
+            return;
+        }
+        mut i32 capacity = this.capacity * 2;
+        if (capacity < 8) {
+            capacity = 8;
+        }
+        ptr<ptr> keys = (ptr<ptr>)Memory.zalloc((u64)capacity * 8);
+        ptr<i64> lows = (ptr<i64>)Memory.zalloc((u64)capacity * 8);
+        ptr<i64> highs = (ptr<i64>)Memory.zalloc((u64)capacity * 8);
+        for (mut i32 i = 0; i < this.count; i = i + 1) {
+            keys[i] = this.keys[i];
+            lows[i] = this.lows[i];
+            highs[i] = this.highs[i];
+        }
+        this.keys = keys;
+        this.lows = lows;
+        this.highs = highs;
+        this.capacity = capacity;
+    }
+
+    public unsafe void put(ptr key, i64 low, i64 high) {
+        mut i32 at = this.find(key);
+        if (at < 0) {
+            this.grow();
+            at = this.count;
+            this.count = this.count + 1;
+            this.keys[at] = key;
+        }
+        this.lows[at] = low;
+        this.highs[at] = high;
+    }
+
+    public unsafe void remove(ptr key) {
+        i32 at = this.find(key);
+        if (at < 0) {
+            return;
+        }
+        i32 last = this.count - 1;
+        this.keys[at] = this.keys[last];
+        this.lows[at] = this.lows[last];
+        this.highs[at] = this.highs[last];
+        this.count = last;
+    }
+
+    // A missing key means the full range of the variable's type, so the hull keeps only keys known on both sides.
+    public unsafe void join(RangeState* other) {
+        if (other.dead) {
+            return;
+        }
+        if (this.dead) {
+            this.count = 0;
+            this.dead = false;
+            for (mut i32 i = 0; i < other.count; i = i + 1) {
+                this.put(other.keys[i], other.lows[i], other.highs[i]);
+            }
+            return;
+        }
+        mut i32 i = 0;
+        while (i < this.count) {
+            i32 at = other.find(this.keys[i]);
+            if (at < 0) {
+                this.remove(this.keys[i]);
+            } else {
+                if (other.lows[at] < this.lows[i]) {
+                    this.lows[i] = other.lows[at];
+                }
+                if (other.highs[at] > this.highs[i]) {
+                    this.highs[i] = other.highs[at];
+                }
+                i = i + 1;
+            }
+        }
+    }
+}

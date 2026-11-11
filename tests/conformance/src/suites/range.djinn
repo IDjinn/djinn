@@ -1,0 +1,387 @@
+namespace conformance;
+
+import testing;
+import djinnc::testing;
+import djinnc;
+
+struct RangeTests {
+    static void exits_at_every_level(str source, i32 code) {
+        Verify.source(source).optimized(1).runs(Expected.exit(code));
+        Verify.source(source).optimized(2).runs(Expected.exit(code));
+        Verify.source(source).optimized(3).runs(Expected.exit(code));
+    }
+
+    static void crashes_at_every_level(str source, ptr<i8> text) {
+        Verify.source(source).optimized(1).crashes(Expected.contains(text));
+        Verify.source(source).optimized(2).crashes(Expected.contains(text));
+        Verify.source(source).optimized(3).crashes(Expected.contains(text));
+    }
+
+    [Test]
+    void widened_operands_compute_without_a_check() {
+        str source = """
+i32 sum(u8 a, u8 b) { return (i32)a + (i32)b; }
+i32 scale(i32 x) { return (x & 255) * 3; }
+
+i32 main() {
+    if (sum(255, 255) != 510) { return 1; }
+    if (scale(1000) != 696) { return 2; }
+    return 42;
+}
+""";
+        RangeTests.exits_at_every_level(source, 42);
+    }
+
+    [Test]
+    void a_guard_proves_the_increment_but_not_the_unguarded_one() {
+        str source = """
+i32 guarded(i32 n) {
+    if (n < 100 && n > 0 - 100) { return n + 1; }
+    return 0 - 1;
+}
+
+i32 unguarded(i32 n) { return n + 1; }
+
+i32 main() {
+    if (guarded(99) != 100) { return 1; }
+    if (guarded(100) != 0 - 1) { return 2; }
+    return unguarded(2147483647);
+}
+""";
+        RangeTests.crashes_at_every_level(source, "integer overflow");
+    }
+
+    [Test]
+    void the_loop_counter_keeps_its_checks_when_the_bound_is_the_type_limit() {
+        str source = """
+i32 main() {
+    mut i32 steps = 0;
+    for (mut i32 i = 2147483640; i <= 2147483647; i++) {
+        steps = steps + 1;
+    }
+    return steps;
+}
+""";
+        RangeTests.crashes_at_every_level(source, "integer overflow");
+    }
+
+    [Test]
+    void a_counted_loop_sums_correctly() {
+        str source = """
+i32 main() {
+    mut i32 total = 0;
+    for (mut i32 i = 0; i < 8; i++) { total = total + i; }
+    return total + 14;
+}
+""";
+        RangeTests.exits_at_every_level(source, 42);
+    }
+
+    [Test]
+    void a_value_written_inside_the_loop_is_not_assumed_constant() {
+        str source = """
+i32 main() {
+    mut i32 value = 1;
+    mut i32 round = 0;
+    while (round < 40) {
+        value = value * 2;
+        round = round + 1;
+    }
+    return value;
+}
+""";
+        RangeTests.crashes_at_every_level(source, "integer overflow");
+    }
+
+    [Test]
+    void a_branch_that_reassigns_the_variable_invalidates_the_guard() {
+        str source = """
+i32 pick(i32 flag, i32 n) {
+    mut i32 value = n;
+    if (value < 100) {
+        if (flag != 0) { value = 2147483647; }
+        return value + 1;
+    }
+    return 0;
+}
+
+i32 main() {
+    if (pick(0, 5) != 6) { return 1; }
+    return pick(1, 5);
+}
+""";
+        RangeTests.crashes_at_every_level(source, "integer overflow");
+    }
+
+    [Test]
+    void an_address_taken_local_is_never_assumed() {
+        str source = """
+void poke(i32* target) { *target = 2147483647; }
+
+i32 main() {
+    mut i32 value = 5;
+    poke(&value);
+    return value + 1;
+}
+""";
+        RangeTests.crashes_at_every_level(source, "integer overflow");
+    }
+
+    [Test]
+    void division_by_a_proven_nonzero_divisor_still_divides() {
+        str source = """
+i32 main() {
+    i32 divisor = 7;
+    i32 quotient = 50 / divisor;
+    i32 remainder = 50 % divisor;
+    return quotient * 6 + remainder;
+}
+""";
+        RangeTests.exits_at_every_level(source, 43);
+    }
+
+    [Test]
+    void a_proven_signed_division_keeps_signed_semantics() {
+        str source = """
+i32 halve(i32 a) {
+    i32 shifted = (a & 255) - 300;
+    return shifted / 4 + shifted % 4;
+}
+
+i32 main() {
+    return halve(20) + 112;
+}
+""";
+        RangeTests.exits_at_every_level(source, 42);
+    }
+
+    [Test]
+    void division_by_an_unknown_divisor_still_traps() {
+        str source = """
+i32 divide(i32 a, i32 b) { return a / b; }
+
+i32 main() {
+    return divide(10, 0);
+}
+""";
+        RangeTests.crashes_at_every_level(source, "division by zero");
+    }
+
+    [Test]
+    void a_shift_inside_the_width_is_computed() {
+        str source = """
+i32 main() {
+    i32 value = 9;
+    return ((value & 15) << 3) - 30;
+}
+""";
+        RangeTests.exits_at_every_level(source, 42);
+    }
+
+    [Test]
+    void a_shift_beyond_the_width_still_traps() {
+        str source = """
+i32 shift(i32 a, i32 b) { return a << b; }
+
+i32 main() {
+    return shift(1, 40);
+}
+""";
+        RangeTests.crashes_at_every_level(source, "shift");
+    }
+
+    [Test]
+    void negating_the_minimum_still_traps() {
+        str source = """
+i32 negate(i32 a) { return -a; }
+
+i32 main() {
+    return negate(0 - 2147483647 - 1);
+}
+""";
+        RangeTests.crashes_at_every_level(source, "overflow");
+    }
+
+    [Test]
+    void a_break_keeps_the_loop_condition_from_refining_the_exit() {
+        str source = """
+i32 main() {
+    mut i32 n = 0;
+    while (n < 10) {
+        if (n == 5) { n = 2147483647; break; }
+        n = n + 1;
+    }
+    return n + 1;
+}
+""";
+        RangeTests.crashes_at_every_level(source, "integer overflow");
+    }
+
+    [Test]
+    void compound_assignment_in_a_proven_range_updates_the_interval() {
+        str source = """
+i32 main() {
+    mut i32 value = 10;
+    value += 20;
+    value *= 2;
+    value -= 18;
+    return value;
+}
+""";
+        RangeTests.exits_at_every_level(source, 42);
+    }
+
+    [Test]
+    void a_counter_keeps_its_lower_bound_across_the_loop() {
+        str source = """
+u32 offsets(u32 limit) {
+    mut u32 total = 0;
+    for (mut u32 i = 5; i < 10; i++) {
+        if (i < limit) { total = total + (i - 5); }
+    }
+    return total;
+}
+
+i32 main() {
+    return (i32)offsets(8) + 39;
+}
+""";
+        RangeTests.exits_at_every_level(source, 42);
+    }
+
+    [Test]
+    void a_counter_that_is_also_reset_loses_its_lower_bound() {
+        str source = """
+i32 main() {
+    mut u32 i = 5;
+    mut u32 guard = 0;
+    while (guard < 3) {
+        i++;
+        if (guard == 1) { i = 0; }
+        guard++;
+    }
+    return (i32)(i - 5);
+}
+""";
+        RangeTests.crashes_at_every_level(source, "overflow");
+    }
+
+    [Test]
+    void a_counter_that_steps_by_a_variable_is_not_monotone() {
+        str source = """
+i32 main() {
+    mut i32 value = 10;
+    mut i32 step = 0 - 20;
+    for (mut i32 round = 0; round < 3; round++) {
+        value = value + step;
+    }
+    return value + 92;
+}
+""";
+        RangeTests.exits_at_every_level(source, 42);
+    }
+
+    [Test]
+    void a_bounds_check_inside_a_counted_loop_passes_and_an_outside_index_traps() {
+        str source = """
+i32 walk(i32 index) {
+    mut i32 hits = 0;
+    for (mut i32 i = 0; i < 4; i++) {
+        bounds_check(i, 4);
+        hits = hits + 1;
+    }
+    bounds_check(index, 4);
+    return hits;
+}
+
+i32 main() {
+    if (walk(3) != 4) { return 1; }
+    return walk(4);
+}
+""";
+        RangeTests.crashes_at_every_level(source, "out of range");
+    }
+
+    [Test]
+    void parameters_summarized_over_every_caller_prove_the_body() {
+        str source = """
+i32 bump(i32 n) { return n + 1; }
+i32 scaled(i32 n) { return n * 1000; }
+i32 bounded(i32 n) { return n & 15; }
+
+i32 main() {
+    i32 a = bump(10) + bump(20);
+    i32 b = scaled(bounded(a)) + scaled(bounded(7));
+    return b / 1000 + a + 3;
+}
+""";
+        RangeTests.exits_at_every_level(source, 42);
+    }
+
+    [Test]
+    void one_large_caller_keeps_the_check_in_the_callee() {
+        str source = """
+i32 bump(i32 n) { return n + 1; }
+
+i32 main() {
+    i32 small = bump(10);
+    return bump(2147483647) + small;
+}
+""";
+        RangeTests.crashes_at_every_level(source, "integer overflow");
+    }
+
+    [Test]
+    void a_returned_range_flows_to_the_caller() {
+        str source = """
+i32 low_bits(i32 x) { return x & 15; }
+i32 wide(i32 x) { return x; }
+
+i32 main() {
+    i32 scaled = low_bits(123461) * 1000;
+    return scaled / 1000 + wide(34) + 0;
+}
+""";
+        RangeTests.exits_at_every_level(source, 39);
+    }
+
+    [Test]
+    void an_unbounded_returned_value_keeps_the_check() {
+        str source = """
+i32 pass(i32 x) { return x; }
+
+i32 main() {
+    return pass(2147483647) + pass(1);
+}
+""";
+        RangeTests.crashes_at_every_level(source, "integer overflow");
+    }
+
+    [Test]
+    void a_function_whose_address_is_taken_is_not_summarized() {
+        str source = """
+i32 grow(i32 n) { return n + 1; }
+
+i32 main() {
+    ptr<void> address = &grow;
+    if (address == null) { return 1; }
+    i32 small = grow(1);
+    return grow(2147483647) + small;
+}
+""";
+        RangeTests.crashes_at_every_level(source, "integer overflow");
+    }
+
+    [Test]
+    void a_function_called_with_named_arguments_is_not_summarized() {
+        str source = """
+i32 grow(i32 amount, i32 bonus) { return amount + bonus; }
+
+i32 main() {
+    i32 small = grow(1, 2);
+    return grow(bonus: 2147483647, amount: 5) + small;
+}
+""";
+        RangeTests.crashes_at_every_level(source, "integer overflow");
+    }
+}

@@ -1,0 +1,1144 @@
+namespace djinnc;
+
+unsafe static mut i32 range_proven_checks = 0;
+
+// Interval analysis over the typed AST. It proves runtime checks redundant and records the proof on the node,
+// keyed by the common type the check would run in. Every rule must hold on every execution: anything not modeled
+// falls back to the full range of the type, and a missing proof keeps the check.
+struct RangeAnalysis {
+    RangeState* state;
+    PointerList* excluded;
+    RangeSummary* current;
+    PointerList* summaries;
+    i32 quiet;
+    i32 base_quiet;
+    bool top;
+    i64 low;
+    i64 high;
+
+    public static i32 proven() {
+        return range_proven_checks;
+    }
+
+    // Whole-program summaries need every caller in view, so a library, whose public functions have unknown callers,
+    // only gets the per-function analysis. Two collecting passes tighten the summaries before the proving pass.
+    public static unsafe void run(SymbolTable* symbols, bool library) {
+        if (ast_proofs == null) {
+            ast_proofs = calloc((u64)ast_capacity, 4);
+        }
+        RangeAnalysis* analysis = (RangeAnalysis*)Memory.zalloc(sizeof(RangeAnalysis));
+        analysis.summaries = PointerList.create();
+        mut i32 passes = 1;
+        if (!library) {
+            analysis.summarize(symbols);
+            passes = 3;
+        }
+        PointerList* functions = symbols.functions;
+        for (mut i32 pass = 0; pass < passes; pass = pass + 1) {
+            analysis.base_quiet = 0;
+            if (pass < passes - 1) {
+                analysis.base_quiet = 1;
+            }
+            for (mut i32 i = 0; i < functions.length; i = i + 1) {
+                FunctionInfo* info = (FunctionInfo*)functions.get(i);
+                if (info.is_extern || info.is_template || info.node == null) {
+                    continue;
+                }
+                Node* declaration = info.node;
+                if (declaration.kind() != NodeKind::FUNCTION || declaration.first() == null) {
+                    continue;
+                }
+                analysis.function(info, declaration);
+            }
+            PointerList* summaries = analysis.summaries;
+            for (mut i32 s = 0; s < summaries.length; s = s + 1) {
+                RangeSummary* summary = (RangeSummary*)summaries.get(s);
+                summary.settle();
+            }
+        }
+    }
+
+    unsafe bool summarizable(FunctionInfo* info) {
+        Node* declaration = info.node;
+        if (info.is_extern || info.is_template || info.is_variadic || info.is_instance || info.is_async || info.is_disabled
+            || info.owner != null || declaration == null || declaration.kind() != NodeKind::FUNCTION
+            || declaration.first() == null || info.name_atom == Atoms.MAIN_ATOM) {
+            return false;
+        }
+        PointerList* uses = Attributes.of(declaration);
+        for (mut i32 i = 0; i < uses.length; i = i + 1) {
+            AttributeUse* use = (AttributeUse*)uses.get(i);
+            if (Attributes.llvm_name(use.name) == null || Attributes.named(use.name, "Export")) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    unsafe void summarize(SymbolTable* symbols) {
+        PointerList* functions = symbols.functions;
+        PointerList* summaries = this.summaries;
+        for (mut i32 i = 0; i < functions.length; i = i + 1) {
+            FunctionInfo* info = (FunctionInfo*)functions.get(i);
+            if (this.summarizable(info)) {
+                RangeSummary* summary = RangeSummary.create(info);
+                summary.eligible = true;
+                summary.returns_total = RangeAnalysis.count_kind(info.node.first(), NodeKind::RETURN);
+                info.range_summary = (ptr)summary;
+                summaries.push((ptr)summary);
+            }
+        }
+        for (mut i32 id = 1; id < Ast.node_count(); id = id + 1) {
+            Node* node = Ast.at(id);
+            if (node.symbol_kind() == SymbolKind.FUNCTION && node.symbol() != null) {
+                FunctionInfo* referenced = (FunctionInfo*)node.symbol();
+                if (referenced.range_summary != null) {
+                    RangeSummary* summary = (RangeSummary*)referenced.range_summary;
+                    summary.references = summary.references + 1;
+                }
+            }
+            if (node.kind() == NodeKind::CALL) {
+                Node* callee = node.first();
+                if (callee != null && callee.symbol_kind() == SymbolKind.FUNCTION && callee.symbol() != null) {
+                    FunctionInfo* called = (FunctionInfo*)callee.symbol();
+                    if (called.range_summary != null) {
+                        RangeSummary* summary = (RangeSummary*)called.range_summary;
+                        summary.callee_references = summary.callee_references + 1;
+                    }
+                }
+            }
+        }
+    }
+
+    static unsafe i32 count_kind(Node* node, NodeKind wanted) {
+        if (node == null) {
+            return 0;
+        }
+        mut i32 total = 0;
+        if (node.kind() == wanted) {
+            total = 1;
+        }
+        for (mut i32 field = NodeField.FIRST; field <= NodeField.FOURTH; field = field + 1) {
+            u32 stored = node.get_field(field);
+            if (stored != 0) {
+                total = total + RangeAnalysis.count_kind(Ast.at((i32)stored), wanted);
+            }
+        }
+        if (node.has_items()) {
+            for (mut i32 i = 0; i < node.count(); i = i + 1) {
+                total = total + RangeAnalysis.count_kind(node.child(i), wanted);
+            }
+        }
+        return total;
+    }
+
+    unsafe void function(FunctionInfo* info, Node* declaration) {
+        Node* body = declaration.first();
+        this.excluded = PointerList.create();
+        this.collect_excluded(body);
+        this.state = RangeState.create();
+        this.quiet = this.base_quiet;
+        this.current = (RangeSummary*)info.range_summary;
+        RangeSummary* summary = this.current;
+        if (summary != null && summary.trusted()) {
+            for (mut i32 p = 0; p < declaration.count() && p < summary.count; p = p + 1) {
+                LocalVariable* parameter = (LocalVariable*)declaration.child(p).symbol();
+                if (summary.in_known[p] == 1 && parameter != null && this.entry_tracked(parameter)) {
+                    RangeState* state = this.state;
+                    state.put((ptr)parameter, summary.in_low[p], summary.in_high[p]);
+                }
+            }
+        }
+        this.statement(body);
+    }
+
+    unsafe bool entry_tracked(LocalVariable* variable) {
+        PointerList* excluded = this.excluded;
+        return !variable.is_volatile && RangeMath.tracks(variable.type) && !excluded.contains((ptr)variable);
+    }
+
+    // A local whose address is taken, or that receives a method call, can change behind the analysis.
+    unsafe void collect_excluded(Node* node) {
+        if (node == null) {
+            return;
+        }
+        NodeKind kind = node.kind();
+        if (kind == NodeKind::UNARY && node.op_kind() == TokenKind::AMPERSAND) {
+            this.exclude(node.first());
+        }
+        if (kind == NodeKind::FIELD_ACCESS) {
+            this.exclude(node.first());
+        }
+        this.visit_children(node, 0);
+    }
+
+    unsafe void exclude(Node* node) {
+        if (node != null && node.kind() == NodeKind::IDENTIFIER && node.symbol_kind() == SymbolKind.LOCAL) {
+            PointerList* excluded = this.excluded;
+            excluded.push(node.symbol());
+        }
+    }
+
+    // mode 0 collects excluded locals, 1 havocs assigned locals.
+    unsafe void visit_children(Node* node, i32 mode) {
+        for (mut i32 field = NodeField.FIRST; field <= NodeField.FOURTH; field = field + 1) {
+            u32 stored = node.get_field(field);
+            if (stored != 0) {
+                this.visit(Ast.at((i32)stored), mode);
+            }
+        }
+        if (node.has_items()) {
+            for (mut i32 i = 0; i < node.count(); i = i + 1) {
+                this.visit(node.child(i), mode);
+            }
+        }
+    }
+
+    unsafe void visit(Node* node, i32 mode) {
+        if (mode == 0) {
+            this.collect_excluded(node);
+        } else {
+            this.havoc(node);
+        }
+    }
+
+    unsafe LocalVariable* tracked_local(Node* node) {
+        if (node == null || node.kind() != NodeKind::IDENTIFIER || node.symbol_kind() != SymbolKind.LOCAL) {
+            return (LocalVariable*)0;
+        }
+        LocalVariable* variable = (LocalVariable*)node.symbol();
+        PointerList* excluded = this.excluded;
+        if (variable.is_volatile || !RangeMath.tracks(variable.type) || excluded.contains((ptr)variable)) {
+            return (LocalVariable*)0;
+        }
+        return variable;
+    }
+
+    unsafe void havoc(Node* node) {
+        if (node == null) {
+            return;
+        }
+        NodeKind kind = node.kind();
+        if (kind == NodeKind::ASSIGN) {
+            this.forget(node.first());
+        }
+        if (kind == NodeKind::UNARY && (node.op_kind() == TokenKind::PLUS_PLUS || node.op_kind() == TokenKind::MINUS_MINUS)) {
+            this.forget(node.first());
+        }
+        this.visit_children(node, 1);
+    }
+
+    // A local the loop only ever counts up (or only down) keeps the bound it had before the loop, because a counter
+    // that wraps is never trusted: wrapped arithmetic and any other write make it a plain forgotten local.
+    unsafe void havoc_loop(Node* condition, Node* step, Node* body) {
+        PointerList* variables = PointerList.create();
+        IdList* kinds = IdList.create();
+        this.classify(condition, variables, kinds);
+        this.classify(step, variables, kinds);
+        this.classify(body, variables, kinds);
+        RangeState* state = this.state;
+        for (mut i32 i = 0; i < variables.length; i = i + 1) {
+            LocalVariable* variable = (LocalVariable*)variables.get(i);
+            u32 kind = kinds.get(i);
+            i32 at = state.find((ptr)variable);
+            if (at >= 0 && kind == 1 && !RangeMath.wide_unsigned(variable.type)) {
+                state.put((ptr)variable, state.low(at), RangeMath.type_max(variable.type));
+            } else if (at >= 0 && kind == 2 && !RangeMath.wide_unsigned(variable.type)) {
+                state.put((ptr)variable, RangeMath.type_min(variable.type), state.high(at));
+            } else {
+                state.remove((ptr)variable);
+            }
+        }
+    }
+
+    // kind 1 only counts up, 2 only counts down, 4 is any other write.
+    unsafe void note_write(Node* target, u32 kind, PointerList* variables, IdList* kinds) {
+        if (target == null || target.kind() != NodeKind::IDENTIFIER || target.symbol_kind() != SymbolKind.LOCAL) {
+            return;
+        }
+        ptr variable = target.symbol();
+        for (mut i32 i = 0; i < variables.length; i = i + 1) {
+            if (variables.get(i) == variable) {
+                u32 seen = kinds.get(i);
+                if (seen != kind) {
+                    kinds.data[i] = 4;
+                }
+                return;
+            }
+        }
+        variables.push(variable);
+        kinds.push(kind);
+    }
+
+    unsafe u32 step_kind(Node* assign) {
+        Node* target = assign.first();
+        Node* value = assign.second();
+        if (value.kind() != NodeKind::BINARY || value.symbol_kind() == SymbolKind.OPERATOR || value.mode() == OverflowMode::WRAPPED) {
+            return 4;
+        }
+        TokenKind op = value.op_kind();
+        Node* counted = value.first();
+        Node* amount = value.second();
+        if ((op != TokenKind::PLUS && op != TokenKind::MINUS) || counted.kind() != NodeKind::IDENTIFIER
+            || counted.symbol() != target.symbol() || amount.kind() != NodeKind::INT_LITERAL || amount.int_value() < 0) {
+            return 4;
+        }
+        LocalVariable* variable = (LocalVariable*)target.symbol();
+        if (Types.common(variable.type, amount.value_type()) != variable.type) {
+            return 4;
+        }
+        if (op == TokenKind::PLUS) {
+            return 1;
+        }
+        return 2;
+    }
+
+    unsafe void classify(Node* node, PointerList* variables, IdList* kinds) {
+        if (node == null) {
+            return;
+        }
+        NodeKind kind = node.kind();
+        if (kind == NodeKind::ASSIGN) {
+            this.note_write(node.first(), this.step_kind(node), variables, kinds);
+        }
+        if (kind == NodeKind::UNARY && (node.op_kind() == TokenKind::PLUS_PLUS || node.op_kind() == TokenKind::MINUS_MINUS)) {
+            mut u32 direction = 2;
+            if (node.op_kind() == TokenKind::PLUS_PLUS) {
+                direction = 1;
+            }
+            if (node.mode() == OverflowMode::WRAPPED) {
+                direction = 4;
+            }
+            this.note_write(node.first(), direction, variables, kinds);
+        }
+        for (mut i32 field = NodeField.FIRST; field <= NodeField.FOURTH; field = field + 1) {
+            u32 stored = node.get_field(field);
+            if (stored != 0) {
+                this.classify(Ast.at((i32)stored), variables, kinds);
+            }
+        }
+        if (node.has_items()) {
+            for (mut i32 i = 0; i < node.count(); i = i + 1) {
+                this.classify(node.child(i), variables, kinds);
+            }
+        }
+    }
+
+    unsafe void forget(Node* target) {
+        if (target != null && target.kind() == NodeKind::IDENTIFIER && target.symbol_kind() == SymbolKind.LOCAL) {
+            RangeState* state = this.state;
+            state.remove(target.symbol());
+        }
+    }
+
+    static unsafe bool contains_kind(Node* node, NodeKind wanted) {
+        if (node == null) {
+            return false;
+        }
+        if (node.kind() == wanted) {
+            return true;
+        }
+        for (mut i32 field = NodeField.FIRST; field <= NodeField.FOURTH; field = field + 1) {
+            u32 stored = node.get_field(field);
+            if (stored != 0 && RangeAnalysis.contains_kind(Ast.at((i32)stored), wanted)) {
+                return true;
+            }
+        }
+        if (node.has_items()) {
+            for (mut i32 i = 0; i < node.count(); i = i + 1) {
+                if (RangeAnalysis.contains_kind(node.child(i), wanted)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    static bool writes(Node* node) {
+        return RangeAnalysis.contains_kind(node, NodeKind::ASSIGN) || RangeAnalysis.contains_count(node);
+    }
+
+    static unsafe bool contains_count(Node* node) {
+        if (node == null) {
+            return false;
+        }
+        if (node.kind() == NodeKind::UNARY && (node.op_kind() == TokenKind::PLUS_PLUS || node.op_kind() == TokenKind::MINUS_MINUS)) {
+            return true;
+        }
+        for (mut i32 field = NodeField.FIRST; field <= NodeField.FOURTH; field = field + 1) {
+            u32 stored = node.get_field(field);
+            if (stored != 0 && RangeAnalysis.contains_count(Ast.at((i32)stored))) {
+                return true;
+            }
+        }
+        if (node.has_items()) {
+            for (mut i32 i = 0; i < node.count(); i = i + 1) {
+                if (RangeAnalysis.contains_count(node.child(i))) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    unsafe void prove(Node* node, u32 common, u32 flag) {
+        if (this.quiet == 0 && (node.proof_for(common) & flag) == 0) {
+            node.add_proof(common, flag);
+            range_proven_checks = range_proven_checks + 1;
+        }
+    }
+
+    void result(i64 low, i64 high) {
+        this.top = false;
+        this.low = low;
+        this.high = high;
+    }
+
+    void full(u32 type) {
+        if (!RangeMath.tracks(type) || RangeMath.wide_unsigned(type)) {
+            this.top = true;
+            this.low = 0;
+            this.high = 0;
+            return;
+        }
+        this.result(RangeMath.type_min(type), RangeMath.type_max(type));
+    }
+
+    // The value of an in-range interval survives any integer conversion to the type; anything else may wrap.
+    void convert(u32 type) {
+        if (!RangeMath.tracks(type)) {
+            this.full(type);
+            return;
+        }
+        if (this.top || !RangeMath.fits(type, this.low, this.high)) {
+            this.full(type);
+        }
+    }
+
+    unsafe void store(LocalVariable* variable) {
+        RangeState* state = this.state;
+        this.convert(variable.type);
+        if (this.top) {
+            state.remove((ptr)variable);
+            return;
+        }
+        state.put((ptr)variable, this.low, this.high);
+    }
+
+    unsafe void statement(Node* node) {
+        RangeState* current = this.state;
+        if (node == null || current.dead) {
+            return;
+        }
+        NodeKind kind = node.kind();
+        if (kind == NodeKind::BLOCK) {
+            for (mut i32 i = 0; i < node.count(); i = i + 1) {
+                this.statement(node.child(i));
+            }
+            return;
+        }
+        if (kind == NodeKind::VAR_DECL) {
+            LocalVariable* variable = (LocalVariable*)node.symbol();
+            if (node.first() != null) {
+                this.eval(node.first());
+            } else {
+                this.result(0, 0);
+            }
+            if (variable != null && !variable.is_volatile && RangeMath.tracks(variable.type)) {
+                PointerList* excluded = this.excluded;
+                if (!excluded.contains((ptr)variable)) {
+                    this.store(variable);
+                }
+            }
+            return;
+        }
+        if (kind == NodeKind::EXPR_STMT) {
+            this.eval(node.first());
+            return;
+        }
+        if (kind == NodeKind::RETURN || kind == NodeKind::THROW_STMT) {
+            if (node.first() != null) {
+                this.eval(node.first());
+                this.note_return(kind == NodeKind::RETURN);
+            }
+            RangeState* ended = this.state;
+            ended.dead = true;
+            return;
+        }
+        if (kind == NodeKind::BREAK || kind == NodeKind::CONTINUE) {
+            current.dead = true;
+            return;
+        }
+        if (kind == NodeKind::IF) {
+            this.branch(node);
+            return;
+        }
+        if (kind == NodeKind::WHILE) {
+            this.loop(node, (Node*)0, node.first(), (Node*)0, node.second(), false);
+            return;
+        }
+        if (kind == NodeKind::DO_WHILE) {
+            this.loop(node, (Node*)0, node.first(), (Node*)0, node.second(), true);
+            return;
+        }
+        if (kind == NodeKind::FOR) {
+            this.statement(node.first());
+            this.loop(node, node.first(), node.second(), node.third(), node.fourth(), false);
+            return;
+        }
+        this.havoc(node);
+    }
+
+    unsafe void note_return(bool returns) {
+        RangeSummary* summary = this.current;
+        if (summary == null || !returns) {
+            return;
+        }
+        FunctionInfo* info = summary.info;
+        summary.returns_seen = summary.returns_seen + 1;
+        if (info.has_throws || info.is_async || !RangeMath.tracks(info.return_type)) {
+            summary.join_return(true, 0, 0);
+            return;
+        }
+        this.convert(info.return_type);
+        summary.join_return(this.top, this.low, this.high);
+    }
+
+    unsafe void branch(Node* node) {
+        if (node.op() == 2) {
+            this.statement(node.second());
+            return;
+        }
+        if (node.op() == 3) {
+            this.statement(node.third());
+            return;
+        }
+        Node* condition = node.first();
+        this.eval(condition);
+        RangeState* before = this.state;
+        RangeState* otherwise = before.copy();
+        bool refinable = !RangeAnalysis.writes(condition);
+        if (refinable) {
+            this.refine(condition, true);
+        }
+        this.statement(node.second());
+        RangeState* taken = this.state;
+        this.state = otherwise;
+        if (refinable) {
+            this.refine(condition, false);
+        }
+        this.statement(node.third());
+        RangeState* skipped = this.state;
+        skipped.join(taken);
+    }
+
+    // Every local the loop writes is forgotten before the first iteration, so the entry state over-approximates
+    // every iteration; locals the loop never writes keep their values across it.
+    unsafe void loop(Node* node, Node* init, Node* condition, Node* step, Node* body, bool body_first) {
+        RangeState* current = this.state;
+        if (current.dead) {
+            return;
+        }
+        this.havoc_loop(condition, step, body);
+        RangeState* entry = this.state;
+        bool breaks = RangeAnalysis.contains_kind(body, NodeKind::BREAK);
+        bool refinable = condition != null && !RangeAnalysis.writes(condition);
+        if (body_first) {
+            this.state = entry.copy();
+            this.statement(body);
+            this.state = entry.copy();
+            this.eval(condition);
+            RangeState* exit = this.state;
+            exit.dead = false;
+            if (!breaks && refinable) {
+                this.refine(condition, false);
+            }
+            return;
+        }
+        if (condition != null) {
+            this.eval(condition);
+        }
+        RangeState* checked = this.state;
+        RangeState* exit = checked.copy();
+        if (refinable) {
+            this.refine(condition, true);
+        }
+        RangeState* inside = this.state;
+        RangeState* continued = inside.copy();
+        this.state = inside.copy();
+        this.statement(body);
+        if (step != null) {
+            RangeState* finished = this.state;
+            if (finished.dead || RangeAnalysis.contains_kind(body, NodeKind::CONTINUE)) {
+                this.state = continued;
+                this.havoc(body);
+            }
+            this.eval(step);
+        }
+        this.state = exit;
+        if (condition == null) {
+            exit.dead = !breaks;
+            return;
+        }
+        if (!breaks && refinable) {
+            this.refine(condition, false);
+        }
+    }
+
+    unsafe void eval(Node* node) {
+        if (node == null) {
+            this.top = true;
+            return;
+        }
+        NodeKind kind = node.kind();
+        u32 type = node.value_type();
+        if (kind == NodeKind::INT_LITERAL) {
+            this.literal(node, type);
+            return;
+        }
+        if (kind == NodeKind::IDENTIFIER) {
+            this.identifier(node, type);
+            return;
+        }
+        if (kind == NodeKind::CAST) {
+            this.eval(node.first());
+            Node* operand = node.first();
+            if (!RangeMath.tracks(operand.value_type())) {
+                this.full(type);
+                return;
+            }
+            this.convert(type);
+            return;
+        }
+        if (kind == NodeKind::UNARY) {
+            this.unary(node, type);
+            return;
+        }
+        if (kind == NodeKind::BINARY) {
+            this.binary(node, type);
+            return;
+        }
+        if (kind == NodeKind::ASSIGN) {
+            this.assign(node, type);
+            return;
+        }
+        if (kind == NodeKind::CALL) {
+            this.call(node, type);
+            return;
+        }
+        if (kind == NodeKind::FIELD_ACCESS) {
+            this.eval(node.first());
+            this.full(type);
+            return;
+        }
+        if (kind == NodeKind::INDEX) {
+            this.eval(node.first());
+            this.eval(node.second());
+            this.full(type);
+            return;
+        }
+        if (kind == NodeKind::BOOL_LITERAL || kind == NodeKind::FLOAT_LITERAL || kind == NodeKind::STRING_LITERAL
+            || kind == NodeKind::NULL_LITERAL || kind == NodeKind::FLOAT_CONST) {
+            this.full(type);
+            return;
+        }
+        if (kind == NodeKind::INTRINSIC && node.op() == Intrinsic.BOUNDS_CHECK) {
+            this.bounds(node);
+            return;
+        }
+        this.havoc(node);
+        this.full(type);
+    }
+
+    unsafe void call(Node* node, u32 type) {
+        Node* callee = node.first();
+        this.eval(callee);
+        mut RangeSummary* summary = (RangeSummary*)0;
+        if (callee.symbol_kind() == SymbolKind.FUNCTION && callee.symbol() != null) {
+            FunctionInfo* called = (FunctionInfo*)callee.symbol();
+            summary = (RangeSummary*)called.range_summary;
+        }
+        mut bool direct = summary != null && summary.eligible && node.count() == summary.count;
+        if (summary != null && !direct) {
+            summary.eligible = false;
+        }
+        for (mut i32 i = 0; i < node.count(); i = i + 1) {
+            Node* argument = node.child(i);
+            if (argument.kind() == NodeKind::NAMED_ARG) {
+                this.eval(argument.first());
+                if (summary != null) {
+                    summary.eligible = false;
+                }
+                direct = false;
+            } else {
+                this.eval(argument);
+                if (direct && this.quiet == this.base_quiet) {
+                    IdList* params = summary.info.param_types;
+                    this.convert(params.get(i));
+                    summary.join_argument(i, this.top, this.low, this.high);
+                }
+            }
+        }
+        if (direct && this.quiet == this.base_quiet) {
+            summary.calls_seen = summary.calls_seen + 1;
+        }
+        if (summary != null && summary.ret_in_known && summary.trusted() && RangeMath.tracks(type)) {
+            this.result(summary.ret_in_low, summary.ret_in_high);
+            this.convert(type);
+            return;
+        }
+        this.full(type);
+    }
+
+    // An index below the smallest possible length can never be out of range; the check runs in u64.
+    unsafe void bounds(Node* node) {
+        this.eval(node.first());
+        bool index_top = this.top;
+        i64 index_low = this.low;
+        i64 index_high = this.high;
+        this.eval(node.second());
+        if (!index_top && !this.top && index_low >= 0 && index_high < this.low) {
+            this.prove(node, Types.integer(64, false), RangeProof.INDEX_IN_BOUNDS);
+        }
+        this.full(node.value_type());
+    }
+
+    void literal(Node* node, u32 type) {
+        if (!RangeMath.tracks(type)) {
+            this.full(type);
+            return;
+        }
+        i64 value = node.int_value();
+        if (RangeMath.wide_unsigned(type) && value < 0) {
+            this.full(type);
+            return;
+        }
+        if (!RangeMath.fits(type, value, value)) {
+            this.full(type);
+            return;
+        }
+        this.result(value, value);
+    }
+
+    unsafe void identifier(Node* node, u32 type) {
+        LocalVariable* variable = this.tracked_local(node);
+        if (variable == null) {
+            this.full(type);
+            return;
+        }
+        RangeState* state = this.state;
+        i32 at = state.find((ptr)variable);
+        if (at < 0) {
+            this.full(variable.type);
+            return;
+        }
+        this.result(state.low(at), state.high(at));
+    }
+
+    unsafe void assign(Node* node, u32 type) {
+        Node* target = node.first();
+        LocalVariable* variable = this.tracked_local(target);
+        NodeKind target_kind = target.kind();
+        if (target_kind == NodeKind::FIELD_ACCESS || target_kind == NodeKind::UNARY) {
+            this.eval(target.first());
+        } else if (target_kind == NodeKind::INDEX) {
+            this.eval(target.first());
+            this.eval(target.second());
+        }
+        this.eval(node.second());
+        if (variable != null) {
+            this.store(variable);
+            return;
+        }
+        this.forget(target);
+        this.convert(type);
+    }
+
+    unsafe void unary(Node* node, u32 type) {
+        TokenKind op = node.op_kind();
+        if (op == TokenKind::PLUS_PLUS || op == TokenKind::MINUS_MINUS) {
+            this.count(node, type, op == TokenKind::PLUS_PLUS);
+            return;
+        }
+        if (op == TokenKind::QUESTION_DOT) {
+            this.havoc(node);
+            this.full(type);
+            return;
+        }
+        this.eval(node.first());
+        if (op != TokenKind::MINUS || node.symbol_kind() == SymbolKind.OPERATOR || !RangeMath.tracks(type)) {
+            this.full(type);
+            return;
+        }
+        this.negate(node, type);
+    }
+
+    unsafe void negate(Node* node, u32 type) {
+        Node* operand = node.first();
+        if (this.top || !RangeMath.fits(type, this.low, this.high) || !Types.is_signed(type)) {
+            this.full(type);
+            return;
+        }
+        if (this.low == RangeMath.type_min(type)) {
+            if (operand.kind() == NodeKind::INT_LITERAL) {
+                this.full(type);
+                return;
+            }
+            this.full(type);
+            return;
+        }
+        this.prove(node, type, RangeProof.OVERFLOW_FREE);
+        this.result(0 - this.high, 0 - this.low);
+    }
+
+    unsafe void count(Node* node, u32 type, bool increment) {
+        Node* target = node.first();
+        LocalVariable* variable = this.tracked_local(target);
+        if (variable == null) {
+            this.forget(target);
+            NodeKind target_kind = target.kind();
+            if (target_kind == NodeKind::FIELD_ACCESS || target_kind == NodeKind::UNARY) {
+                this.eval(target.first());
+            } else if (target_kind == NodeKind::INDEX) {
+                this.eval(target.first());
+                this.eval(target.second());
+            }
+            this.full(type);
+            return;
+        }
+        this.identifier(target, type);
+        bool known = !this.top && RangeMath.fits(type, this.low, this.high);
+        i64 before_low = this.low;
+        i64 before_high = this.high;
+        mut TokenKind op = TokenKind::MINUS;
+        if (increment) {
+            op = TokenKind::PLUS;
+        }
+        if (known) {
+            this.arithmetic(node, op, type, before_low, before_high, 1, 1);
+        } else {
+            this.full(type);
+        }
+        this.store(variable);
+        if (node.flag() && known) {
+            this.result(before_low, before_high);
+        } else if (node.flag()) {
+            this.full(type);
+        }
+    }
+
+    unsafe void binary(Node* node, u32 type) {
+        TokenKind op = node.op_kind();
+        if (op == TokenKind::AND_AND || op == TokenKind::OR_OR || op == TokenKind::QUESTION_QUESTION) {
+            this.eval(node.first());
+            RangeState* left = this.state;
+            RangeState* skipped = left.copy();
+            this.eval(node.second());
+            RangeState* evaluated = this.state;
+            evaluated.join(skipped);
+            this.full(type);
+            return;
+        }
+        this.eval(node.first());
+        bool left_top = this.top;
+        i64 left_low = this.low;
+        i64 left_high = this.high;
+        this.eval(node.second());
+        bool right_top = this.top;
+        i64 right_low = this.low;
+        i64 right_high = this.high;
+        i32 symbol = node.symbol_kind();
+        if (symbol == SymbolKind.OPERATOR || symbol == SymbolKind.NEGATED_OPERATOR || TypeChecker.is_comparison(op)) {
+            this.full(type);
+            return;
+        }
+        Node* first = node.first();
+        Node* second = node.second();
+        u32 left_type = first.value_type();
+        u32 right_type = second.value_type();
+        if (!RangeMath.tracks(left_type) || !RangeMath.tracks(right_type)) {
+            this.full(type);
+            return;
+        }
+        u32 common = Types.common(left_type, right_type);
+        if (!RangeMath.tracks(common) || left_top || right_top
+            || !RangeMath.fits(common, left_low, left_high) || !RangeMath.fits(common, right_low, right_high)) {
+            this.full(common);
+            return;
+        }
+        if (op == TokenKind::PLUS || op == TokenKind::MINUS || op == TokenKind::STAR) {
+            this.arithmetic(node, op, common, left_low, left_high, right_low, right_high);
+            return;
+        }
+        if (op == TokenKind::SLASH || op == TokenKind::PERCENT) {
+            this.division(node, op, common, left_low, left_high, right_low, right_high);
+            return;
+        }
+        if (op == TokenKind::AMPERSAND) {
+            this.mask(common, left_low, left_high, right_low, right_high);
+            return;
+        }
+        if (op == TokenKind::LESS_LESS || op == TokenKind::GREATER_GREATER) {
+            this.shift(node, op, common, left_low, left_high, right_low, right_high);
+            return;
+        }
+        this.full(common);
+    }
+
+    // The corners of the operand box bound the result of +, - and *; a result inside the type cannot overflow.
+    unsafe void arithmetic(Node* node, TokenKind op, u32 common, i64 a_low, i64 a_high, i64 b_low, i64 b_high) {
+        mut i64 low = 0;
+        mut i64 high = 0;
+        if (op == TokenKind::PLUS) {
+            if (RangeMath.add_overflows(a_low, b_low) || RangeMath.add_overflows(a_high, b_high)) {
+                this.full(common);
+                return;
+            }
+            low = a_low + b_low;
+            high = a_high + b_high;
+        } else if (op == TokenKind::MINUS) {
+            if (RangeMath.sub_overflows(a_low, b_high) || RangeMath.sub_overflows(a_high, b_low)) {
+                this.full(common);
+                return;
+            }
+            low = a_low - b_high;
+            high = a_high - b_low;
+        } else {
+            if (RangeMath.mul_overflows(a_low, b_low) || RangeMath.mul_overflows(a_low, b_high)
+                || RangeMath.mul_overflows(a_high, b_low) || RangeMath.mul_overflows(a_high, b_high)) {
+                this.full(common);
+                return;
+            }
+            i64 p1 = a_low * b_low;
+            i64 p2 = a_low * b_high;
+            i64 p3 = a_high * b_low;
+            i64 p4 = a_high * b_high;
+            low = RangeMath.lesser(RangeMath.lesser(p1, p2), RangeMath.lesser(p3, p4));
+            high = RangeMath.greater(RangeMath.greater(p1, p2), RangeMath.greater(p3, p4));
+        }
+        if (RangeMath.fits(common, low, high)) {
+            this.prove(node, common, RangeProof.OVERFLOW_FREE);
+            this.result(low, high);
+            return;
+        }
+        if (node.mode() == OverflowMode::WRAPPED) {
+            this.full(common);
+            return;
+        }
+        i64 clamped_low = RangeMath.greater(low, RangeMath.type_min(common));
+        i64 clamped_high = RangeMath.lesser(high, RangeMath.type_max(common));
+        if (clamped_low > clamped_high) {
+            this.full(common);
+            return;
+        }
+        this.result(clamped_low, clamped_high);
+    }
+
+    unsafe void division(Node* node, TokenKind op, u32 common, i64 a_low, i64 a_high, i64 b_low, i64 b_high) {
+        bool nonzero = b_low > 0 || b_high < 0;
+        if (nonzero) {
+            this.prove(node, common, RangeProof.DIVISOR_NONZERO);
+        }
+        bool signed = Types.is_signed(common);
+        if (signed && (b_low > 0 - 1 || b_high < 0 - 1 || a_low > RangeMath.type_min(common))) {
+            this.prove(node, common, RangeProof.NOT_MINIMUM_DIVIDED);
+        }
+        if (b_low <= 0) {
+            this.full(common);
+            return;
+        }
+        if (op == TokenKind::SLASH) {
+            mut i64 low = a_low / b_low;
+            if (a_low >= 0) {
+                low = a_low / b_high;
+            }
+            mut i64 high = a_high / b_high;
+            if (a_high >= 0) {
+                high = a_high / b_low;
+            }
+            this.result(low, high);
+            return;
+        }
+        i64 bound = b_high - 1;
+        if (a_low >= 0) {
+            this.result(0, RangeMath.lesser(a_high, bound));
+            return;
+        }
+        this.result(RangeMath.greater(a_low, 0 - bound), RangeMath.lesser(RangeMath.greater(a_high, 0), bound));
+    }
+
+    void mask(u32 common, i64 a_low, i64 a_high, i64 b_low, i64 b_high) {
+        if (a_low >= 0 && b_low >= 0) {
+            this.result(0, RangeMath.lesser(a_high, b_high));
+            return;
+        }
+        if (a_low >= 0) {
+            this.result(0, a_high);
+            return;
+        }
+        if (b_low >= 0) {
+            this.result(0, b_high);
+            return;
+        }
+        this.full(common);
+    }
+
+    unsafe void shift(Node* node, TokenKind op, u32 common, i64 a_low, i64 a_high, i64 b_low, i64 b_high) {
+        i64 bits = (i64)Types.bits(common);
+        if (b_low < 0 || b_high >= bits) {
+            this.full(common);
+            return;
+        }
+        this.prove(node, common, RangeProof.SHIFT_IN_RANGE);
+        if (op == TokenKind::GREATER_GREATER) {
+            if (a_low >= 0) {
+                this.result(a_low >> b_high, a_high >> b_low);
+                return;
+            }
+            if (!Types.is_signed(common)) {
+                this.full(common);
+                return;
+            }
+            mut i64 high = a_high >> b_high;
+            if (a_high >= 0) {
+                high = a_high >> b_low;
+            }
+            this.result(a_low >> b_low, high);
+            return;
+        }
+        if (a_low < 0 || b_high >= 62 || a_high > (i64.MAX_VALUE >> b_high)) {
+            this.full(common);
+            return;
+        }
+        i64 low = a_low << b_low;
+        i64 high = a_high << b_high;
+        if (!RangeMath.fits(common, low, high)) {
+            this.full(common);
+            return;
+        }
+        this.result(low, high);
+    }
+
+    unsafe void refine(Node* condition, bool positive) {
+        if (condition == null) {
+            return;
+        }
+        NodeKind kind = condition.kind();
+        if (kind == NodeKind::UNARY && condition.op_kind() == TokenKind::BANG && condition.symbol_kind() != SymbolKind.OPERATOR) {
+            this.refine(condition.first(), !positive);
+            return;
+        }
+        if (kind != NodeKind::BINARY) {
+            return;
+        }
+        TokenKind op = condition.op_kind();
+        if (op == TokenKind::AND_AND) {
+            if (positive) {
+                this.refine(condition.first(), true);
+                this.refine(condition.second(), true);
+            }
+            return;
+        }
+        if (op == TokenKind::OR_OR) {
+            if (!positive) {
+                this.refine(condition.first(), false);
+                this.refine(condition.second(), false);
+            }
+            return;
+        }
+        i32 symbol = condition.symbol_kind();
+        if (!TypeChecker.is_comparison(op) || symbol == SymbolKind.OPERATOR || symbol == SymbolKind.NEGATED_OPERATOR) {
+            return;
+        }
+        Node* left = condition.first();
+        Node* right = condition.second();
+        u32 left_type = left.value_type();
+        u32 right_type = right.value_type();
+        if (!RangeMath.tracks(left_type) || !RangeMath.tracks(right_type) || Types.is_signed(left_type) != Types.is_signed(right_type)) {
+            return;
+        }
+        mut TokenKind effective = op;
+        if (!positive) {
+            effective = RangeAnalysis.negated(op);
+        }
+        this.constrain(left, effective, right);
+        this.constrain(right, RangeAnalysis.mirrored(effective), left);
+    }
+
+    static TokenKind negated(TokenKind op) {
+        return switch op {
+            LESS -> TokenKind::GREATER_EQUAL,
+            LESS_EQUAL -> TokenKind::GREATER,
+            GREATER -> TokenKind::LESS_EQUAL,
+            GREATER_EQUAL -> TokenKind::LESS,
+            EQUAL_EQUAL -> TokenKind::BANG_EQUAL,
+            BANG_EQUAL -> TokenKind::EQUAL_EQUAL,
+            _ -> TokenKind::UNKNOWN
+        };
+    }
+
+    static TokenKind mirrored(TokenKind op) {
+        return switch op {
+            LESS -> TokenKind::GREATER,
+            LESS_EQUAL -> TokenKind::GREATER_EQUAL,
+            GREATER -> TokenKind::LESS,
+            GREATER_EQUAL -> TokenKind::LESS_EQUAL,
+            _ -> op
+        };
+    }
+
+    // Narrows a local compared against another operand; an empty interval means the path cannot run.
+    unsafe void constrain(Node* target, TokenKind op, Node* other) {
+        LocalVariable* variable = this.tracked_local(target);
+        if (variable == null || op == TokenKind::UNKNOWN) {
+            return;
+        }
+        this.quiet = this.quiet + 1;
+        this.eval(other);
+        this.quiet = this.quiet - 1;
+        if (this.top) {
+            return;
+        }
+        i64 other_low = this.low;
+        i64 other_high = this.high;
+        this.identifier(target, variable.type);
+        if (this.top) {
+            if (op != TokenKind::LESS && op != TokenKind::LESS_EQUAL && op != TokenKind::EQUAL_EQUAL) {
+                return;
+            }
+            this.result(0, i64.MAX_VALUE);
+        }
+        mut i64 low = this.low;
+        mut i64 high = this.high;
+        if (op == TokenKind::LESS) {
+            if (other_high == i64.MIN_VALUE) {
+                return;
+            }
+            high = RangeMath.lesser(high, other_high - 1);
+        } else if (op == TokenKind::LESS_EQUAL) {
+            high = RangeMath.lesser(high, other_high);
+        } else if (op == TokenKind::GREATER) {
+            if (other_low == i64.MAX_VALUE) {
+                return;
+            }
+            low = RangeMath.greater(low, other_low + 1);
+        } else if (op == TokenKind::GREATER_EQUAL) {
+            low = RangeMath.greater(low, other_low);
+        } else if (op == TokenKind::EQUAL_EQUAL) {
+            low = RangeMath.greater(low, other_low);
+            high = RangeMath.lesser(high, other_high);
+        } else if (op == TokenKind::BANG_EQUAL && other_low == other_high) {
+            if (low == other_low && low < i64.MAX_VALUE) {
+                low = low + 1;
+            } else if (high == other_low && high > i64.MIN_VALUE) {
+                high = high - 1;
+            }
+        }
+        RangeState* state = this.state;
+        if (low > high) {
+            state.dead = true;
+            return;
+        }
+        state.put((ptr)variable, low, high);
+    }
+}
