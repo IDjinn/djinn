@@ -52,4 +52,37 @@ set -e
 [ "$code" = 42 ] || { cat "$out/jit.log"; fail "--run must exit 42, got $code"; }
 grep -q 'E6004' "$out/jit.log" || fail "--run must report E6004"
 
+cat > "$out/tail.djinn" <<'SOURCE'
+async bool is_even(i32 n) {
+    if (n == 0) {
+        return true;
+    }
+    return await is_odd(n - 1);
+}
+
+async bool is_odd(i32 n) {
+    if (n == 0) {
+        return false;
+    }
+    return await is_even(n - 1);
+}
+
+i32 main() {
+    mut i32 hits = 0;
+    for (mut i32 round = 0; round < 200; round = round + 1) {
+        if (await is_even(3000000 + round)) {
+            hits = hits + 1;
+        }
+    }
+    return hits - 58;
+}
+SOURCE
+
+for mode in "--run" "--run --tiered --tier-threshold=2"; do
+    set +e
+    "$compiler" "$out/tail.djinn" $mode "${flags[@]}" > "$out/tail.log" 2>&1; code=$?
+    set -e
+    [ "$code" = 42 ] || { cat "$out/tail.log"; fail "a deep tail-recursive cycle must run in constant stack with $mode, got $code"; }
+done
+
 echo "async_elision: ok"

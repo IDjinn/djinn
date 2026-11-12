@@ -462,3 +462,112 @@ async i32 main() {
         Verify.source(source).with_std().emits_ir(Expected.ir_contains("call ptr @__djinn_coro_alloc(i64").and_ir_contains("call void @__djinn_coro_free(ptr"));
     }
 }
+
+struct ProgressIrTests {
+    [Test]
+    void LoopFreeCallChainMustProgress() {
+        str source = """
+i32 square(i32 x) {
+    return x * x;
+}
+
+i32 hyp(i32 a, i32 b) {
+    return square(a) + square(b);
+}
+
+async i32 never_suspends(i32 n) {
+    return n + 1;
+}
+
+i32 main() {
+    return hyp(3, 4) + await never_suspends(16);
+}
+""";
+        Verify.source(source).emits_ir(Expected.ir_contains("mustprogress").in_function("square"));
+        Verify.source(source).emits_ir(Expected.ir_contains("mustprogress").in_function("hyp"));
+        Verify.source(source).emits_ir(Expected.ir_contains("mustprogress").in_function("never_suspends"));
+        Verify.source(source).runs(Expected.exit(42));
+        Verify.source(source).optimized(2).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void UnprovenFunctionsDoNotMustProgress() {
+        str source = """
+extern i32 abs(i32 value);
+
+struct Data : Disposable {
+    i32 value;
+
+    void disposable() {
+        while (this.value > 100) {
+            this.value = this.value - 1;
+        }
+    }
+}
+
+i32 looping(i32 n) {
+    mut i32 total = 0;
+    for (mut i32 i = 0; i < n; i = i + 1) {
+        total = total + i;
+    }
+    return total;
+}
+
+i32 spinning(i32 n) {
+    mut i32 left = n;
+    do {
+        left = left - 1;
+    } while (left > 0);
+    return left;
+}
+
+i32 fact(i32 n) {
+    if (n <= 1) {
+        return 1;
+    }
+    return n * fact(n - 1);
+}
+
+async bool is_even(i32 n) {
+    if (n == 0) {
+        return true;
+    }
+    return await is_odd(n - 1);
+}
+
+async bool is_odd(i32 n) {
+    if (n == 0) {
+        return false;
+    }
+    return await is_even(n - 1);
+}
+
+i32 external(i32 n) {
+    return abs(n);
+}
+
+i32 owner(i32 n) {
+    Data data = { .value = n };
+    return data.value;
+}
+
+i32 main() {
+    mut i32 total = looping(4) + spinning(3) + fact(3) + external(-5) + owner(24);
+    if (await is_even(10)) {
+        total = total + 1;
+    }
+    return total;
+}
+""";
+        Verify.source(source).emits_ir(Expected.ir_contains("nounwind").and_ir_lacks("mustprogress").in_function("Data.disposable"));
+        Verify.source(source).emits_ir(Expected.ir_contains("nounwind").and_ir_lacks("mustprogress").in_function("looping"));
+        Verify.source(source).emits_ir(Expected.ir_contains("nounwind").and_ir_lacks("mustprogress").in_function("spinning"));
+        Verify.source(source).emits_ir(Expected.ir_contains("nounwind").and_ir_lacks("mustprogress").in_function("fact"));
+        Verify.source(source).emits_ir(Expected.ir_contains("nounwind").and_ir_lacks("mustprogress").in_function("is_even"));
+        Verify.source(source).emits_ir(Expected.ir_contains("nounwind").and_ir_lacks("mustprogress").in_function("is_odd"));
+        Verify.source(source).emits_ir(Expected.ir_contains("nounwind").and_ir_lacks("mustprogress").in_function("external"));
+        Verify.source(source).emits_ir(Expected.ir_contains("nounwind").and_ir_lacks("mustprogress").in_function("owner"));
+        Verify.source(source).emits_ir(Expected.ir_contains("nounwind").and_ir_lacks("mustprogress").in_function("__djinn_sync_main"));
+        Verify.source(source).runs(Expected.exit(42));
+    }
+}

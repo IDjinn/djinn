@@ -515,7 +515,50 @@ struct Runner {
                 while (stop < length && !(ir[stop] == 10 && ir[stop + 1] == 125)) {
                     stop = stop + 1;
                 }
-                return Text.duplicate(ir + start, stop - start);
+                TextBuffer* body = TextBuffer.create();
+                body.append(Text.duplicate(ir + start, stop - start));
+                ptr<i8> group = Runner.attribute_group(ir, line);
+                if (group != null) {
+                    body.append("
+");
+                    body.append(group);
+                }
+                return body.cstr();
+            }
+            start = end + 1;
+        }
+        return null;
+    }
+
+    // A function's attributes live in a shared 'attributes #N = { ... }' line; it is appended to the function's IR so
+    // a check scoped with 'in_function' sees them too.
+    public static unsafe ptr<i8> attribute_group(ptr<i8> ir, ptr<i8> define_line) {
+        mut i32 hash = (i32)strlen(define_line) - 1;
+        while (hash >= 0 && define_line[hash] != 35) {
+            hash = hash - 1;
+        }
+        if (hash < 0) {
+            return null;
+        }
+        mut i32 digits = hash + 1;
+        while (define_line[digits] >= 48 && define_line[digits] <= 57) {
+            digits = digits + 1;
+        }
+        TextBuffer* marker = TextBuffer.create();
+        marker.append("attributes ");
+        marker.append(Text.duplicate(define_line + hash, digits - hash));
+        marker.append(" = ");
+        ptr<i8> wanted = marker.cstr();
+        i32 wanted_length = (i32)strlen(wanted);
+        i32 length = (i32)strlen(ir);
+        mut i32 start = 0;
+        while (start < length) {
+            mut i32 end = start;
+            while (end < length && ir[end] != 10) {
+                end = end + 1;
+            }
+            if (end - start >= wanted_length && Text.same(Text.duplicate(ir + start, wanted_length), wanted)) {
+                return Text.duplicate(ir + start, end - start);
             }
             start = end + 1;
         }

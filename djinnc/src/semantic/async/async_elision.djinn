@@ -5,14 +5,22 @@ namespace djinnc;
 // an await on anything but a direct call to a function that never suspends either (a fixpoint over the awaits).
 // The coroutine ABI stays wherever it can be observed: recursion keeps its frames on the heap instead of the native
 // stack, a task used other than by an immediate await keeps its handle, and libraries, async main, attributed
-// functions and the methods of reflected types are left alone.
+// functions and the methods of reflected types are left alone. The one recursion that is converted is a cycle whose
+// calls among its members are all 'return await g(...)' with identical register-sized signatures and nothing to dispose:
+// codegen turns those into guaranteed tail calls, so the stack stays constant.
 struct AsyncElision {
     SymbolTable* symbols;
     PointerList* functions;
     PointerList* calls;
+    PointerList* tails;
     PointerList* awaits;
+    PointerList* exits;
+    PointerList* groups;
     ptr<bool> excluded;
     ptr<bool> suspends;
+    ptr<bool> disposes;
+    ptr<bool> tail_callee;
+    ptr<i32> group;
     ptr<i32> order;
     ptr<i32> low;
     ptr<bool> stacked;
@@ -31,7 +39,8 @@ struct AsyncElision {
         }
         elision.exclude_escaping();
         elision.scan_bodies();
-        elision.exclude_recursive();
+        elision.find_cycles();
+        elision.admit_tail_cycles();
         elision.settle();
         elision.report(diagnostics);
     }
@@ -41,6 +50,8 @@ struct AsyncElision {
         i32 count = functions.length;
         this.excluded = (ptr<bool>)calloc((u64)count + 1, 1);
         this.suspends = (ptr<bool>)calloc((u64)count + 1, 1);
+        this.disposes = (ptr<bool>)calloc((u64)count + 1, 1);
+        this.group = (ptr<i32>)calloc((u64)count + 1, 4);
         mut bool any = false;
         for (mut i32 i = 0; i < count; i = i + 1) {
             FunctionInfo* info = (FunctionInfo*)functions.get(i);
@@ -135,16 +146,34 @@ struct AsyncElision {
     unsafe void scan_bodies() {
         PointerList* functions = this.functions;
         this.calls = PointerList.create();
+        this.tails = PointerList.create();
         this.awaits = PointerList.create();
+        this.exits = PointerList.create();
+        this.tail_callee = (ptr<bool>)calloc((u64)Ast.node_count() + 1, 1);
         PointerList* calls = this.calls;
+        PointerList* tails = this.tails;
         PointerList* awaits = this.awaits;
+        PointerList* exits = this.exits;
+        SymbolTable* symbols = this.symbols;
         for (mut i32 i = 0; i < functions.length; i = i + 1) {
             calls.push((ptr)PointerList.create());
+            tails.push((ptr)IdList.create());
             awaits.push((ptr)PointerList.create());
+            PointerList* returns = PointerList.create();
+            exits.push((ptr)returns);
             FunctionInfo* info = (FunctionInfo*)functions.get(i);
             Node* declaration = info.node;
             if (info.is_extern || info.is_template || declaration == null || declaration.kind() != NodeKind::FUNCTION) {
                 continue;
+            }
+            for (mut i32 p = 0; p < declaration.count(); p = p + 1) {
+                Node* parameter = declaration.child(p);
+                if (parameter.kind() == NodeKind::PARAMETER && parameter.symbol() != null) {
+                    LocalVariable* variable = (LocalVariable*)parameter.symbol();
+                    if (Ownership.needs_dispose(symbols, variable.type)) {
+                        this.disposes[i] = true;
+                    }
+                }
             }
             this.scan(declaration.first(), i);
         }
@@ -163,11 +192,36 @@ struct AsyncElision {
             PointerList* awaited = (PointerList*)awaits.get(owner);
             awaited.push((ptr)AsyncElision.awaited_call(node));
         }
+        if (kind == NodeKind::RETURN) {
+            mut FunctionInfo* continued = (FunctionInfo*)0;
+            Node* returned = node.first();
+            if (returned != null && returned.kind() == NodeKind::AWAIT_EXPR && AsyncElision.awaited_call(returned) != null) {
+                Node* call = returned.first();
+                this.tail_callee[Ast.id_of(call.first())] = true;
+                continued = AsyncElision.awaited_call(returned);
+            }
+            PointerList* exits = this.exits;
+            PointerList* returns = (PointerList*)exits.get(owner);
+            returns.push((ptr)continued);
+        }
+        if (kind == NodeKind::VAR_DECL && node.symbol() != null) {
+            LocalVariable* variable = (LocalVariable*)node.symbol();
+            if (Ownership.needs_dispose(this.symbols, variable.type)) {
+                this.disposes[owner] = true;
+            }
+        }
         FunctionInfo* target = AsyncElision.referenced(node);
         if (target != null) {
             PointerList* calls = this.calls;
             PointerList* edges = (PointerList*)calls.get(owner);
             edges.push((ptr)target);
+            PointerList* tails = this.tails;
+            IdList* positions = (IdList*)tails.get(owner);
+            mut u32 tail = 0;
+            if (this.tail_callee[Ast.id_of(node)]) {
+                tail = 1;
+            }
+            positions.push(tail);
             if (AsyncElision.suspends_natively(target)) {
                 this.suspends[owner] = true;
             }
@@ -199,10 +253,12 @@ struct AsyncElision {
             || Strings.starts_with(name, 0, length, "__djinn_spawn") || Strings.starts_with(name, 0, length, "__djinn_event_loop");
     }
 
-    // Tarjan's strongly connected components over every call: a function in a cycle, or calling itself, stays async.
-    unsafe void exclude_recursive() {
+    // Tarjan's strongly connected components over every call: a function in a cycle, or calling itself, joins a group
+    // that 'admit_tail_cycles' either keeps as a whole or leaves async.
+    unsafe void find_cycles() {
         PointerList* functions = this.functions;
         i32 count = functions.length;
+        this.groups = PointerList.create();
         this.order = (ptr<i32>)calloc((u64)count + 1, 4);
         this.low = (ptr<i32>)calloc((u64)count + 1, 4);
         this.stacked = (ptr<bool>)calloc((u64)count + 1, 1);
@@ -247,14 +303,159 @@ struct AsyncElision {
             start = start - 1;
         }
         bool cyclic = self_call || start < stack.length - 1;
+        IdList* members = IdList.create();
+        PointerList* groups = this.groups;
+        if (cyclic) {
+            groups.push((ptr)members);
+        }
         for (mut i32 s = start; s < stack.length; s = s + 1) {
             i32 member = (i32)stack.get(s);
             this.stacked[member] = false;
             if (cyclic) {
-                this.excluded[member] = true;
+                this.group[member] = groups.length;
+                members.push((u32)member);
             }
         }
         stack.length = start;
+    }
+
+    unsafe void admit_tail_cycles() {
+        PointerList* groups = this.groups;
+        for (mut i32 g = 0; g < groups.length; g = g + 1) {
+            IdList* members = (IdList*)groups.get(g);
+            mut bool accepted = this.has_exit(members, g + 1);
+            for (mut i32 m = 0; m < members.length && accepted; m = m + 1) {
+                accepted = this.tail_safe((i32)members.get(m));
+            }
+            if (accepted) {
+                continue;
+            }
+            for (mut i32 m = 0; m < members.length; m = m + 1) {
+                this.excluded[(i32)members.get(m)] = true;
+            }
+        }
+    }
+
+    // A cycle needs a base case: some 'return' that does not continue into the cycle (a void function cannot
+    // 'return await', so it never joins an accepted cycle).
+    // This rejects a recursion that can never end; whether a base case is reached at run time is the program's
+    // business, exactly as it is for the coroutine version.
+    unsafe bool has_exit(IdList* members, i32 id) {
+        PointerList* exits = this.exits;
+        for (mut i32 m = 0; m < members.length; m = m + 1) {
+            PointerList* returns = (PointerList*)exits.get((i32)members.get(m));
+            for (mut i32 r = 0; r < returns.length; r = r + 1) {
+                FunctionInfo* continued = (FunctionInfo*)returns.get(r);
+                if (continued == null || this.group[continued.graph_index - 1] != id) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    // A member may reach its own cycle only through 'return await' of a function with the same scalar signature: the
+    // caller's frame is gone during a tail call, so no argument may point into it, and nothing may need a dispose.
+    unsafe bool tail_safe(i32 index) {
+        PointerList* functions = this.functions;
+        FunctionInfo* info = (FunctionInfo*)functions.get(index);
+        if (this.excluded[index] || this.disposes[index] || !AsyncElision.scalar_parameters(info) || !this.register_result(info)) {
+            return false;
+        }
+        PointerList* calls = this.calls;
+        PointerList* edges = (PointerList*)calls.get(index);
+        PointerList* tails = this.tails;
+        IdList* positions = (IdList*)tails.get(index);
+        for (mut i32 e = 0; e < edges.length; e = e + 1) {
+            FunctionInfo* callee = (FunctionInfo*)edges.get(e);
+            if (this.group[callee.graph_index - 1] != this.group[index]) {
+                continue;
+            }
+            if (positions.get(e) == 0 || !AsyncElision.same_signature(info, callee)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    static unsafe bool scalar_parameters(FunctionInfo* info) {
+        IdList* types = info.param_types;
+        for (mut i32 i = 0; i < types.length; i = i + 1) {
+            if (!AsyncElision.register_scalar(types.get(i))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // A value wider than 64 bits can travel through memory (i128 on Windows x64), which a tail call cannot forward.
+    static bool register_scalar(u32 type) {
+        bool scalar = Types.is_integer(type) || Types.is_float(type) || Types.is_char(type) || type == Types.bool_type();
+        return scalar && Types.bits(type) <= 64;
+    }
+
+    // 'musttail' needs the result to come back in registers: a backend that returns it through a hidden pointer
+    // cannot perform the call. A scalar always does; a 'throws' record '{ i32, [n x i64] }' does while its payload is
+    // at most two words, so every error must be a plain struct of at most two scalars without a custom alignment.
+    unsafe bool register_result(FunctionInfo* info) {
+        if (!AsyncElision.register_scalar(info.return_type)) {
+            return false;
+        }
+        if (!info.has_throws) {
+            return true;
+        }
+        if (info.throws_any || info.throws_types == null) {
+            return false;
+        }
+        IdList* errors = info.throws_types;
+        for (mut i32 i = 0; i < errors.length; i = i + 1) {
+            if (!this.small_error(errors.get(i))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    unsafe bool small_error(u32 type) {
+        SymbolTable* symbols = this.symbols;
+        if (!Types.is_struct(type) || symbols.enum_of_type(type) != null) {
+            return false;
+        }
+        StructInfo* error = symbols.struct_at(Types.struct_index(type));
+        PointerList* fields = error.fields;
+        if (error.is_template || error.node == null || Attributes.has(error.node, "Align") || fields == null || fields.length > 2) {
+            return false;
+        }
+        for (mut i32 i = 0; i < fields.length; i = i + 1) {
+            FieldInfo* field = (FieldInfo*)fields.get(i);
+            if (!AsyncElision.register_scalar(field.type)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    static unsafe bool same_signature(FunctionInfo* left, FunctionInfo* right) {
+        if (left.return_type != right.return_type || left.has_throws != right.has_throws || left.throws_any != right.throws_any
+            || !AsyncElision.same_types(left.param_types, right.param_types)) {
+            return false;
+        }
+        if (left.throws_types == null || right.throws_types == null) {
+            return left.throws_types == right.throws_types;
+        }
+        return AsyncElision.same_types(left.throws_types, right.throws_types);
+    }
+
+    static unsafe bool same_types(IdList* left, IdList* right) {
+        if (left.length != right.length) {
+            return false;
+        }
+        for (mut i32 i = 0; i < left.length; i = i + 1) {
+            if (left.get(i) != right.get(i)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     unsafe void settle() {
@@ -267,7 +468,11 @@ struct AsyncElision {
                 if (this.excluded[i] || this.suspends[i] || info.runs_sync) {
                     continue;
                 }
-                if (this.awaits_only_sync(i)) {
+                if (this.group[i] != 0) {
+                    if (this.settle_group(this.group[i])) {
+                        changed = true;
+                    }
+                } else if (this.awaits_only_sync(i)) {
                     info.runs_sync = true;
                     changed = true;
                 }
@@ -275,18 +480,44 @@ struct AsyncElision {
         }
     }
 
+    // A cycle never suspends only as a whole: every member must be free of suspension points, and each await must
+    // target a function already known to be synchronous or a member of the same cycle.
+    unsafe bool settle_group(i32 id) {
+        PointerList* groups = this.groups;
+        PointerList* functions = this.functions;
+        IdList* members = (IdList*)groups.get(id - 1);
+        for (mut i32 m = 0; m < members.length; m = m + 1) {
+            i32 member = (i32)members.get(m);
+            if (this.excluded[member] || this.suspends[member] || !this.awaits_only_sync(member)) {
+                return false;
+            }
+        }
+        for (mut i32 m = 0; m < members.length; m = m + 1) {
+            FunctionInfo* info = (FunctionInfo*)functions.get((i32)members.get(m));
+            info.runs_sync = true;
+            info.tail_group = id;
+        }
+        return true;
+    }
+
     unsafe bool awaits_only_sync(i32 index) {
         PointerList* awaits = this.awaits;
         PointerList* awaited = (PointerList*)awaits.get(index);
         for (mut i32 a = 0; a < awaited.length; a = a + 1) {
             FunctionInfo* target = (FunctionInfo*)awaited.get(a);
-            if (target == null || !target.runs_sync) {
+            if (target == null) {
+                return false;
+            }
+            bool same_cycle = this.group[index] != 0 && this.group[target.graph_index - 1] == this.group[index];
+            if (!target.runs_sync && !same_cycle) {
                 return false;
             }
         }
         return true;
     }
 
+    // A tail-recursive cycle gets no warning: as a plain recursion without 'async' its calls would no longer be
+    // guaranteed tail calls.
     unsafe void report(Diagnostics* diagnostics) {
         PointerList* functions = this.functions;
         for (mut i32 i = 0; i < functions.length; i = i + 1) {
@@ -295,7 +526,7 @@ struct AsyncElision {
                 continue;
             }
             info.is_async = false;
-            if (this.in_std(info)) {
+            if (info.tail_group != 0 || this.in_std(info)) {
                 continue;
             }
             Node* declaration = info.node;

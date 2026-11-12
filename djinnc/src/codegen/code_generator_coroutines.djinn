@@ -213,6 +213,43 @@ impl CodeGenerator {
         return Value.create(result, result_type);
     }
 
+    // 'return await g(...)' between functions of one converted tail-recursive cycle: a guaranteed tail call, so the
+    // recursion runs in constant stack. The analysis only groups functions with identical scalar signatures and
+    // nothing to dispose, which is what makes 'musttail' valid; pending drops fall back to an ordinary call.
+    unsafe bool generate_tail_await(Node* node) {
+        FunctionInfo* current = this.current_function();
+        Node* awaited = node.first();
+        if (current.tail_group == 0 || Types.is_void(current.return_type) || awaited == null || awaited.kind() != NodeKind::AWAIT_EXPR) {
+            return false;
+        }
+        Node* call = awaited.first();
+        if (call.kind() != NodeKind::CALL) {
+            return false;
+        }
+        Node* callee_node = call.first();
+        i32 kind = callee_node.symbol_kind();
+        if (kind != SymbolKind.FUNCTION && kind != SymbolKind.STATIC_METHOD) {
+            return false;
+        }
+        FunctionInfo* callee = (FunctionInfo*)callee_node.symbol();
+        FunctionContext* function_context = this.function_context;
+        PointerList* drops = function_context.drops;
+        if (callee.tail_group != current.tail_group || drops.length > 0) {
+            return false;
+        }
+        this.tail_call = true;
+        Value* produced = this.generate_call_with_propagation(call, false);
+        ptr instruction = produced.ref;
+        LLVMSetTailCallKind(instruction, LlvmConst.TAIL_CALL_MUST);
+        ptr block = LLVMGetInsertBlock(this.builder);
+        LLVMPositionBuilderBefore(this.builder, instruction);
+        this.emit_frame_pop();
+        LLVMPositionBuilderAtEnd(this.builder, block);
+        LLVMBuildRet(this.builder, instruction);
+        this.start_dead_block();
+        return true;
+    }
+
     unsafe ptr promise_address(ptr handle, ptr promise_llvm) {
         ptr<ptr> promise_args = CodeGenerator.array_of(3);
         promise_args[0] = handle;
