@@ -105,13 +105,30 @@ void* __djinn_realloc(void* pointer, size_t new_size)
 }
 
 DJINN_ATTR_MALLOC
-void* __djinn_malloc(size_t size)
+void* __djinn_alloc(size_t size)
+{
+    DJINN_ASSERT(size > 0, "Size need be greater than zero!");
+    void* chunk = malloc(size);
+    DJINN_ASSERT(chunk, "Out of memory");
+    DJINN_TRACE("allocated size %zu on heap at %p", size, chunk);
+    return chunk;
+}
+
+DJINN_ATTR_MALLOC
+void* __djinn_alloc_zeroed(size_t size)
 {
     DJINN_ASSERT(size > 0, "Size need be greater than zero!");
     void* chunk = calloc(1, size);
     DJINN_ASSERT(chunk, "Out of memory");
-    DJINN_TRACE("allocated size %zu on heap at %p", size, chunk);
+    DJINN_TRACE("allocated zeroed size %zu on heap at %p", size, chunk);
     return chunk;
+}
+
+// Programs and libraries built by an older djinnc still import the zeroing allocator under this name.
+DJINN_ATTR_MALLOC
+void* __djinn_malloc(size_t size)
+{
+    return __djinn_alloc_zeroed(size);
 }
 
 DJINN_ATTR_MALLOC_ALIGNED

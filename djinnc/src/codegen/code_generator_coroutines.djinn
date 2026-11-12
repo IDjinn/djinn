@@ -12,18 +12,24 @@ impl CodeGenerator {
         return LLVMConstNull(LLVMTokenTypeInContext(this.context));
     }
 
-    unsafe ptr libc_call(ptr<i8> name, ptr return_type, ptr argument, ptr<i8> label) {
-        ptr pointer_llvm = LLVMPointerTypeInContext(this.context, 0);
-        ptr<ptr> params = CodeGenerator.array_of(1);
-        ptr<ptr> args = CodeGenerator.array_of(1);
-        params[0] = LLVMTypeOf(argument);
-        args[0] = argument;
-        ptr function_type = LLVMFunctionType(return_type, params, 1, 0);
-        mut ptr function = LLVMGetNamedFunction(this.module, name);
-        if (function == null) {
-            function = LLVMAddFunction(this.module, name, function_type);
+    unsafe ptr frame_size() {
+        ptr<ptr> size_types = CodeGenerator.array_of(1);
+        size_types[0] = LLVMIntTypeInContext(this.context, 64);
+        return this.coro_intrinsic("llvm.coro.size.i64", size_types, 1, CodeGenerator.array_of(0), 0, "coro.size");
+    }
+
+    unsafe ptr frame_call(ptr<i8> name, ptr return_type, ptr frame, u32 count) {
+        ptr<ptr> params = (ptr<ptr>)u64[2];
+        ptr<ptr> args = (ptr<ptr>)u64[2];
+        mut i32 at = 0;
+        if (frame != null) {
+            params[0] = LLVMPointerTypeInContext(this.context, 0);
+            args[0] = frame;
+            at = 1;
         }
-        return LLVMBuildCall2(this.builder, function_type, function, args, 1, label);
+        params[at] = LLVMIntTypeInContext(this.context, 64);
+        args[at] = this.frame_size();
+        return this.call_runtime(name, return_type, params, args, (i32)count);
     }
 
     unsafe ptr suspend_switch(ptr ready_block, ptr<i8> label) {
@@ -44,7 +50,6 @@ impl CodeGenerator {
         function_context.is_async = true;
         ptr pointer_llvm = LLVMPointerTypeInContext(this.context, 0);
         ptr i32_type = LLVMIntTypeInContext(this.context, 32);
-        ptr i64_type = LLVMIntTypeInContext(this.context, 64);
 
         u32 kind = LLVMGetEnumAttributeKindForName("presplitcoroutine", 17);
         LLVMAddAttributeAtIndex(info.function, 4294967295, LLVMCreateEnumAttribute(this.context, kind, 0));
@@ -79,10 +84,7 @@ impl CodeGenerator {
         LLVMBuildCondBr(this.builder, needs_alloc, alloc_block, begin_block);
 
         LLVMPositionBuilderAtEnd(this.builder, alloc_block);
-        ptr<ptr> size_types = CodeGenerator.array_of(1);
-        size_types[0] = i64_type;
-        ptr frame_size = this.coro_intrinsic("llvm.coro.size.i64", size_types, 1, CodeGenerator.array_of(0), 0, "coro.size");
-        ptr frame = this.libc_call("malloc", pointer_llvm, frame_size, "coro.frame");
+        ptr frame = this.frame_call("__djinn_coro_alloc", pointer_llvm, null, 1);
         LLVMBuildBr(this.builder, begin_block);
 
         LLVMPositionBuilderAtEnd(this.builder, begin_block);
@@ -133,7 +135,7 @@ impl CodeGenerator {
         LLVMBuildCondBr(this.builder, has_memory, release_block, function_context.suspend_block);
 
         LLVMPositionBuilderAtEnd(this.builder, release_block);
-        this.libc_call("free", LLVMVoidTypeInContext(this.context), memory, "");
+        this.frame_call("__djinn_coro_free", LLVMVoidTypeInContext(this.context), memory, 2);
         LLVMBuildBr(this.builder, function_context.suspend_block);
 
         LLVMPositionBuilderAtEnd(this.builder, function_context.suspend_block);

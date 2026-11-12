@@ -103,6 +103,8 @@ int64_t __djinn_atomic_exchange_i64(int64_t* target, int64_t value);
 int64_t __djinn_atomic_add_i64(int64_t* target, int64_t delta);
 int32_t __djinn_atomic_cas_i64(int64_t* target, int64_t expected, int64_t desired);
 
+void* __djinn_alloc(size_t size);
+void* __djinn_alloc_zeroed(size_t size);
 void* __djinn_malloc(size_t size);
 
 void* __djinn_malloc_aligned(size_t size, size_t alignment);
@@ -116,18 +118,13 @@ void __djinn_free_aligned(void* pointer);
 #define DJINN_IO_RECV        4
 #define DJINN_IO_SEND        5
 
-typedef struct djinn_task
-{
-    void* handle; // coroutine handle
-    struct djinn_task* next; // linked list
-    int priority; // 0 = normal, 1 = high
-} djinn_task_t;
 
 
 typedef struct
 {
-    djinn_task_t* head;
-    djinn_task_t* tail;
+    void** items;
+    int capacity;
+    int head;
     int count;
 #ifdef _WIN32
     CRITICAL_SECTION mutex;
@@ -213,14 +210,12 @@ typedef struct
     volatile int running;
 } djinn_runtime_t;
 
-typedef struct djinn_continuation
+typedef struct
 {
-    void* child;
+    void* handle;
     void* parent;
-    struct djinn_continuation* next;
-} djinn_continuation_t;
-
-#define DJINN_MAX_WAITING 256
+    int waiting;
+} djinn_coro_entry_t;
 
 void __djinn_runtime_init(int num_threads);
 void __djinn_runtime_shutdown(void);

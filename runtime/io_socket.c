@@ -325,7 +325,7 @@ int64_t __djinn_async_accept(int64_t server_sock, int64_t* out_result, void* cor
 {
     DJINN_ASSERT(coro, "coro handle is NULL");
 
-    djinn_io_request_t* req = __djinn_malloc(sizeof(djinn_io_request_t));
+    djinn_io_request_t* req = __djinn_alloc_zeroed(sizeof(djinn_io_request_t));
     if (!req) return -1;
 
     req->type = DJINN_IO_ACCEPT;
@@ -387,7 +387,7 @@ int64_t __djinn_async_connect(int64_t socket_fd, const char* address, int port, 
     DJINN_ASSERT(coro, "coro handle is NULL");
     DJINN_ASSERT(address, "addr is NULL");
 
-    djinn_io_request_t* req = __djinn_malloc(sizeof(djinn_io_request_t));
+    djinn_io_request_t* req = __djinn_alloc_zeroed(sizeof(djinn_io_request_t));
     if (!req) return -1;
 
     const size_t addr_len = strlen(address);
@@ -468,7 +468,7 @@ int64_t __djinn_async_send(int64_t socket_fd, void* buffer, int64_t count, int64
     DJINN_ASSERT(buffer, "buf is NULL");
     DJINN_ASSERT(count > 0, "count <= 0");
 
-    djinn_io_request_t* req = __djinn_malloc(sizeof(djinn_io_request_t));
+    djinn_io_request_t* req = __djinn_alloc_zeroed(sizeof(djinn_io_request_t));
     if (!req) return -1;
 
     req->type = DJINN_IO_SEND;
@@ -517,7 +517,7 @@ int64_t __djinn_async_recv(int64_t socket_fd, void* buffer, int64_t count, int64
 
     DJINN_TRACE("reading buffer size %d", (int)count);
 
-    djinn_io_request_t* req = __djinn_malloc(sizeof(djinn_io_request_t));
+    djinn_io_request_t* req = __djinn_alloc_zeroed(sizeof(djinn_io_request_t));
     if (!req) return -1;
 
     req->type = DJINN_IO_RECV;
