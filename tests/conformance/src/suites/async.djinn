@@ -280,3 +280,227 @@ async i32 main() {
         Verify.source(source).with_std().compiles().runs(Expected.exit(0));
     }
 }
+
+struct AsyncElisionTests {
+    [Test]
+    void NeverSuspendingChainRuns() {
+        str source = """
+async i32 leaf(i32 x) {
+    return x + 1;
+}
+
+async i32 middle(i32 x) {
+    i32 value = await leaf(x);
+    return value * 2;
+}
+
+i32 main() {
+    i32 first = await middle(20);
+    i32 second = await leaf(-43);
+    return first + second;
+}
+""";
+        Verify.source(source).runs(Expected.exit(0));
+    }
+
+    [Test]
+    void NeverSuspendingFunctionHasNoCoroutine() {
+        str source = """
+async i32 leaf(i32 x) {
+    return x + 1;
+}
+
+async i32 middle(i32 x) {
+    i32 value = await leaf(x);
+    return value * 2;
+}
+
+i32 main() {
+    return await middle(20);
+}
+""";
+        Verify.source(source).emits_ir(Expected.ir_contains("define i32 @leaf(").and_ir_contains("define i32 @middle(").and_ir_lacks("llvm.coro.id").and_ir_lacks("__djinn_event_loop_run"));
+    }
+
+    [Test]
+    void NeverSuspendingFunctionWarns() {
+        str source = """
+async i32 leaf(i32 x) {
+    return x + 1;
+}
+
+i32 main() {
+    return await leaf(41);
+}
+""";
+        Verify.source(source).diagnostics(Expected.warning(DiagnosticWarnings.ASYNC_NEVER_SUSPENDS).at(1, 7));
+    }
+
+    [Test]
+    void SuspendingCallKeepsTheCallerAsync() {
+        str source = """
+import std::sys;
+
+async i32 leaf(i32 x) {
+    return x + 1;
+}
+
+async i32 waits(i32 x) {
+    await Task.delay(1);
+    i32 value = await leaf(x);
+    return value;
+}
+
+i32 main() {
+    return await waits(41);
+}
+""";
+        Verify.source(source).with_std().diagnostics(Expected.warning(DiagnosticWarnings.ASYNC_NEVER_SUSPENDS).at(3, 7));
+        Verify.source(source).with_std().emits_ir(Expected.ir_contains("define ptr @waits(").and_ir_contains("define i32 @leaf("));
+        Verify.source(source).with_std().runs(Expected.exit(42));
+    }
+
+    [Test]
+    void StaticMethodIsConvertedUnlessReflected() {
+        str source = """
+struct Calc {
+    public static async i32 twice(i32 x) {
+        return x * 2;
+    }
+}
+
+[Reflect]
+struct Shown {
+    public static async i32 twice(i32 x) {
+        return x * 2;
+    }
+}
+
+i32 main() {
+    i32 first = await Calc.twice(10);
+    i32 second = await Shown.twice(11);
+    return first + second;
+}
+""";
+        Verify.source(source).diagnostics(Expected.warning(DiagnosticWarnings.ASYNC_NEVER_SUSPENDS).at(2, 25));
+        Verify.source(source).emits_ir(Expected.ir_contains("define i32 @Calc.twice(").and_ir_contains("define ptr @Shown.twice("));
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void RecursionStaysAsync() {
+        str source = """
+async i32 depth(i32 n) {
+    if (n == 0) {
+        return 0;
+    }
+    i32 below = await depth(n - 1);
+    return below + 1;
+}
+
+async bool is_even(i32 n) {
+    if (n == 0) {
+        return true;
+    }
+    return await is_odd(n - 1);
+}
+
+async bool is_odd(i32 n) {
+    if (n == 0) {
+        return false;
+    }
+    return await is_even(n - 1);
+}
+
+i32 main() {
+    i32 total = await depth(1000);
+    if (await is_even(10)) {
+        return total + 1;
+    }
+    return 0;
+}
+""";
+        Verify.source(source).compiles();
+        Verify.source(source).emits_ir(Expected.ir_contains("define ptr @depth(").and_ir_contains("define ptr @is_even(").and_ir_contains("define ptr @is_odd("));
+        Verify.source(source).runs(Expected.exit(1001));
+    }
+
+    [Test]
+    void SpawnedFunctionStaysAsync() {
+        str source = """
+async i32 work(i32 x) {
+    return x;
+}
+
+async i32 main() {
+    spawn work(1);
+    i32 value = await work(41);
+    return value + 1;
+}
+""";
+        Verify.source(source).with_std().compiles();
+        Verify.source(source).with_std().emits_ir(Expected.ir_contains("define ptr @work("));
+        Verify.source(source).with_std().runs(Expected.exit(42));
+    }
+
+    [Test]
+    void StoredTaskStaysAsync() {
+        str source = """
+async i32 work(i32 x) {
+    return x * 2;
+}
+
+i32 main() {
+    task<i32> pending = work(21);
+    return await pending;
+}
+""";
+        Verify.source(source).compiles();
+        Verify.source(source).emits_ir(Expected.ir_contains("define ptr @work("));
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void ThrowsPropagateThroughConvertedAwait() {
+        str source = """
+import std::sys;
+
+struct Oops {
+    i32 code;
+
+    Oops(i32 code) {
+        this.code = code;
+    }
+}
+
+async i32 risky(i32 x) throws(Oops) {
+    if (x > 5) {
+        throw Oops(x);
+    }
+    return x;
+}
+
+async i32 wrapper(i32 x) throws(Oops) {
+    i32 value = await risky(x);
+    return value + 1;
+}
+
+async i32 suspending(i32 x) throws(Oops) {
+    await Task.delay(1);
+    i32 value = await wrapper(x);
+    return value * 10;
+}
+
+i32 main() {
+    i32 passed = try await wrapper(3) ?: 100;
+    i32 failed = try await wrapper(9) ?: 30;
+    i32 direct = try await risky(7) ?: 2;
+    i32 resumed = try await suspending(1) ?: 500;
+    i32 rethrown = try await suspending(8) ?: 600;
+    return passed + failed + direct + resumed + rethrown;
+}
+""";
+        Verify.source(source).with_std().emits_ir(Expected.ir_contains("define { i32, [1 x i64] } @wrapper(").and_ir_contains("define ptr @suspending("));
+        Verify.source(source).with_std().runs(Expected.exit(656));
+    }
+}

@@ -72,6 +72,7 @@ The runtime (the `.c` files in `runtime/`) is compiled together with the program
 | `--emit-ir` / `--keep-ir` | Write `<output>.ll` (IR). `--keep-ir` also links. |
 | `--emit-asm` | Write the assembly to `-o` and stop. |
 | `--show-async` | In the view modes, also show the compiler-generated async infrastructure (the entry `main` that starts the runtime and event loop, and the `__djinn_coro_*` wrappers). Hidden by default. |
+| `--no-async-elision` | Keep every `async` function a coroutine. By default an async function that can never suspend is compiled as a plain function and reported with warning `E6004` (see `djinnc/SUBSET.md`). |
 | `--emit-ast` | Print the AST (with `<line:col>`) to stdout and stop. |
 | `--version` | Print the compiler version. |
 
