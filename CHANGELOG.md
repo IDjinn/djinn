@@ -1,5 +1,37 @@
 # Changelog
 
+## [0.2.0] - 2026-11-12
+
+### Language
+
+- `char` type with Unicode literals, `\uXXXX`/`\UXXXXXXXX` escapes, UTF-8 interpolation and `str` overloads.
+- Nullable values and pointers: `null`, `== null`, `??`, `??=`, `!.`, `?.` and implicit wrapping.
+- Destructuring (`auto { a, b } = expr`), `for (a..b)` without a loop variable, `const` locals, `$"""` blocks, error switch arms catching several types.
+- Ownership: `Trivial`/`Value`, `Disposable`, `Cloneable`, `owner<T>`, `shared<T>`, owned `string`, borrowed views; arguments move into the callee.
+- Compile-time text: constexpr `str`/`string`, folded interpolation and formatters, stack text builder.
+- Intrinsics: `alignof`, `sizeof(expr)`, `typeof(variable)`, `expect`, ABI, endianness, CPU features and platforms; function addresses and `System.hook`.
+- `nint` overflow-mode suffixes, static methods on primitive types, qualified types, `Align` on functions.
+- Async functions that never suspend compile as plain functions (warning E6004, `--no-async-elision`).
+
+### Compiler
+
+- Range analysis drops proven-safe overflow, division, shift and bounds checks; `--verify-ranges`.
+- Faster `--run` startup, tiered JIT and LLVM/driver optimizations; fewer heap allocations in async, allocation and formatting.
+- `--std` links a prebuilt `std.djlib`; array literals that do not escape live on the stack.
+- Standardized runtime errors and bound-checked `str`/`string` indexers.
+- The legacy C++ compiler (stage0) and its LSP were removed.
+
+### Standard library
+
+- `std::filesystem`: capability-based, async by default (`_sync` variants), native IOCP and io_uring.
+- `std::math`: type-safe `Math`, constexpr libm folding, bit-based NaN/infinity.
+- String and array QoL, `atomic<T>`.
+
+### Tooling
+
+- `djinn-lsp` suggestions, library discovery and `--std` checking of test files.
+- CI takes the seed from the `v0.2.0-seed.1` release.
+
 ## [0.1.1] - 2026-11-08
 
 - Windows x86_64 package (`djinn-<tag>-windows-x86_64.zip` with `LLVM-C.dll`) in the release workflow.
