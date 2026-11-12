@@ -79,7 +79,7 @@ int64_t __djinn_async_read(int fd, void* buf, int64_t count, void* coro)
     DJINN_ASSERT(buf, "buf is NULL");
     DJINN_ASSERT(count > 0, "count <= 0");
 
-    djinn_io_request_t* req = __djinn_malloc(sizeof(djinn_io_request_t));
+    djinn_io_request_t* req = __djinn_alloc_zeroed(sizeof(djinn_io_request_t));
     if (!req) return -1;
 
     req->type = DJINN_IO_FILE_READ;
@@ -112,7 +112,7 @@ int64_t __djinn_async_write(int fd, void* buf, int64_t count, void* coro)
     DJINN_ASSERT(buf, "buf is NULL");
     DJINN_ASSERT(count > 0, "count <= 0");
 
-    djinn_io_request_t* req = __djinn_malloc(sizeof(djinn_io_request_t));
+    djinn_io_request_t* req = __djinn_alloc_zeroed(sizeof(djinn_io_request_t));
     if (!req) return -1;
 
     req->type = DJINN_IO_FILE_WRITE;

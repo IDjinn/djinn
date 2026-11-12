@@ -44,6 +44,9 @@ impl CodeGenerator {
             } else {
                 info.function = LLVMAddFunction(this.module, symbol, info.function_type);
                 this.apply_attributes(info);
+                if (info.is_extern && CodeGenerator.is_runtime_allocator(symbol)) {
+                    this.mark_allocator(info.function, symbol);
+                }
                 if (!info.is_extern) {
                     this.share_definition(info);
                 }
@@ -304,9 +307,37 @@ impl CodeGenerator {
         this.add_attribute(function, 4294967295, name, 0);
     }
 
-    void mark_allocator(ptr function) {
+    unsafe ptr allocator_function(ptr<i8> name, ptr function_type) {
+        mut ptr allocator = LLVMGetNamedFunction(this.module, name);
+        if (allocator == null) {
+            allocator = LLVMAddFunction(this.module, name, function_type);
+        }
+        this.mark_allocator(allocator, name);
+        return allocator;
+    }
+
+    unsafe void mark_allocator(ptr function, ptr<i8> name) {
+        if (LLVMGetStringAttributeAtIndex(function, 4294967295, "alloc-family", 12) != null) {
+            return;
+        }
+        mut i32 kind = AllocKind.ALLOC | AllocKind.ZEROED;
+        mut ptr<i8> family = "djinn";
+        if (Strings.same(name, "__djinn_alloc")) {
+            kind = AllocKind.ALLOC | AllocKind.UNINITIALIZED;
+        } else if (Strings.same(name, "__djinn_malloc_aligned")) {
+            family = "djinn_aligned";
+        }
         this.add_attribute(function, 0, "noalias", 0);
         this.add_function_attribute(function, "nounwind");
+        this.add_attribute(function, 4294967295, "allockind", (u64)kind);
+        this.add_attribute(function, 4294967295, "allocsize", AllocKind.SIZE_IN_FIRST_PARAMETER);
+        this.add_attribute(function, 4294967295, "memory", AllocKind.INACCESSIBLE_MEMORY);
+        FloatEnvironment.add_string_attribute(this, function, "alloc-family", family);
+    }
+
+    static bool is_runtime_allocator(ptr<i8> name) {
+        return Strings.same(name, "__djinn_alloc") || Strings.same(name, "__djinn_alloc_zeroed")
+            || Strings.same(name, "__djinn_malloc") || Strings.same(name, "__djinn_malloc_aligned");
     }
 
     unsafe void apply_parameter_attributes(FunctionInfo* info) {

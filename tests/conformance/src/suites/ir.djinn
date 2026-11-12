@@ -414,3 +414,48 @@ i32 main() {
         Verify.source(source).with_std().emits_ir(Expected.ir_contains("div.zero").in_function("work"));
     }
 }
+
+struct AllocatorIrTests {
+    [Test]
+    void ArrayLiteralUsesTheZeroedAllocator() {
+        str source = """
+i32 main() {
+    i32[] values = [1, 2, 3];
+    return values[0] + values[2];
+}
+""";
+        Verify.source(source).with_std().emits_ir(Expected.ir_contains("declare noalias ptr @__djinn_alloc_zeroed(i64)").and_ir_contains("allockind(\"alloc,zeroed\") allocsize(0) memory(inaccessiblemem: readwrite)"));
+    }
+
+    [Test]
+    void ExternAllocatorsAreMarked() {
+        str source = """
+extern "C" {
+    void* __djinn_alloc(u64 size);
+}
+
+i32 main() {
+    unsafe {
+        i8* memory = (i8*)__djinn_alloc(8);
+        memory[0] = 7;
+        return (i32)memory[0];
+    }
+}
+""";
+        Verify.source(source).with_std().emits_ir(Expected.ir_contains("declare noalias ptr @__djinn_alloc(i64)").and_ir_contains("allockind(\"alloc,uninitialized\")"));
+    }
+
+    [Test]
+    void CoroutineFramesUseTheFramePool() {
+        str source = """
+async i32 compute() {
+    return 42;
+}
+
+async i32 main() {
+    return await compute();
+}
+""";
+        Verify.source(source).with_std().emits_ir(Expected.ir_contains("call ptr @__djinn_coro_alloc(i64").and_ir_contains("call void @__djinn_coro_free(ptr"));
+    }
+}
