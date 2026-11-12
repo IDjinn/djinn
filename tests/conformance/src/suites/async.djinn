@@ -437,7 +437,7 @@ i32 main() {
     }
 
     [Test]
-    void RecursionStaysAsync() {
+    void NonTailRecursionStaysAsync() {
         str source = """
 async i32 depth(i32 n) {
     if (n == 0) {
@@ -447,6 +447,18 @@ async i32 depth(i32 n) {
     return below + 1;
 }
 
+i32 main() {
+    return await depth(1000);
+}
+""";
+        Verify.source(source).compiles();
+        Verify.source(source).emits_ir(Expected.ir_contains("define ptr @depth("));
+        Verify.source(source).runs(Expected.exit(1000));
+    }
+
+    [Test]
+    void TailRecursiveCycleBecomesTailCalls() {
+        str source = """
 async bool is_even(i32 n) {
     if (n == 0) {
         return true;
@@ -462,16 +474,268 @@ async bool is_odd(i32 n) {
 }
 
 i32 main() {
-    i32 total = await depth(1000);
-    if (await is_even(10)) {
-        return total + 1;
+    if (await is_even(3000000) && await is_odd(1000001)) {
+        return 42;
     }
-    return 0;
+    return 1;
 }
 """;
         Verify.source(source).compiles();
-        Verify.source(source).emits_ir(Expected.ir_contains("define ptr @depth(").and_ir_contains("define ptr @is_even(").and_ir_contains("define ptr @is_odd("));
-        Verify.source(source).runs(Expected.exit(1001));
+        Verify.source(source).emits_ir(Expected.ir_contains("define i1 @is_even(").and_ir_contains("musttail call i1 @is_odd(").and_ir_contains("musttail call i1 @is_even(").and_ir_lacks("llvm.coro.id"));
+        Verify.source(source).runs(Expected.exit(42));
+        Verify.source(source).optimized(2).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void SelfTailRecursionRunsInConstantStack() {
+        str source = """
+async i64 sum_to(i64 n, i64 total) {
+    if (n == 0) {
+        return total;
+    }
+    return await sum_to(n - 1, total + n);
+}
+
+i32 main() {
+    i64 sum = await sum_to(2000000, 0);
+    if (sum == 2000001000000) {
+        return 42;
+    }
+    return 1;
+}
+""";
+        Verify.source(source).compiles();
+        Verify.source(source).emits_ir(Expected.ir_contains("musttail call i64 @sum_to("));
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void TailRecursionThrowsThroughTheRecord() {
+        str source = """
+struct Oops {
+    i32 code;
+
+    Oops(i32 code) {
+        this.code = code;
+    }
+}
+
+async i32 count_down(i32 n, i32 fail_at) throws(Oops) {
+    if (n == fail_at) {
+        throw Oops(n);
+    }
+    if (n == 0) {
+        return 40;
+    }
+    return await count_down(n - 1, fail_at);
+}
+
+i32 main() {
+    i32 finished = try await count_down(1000000, -1) ?: 0;
+    i32 failed = try await count_down(1000000, 3) ?: 2;
+    return finished + failed;
+}
+""";
+        Verify.source(source).emits_ir(Expected.ir_contains("musttail call { i32, [1 x i64] } @count_down("));
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void TailCycleThatSuspendsStaysAsync() {
+        str source = """
+import std::sys;
+
+async bool is_even(i32 n) {
+    if (n == 0) {
+        await Task.pause();
+        return true;
+    }
+    return await is_odd(n - 1);
+}
+
+async bool is_odd(i32 n) {
+    if (n == 0) {
+        return false;
+    }
+    return await is_even(n - 1);
+}
+
+i32 main() {
+    if (await is_even(10)) {
+        return 42;
+    }
+    return 1;
+}
+""";
+        Verify.source(source).with_std().compiles();
+        Verify.source(source).with_std().emits_ir(Expected.ir_contains("define ptr @is_even(").and_ir_contains("define ptr @is_odd(").and_ir_lacks("musttail"));
+        Verify.source(source).with_std().runs(Expected.exit(42));
+    }
+
+    [Test]
+    void TailCycleWithoutBaseCaseStaysAsync() {
+        str source = """
+async i32 spin(i32 n) {
+    return await spin(n);
+}
+
+async i32 ping(i32 n) {
+    return await pong(n - 1);
+}
+
+async i32 pong(i32 n) {
+    return await ping(n + 1);
+}
+
+i32 main() {
+    i32 limit = 0;
+    if (limit > 0) {
+        i32 value = await ping(limit);
+        return await spin(value);
+    }
+    return 42;
+}
+""";
+        Verify.source(source).compiles();
+        Verify.source(source).emits_ir(Expected.ir_contains("define ptr @spin(").and_ir_contains("define ptr @ping(").and_ir_contains("define ptr @pong(").and_ir_lacks("musttail"));
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void UnsafeTailCyclesStayAsync() {
+        str source = """
+struct Pair {
+    i32 first;
+    i32 second;
+}
+
+struct Data : Disposable {
+    i32 value;
+
+    void disposable() {
+    }
+}
+
+async i32 walk(Pair pair, i32 n) {
+    if (n == 0) {
+        return pair.first;
+    }
+    return await walk(pair, n - 1);
+}
+
+async i32 narrow(i32 n) {
+    if (n == 0) {
+        return 1;
+    }
+    return await wide((i64)n - 1);
+}
+
+async i32 wide(i64 n) {
+    if (n == 0) {
+        return 2;
+    }
+    return await narrow((i32)n - 1);
+}
+
+async i32 owner(i32 n) {
+    Data data = { .value = n };
+    if (n == 0) {
+        return data.value;
+    }
+    return await owner(n - 1);
+}
+
+i32 main() {
+    Pair pair = { .first = 30, .second = 0 };
+    i32 a = await walk(pair, 10);
+    i32 b = await narrow(10);
+    i32 c = await owner(10);
+    return a + b + c + 10;
+}
+""";
+        Verify.source(source).compiles();
+        Verify.source(source).emits_ir(Expected.ir_contains("define ptr @walk(").and_ir_contains("define ptr @narrow(").and_ir_contains("define ptr @wide(").and_ir_contains("define ptr @owner(").and_ir_lacks("musttail"));
+        Verify.source(source).runs(Expected.exit(41));
+    }
+
+    [Test]
+    void TailCyclesReturningThroughMemoryStayAsync() {
+        str source = """
+struct Big {
+    i64 a;
+    i64 b;
+    i64 c;
+    i64 d;
+}
+
+struct Wide {
+    i64 x;
+    i64 y;
+    i64 z;
+
+    Wide(i64 x) {
+        this.x = x;
+        this.y = x;
+        this.z = x;
+    }
+}
+
+[Align(32)]
+struct Aligned {
+    i32 code;
+
+    Aligned(i32 code) {
+        this.code = code;
+    }
+}
+
+async Big walk(i64 n) {
+    if (n == 0) {
+        Big big = { .a = 1, .b = 2, .c = 3, .d = 4 };
+        return big;
+    }
+    return await walk(n - 1);
+}
+
+async i32 wide(i32 n) throws(Wide) {
+    if (n < 0) {
+        throw Wide(1);
+    }
+    if (n == 0) {
+        return 10;
+    }
+    return await wide(n - 1);
+}
+
+async i32 aligned(i32 n) throws(Aligned) {
+    if (n < 0) {
+        throw Aligned(1);
+    }
+    if (n == 0) {
+        return 20;
+    }
+    return await aligned(n - 1);
+}
+
+async i64 huge(i128 n) {
+    if (n == 0) {
+        return 2;
+    }
+    return await huge(n - 1);
+}
+
+i32 main() {
+    Big big = await walk(100);
+    i32 a = try await wide(100) ?: 0;
+    i32 b = try await aligned(100) ?: 0;
+    i64 c = await huge(100);
+    return (i32)big.d + a + b + (i32)c + 6;
+}
+""";
+        Verify.source(source).compiles();
+        Verify.source(source).emits_ir(Expected.ir_contains("define ptr @walk(").and_ir_contains("define ptr @wide(").and_ir_contains("define ptr @aligned(").and_ir_contains("define ptr @huge(").and_ir_lacks("musttail"));
+        Verify.source(source).runs(Expected.exit(42));
+        Verify.source(source).optimized(2).runs(Expected.exit(42));
     }
 
     [Test]

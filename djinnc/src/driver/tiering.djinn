@@ -34,6 +34,10 @@ struct TierState {
 
 struct Tiering {
     const i32 TYPE_VOID = 0;
+    const i32 TYPE_X86_FP80 = 4;
+    const i32 TYPE_FP128 = 5;
+    const i32 TYPE_PPC_FP128 = 6;
+    const i32 TYPE_INTEGER = 8;
     const i32 TYPE_STRUCT = 10;
     const i32 TYPE_ARRAY = 11;
     const i32 TYPE_VECTOR = 13;
@@ -201,6 +205,41 @@ struct Tiering {
         Tiering.bump(builder, context, hot, hot_type, LLVMConstInt(wide, (u64)index, 0));
     }
 
+    // 'musttail' keeps a deep recursion in constant stack across tiers, but the backend aborts on it when a value
+    // travels through memory: an aggregate result returned through a hidden pointer, or a scalar wider than 64 bits.
+    // Such a function forwards with a plain 'tail' hint, as before.
+    static unsafe bool must_forward(ptr function_type) {
+        if (!Tiering.in_registers(LLVMGetReturnType(function_type))) {
+            return false;
+        }
+        u32 count = LLVMCountParamTypes(function_type);
+        ptr<ptr> types = CodeGenerator.array_of((i32)count);
+        LLVMGetParamTypes(function_type, types);
+        for (mut u32 i = 0; i < count; i = i + 1) {
+            if (!Tiering.in_registers(types[(i32)i])) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    static unsafe bool in_registers(ptr type) {
+        i32 kind = LLVMGetTypeKind(type);
+        if (kind == Tiering.TYPE_INTEGER) {
+            return LLVMGetIntTypeWidth(type) <= 64;
+        }
+        return kind != Tiering.TYPE_STRUCT && kind != Tiering.TYPE_ARRAY && kind != Tiering.TYPE_VECTOR && kind != Tiering.TYPE_SCALABLE_VECTOR
+            && kind != Tiering.TYPE_X86_FP80 && kind != Tiering.TYPE_FP128 && kind != Tiering.TYPE_PPC_FP128;
+    }
+
+    static unsafe void mark_forward(ptr call, ptr function_type) {
+        if (Tiering.must_forward(function_type)) {
+            LLVMSetTailCallKind(call, LlvmConst.TAIL_CALL_MUST);
+        } else {
+            LLVMSetTailCall(call, 1);
+        }
+    }
+
     static unsafe void forward_calls(ptr builder, ptr context, ptr function, ptr slot) {
         ptr function_type = LLVMGlobalGetValueType(function);
         ptr pointer = LLVMPointerTypeInContext(context, 0);
@@ -223,11 +262,11 @@ struct Tiering {
         ptr return_type = LLVMGetReturnType(function_type);
         if (LLVMGetTypeKind(return_type) == Tiering.TYPE_VOID) {
             ptr call = LLVMBuildCall2(builder, function_type, target, arguments, count, "");
-            LLVMSetTailCall(call, 1);
+            Tiering.mark_forward(call, function_type);
             LLVMBuildRetVoid(builder);
         } else {
             ptr call = LLVMBuildCall2(builder, function_type, target, arguments, count, "tier.call");
-            LLVMSetTailCall(call, 1);
+            Tiering.mark_forward(call, function_type);
             LLVMBuildRet(builder, call);
         }
     }

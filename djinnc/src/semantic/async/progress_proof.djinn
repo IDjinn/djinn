@@ -1,0 +1,174 @@
+namespace djinnc;
+
+// LLVM's 'mustprogress' lets the optimizer assume a function returns, unwinds or acts observably, so a side-effect
+// free loop it cannot prove finite may be deleted. Djinn only states it when that is proven: the body has no loop,
+// no recursion, no suspension and no call whose target is unknown or unproven, and nothing codegen adds behind the
+// source (dispose, boxing, formatting, reflection) reaches unseen code. 'willreturn' is never emitted, a panic
+// path ends the process instead of returning.
+struct ProgressProof {
+    SymbolTable* symbols;
+    PointerList* functions;
+    PointerList* calls;
+    ptr<bool> blocked;
+    u32 boxed;
+
+    public static unsafe void run(SymbolTable* symbols) {
+        ProgressProof* proof = (ProgressProof*)Memory.zalloc(sizeof(ProgressProof));
+        proof.symbols = symbols;
+        proof.functions = symbols.functions;
+        StructInfo* object_info = symbols.find_core_struct(Ast.intern_base_name("object", 6));
+        if (object_info != null) {
+            proof.boxed = object_info.type_id;
+        }
+        PointerList* functions = symbols.functions;
+        for (mut i32 i = 0; i < functions.length; i = i + 1) {
+            FunctionInfo* info = (FunctionInfo*)functions.get(i);
+            info.graph_index = i + 1;
+        }
+        proof.scan_bodies();
+        proof.settle();
+    }
+
+    static unsafe bool candidate(FunctionInfo* info) {
+        Node* declaration = info.node;
+        return !info.is_async && !info.is_extern && !info.is_template && info.generics == null && info.bindings == null
+            && !info.is_variadic && !info.packs_variadic && !info.is_disabled && declaration != null
+            && declaration.kind() == NodeKind::FUNCTION && declaration.first() != null && !declaration.is_header();
+    }
+
+    unsafe void scan_bodies() {
+        PointerList* functions = this.functions;
+        i32 count = functions.length;
+        this.blocked = (ptr<bool>)calloc((u64)count + 1, 1);
+        this.calls = PointerList.create();
+        PointerList* calls = this.calls;
+        for (mut i32 i = 0; i < count; i = i + 1) {
+            calls.push((ptr)PointerList.create());
+            FunctionInfo* info = (FunctionInfo*)functions.get(i);
+            if (!ProgressProof.candidate(info)) {
+                this.blocked[i] = true;
+                continue;
+            }
+            Node* declaration = info.node;
+            for (mut i32 p = 0; p < declaration.count(); p = p + 1) {
+                Node* parameter = declaration.child(p);
+                if (parameter.kind() == NodeKind::PARAMETER && parameter.symbol() != null) {
+                    LocalVariable* variable = (LocalVariable*)parameter.symbol();
+                    if (this.hidden_calls(variable.type)) {
+                        this.blocked[i] = true;
+                    }
+                }
+            }
+            if (!this.blocked[i]) {
+                this.scan(declaration.first(), i);
+            }
+        }
+    }
+
+    unsafe bool hidden_calls(u32 type) {
+        return type != 0 && (type == this.boxed || Ownership.needs_dispose(this.symbols, type));
+    }
+
+    unsafe void scan(Node* node, i32 owner) {
+        if (node == null || this.blocked[owner]) {
+            return;
+        }
+        NodeKind kind = node.kind();
+        if (kind == NodeKind::WHILE || kind == NodeKind::DO_WHILE || kind == NodeKind::FOR || kind == NodeKind::SPAWN_STMT
+            || kind == NodeKind::INTERPOLATION || kind == NodeKind::FUNCTION || this.hidden_calls(node.value_type())) {
+            this.blocked[owner] = true;
+            return;
+        }
+        if (kind == NodeKind::INTRINSIC && !ProgressProof.plain_intrinsic(node.op())) {
+            this.blocked[owner] = true;
+            return;
+        }
+        if (kind == NodeKind::VAR_DECL && node.symbol() != null) {
+            LocalVariable* variable = (LocalVariable*)node.symbol();
+            if (this.hidden_calls(variable.type)) {
+                this.blocked[owner] = true;
+                return;
+            }
+        }
+        if (kind == NodeKind::AWAIT_EXPR && AsyncElision.awaited_call(node) == null) {
+            this.blocked[owner] = true;
+            return;
+        }
+        if (kind == NodeKind::CALL && !ProgressProof.direct_callee(node.first())) {
+            this.blocked[owner] = true;
+            return;
+        }
+        if (ProgressProof.calls_function(node.symbol_kind()) && node.symbol() != null) {
+            FunctionInfo* target = (FunctionInfo*)node.symbol();
+            if (target.graph_index == 0) {
+                this.blocked[owner] = true;
+                return;
+            }
+            PointerList* calls = this.calls;
+            PointerList* edges = (PointerList*)calls.get(owner);
+            edges.push((ptr)target);
+        }
+        for (mut i32 field = NodeField.FIRST; field <= NodeField.FOURTH; field = field + 1) {
+            u32 stored = node.get_field(field);
+            if (stored != 0) {
+                this.scan(Ast.at((i32)stored), owner);
+            }
+        }
+        if (node.has_items()) {
+            for (mut i32 i = 0; i < node.count(); i = i + 1) {
+                this.scan(node.child(i), owner);
+            }
+        }
+    }
+
+    static bool calls_function(i32 kind) {
+        return kind == SymbolKind.FUNCTION || kind == SymbolKind.STATIC_METHOD || kind == SymbolKind.INSTANCE_METHOD
+            || kind == SymbolKind.CONSTRUCTOR || kind == SymbolKind.OPERATOR || kind == SymbolKind.NEGATED_OPERATOR
+            || kind == SymbolKind.PROPERTY_GET || kind == SymbolKind.PROPERTY_SET || kind == SymbolKind.IMPLICIT_GET
+            || kind == SymbolKind.IMPLICIT_SET || kind == SymbolKind.INDEX_GET || kind == SymbolKind.INDEX_SET;
+    }
+
+    static unsafe bool direct_callee(Node* callee) {
+        if (callee == null) {
+            return false;
+        }
+        i32 kind = callee.symbol_kind();
+        return kind == SymbolKind.FUNCTION || kind == SymbolKind.STATIC_METHOD || kind == SymbolKind.INSTANCE_METHOD
+            || kind == SymbolKind.CONSTRUCTOR || kind == SymbolKind.CONSTANT || kind == SymbolKind.FLOAT_BUILTIN
+            || kind == SymbolKind.ENUM_VALUE;
+    }
+
+    static bool plain_intrinsic(i32 id) {
+        return id == Intrinsic.SIZEOF || id == Intrinsic.ALIGNOF || id == Intrinsic.LIKELY || id == Intrinsic.UNLIKELY
+            || id == Intrinsic.EXPECT || id == Intrinsic.ASSUME || id == Intrinsic.PREFETCH || id == Intrinsic.TRAP
+            || id == Intrinsic.DEBUGTRAP || id == Intrinsic.UNREACHABLE || id == Intrinsic.PANIC || id == Intrinsic.BOUNDS_CHECK
+            || id == Intrinsic.FLOAT_BITS;
+    }
+
+    // Pessimistic fixpoint: a function is proven once every function it reaches is, so a recursion, which would
+    // first need itself, never is.
+    unsafe void settle() {
+        PointerList* functions = this.functions;
+        PointerList* calls = this.calls;
+        mut bool changed = true;
+        while (changed) {
+            changed = false;
+            for (mut i32 i = 0; i < functions.length; i = i + 1) {
+                FunctionInfo* info = (FunctionInfo*)functions.get(i);
+                if (this.blocked[i] || info.must_progress) {
+                    continue;
+                }
+                PointerList* edges = (PointerList*)calls.get(i);
+                mut bool proven = true;
+                for (mut i32 e = 0; e < edges.length && proven; e = e + 1) {
+                    FunctionInfo* target = (FunctionInfo*)edges.get(e);
+                    proven = target.must_progress;
+                }
+                if (proven) {
+                    info.must_progress = true;
+                    changed = true;
+                }
+            }
+        }
+    }
+}
