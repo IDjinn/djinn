@@ -293,6 +293,7 @@ impl TypeChecker {
         }
         Node* primitive = this.primitive_constant(base, node);
         if (primitive != null) {
+            this.check_non_finite_constant(base, node);
             base.set_symbol(SymbolKind.STRUCT_NAME, (ptr)0);
             node.set_symbol(SymbolKind.CONSTANT, (ptr)primitive);
             return primitive.value_type();
@@ -393,6 +394,14 @@ impl TypeChecker {
             }
             return Types.void_type();
         }
+        if (id == Intrinsic.FLOAT_BITS) {
+            u32 float_type = this.check_expression(node.first(), 0);
+            if (!Types.is_float(float_type)) {
+                this.error_code(node, DiagnosticErrors.INVALID_OPERATOR_OPERAND, "float_bits needs an f32 or f64 value");
+                return Types.integer(64, false);
+            }
+            return Types.integer(Types.bits(float_type), false);
+        }
         if (id == Intrinsic.EXPECT) {
             u32 value_type = this.check_expression(node.first(), 0);
             if (!Types.is_integer(value_type)) {
@@ -473,6 +482,27 @@ impl TypeChecker {
     unsafe void check_prefetch_constant(Node* node, i64 maximum, ptr<i8> message) {
         if (node == null || node.kind() != NodeKind::INT_LITERAL || node.int_value() < 0 || node.int_value() > maximum) {
             this.error_code(node, DiagnosticErrors.INVALID_PREFETCH, message);
+        }
+    }
+}
+
+impl TypeChecker {
+    unsafe void check_non_finite_constant(Node* base, Node* member) {
+        FloatStandard standard = FloatSettings.current().standard;
+        if (standard.conforming()) {
+            return;
+        }
+        ptr<i8> owner = base.text();
+        bool floating = Strings.same(owner, "f32") || Strings.same(owner, "f64");
+        ptr<i8> name = member.text();
+        bool non_finite = Strings.same(name, "NAN") || Strings.same(name, "INFINITY") || Strings.same(name, "NEG_INFINITY");
+        if (floating && non_finite) {
+            ByteBuffer* message = ByteBuffer.create();
+            message.append(owner);
+            message.append(".");
+            message.append(name);
+            message.append(" is undefined with --ieee754=none: the optimizer may assume no NaN or infinity exists; select an IEEE 754 revision to use it (see https://djinn-docs.lucas-romero.com/docs/types/numbers#ieee-754)");
+            this.error_code(member, DiagnosticErrors.NON_FINITE_CONSTANT_UNDEFINED, message.cstr());
         }
     }
 }

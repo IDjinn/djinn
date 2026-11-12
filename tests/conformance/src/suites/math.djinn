@@ -1,0 +1,388 @@
+namespace conformance;
+
+import testing;
+import djinnc::testing;
+import djinnc;
+
+struct StdMathTests {
+    static void every_configuration(str source) {
+        Verify.source(source).with_std().with_flag("--ieee754=1985").runs(Expected.exit(0));
+        Verify.source(source).with_std().with_flag("--ieee754=2008").runs(Expected.exit(0));
+        Verify.source(source).with_std().with_flag("--ieee754=2019").runs(Expected.exit(0));
+        Verify.source(source).with_std().with_flag("--fp-env=strict").runs(Expected.exit(0));
+        Verify.source(source).with_std().with_flag("--ieee754=1985").optimized(2).runs(Expected.exit(0));
+        Verify.source(source).with_std().with_flag("--ieee754=2008").optimized(2).runs(Expected.exit(0));
+        Verify.source(source).with_std().with_flag("--ieee754=2019").optimized(2).runs(Expected.exit(0));
+        Verify.source(source).with_std().with_flag("--fp-env=strict").optimized(2).runs(Expected.exit(0));
+    }
+
+    [Test]
+    void results_that_every_ieee_configuration_must_agree_on() {
+        str source = """
+import std::math;
+import std::types;
+namespace app;
+
+f64 divide(f64 left, f64 right) {
+    return left / right;
+}
+
+constexpr f64 FLOORED = Math.floor(-2.5);
+constexpr f64 ROOT = Math.sqrt(2.0);
+
+i32 main() {
+    f64 nan = divide(0.0, 0.0);
+    f64 infinity = divide(1.0, 0.0);
+    f64 negative_zero = -0.0;
+    if (!Math.isNaN(nan) || Math.isNaN(infinity) || Math.isNaN(1.0)) { return 1; }
+    if (!Math.isInfinity(infinity) || !Math.isInfinity(0.0 - infinity) || Math.isInfinity(nan)) { return 2; }
+    if (Math.isFinite(nan) || Math.isFinite(infinity) || !Math.isFinite(f64.MAX_VALUE)) { return 3; }
+    if (!Math.signBit(negative_zero) || Math.signBit(Math.abs(negative_zero)) || Math.signBit(0.0)) { return 4; }
+    if (Math.floor(-2.5) != -3.0 || Math.ceiling(-2.5) != -2.0 || Math.truncate(-2.5) != -2.0 || Math.round(-2.5) != -3.0) { return 5; }
+    if (Math.round(0.49999999999999994) != 0.0 || Math.truncate(1.0e300) != 1.0e300) { return 6; }
+    if (Math.min(1.0, 2.0) != 1.0 || Math.max(1.0, 2.0) != 2.0 || Math.clamp(5.0, 0.0, 3.0) != 3.0) { return 7; }
+    if (Math.min(3, 9) != 3 || Math.max((u8)3, (u8)9) != 9 || Math.abs((i16)-4) != 4 || Math.sign((i64)-7) != -1) { return 8; }
+    if (Math.sign(2.5) != 1.0 || Math.sign(-2.5) != -1.0 || Math.sign(0.0) != 0.0) { return 9; }
+    if (!Math.isNaN(Math.sign(nan)) || !Math.isNaN(Math.abs(nan))) { return 10; }
+    if (FLOORED != -3.0 || ROOT * ROOT < 1.9999999999999 || ROOT * ROOT > 2.0000000000001) { return 11; }
+    if (Math.sqrt(16.0) != 4.0 || Math.hypotenuse(3.0, 4.0) != 5.0 || Math.pow(2.0, 10.0) != 1024.0) { return 12; }
+    if (Math.remainder(7.5, 2.0) != -0.5 || Math.truncatedRemainder(7.5, 2.0) != 1.5) { return 13; }
+    if (Math.floor((f32)-1.5) != (f32)-2.0 || Math.sqrt((f32)9.0) != (f32)3.0 || !Math.isNaN((f32)nan)) { return 14; }
+    return 0;
+}
+""";
+        StdMathTests.every_configuration(source);
+    }
+
+    [Test]
+    void signed_zero_ordering_in_min_and_max_depends_on_the_revision() {
+        str source = """
+import std::math;
+import std::types;
+namespace app;
+
+i32 main() {
+    f64 positive = 0.0;
+    f64 negative = -0.0;
+    if (!Math.signBit(Math.min(positive, negative)) || !Math.signBit(Math.min(negative, positive))) { return 1; }
+    if (Math.signBit(Math.max(positive, negative)) || Math.signBit(Math.max(negative, positive))) { return 2; }
+    return 0;
+}
+""";
+        Verify.source(source).with_std().with_flag("--ieee754=2019").runs(Expected.exit(0));
+        Verify.source(source).with_std().with_flag("--ieee754=2019").optimized(2).runs(Expected.exit(0));
+    }
+
+    [Test]
+    void integers_use_the_generic_functions() {
+        str source = """
+import std::math;
+import std::types;
+namespace app;
+
+i32 main() {
+    if (Math.min(3, 9) != 3 || Math.max(3, 9) != 9) { return 1; }
+    if (Math.max((u8)3, (u8)9) != 9 || Math.min((u16)3, (u16)9) != 3) { return 2; }
+    if (Math.abs((i8)-5) != 5 || Math.abs((i16)7) != 7 || Math.abs((u32)7) != 7) { return 3; }
+    if (Math.abs((i64)-9) != 9) { return 4; }
+    if (Math.sign((i64)-7) != -1 || Math.sign(0) != 0 || Math.sign((u64)8) != 1) { return 5; }
+    if (Math.clamp(15, 0, 10) != 10 || Math.clamp(-5, 0, 10) != 0 || Math.clamp(5, 0, 10) != 5) { return 6; }
+    return 0;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(0));
+    }
+
+    [Test]
+    void floats_use_the_same_functions() {
+        str source = """
+import std::math;
+import std::types;
+namespace app;
+
+i32 main() {
+    f64 zero = 0.0;
+    f64 nan = zero / zero;
+    if (Math.abs(-2.5) != 2.5 || Math.abs((f32)-2.5) != (f32)2.5) { return 1; }
+    if (Math.min(1.0, 2.0) != 1.0 || Math.max(1.0, 2.0) != 2.0) { return 2; }
+    if (Math.min(nan, 1.0) != 1.0 || Math.max(1.0, nan) != 1.0) { return 3; }
+    if (!Math.isNaN(Math.sign(nan))) { return 4; }
+    if (Math.sign(-0.5) != -1.0 || Math.sign(3.0) != 1.0 || Math.sign(zero) != 0.0) { return 5; }
+    if (Math.clamp(1.5, 0.0, 1.0) != 1.0) { return 6; }
+    if (Math.lerp(10.0, 20.0, 0.5) != 15.0) { return 7; }
+    return 0;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(0));
+    }
+
+    [Test]
+    void rounding_is_implemented_in_djinn() {
+        str source = """
+import std::math;
+import std::types;
+namespace app;
+
+i32 main() {
+    if (Math.floor(-2.5) != -3.0 || Math.floor(2.5) != 2.0) { return 1; }
+    if (Math.ceiling(-2.5) != -2.0 || Math.ceiling(2.5) != 3.0) { return 2; }
+    if (Math.truncate(-2.9) != -2.0 || Math.truncate(2.9) != 2.0) { return 3; }
+    if (Math.round(2.5) != 3.0 || Math.round(-2.5) != -3.0 || Math.round(0.49999999999999994) != 0.0) { return 4; }
+    if (Math.truncate(1.0e300) != 1.0e300) { return 5; }
+    if (Math.fraction(2.25) != 0.25 || Math.truncatedRemainder(7.5, 2.0) != 1.5 || Math.remainder(7.5, 2.0) != -0.5) { return 6; }
+    if (Math.floor((f32)-1.5) != (f32)-2.0 || Math.round((f32)1.5) != (f32)2.0) { return 7; }
+    return 0;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(0));
+    }
+
+    [Test]
+    void classification() {
+        str source = """
+import std::math;
+import std::types;
+namespace app;
+
+i32 main() {
+    f64 zero = 0.0;
+    f64 nan = zero / zero;
+    f64 infinity = 1.0 / zero;
+    if (!Math.isNaN(nan) || Math.isNaN(1.0)) { return 1; }
+    if (!Math.isInfinity(infinity) || !Math.isInfinity(0.0 - infinity) || Math.isInfinity(1.0)) { return 2; }
+    if (Math.isFinite(infinity) || Math.isFinite(nan) || !Math.isFinite(1.0)) { return 3; }
+    return 0;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(0));
+    }
+
+    [Test]
+    void rounding_and_classification_are_methods_of_the_float_types() {
+        str source = """
+import std::math;
+import std::types;
+namespace app;
+
+i32 main() {
+    f64 value = -2.5;
+    f64 zero = 0.0;
+    f32 narrow = 1.5;
+    if (value.floor() != -3.0 || value.ceiling() != -2.0 || value.truncate() != -2.0 || value.round() != -3.0) { return 1; }
+    if (value.fraction() != -0.5 || narrow.floor() != (f32)1.0 || narrow.round() != (f32)2.0) { return 2; }
+    f64 infinity = 1.0 / zero;
+    f64 nan = zero / zero;
+    if (!infinity.isInfinity() || value.isInfinity() || infinity.isFinite() || nan.isFinite() || !value.isFinite()) { return 3; }
+    if (!nan.isNaN() || value.isNaN()) { return 4; }
+    return 0;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(0));
+    }
+
+    [Test]
+    void pure_functions_fold_at_compile_time() {
+        str source = """
+import std::math;
+import std::types;
+namespace app;
+
+constexpr f64 FLOORED = Math.floor(2.5);
+constexpr f64 ROUNDED = Math.round(-2.5);
+constexpr i32 SMALLEST = Math.min(3, 9);
+constexpr i32 MAGNITUDE = Math.abs(-7);
+constexpr i32 LIMITED = Math.clamp(15, 0, 10);
+constexpr f64 BLENDED = Math.lerp(10.0, 20.0, 0.5);
+constexpr f64 WHOLE = Math.truncate(-2.5) + Math.ceiling(2.5) + Math.fraction(2.25);
+constexpr f32 NARROW = Math.floor((f32)2.5);
+constexpr u8 POSITIVE = Math.sign((u8)5);
+constexpr bool FINITE = Math.isFinite(1.0) && !Math.isNaN(1.0) && !Math.isInfinity(1.0);
+
+i32 main() {
+    if (FLOORED != 2.0 || ROUNDED != -3.0 || BLENDED != 15.0 || WHOLE != 1.25) { return 1; }
+    if (NARROW != (f32)2.0 || POSITIVE != 1 || !FINITE) { return 2; }
+    return SMALLEST + MAGNITUDE + LIMITED - 20;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(0));
+    }
+
+    [Test]
+    void non_finite_constants_are_rejected_when_conformance_is_off() {
+        str source = """
+i32 main() {
+    f64 infinite = f64.INFINITY;
+    f32 missing = f32.NAN;
+    f64 below = f64.NEG_INFINITY;
+    return 0;
+}
+""";
+        Verify.source(source).with_std().with_flag("--ieee754=none").diagnostics(Expected.error(DiagnosticErrors.NON_FINITE_CONSTANT_UNDEFINED).and_error(DiagnosticErrors.NON_FINITE_CONSTANT_UNDEFINED).and_error(DiagnosticErrors.NON_FINITE_CONSTANT_UNDEFINED));
+        Verify.source(source).with_std().with_flag("--ieee754=2019").runs(Expected.exit(0));
+        Verify.source(source).with_std().with_flag("--ieee754=1985").runs(Expected.exit(0));
+    }
+
+    [Test]
+    void finite_values_keep_their_meaning_when_conformance_is_off() {
+        str source = """
+import std::math;
+import std::types;
+namespace app;
+
+f64 identity(f64 value) {
+    return value;
+}
+
+i32 main() {
+    f64 negative_zero = identity(-0.0);
+    if (Math.isNaN(identity(1.0)) || Math.isInfinity(identity(1.0)) || !Math.isFinite(identity(f64.MAX_VALUE))) { return 1; }
+    if (!Math.signBit(negative_zero) || Math.signBit(Math.abs(negative_zero)) || Math.signBit(identity(0.0))) { return 2; }
+    if (Math.floor(identity(-2.5)) != -3.0 || Math.ceiling(identity(-2.5)) != -2.0 || Math.round(identity(-2.5)) != -3.0 || Math.truncate(identity(-2.5)) != -2.0) { return 3; }
+    if (Math.min(identity(1.0), 2.0) != 1.0 || Math.max(identity(1.0), 2.0) != 2.0 || Math.clamp(identity(5.0), 0.0, 3.0) != 3.0) { return 4; }
+    if (Math.min(3, 9) != 3 || Math.abs((i16)-4) != 4 || Math.sign((i64)-7) != -1) { return 5; }
+    if (Math.sqrt(identity(16.0)) != 4.0 || Math.pow(identity(2.0), 10.0) != 1024.0) { return 6; }
+    return 0;
+}
+""";
+        Verify.source(source).with_std().with_flag("--ieee754=none").runs(Expected.exit(0));
+        Verify.source(source).with_std().with_flag("--ieee754=none").optimized(2).runs(Expected.exit(0));
+    }
+
+    [Test]
+    void signed_zero_follows_minimum_number_and_maximum_number() {
+        str source = """
+import std::math;
+import std::types;
+namespace app;
+
+i32 main() {
+    f64 positive = 0.0;
+    f64 negative = -0.0;
+    if (!Math.signBit(Math.min(positive, negative)) || !Math.signBit(Math.min(negative, positive))) { return 1; }
+    if (Math.signBit(Math.max(positive, negative)) || Math.signBit(Math.max(negative, positive))) { return 2; }
+    if (Math.signBit(Math.abs(negative)) || !Math.signBit(negative) || Math.signBit(positive)) { return 3; }
+    if (!Math.signBit((f32)-1.5) || Math.signBit((f32)1.5)) { return 4; }
+    return 0;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(0));
+    }
+
+    [Test]
+    void float_bits_and_classification_fold_at_compile_time() {
+        str source = """
+import std::math;
+import std::types;
+namespace app;
+
+constexpr u64 ONE = float_bits(1.0);
+constexpr u32 NARROW_ONE = float_bits((f32)1.0);
+constexpr bool NAN_IS_NAN = Math.isNaN(f64.NAN);
+constexpr bool INFINITY_IS_INFINITE = Math.isInfinity(f64.INFINITY) && !Math.isFinite(f64.INFINITY);
+constexpr bool NEGATIVE = Math.signBit(-2.0);
+
+i32 main() {
+    if (ONE != 0x3FF0000000000000 || NARROW_ONE != 0x3F800000) { return 1; }
+    if (!NAN_IS_NAN || !INFINITY_IS_INFINITE || !NEGATIVE) { return 2; }
+    return 0;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(0));
+    }
+
+    [Test]
+    void min_and_max_follow_the_selected_ieee_revision() {
+        str source = """
+import std::math;
+import std::types;
+namespace app;
+
+f64 divide(f64 left, f64 right) {
+    return left / right;
+}
+
+i32 main() {
+    f64 nan = divide(0.0, 0.0);
+    if (!Math.isNaN(Math.min(1.0, nan))) { return 1; }
+    if (Math.min(nan, 1.0) != 1.0) { return 2; }
+    return 0;
+}
+""";
+        str ignores_nan = """
+import std::math;
+import std::types;
+namespace app;
+
+f64 divide(f64 left, f64 right) {
+    return left / right;
+}
+
+i32 main() {
+    f64 nan = divide(0.0, 0.0);
+    if (Math.min(1.0, nan) != 1.0 || Math.max(nan, 2.0) != 2.0) { return 1; }
+    return 0;
+}
+""";
+        Verify.source(source).with_std().with_flag("--ieee754=1985").runs(Expected.exit(0));
+        Verify.source(ignores_nan).with_std().with_flag("--ieee754=2008").runs(Expected.exit(0));
+        Verify.source(ignores_nan).with_std().with_flag("--ieee754=2019").runs(Expected.exit(0));
+    }
+
+    [Test]
+    void transcendental_functions_wrap_libm() {
+        str source = """
+import std::math;
+import std::types;
+namespace app;
+
+i32 main() {
+    if (Math.sqrt(16.0) != 4.0 || Math.sqrt((f32)16.0) != (f32)4.0) { return 1; }
+    if (Math.abs(Math.sin(Math.HALF_PI) - 1.0) > 1.0e-12) { return 2; }
+    if (Math.abs(Math.cos(Math.PI) + 1.0) > 1.0e-12) { return 3; }
+    if (Math.pow(2.0, 10.0) != 1024.0) { return 4; }
+    if (Math.abs(Math.log(Math.EULER_NUMBER) - 1.0) > 1.0e-12) { return 5; }
+    if (Math.hypotenuse(3.0, 4.0) != 5.0 || Math.hypotenuse((f32)3.0, (f32)4.0) != (f32)5.0) { return 6; }
+    if (Math.abs(Math.toDegrees(Math.toRadians(90.0)) - 90.0) > 1.0e-12) { return 7; }
+    return 0;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(0));
+    }
+
+    [Test]
+    void libm_wrappers_fold_at_compile_time() {
+        str source = """
+import std::math;
+import std::types;
+namespace app;
+
+constexpr f64 ROOT = Math.sqrt(16.0);
+constexpr f64 POWER = Math.pow(2.0, 10.0);
+constexpr f64 SIDE = Math.hypotenuse(3.0, 4.0);
+constexpr f32 NARROW = Math.sqrt((f32)9.0);
+constexpr f64 ZEROS = Math.sin(0.0) + Math.arcTan2(0.0, 1.0) + Math.log(1.0);
+
+i32 main() {
+    if (ROOT != 4.0 || POWER != 1024.0 || SIDE != 5.0) { return 1; }
+    if (NARROW != (f32)3.0 || ZEROS != 0.0) { return 2; }
+    return 0;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(0));
+    }
+
+    [Test]
+    void only_numbers_satisfy_the_generic_functions() {
+        str source = """
+import std::math;
+import std::types;
+namespace app;
+
+i32 main() {
+    bool low = Math.min(true, false);
+    return 0;
+}
+""";
+        Verify.source(source).with_std().diagnostics(Expected.error(DiagnosticErrors.INTERFACE_NOT_IMPLEMENTED).and_error(DiagnosticErrors.UNDECLARED_FUNCTION).and_error(DiagnosticErrors.IMPLICIT_CONVERSION));
+    }
+}
