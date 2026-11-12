@@ -7,6 +7,7 @@
 #include <fcntl.h>
 #include <signal.h>
 #include <sys/wait.h>
+#include <dlfcn.h>
 extern char** environ;
 #endif
 
@@ -354,4 +355,35 @@ int32_t __djinn_stdout_write(const void* data, int32_t length)
         written += count;
     }
     return written;
+}
+
+// ── Host math functions, for the compiler's compile-time evaluator ──
+
+int32_t __djinn_host_call_f64(const char* name, int32_t arity, double a, double b, double* result)
+{
+    void* function = NULL;
+#ifdef _WIN32
+    HMODULE crt = GetModuleHandleA("ucrtbase.dll");
+    if (crt == NULL)
+        crt = LoadLibraryA("ucrtbase.dll");
+    if (crt != NULL)
+        function = (void*)GetProcAddress(crt, name);
+#else
+    function = dlsym(RTLD_DEFAULT, name);
+    if (function == NULL)
+    {
+        void* math = dlopen("libm.so.6", RTLD_LAZY);
+        if (math != NULL)
+            function = dlsym(math, name);
+    }
+#endif
+    if (function == NULL)
+        return 0;
+    if (arity == 1)
+        *result = ((double (*)(double))function)(a);
+    else if (arity == 2)
+        *result = ((double (*)(double, double))function)(a, b);
+    else
+        return 0;
+    return 1;
 }

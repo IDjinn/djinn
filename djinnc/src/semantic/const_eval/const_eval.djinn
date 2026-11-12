@@ -1,5 +1,9 @@
 namespace djinnc;
 
+extern "C" {
+    i32 __djinn_host_call_f64(ptr<i8> name, i32 arity, f64 a, f64 b, ptr<f64> result);
+}
+
 struct ConstEval {
     const i32 SIGNED = 256;
     const i32 FLOAT = 512;
@@ -357,10 +361,30 @@ struct ConstEval {
         if (kind == NodeKind::STRUCT_INIT) {
             return this.eval_struct_init(node);
         }
+        if (kind == NodeKind::INTRINSIC && node.op() == Intrinsic.FLOAT_BITS) {
+            return this.eval_float_bits(node);
+        }
         if (kind == NodeKind::INTRINSIC && node.op() == Intrinsic.SIZEOF) {
             return this.eval_sizeof(node);
         }
         return this.fail(node, "expression cannot be evaluated at compile time");
+    }
+
+    unsafe bool eval_float_bits(Node* node) {
+        Node* operand = node.first();
+        if (!this.eval(operand)) {
+            return false;
+        }
+        i32 shape = this.shape_of(operand.value_type());
+        if ((shape & ConstEval.FLOAT) == 0) {
+            return this.fail(node, "float_bits needs a float operand");
+        }
+        if ((shape & 255) == 32) {
+            this.ri = ConstBits.of_float32(this.rf);
+        } else {
+            this.ri = ConstBits.of_float(this.rf);
+        }
+        return true;
     }
 
     unsafe bool eval_sizeof(Node* node) {
@@ -1003,17 +1027,72 @@ struct ConstEval {
         }
     }
 
+    unsafe bool eval_float_builtin(Node* node, Node* callee) {
+        i32 builtin = (i32)(u64)callee.symbol();
+        if (builtin == FloatBuiltin.FMA || node.count() != 1) {
+            return this.fail(node, "this floating-point operation cannot be evaluated at compile time");
+        }
+        i32 shape = this.shape_of(node.value_type());
+        if (!this.eval(callee.first())) {
+            return false;
+        }
+        this.convert(this.shape_of(callee.first().value_type()), shape);
+        f64 first = this.rf;
+        if (!this.eval(node.child(0))) {
+            return false;
+        }
+        this.convert(this.shape_of(node.child(0).value_type()), shape);
+        FloatSettings* settings = FloatSettings.current();
+        this.rf = ConstFloat.pick(builtin, settings.standard, first, this.rf);
+        return true;
+    }
+
+    unsafe bool eval_libm(Node* node, ptr<i8> name, FunctionInfo* info) {
+        i32 arity = node.count();
+        if (info.node == null || !Attributes.has(info.node, "Foldable") || arity < 1 || arity > 2) {
+            return this.fail(node, "call to a function that is not constexpr or consteval");
+        }
+        mut f64 first = 0.0;
+        mut f64 second = 0.0;
+        IdList* param_types = info.param_types;
+        for (mut i32 i = 0; i < arity; i = i + 1) {
+            Node* argument = node.child(i);
+            if (!this.eval(argument)) {
+                return false;
+            }
+            this.convert(this.shape_of(argument.value_type()), this.shape_of(param_types.get(i)));
+            if (i == 0) {
+                first = this.rf;
+            } else {
+                second = this.rf;
+            }
+        }
+        mut f64 result = 0.0;
+        if (__djinn_host_call_f64(name, arity, first, second, &result) == 0) {
+            return this.fail(node, "this [Foldable] function was not found in the host math library");
+        }
+        this.rf = result;
+        return true;
+    }
+
     unsafe bool eval_call(Node* node) {
         Node* callee = node.first();
         i32 symbol_kind = callee.symbol_kind();
-        if (symbol_kind != SymbolKind.FUNCTION && symbol_kind != SymbolKind.STATIC_METHOD) {
+        if (symbol_kind == SymbolKind.FLOAT_BUILTIN) {
+            return this.eval_float_builtin(node, callee);
+        }
+        if (symbol_kind != SymbolKind.FUNCTION && symbol_kind != SymbolKind.STATIC_METHOD && symbol_kind != SymbolKind.INSTANCE_METHOD) {
             return this.fail(node, "only calls to constexpr functions can be evaluated");
         }
         FunctionInfo* info = (FunctionInfo*)callee.symbol();
+        if (info != null && info.is_extern) {
+            return this.eval_libm(node, callee.text(), info);
+        }
         if (info == null || info.const_kind == 0) {
             return this.fail(node, "call to a function that is not constexpr or consteval");
         }
-        if (info.is_instance || info.is_async || info.is_extern || info.is_variadic || info.is_template) {
+        bool scalar_receiver = info.is_instance && symbol_kind == SymbolKind.INSTANCE_METHOD && (this.shape_of(callee.first().value_type()) & ConstEval.NUMERIC) != 0;
+        if ((info.is_instance && !scalar_receiver) || info.is_async || info.is_extern || info.is_variadic || info.is_template) {
             return this.fail(node, "this function cannot be evaluated at compile time");
         }
         if (!this.prepare(node, info)) {
@@ -1042,6 +1121,17 @@ struct ConstEval {
         }
         this.top = frame_top;
 
+        mut i32 shift = 0;
+        if (scalar_receiver) {
+            Node* receiver = callee.first();
+            if (!this.eval(receiver)) {
+                this.top = frame_base;
+                return false;
+            }
+            this.ints[frame_base] = this.ri;
+            this.floats[frame_base] = this.rf;
+            shift = 1;
+        }
         IdList* param_types = info.param_types;
         for (mut i32 i = 0; i < count; i = i + 1) {
             Node* argument = node.child(i);
@@ -1055,8 +1145,8 @@ struct ConstEval {
                 return false;
             }
             this.convert(this.shape_of(argument.value_type()), param_shape);
-            this.ints[frame_base + i] = this.ri;
-            this.floats[frame_base + i] = this.rf;
+            this.ints[frame_base + i + shift] = this.ri;
+            this.floats[frame_base + i + shift] = this.rf;
         }
 
         i32 saved_base = this.base;
