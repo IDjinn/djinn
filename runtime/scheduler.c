@@ -1,19 +1,113 @@
 #include "runtime_internal.h"
 
 djinn_runtime_t djinn_rt;
-static void* waiting_handles[DJINN_MAX_WAITING];
-static int waiting_count = 0;
-static djinn_continuation_t* continuations = NULL;
+static djinn_coro_entry_t* coro_table = NULL;
+static size_t coro_table_capacity = 0;
+static size_t coro_table_count = 0;
 
 #ifdef _WIN32
 LPFN_ACCEPTEX djinn_pfn_accept_ex = NULL;
 LPFN_CONNECTEX djinn_pfn_connect_ex = NULL;
 #endif
 
+#define DJINN_FRAME_GRANULE 64
+#define DJINN_FRAME_CLASSES 32
+#define DJINN_FRAME_CACHE 64
+
+static void* frame_cache[DJINN_FRAME_CLASSES];
+static int frame_cached[DJINN_FRAME_CLASSES];
+static int frame_lock = 0;
+
+static void frame_lock_acquire(void)
+{
+    int expected = 0;
+    while (!__atomic_compare_exchange_n(&frame_lock, &expected, 1, 1, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
+    {
+        expected = 0;
+    }
+}
+
+static void frame_lock_release(void)
+{
+    __atomic_store_n(&frame_lock, 0, __ATOMIC_RELEASE);
+}
+
+static size_t frame_class(size_t size)
+{
+    return (size + DJINN_FRAME_GRANULE - 1) / DJINN_FRAME_GRANULE;
+}
+
+void* __djinn_coro_alloc(size_t size)
+{
+    const size_t size_class = frame_class(size);
+    void* frame = NULL;
+    if (size_class > 0 && size_class <= DJINN_FRAME_CLASSES)
+    {
+        frame_lock_acquire();
+        frame = frame_cache[size_class - 1];
+        if (frame)
+        {
+            frame_cache[size_class - 1] = *(void**)frame;
+            frame_cached[size_class - 1]--;
+        }
+        frame_lock_release();
+        if (!frame)
+        {
+            frame = malloc(size_class * DJINN_FRAME_GRANULE);
+        }
+    }
+    else
+    {
+        frame = malloc(size);
+    }
+    DJINN_ASSERT(frame, "Out of memory");
+    DJINN_TRACE("allocated coroutine frame of %zu bytes at %p", size, frame);
+    return frame;
+}
+
+void __djinn_coro_free(void* frame, size_t size)
+{
+    if (!frame) return;
+    DJINN_TRACE("released coroutine frame of %zu bytes at %p", size, frame);
+    const size_t size_class = frame_class(size);
+    if (size_class > 0 && size_class <= DJINN_FRAME_CLASSES)
+    {
+        frame_lock_acquire();
+        if (frame_cached[size_class - 1] < DJINN_FRAME_CACHE)
+        {
+            *(void**)frame = frame_cache[size_class - 1];
+            frame_cache[size_class - 1] = frame;
+            frame_cached[size_class - 1]++;
+            frame = NULL;
+        }
+        frame_lock_release();
+    }
+    free(frame);
+}
+
+static void release_frame_cache(void)
+{
+    frame_lock_acquire();
+    for (int i = 0; i < DJINN_FRAME_CLASSES; i++)
+    {
+        void* frame = frame_cache[i];
+        while (frame)
+        {
+            void* next = *(void**)frame;
+            free(frame);
+            frame = next;
+        }
+        frame_cache[i] = NULL;
+        frame_cached[i] = 0;
+    }
+    frame_lock_release();
+}
+
 void djinn_init_queue(djinn_task_queue_t* q)
 {
-    q->head = NULL;
-    q->tail = NULL;
+    q->items = NULL;
+    q->capacity = 0;
+    q->head = 0;
     q->count = 0;
 #ifdef _WIN32
     InitializeCriticalSection(&q->mutex);
@@ -26,15 +120,10 @@ void djinn_init_queue(djinn_task_queue_t* q)
 
 void djinn_destroy_queue(djinn_task_queue_t* q)
 {
-    djinn_task_t* t = q->head;
-    while (t)
-    {
-        djinn_task_t* next = t->next;
-        free(t);
-        t = next;
-    }
-    q->head = NULL;
-    q->tail = NULL;
+    free(q->items);
+    q->items = NULL;
+    q->capacity = 0;
+    q->head = 0;
     q->count = 0;
 #ifdef _WIN32
     DeleteCriticalSection(&q->mutex);
@@ -44,29 +133,43 @@ void djinn_destroy_queue(djinn_task_queue_t* q)
 #endif
 }
 
+static void grow_queue(djinn_task_queue_t* q)
+{
+    const int capacity = q->capacity ? q->capacity * 2 : 64;
+    void** items = (void**)malloc(sizeof(void*) * (size_t)capacity);
+    DJINN_ASSERT(items, "Out of memory");
+    for (int i = 0; i < q->count; i++)
+    {
+        items[i] = q->items[(q->head + i) & (q->capacity - 1)];
+    }
+    free(q->items);
+    q->items = items;
+    q->capacity = capacity;
+    q->head = 0;
+}
+
+static void* take_task(djinn_task_queue_t* q)
+{
+    if (q->count == 0) return NULL;
+    void* handle = q->items[q->head];
+    q->head = (q->head + 1) & (q->capacity - 1);
+    q->count--;
+    return handle;
+}
+
 void djinn_enqueue_task(djinn_task_queue_t* q, void* handle)
 {
-    djinn_task_t* task = (djinn_task_t*)malloc(sizeof(djinn_task_t));
-    if (!task) return;
-    task->handle = handle;
-    task->next = NULL;
-    task->priority = 0;
-
 #ifdef _WIN32
     EnterCriticalSection(&q->mutex);
 #else
     pthread_mutex_lock(&q->mutex);
 #endif
 
-    if (q->tail)
+    if (q->count == q->capacity)
     {
-        q->tail->next = task;
+        grow_queue(q);
     }
-    else
-    {
-        q->head = task;
-    }
-    q->tail = task;
+    q->items[(q->head + q->count) & (q->capacity - 1)] = handle;
     q->count++;
 
 #ifdef _WIN32
@@ -78,7 +181,7 @@ void djinn_enqueue_task(djinn_task_queue_t* q, void* handle)
 #endif
 }
 
-djinn_task_t* djinn_dequeue_task(djinn_task_queue_t* q)
+void* djinn_dequeue_task(djinn_task_queue_t* q)
 {
 #ifdef _WIN32
     EnterCriticalSection(&q->mutex);
@@ -86,14 +189,7 @@ djinn_task_t* djinn_dequeue_task(djinn_task_queue_t* q)
     pthread_mutex_lock(&q->mutex);
 #endif
 
-    djinn_task_t* task = q->head;
-    if (task)
-    {
-        q->head = task->next;
-        if (!q->head) q->tail = NULL;
-        q->count--;
-        task->next = NULL;
-    }
+    void* handle = take_task(q);
 
 #ifdef _WIN32
     LeaveCriticalSection(&q->mutex);
@@ -101,20 +197,20 @@ djinn_task_t* djinn_dequeue_task(djinn_task_queue_t* q)
     pthread_mutex_unlock(&q->mutex);
 #endif
 
-    return task;
+    return handle;
 }
 
-djinn_task_t* djinn_dequeue_task_blocking(djinn_task_queue_t* q, volatile int* shutdown)
+void* djinn_dequeue_task_blocking(djinn_task_queue_t* q, volatile int* shutdown)
 {
 #ifdef _WIN32
     EnterCriticalSection(&q->mutex);
-    while (!q->head && !(*shutdown))
+    while (q->count == 0 && !(*shutdown))
     {
         SleepConditionVariableCS(&q->cond, &q->mutex, 100);
     }
 #else
     pthread_mutex_lock(&q->mutex);
-    while (!q->head && !(*shutdown))
+    while (q->count == 0 && !(*shutdown))
     {
         struct timespec ts;
         clock_gettime(CLOCK_REALTIME, &ts);
@@ -128,14 +224,7 @@ djinn_task_t* djinn_dequeue_task_blocking(djinn_task_queue_t* q, volatile int* s
     }
 #endif
 
-    djinn_task_t* task = q->head;
-    if (task)
-    {
-        q->head = task->next;
-        if (!q->head) q->tail = NULL;
-        q->count--;
-        task->next = NULL;
-    }
+    void* handle = take_task(q);
 
 #ifdef _WIN32
     LeaveCriticalSection(&q->mutex);
@@ -143,39 +232,115 @@ djinn_task_t* djinn_dequeue_task_blocking(djinn_task_queue_t* q, volatile int* s
     pthread_mutex_unlock(&q->mutex);
 #endif
 
-    return task;
+    return handle;
+}
+
+static size_t coro_slot(void* handle, size_t capacity)
+{
+    // Fibonacci hashing of the frame address; the low bits are alignment and carry no entropy.
+    return (size_t)((((uint64_t)(uintptr_t)handle >> 4) * 0x9E3779B97F4A7C15ull) >> 32) & (capacity - 1);
+}
+
+static djinn_coro_entry_t* find_coro(void* handle)
+{
+    if (coro_table_count == 0) return NULL;
+    const size_t mask = coro_table_capacity - 1;
+    for (size_t i = coro_slot(handle, coro_table_capacity);; i = (i + 1) & mask)
+    {
+        if (coro_table[i].handle == handle) return &coro_table[i];
+        if (coro_table[i].handle == NULL) return NULL;
+    }
+}
+
+static djinn_coro_entry_t* place_coro(void* handle)
+{
+    const size_t mask = coro_table_capacity - 1;
+    size_t i = coro_slot(handle, coro_table_capacity);
+    while (coro_table[i].handle != NULL)
+    {
+        i = (i + 1) & mask;
+    }
+    coro_table[i].handle = handle;
+    coro_table_count++;
+    return &coro_table[i];
+}
+
+static void grow_coro_table(void)
+{
+    djinn_coro_entry_t* previous = coro_table;
+    const size_t previous_capacity = coro_table_capacity;
+    coro_table_capacity = previous_capacity ? previous_capacity * 2 : 64;
+    coro_table = (djinn_coro_entry_t*)calloc(coro_table_capacity, sizeof(djinn_coro_entry_t));
+    DJINN_ASSERT(coro_table, "Out of memory");
+    coro_table_count = 0;
+    for (size_t i = 0; i < previous_capacity; i++)
+    {
+        if (previous[i].handle)
+        {
+            *place_coro(previous[i].handle) = previous[i];
+        }
+    }
+    free(previous);
+}
+
+static djinn_coro_entry_t* insert_coro(void* handle)
+{
+    djinn_coro_entry_t* found = find_coro(handle);
+    if (found) return found;
+    if ((coro_table_count + 1) * 2 > coro_table_capacity)
+    {
+        grow_coro_table();
+    }
+    return place_coro(handle);
+}
+
+static void release_coro(djinn_coro_entry_t* entry)
+{
+    if (entry->parent || entry->waiting) return;
+    const size_t mask = coro_table_capacity - 1;
+    size_t hole = (size_t)(entry - coro_table);
+    // Backward-shift deletion: an entry moves into the hole when the hole lies between its home slot and its slot.
+    for (size_t i = (hole + 1) & mask; coro_table[i].handle != NULL; i = (i + 1) & mask)
+    {
+        const size_t home = coro_slot(coro_table[i].handle, coro_table_capacity);
+        if (((i - home) & mask) >= ((i - hole) & mask))
+        {
+            coro_table[hole] = coro_table[i];
+            hole = i;
+        }
+    }
+    coro_table[hole].handle = NULL;
+    coro_table[hole].parent = NULL;
+    coro_table[hole].waiting = 0;
+    coro_table_count--;
+}
+
+static void release_coro_table(void)
+{
+    free(coro_table);
+    coro_table = NULL;
+    coro_table_capacity = 0;
+    coro_table_count = 0;
 }
 
 void __djinn_mark_waiting(void* handle)
 {
-    if (waiting_count < DJINN_MAX_WAITING)
-    {
-        waiting_handles[waiting_count++] = handle;
-    }
+    insert_coro(handle)->waiting = 1;
 }
 
 int djinn_is_in_waiting_set(void* handle)
 {
-    for (int i = 0; i < waiting_count; i++)
-    {
-        if (waiting_handles[i] == handle)
-            return 1;
-    }
-    return 0;
+    const djinn_coro_entry_t* entry = find_coro(handle);
+    return entry && entry->waiting;
 }
 
 int djinn_is_waiting(void* handle)
 {
-    for (int i = 0; i < waiting_count; i++)
-    {
-        if (waiting_handles[i] == handle)
-        {
-            waiting_handles[i] = waiting_handles[waiting_count - 1];
-            waiting_count--;
-            return 1;
-        }
-    }
-    return 0;
+    djinn_coro_entry_t* entry = find_coro(handle);
+    if (!entry || !entry->waiting) return 0;
+    entry->waiting = 0;
+    release_coro(entry);
+    return 1;
 }
 
 void djinn_remove_from_waiting(void* handle)
@@ -185,20 +350,12 @@ void djinn_remove_from_waiting(void* handle)
 
 static void* pop_continuation(void* child)
 {
-    djinn_continuation_t** pp = &continuations;
-    while (*pp)
-    {
-        if ((*pp)->child == child)
-        {
-            void* parent = (*pp)->parent;
-            djinn_continuation_t* to_free = *pp;
-            *pp = (*pp)->next;
-            free(to_free);
-            return parent;
-        }
-        pp = &(*pp)->next;
-    }
-    return NULL;
+    djinn_coro_entry_t* entry = find_coro(child);
+    if (!entry || !entry->parent) return NULL;
+    void* parent = entry->parent;
+    entry->parent = NULL;
+    release_coro(entry);
+    return parent;
 }
 
 void __djinn_await(void* child_handle, void* parent_handle)
@@ -206,13 +363,7 @@ void __djinn_await(void* child_handle, void* parent_handle)
     DJINN_ASSERT(child_handle, "child handle is NULL");
     DJINN_ASSERT(parent_handle, "parent handle is NULL");
 
-    djinn_continuation_t* cont = (djinn_continuation_t*)malloc(sizeof(djinn_continuation_t));
-    if (!cont) return;
-    cont->child = child_handle;
-    cont->parent = parent_handle;
-    cont->next = continuations;
-    continuations = cont;
-
+    insert_coro(child_handle)->parent = parent_handle;
     __djinn_mark_waiting(parent_handle);
 
     if (!djinn_is_in_waiting_set(child_handle))
@@ -234,22 +385,21 @@ DWORD WINAPI djinn_worker_thread(LPVOID arg)
 
     while (!pool->shutdown)
     {
-        djinn_task_t* task = djinn_dequeue_task_blocking(&pool->queue, &pool->shutdown);
-        if (!task) continue;
+        void* handle = djinn_dequeue_task_blocking(&pool->queue, &pool->shutdown);
+        if (!handle) continue;
 
-        if (!__djinn_coro_done(task->handle))
+        if (!__djinn_coro_done(handle))
         {
-            __djinn_coro_resume(task->handle);
-            if (!__djinn_coro_done(task->handle))
+            __djinn_coro_resume(handle);
+            if (!__djinn_coro_done(handle))
             {
-                djinn_enqueue_task(&pool->queue, task->handle);
+                djinn_enqueue_task(&pool->queue, handle);
             }
             else
             {
-                __djinn_coro_destroy(task->handle);
+                __djinn_coro_destroy(handle);
             }
         }
-        free(task);
     }
 
 #ifdef _WIN32
@@ -401,6 +551,8 @@ void __djinn_runtime_shutdown(void)
 
     djinn_destroy_queue(&djinn_rt.ready_queue);
     djinn_destroy_queue(&djinn_rt.pool.queue);
+    release_coro_table();
+    release_frame_cache();
 
 #ifdef _WIN32
     EnterCriticalSection(&djinn_rt.file_io_mutex);
@@ -457,27 +609,22 @@ static void process_completed_coro(void* handle, void* main_handle)
 
 static void drain_ready_queue(void* main_handle)
 {
-    djinn_task_t* remaining;
+    void* remaining;
     while ((remaining = djinn_dequeue_task(&djinn_rt.ready_queue)) != NULL)
     {
-        if (!__djinn_coro_done(remaining->handle))
+        if (!__djinn_coro_done(remaining))
         {
-            __djinn_coro_resume(remaining->handle);
-            if (!__djinn_coro_done(remaining->handle))
+            __djinn_coro_resume(remaining);
+            if (!__djinn_coro_done(remaining))
             {
-                if (!djinn_is_waiting(remaining->handle))
+                if (!djinn_is_waiting(remaining))
                 {
-                    djinn_enqueue_task(&djinn_rt.ready_queue, remaining->handle);
+                    djinn_enqueue_task(&djinn_rt.ready_queue, remaining);
                 }
-                free(remaining);
                 continue;
             }
         }
-        if (__djinn_coro_done(remaining->handle))
-        {
-            process_completed_coro(remaining->handle, main_handle);
-        }
-        free(remaining);
+        process_completed_coro(remaining, main_handle);
     }
 }
 
@@ -492,34 +639,33 @@ static void run_event_loop_core(void* main_handle)
 
     while (djinn_rt.running)
     {
-        djinn_task_t* task = djinn_dequeue_task(&djinn_rt.ready_queue);
-        if (task)
+        void* handle = djinn_dequeue_task(&djinn_rt.ready_queue);
+        if (handle)
         {
-            if (!__djinn_coro_done(task->handle))
+            if (!__djinn_coro_done(handle))
             {
-                __djinn_coro_resume(task->handle);
-                if (!__djinn_coro_done(task->handle))
+                __djinn_coro_resume(handle);
+                if (!__djinn_coro_done(handle))
                 {
-                    if (djinn_is_waiting(task->handle))
+                    if (djinn_is_waiting(handle))
                     {
                         // Waiting for I/O or child — do NOT re-enqueue
                     }
                     else
                     {
                         // Cooperative yield — re-enqueue immediately
-                        djinn_enqueue_task(&djinn_rt.ready_queue, task->handle);
+                        djinn_enqueue_task(&djinn_rt.ready_queue, handle);
                     }
                 }
                 else
                 {
-                    process_completed_coro(task->handle, main_handle);
+                    process_completed_coro(handle, main_handle);
                 }
             }
             else
             {
-                process_completed_coro(task->handle, main_handle);
+                process_completed_coro(handle, main_handle);
             }
-            free(task);
         }
 
         if (__djinn_coro_done(main_handle))
@@ -528,7 +674,7 @@ static void run_event_loop_core(void* main_handle)
             break;
         }
 
-        if (!djinn_rt.ready_queue.head)
+        if (djinn_rt.ready_queue.count == 0)
         {
 #ifdef _WIN32
             Sleep(0);

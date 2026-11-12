@@ -24,7 +24,7 @@ djinn_thread_t* __djinn_thread_create(void (*func)(void*), void* arg)
 {
     DJINN_ASSERT(func, "thread func is NULL");
 
-    djinn_thread_t* t = __djinn_malloc(sizeof(djinn_thread_t));
+    djinn_thread_t* t = __djinn_alloc_zeroed(sizeof(djinn_thread_t));
     if (!t) return NULL;
 
     t->func = func;
@@ -93,7 +93,7 @@ void __djinn_thread_sleep(int64_t milliseconds)
 
 djinn_mutex_t* __djinn_mutex_create(void)
 {
-    djinn_mutex_t* m = __djinn_malloc(sizeof(djinn_mutex_t));
+    djinn_mutex_t* m = __djinn_alloc_zeroed(sizeof(djinn_mutex_t));
     if (!m) return NULL;
 
 #ifdef _WIN32
