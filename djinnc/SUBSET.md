@@ -139,6 +139,9 @@ test the boxed type and optionally bind the unboxed value. `x is Enum::Variant [
 `async T f()` returns `task<T>` and lowers to a presplit LLVM coroutine; `await task` suspends inside async functions and
 runs the event loop in sync ones; `spawn task;` schedules it. `async main` is driven by the runtime event loop (i32 or void);
 a sync `main` can still `await`. `yield` is not a coroutine yield (it is the switch-arm value in stage0) and is not supported.
+An async function that can never suspend (no coro primitive, async I/O call or `spawn`, and only awaits of such functions) compiles as a
+plain function with warning W6004, unless it is recursive, its task is used other than by an immediate `await`, it is `main`, or it is built
+into a library (`AsyncElision`).
 
 ## Attributes
 `[Name]`, `[Name(16)]`, `[Name(key = "text")]` and `[A, B]` before functions, methods, structs, fields and parameters. The builtin names and

@@ -1,0 +1,316 @@
+namespace djinnc;
+
+// An async function whose body can never suspend is compiled as a plain function: no coroutine frame and no
+// scheduler round trip for each await. A body suspends through a coro primitive, a runtime async call, 'spawn', or
+// an await on anything but a direct call to a function that never suspends either (a fixpoint over the awaits).
+// The coroutine ABI stays wherever it can be observed: recursion keeps its frames on the heap instead of the native
+// stack, a task used other than by an immediate await keeps its handle, and libraries, async main, attributed
+// functions and the methods of reflected types are left alone.
+struct AsyncElision {
+    SymbolTable* symbols;
+    PointerList* functions;
+    PointerList* calls;
+    PointerList* awaits;
+    ptr<bool> excluded;
+    ptr<bool> suspends;
+    ptr<i32> order;
+    ptr<i32> low;
+    ptr<bool> stacked;
+    IdList* stack;
+    i32 counter;
+
+    public static unsafe void run(SymbolTable* symbols, Diagnostics* diagnostics, bool disabled, i32 reflect_mode) {
+        if (disabled) {
+            return;
+        }
+        AsyncElision* elision = (AsyncElision*)Memory.zalloc(sizeof(AsyncElision));
+        elision.symbols = symbols;
+        elision.functions = symbols.functions;
+        if (!elision.collect(reflect_mode)) {
+            return;
+        }
+        elision.exclude_escaping();
+        elision.scan_bodies();
+        elision.exclude_recursive();
+        elision.settle();
+        elision.report(diagnostics);
+    }
+
+    unsafe bool collect(i32 reflect_mode) {
+        PointerList* functions = this.functions;
+        i32 count = functions.length;
+        this.excluded = (ptr<bool>)calloc((u64)count + 1, 1);
+        this.suspends = (ptr<bool>)calloc((u64)count + 1, 1);
+        mut bool any = false;
+        for (mut i32 i = 0; i < count; i = i + 1) {
+            FunctionInfo* info = (FunctionInfo*)functions.get(i);
+            info.graph_index = i + 1;
+            if (AsyncElision.eligible(info, reflect_mode)) {
+                any = true;
+            } else {
+                this.excluded[i] = true;
+            }
+        }
+        return any;
+    }
+
+    static unsafe bool eligible(FunctionInfo* info, i32 reflect_mode) {
+        if (!info.is_async || info.is_extern || info.is_template || info.generics != null || info.bindings != null
+            || info.is_instance || info.is_variadic || info.packs_variadic || info.is_disabled) {
+            return false;
+        }
+        if (info.owner == null && info.name_atom == Atoms.MAIN_ATOM) {
+            return false;
+        }
+        if (info.owner != null && AsyncElision.reflected(info.owner, reflect_mode)) {
+            return false;
+        }
+        Node* declaration = info.node;
+        if (declaration == null || declaration.kind() != NodeKind::FUNCTION || declaration.first() == null || declaration.is_header()) {
+            return false;
+        }
+        PointerList* uses = Attributes.of(declaration);
+        return uses.length == 0;
+    }
+
+    static unsafe bool reflected(StructInfo* owner, i32 reflect_mode) {
+        if (reflect_mode == ReflectionMode.NONE) {
+            return false;
+        }
+        if (reflect_mode == ReflectionMode.ALL || owner.origin != null || owner.node == null) {
+            return true;
+        }
+        return Attributes.has(owner.node, "Reflect");
+    }
+
+    static unsafe FunctionInfo* referenced(Node* node) {
+        i32 kind = node.symbol_kind();
+        bool function = kind == SymbolKind.FUNCTION || kind == SymbolKind.STATIC_METHOD || kind == SymbolKind.INSTANCE_METHOD
+            || kind == SymbolKind.CONSTRUCTOR || kind == SymbolKind.OPERATOR || kind == SymbolKind.PROPERTY_GET
+            || kind == SymbolKind.IMPLICIT_GET || kind == SymbolKind.INDEX_GET;
+        if (!function || node.symbol() == null) {
+            return (FunctionInfo*)0;
+        }
+        FunctionInfo* info = (FunctionInfo*)node.symbol();
+        if (info.graph_index == 0) {
+            return (FunctionInfo*)0;
+        }
+        return info;
+    }
+
+    static unsafe FunctionInfo* awaited_call(Node* await_node) {
+        Node* operand = await_node.first();
+        if (operand == null || operand.kind() != NodeKind::CALL || operand.first() == null) {
+            return (FunctionInfo*)0;
+        }
+        return AsyncElision.referenced(operand.first());
+    }
+
+    // The only use that keeps a converted function correct is 'await f(...)': its callee and call nodes are allowed,
+    // any other reference (spawn, a stored task, typeof, a function value) keeps the coroutine.
+    unsafe void exclude_escaping() {
+        i32 count = Ast.node_count();
+        ptr<bool> allowed = (ptr<bool>)calloc((u64)count + 1, 1);
+        for (mut i32 id = 1; id < count; id = id + 1) {
+            Node* node = Ast.at(id);
+            if (node.kind() == NodeKind::AWAIT_EXPR && AsyncElision.awaited_call(node) != null) {
+                Node* call = node.first();
+                allowed[Ast.id_of(call)] = true;
+                allowed[Ast.id_of(call.first())] = true;
+            }
+        }
+        for (mut i32 id = 1; id < count; id = id + 1) {
+            Node* node = Ast.at(id);
+            if (allowed[id] || node.kind() == NodeKind::FUNCTION) {
+                continue;
+            }
+            FunctionInfo* target = AsyncElision.referenced(node);
+            if (target != null) {
+                this.excluded[target.graph_index - 1] = true;
+            }
+        }
+        free((ptr)allowed);
+    }
+
+    unsafe void scan_bodies() {
+        PointerList* functions = this.functions;
+        this.calls = PointerList.create();
+        this.awaits = PointerList.create();
+        PointerList* calls = this.calls;
+        PointerList* awaits = this.awaits;
+        for (mut i32 i = 0; i < functions.length; i = i + 1) {
+            calls.push((ptr)PointerList.create());
+            awaits.push((ptr)PointerList.create());
+            FunctionInfo* info = (FunctionInfo*)functions.get(i);
+            Node* declaration = info.node;
+            if (info.is_extern || info.is_template || declaration == null || declaration.kind() != NodeKind::FUNCTION) {
+                continue;
+            }
+            this.scan(declaration.first(), i);
+        }
+    }
+
+    unsafe void scan(Node* node, i32 owner) {
+        if (node == null) {
+            return;
+        }
+        NodeKind kind = node.kind();
+        if (kind == NodeKind::SPAWN_STMT) {
+            this.suspends[owner] = true;
+        }
+        if (kind == NodeKind::AWAIT_EXPR) {
+            PointerList* awaits = this.awaits;
+            PointerList* awaited = (PointerList*)awaits.get(owner);
+            awaited.push((ptr)AsyncElision.awaited_call(node));
+        }
+        FunctionInfo* target = AsyncElision.referenced(node);
+        if (target != null) {
+            PointerList* calls = this.calls;
+            PointerList* edges = (PointerList*)calls.get(owner);
+            edges.push((ptr)target);
+            if (AsyncElision.suspends_natively(target)) {
+                this.suspends[owner] = true;
+            }
+        }
+        for (mut i32 field = NodeField.FIRST; field <= NodeField.FOURTH; field = field + 1) {
+            u32 stored = node.get_field(field);
+            if (stored != 0) {
+                this.scan(Ast.at((i32)stored), owner);
+            }
+        }
+        if (node.has_items()) {
+            for (mut i32 i = 0; i < node.count(); i = i + 1) {
+                this.scan(node.child(i), owner);
+            }
+        }
+    }
+
+    static unsafe bool suspends_natively(FunctionInfo* target) {
+        if (!target.is_extern) {
+            return false;
+        }
+        StructInfo* owner = target.owner;
+        if (owner != null && owner.node != null && Attributes.has(owner.node, "intrinsic")) {
+            return true;
+        }
+        ptr<i8> name = target.name;
+        i32 length = strlen(name);
+        return Strings.starts_with(name, 0, length, "__djinn_async_") || Strings.starts_with(name, 0, length, "__djinn_await")
+            || Strings.starts_with(name, 0, length, "__djinn_spawn") || Strings.starts_with(name, 0, length, "__djinn_event_loop");
+    }
+
+    // Tarjan's strongly connected components over every call: a function in a cycle, or calling itself, stays async.
+    unsafe void exclude_recursive() {
+        PointerList* functions = this.functions;
+        i32 count = functions.length;
+        this.order = (ptr<i32>)calloc((u64)count + 1, 4);
+        this.low = (ptr<i32>)calloc((u64)count + 1, 4);
+        this.stacked = (ptr<bool>)calloc((u64)count + 1, 1);
+        this.stack = IdList.create();
+        for (mut i32 i = 0; i < count; i = i + 1) {
+            if (this.order[i] == 0) {
+                this.connect(i);
+            }
+        }
+    }
+
+    unsafe void connect(i32 index) {
+        this.counter = this.counter + 1;
+        this.order[index] = this.counter;
+        this.low[index] = this.counter;
+        IdList* stack = this.stack;
+        stack.push((u32)index);
+        this.stacked[index] = true;
+        mut bool self_call = false;
+        PointerList* calls = this.calls;
+        PointerList* edges = (PointerList*)calls.get(index);
+        for (mut i32 e = 0; e < edges.length; e = e + 1) {
+            FunctionInfo* callee = (FunctionInfo*)edges.get(e);
+            i32 next = callee.graph_index - 1;
+            if (next == index) {
+                self_call = true;
+            }
+            if (this.order[next] == 0) {
+                this.connect(next);
+                if (this.low[next] < this.low[index]) {
+                    this.low[index] = this.low[next];
+                }
+            } else if (this.stacked[next] && this.order[next] < this.low[index]) {
+                this.low[index] = this.order[next];
+            }
+        }
+        if (this.low[index] != this.order[index]) {
+            return;
+        }
+        mut i32 start = stack.length - 1;
+        while ((i32)stack.get(start) != index) {
+            start = start - 1;
+        }
+        bool cyclic = self_call || start < stack.length - 1;
+        for (mut i32 s = start; s < stack.length; s = s + 1) {
+            i32 member = (i32)stack.get(s);
+            this.stacked[member] = false;
+            if (cyclic) {
+                this.excluded[member] = true;
+            }
+        }
+        stack.length = start;
+    }
+
+    unsafe void settle() {
+        PointerList* functions = this.functions;
+        mut bool changed = true;
+        while (changed) {
+            changed = false;
+            for (mut i32 i = 0; i < functions.length; i = i + 1) {
+                FunctionInfo* info = (FunctionInfo*)functions.get(i);
+                if (this.excluded[i] || this.suspends[i] || info.runs_sync) {
+                    continue;
+                }
+                if (this.awaits_only_sync(i)) {
+                    info.runs_sync = true;
+                    changed = true;
+                }
+            }
+        }
+    }
+
+    unsafe bool awaits_only_sync(i32 index) {
+        PointerList* awaits = this.awaits;
+        PointerList* awaited = (PointerList*)awaits.get(index);
+        for (mut i32 a = 0; a < awaited.length; a = a + 1) {
+            FunctionInfo* target = (FunctionInfo*)awaited.get(a);
+            if (target == null || !target.runs_sync) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    unsafe void report(Diagnostics* diagnostics) {
+        PointerList* functions = this.functions;
+        for (mut i32 i = 0; i < functions.length; i = i + 1) {
+            FunctionInfo* info = (FunctionInfo*)functions.get(i);
+            if (!info.runs_sync) {
+                continue;
+            }
+            info.is_async = false;
+            if (this.in_std(info)) {
+                continue;
+            }
+            Node* declaration = info.node;
+            diagnostics.warning_in(DiagnosticWarnings.ASYNC_NEVER_SUSPENDS, declaration.file_name(), declaration.line(), declaration.column(),
+                "'async' has no effect: this function never suspends (no await of a suspending call, no I/O, no spawn), so it is compiled as a synchronous function");
+        }
+    }
+
+    unsafe bool in_std(FunctionInfo* info) {
+        SymbolTable* symbols = this.symbols;
+        ptr<i8> name = symbols.namespace_prefix(info.namespace_id);
+        if (name == null) {
+            return false;
+        }
+        i32 length = strlen(name);
+        return Strings.equals(name, length, "std") || Strings.starts_with(name, 0, length, "std::");
+    }
+}
