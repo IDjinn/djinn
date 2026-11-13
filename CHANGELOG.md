@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.3.0] - 2026-11-12
+
+### Compiler
+
+- Async: recursive cycles of async functions that never suspend and only tail-call each other (`return await g(...)`) compile to `musttail` calls and run in constant stack.
+- Tiered JIT forward stubs use `musttail` for register-sized signatures and fall back to a plain tail hint otherwise, avoiding a backend abort on `sret` returns.
+- Functions proven to terminate (no loop, recursion, suspension or hidden call) are marked `mustprogress`; `willreturn` is never implied.
+
+### Tooling
+
+- Conformance runner and tests: async tail-recursion, IR and `tests/djinnc/async_elision.sh` / `tiering.sh` coverage.
+
 ## [0.2.0] - 2026-11-12
 
 ### Language
