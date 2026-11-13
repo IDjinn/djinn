@@ -1,0 +1,69 @@
+import std::libc;
+import std::debug;
+
+namespace std::memory;
+
+struct allocator {
+    const i32 HEAP = 0;
+    const i32 ARENA = 1;
+    const i32 POOL = 2;
+
+    i32 kind;
+    arena* arena_source;
+    pool* pool_source;
+
+    public static unsafe allocator heap() {
+        allocator result = { .kind = 0, .arena_source = (arena*)0, .pool_source = (pool*)0 };
+        return result;
+    }
+
+    public static unsafe allocator from_arena(arena* source) {
+        allocator result = { .kind = 1, .arena_source = source, .pool_source = (pool*)0 };
+        return result;
+    }
+
+    public static unsafe allocator from_pool(pool* source) {
+        allocator result = { .kind = 2, .arena_source = (arena*)0, .pool_source = source };
+        return result;
+    }
+
+    public unsafe i8* alloc(u64 size) {
+        if (this.kind == 1) {
+            return this.arena_source.alloc(size, 16);
+        }
+        if (this.kind == 2) {
+            Debug.assert(size <= this.pool_source.block_size(), "allocator - request is larger than the pool block size");
+            return this.pool_source.acquire();
+        }
+        return (i8*)__djinn_alloc(size);
+    }
+
+    public unsafe i8* resize(i8* pointer, u64 old_size, u64 new_size) {
+        if (this.kind == 0) {
+            return (i8*)__djinn_realloc((void*)pointer, new_size);
+        }
+        if (this.kind == 2) {
+            Debug.assert(new_size <= this.pool_source.block_size(), "allocator - request is larger than the pool block size");
+            if (pointer != (i8*)0) {
+                return pointer;
+            }
+            return this.pool_source.acquire();
+        }
+        i8* grown = this.arena_source.alloc(new_size, 16);
+        if (pointer != (i8*)0 && old_size != 0) {
+            memcpy((void*)grown, (void*)pointer, old_size);
+        }
+        return grown;
+    }
+
+    public unsafe void release(i8* pointer, u64 size) {
+        if (pointer == (i8*)0) {
+            return;
+        }
+        if (this.kind == 0) {
+            __djinn_free((void*)pointer);
+        } else if (this.kind == 2) {
+            this.pool_source.release(pointer);
+        }
+    }
+}

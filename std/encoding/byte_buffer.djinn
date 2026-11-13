@@ -1,0 +1,146 @@
+import std::types;
+import std::libc;
+import std::debug;
+import std::types::constraints;
+
+namespace std::encoding;
+
+struct byte_buffer : Disposable {
+    i8* data;
+    size length;
+    size capacity;
+    size cursor;
+
+    byte_buffer() {
+        this.length = 0u;
+        this.capacity = 0u;
+        this.cursor = 0u;
+        unsafe {
+            this.data = (i8*)0;
+        }
+    }
+
+    public unsafe void reserve(size extra) {
+        u64 needed = (u64)this.length + (u64)extra;
+        if (needed <= (u64)this.capacity) {
+            return;
+        }
+        mut u64 grown = 64;
+        if (this.capacity != 0u) {
+            grown = (u64)this.capacity * 2;
+        }
+        if (grown < needed) {
+            grown = needed;
+        }
+        this.data = (i8*)__djinn_realloc((void*)this.data, grown);
+        this.capacity = (size)grown;
+    }
+
+    public unsafe void write_u8(u8 value) {
+        this.reserve(1u);
+        this.data[this.length] = (i8)value;
+        this.length = this.length + 1u;
+    }
+
+    public unsafe void write_le(u64 value, size width) {
+        Debug.assert(width >= 1u && width <= 8u, "byte_buffer::write_le - width must be 1 to 8");
+        mut u64 rest = value;
+        for (mut size i = 0u; i < width; i = i + 1u) {
+            this.write_u8((u8)(rest & 255));
+            rest = rest >> 8;
+        }
+    }
+
+    public unsafe void write_be(u64 value, size width) {
+        Debug.assert(width >= 1u && width <= 8u, "byte_buffer::write_be - width must be 1 to 8");
+        mut size index = width;
+        while (index > 0u) {
+            index = index - 1u;
+            this.write_u8((u8)((value >> ((u64)index * 8)) & 255));
+        }
+    }
+
+    public unsafe void write_bytes(i8* source, size count) {
+        this.reserve(count);
+        if (count != 0u) {
+            memcpy((void*)&this.data[this.length], (void*)source, (u64)count);
+        }
+        this.length = this.length + count;
+    }
+
+    public unsafe void write_str(str value) {
+        this.write_bytes(value.data, value.length);
+    }
+
+    public unsafe u8 read_u8() {
+        Debug.assert(this.cursor < this.length, "byte_buffer::read_u8 - read past the end");
+        u8 value = (u8)this.data[this.cursor];
+        this.cursor = this.cursor + 1u;
+        return value;
+    }
+
+    public unsafe u64 read_le(size width) {
+        Debug.assert(width >= 1u && width <= 8u, "byte_buffer::read_le - width must be 1 to 8");
+        mut u64 value = 0;
+        for (mut size i = 0u; i < width; i = i + 1u) {
+            value = value | ((u64)this.read_u8() << ((u64)i * 8));
+        }
+        return value;
+    }
+
+    public unsafe u64 read_be(size width) {
+        Debug.assert(width >= 1u && width <= 8u, "byte_buffer::read_be - width must be 1 to 8");
+        mut u64 value = 0;
+        for (mut size i = 0u; i < width; i = i + 1u) {
+            value = (value << 8) | (u64)this.read_u8();
+        }
+        return value;
+    }
+
+    public size remaining() {
+        return this.length - this.cursor;
+    }
+
+    public size length() {
+        return this.length;
+    }
+
+    public size position() {
+        return this.cursor;
+    }
+
+    public void seek(size position) {
+        Debug.assert(position <= this.length, "byte_buffer::seek - position out of bounds");
+        this.cursor = position;
+    }
+
+    public void clear() {
+        this.length = 0u;
+        this.cursor = 0u;
+    }
+
+    public unsafe u8 get(size index) {
+        Debug.assert(index < this.length, "byte_buffer::get - index out of bounds");
+        return (u8)this.data[index];
+    }
+
+    public str as_str() {
+        return { .data = this.data, .length = this.length };
+    }
+
+    public unsafe string to_string() {
+        u64 capacity = (u64)this.length + 1;
+        i8* copy = __djinn_alloc(capacity);
+        if (this.length != 0u) {
+            memcpy((void*)copy, (void*)this.data, (u64)this.length);
+        }
+        copy[this.length] = 0;
+        return { .data = copy, .length = this.length, .capacity = (size)capacity };
+    }
+
+    public unsafe void disposable() {
+        if (this.capacity != 0u) {
+            __djinn_free((void*)this.data);
+        }
+    }
+}

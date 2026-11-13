@@ -203,6 +203,115 @@ i32 main() {
     }
 
     [Test]
+    void map_survives_remove_churn() {
+        str source = """
+import std::collections;
+namespace app;
+
+i32 main() {
+    map<i32, i32> table = map<i32, i32>();
+    for (mut i32 i = 0; i < 1000; i = i + 1) { table.set(i, i * 2); }
+    for (mut i32 i = 0; i < 1000; i = i + 3) { table.remove(i); }
+    for (mut i32 r = 0; r < 20000; r = r + 1) {
+        table.set(5000 + r, r);
+        table.remove(5000 + r);
+    }
+    if (table.length() != 666u) { return 1; }
+    for (mut i32 i = 0; i < 1000; i = i + 1) {
+        bool present = (i % 3) != 0;
+        if (table.has(i) != present) { return 2; }
+        if (present && table.get(i) != i * 2) { return 3; }
+    }
+    if (table.has(5003)) { return 4; }
+    table.set(1, 7);
+    if (table.get(1) != 7 || table.length() != 666u) { return 5; }
+    return 42;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(42));
+    }
+
+    [Test]
+    void map_handles_negative_wide_and_strided_keys() {
+        str source = """
+import std::collections;
+namespace app;
+
+i32 main() {
+    map<i64, i32> wide = map<i64, i32>();
+    for (mut i32 i = -500; i < 500; i = i + 1) { wide.set((i64)i * 1000000007, i); }
+    for (mut i32 i = -500; i < 500; i = i + 1) {
+        if (wide.get((i64)i * 1000000007) != i) { return 1; }
+    }
+    map<i32, i32> strided = map<i32, i32>();
+    for (mut i32 i = -50; i < 50; i = i + 1) { strided.set(i * 16, i); }
+    for (mut i32 i = -50; i < 50; i = i + 1) {
+        if (strided.get(i * 16) != i) { return 2; }
+    }
+    if (wide.length() != 1000u || strided.length() != 100u) { return 3; }
+    return 42;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(42));
+    }
+
+    [Test]
+    void array_grows_hashes_and_ignores_shrinking_reserve() {
+        str source = """
+import std::collections;
+namespace app;
+
+i32 main() {
+    array<i32> empty = array<i32>();
+    array<i32> a = array<i32>();
+    array<i32> b = array<i32>();
+    for (mut i32 i = 0; i < 100; i = i + 1) { a.push(i); b.push(i); }
+    a.reserve(2u);
+    if (empty.length() != 0u || a.length() != 100u || a.get(99) != 99) { return 1; }
+    if (!(a == b) || a.hash() != b.hash()) { return 2; }
+    b.set(3, 100);
+    if (a == b) { return 3; }
+    return 42;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(42));
+    }
+
+    [Test]
+    void arena_allocates_marks_and_resets() {
+        str source = """
+import std::memory;
+namespace app;
+
+i32 main() {
+    arena a = arena(64);
+    unsafe {
+        i32* xs = (i32*)a.alloc_zeroed(40u, 4u);
+        for (mut i32 i = 0; i < 10; i = i + 1) {
+            if (xs[i] != 0) { return 1; }
+            xs[i] = i;
+        }
+        arena_mark point = a.mark();
+        for (mut i32 k = 0; k < 100; k = k + 1) {
+            i64* p = (i64*)a.alloc(8u, 8u);
+            *p = (i64)k;
+            if ((u64)p % 8u != 0u) { return 2; }
+        }
+        if (a.reserved() <= 64u) { return 3; }
+        a.reset_to(point);
+        if (xs[9] != 9) { return 4; }
+        i8* big = a.alloc(1000u, 16u);
+        big[999] = 1;
+        a.reset();
+        if (a.allocated() != 0u) { return 5; }
+    }
+    return 42;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(42));
+    }
+
+    [Test]
     void console() {
         str source = """
 import std::sys;

@@ -1,4 +1,5 @@
 import std::types;
+import std::memory;
 import std::libc;
 import std::debug;
 import std::types::constraints;
@@ -13,60 +14,67 @@ struct map<Key, Value> : Disposable
     Value* values;
     i8* states;
     size count;
+    size tombstones;
+    allocator source;
     size capacity;
 
     map() {
+        unsafe {
+            this.source = allocator.heap();
+        }
+        this.start();
+    }
+
+    map(allocator source) {
+        this.source = source;
+        this.start();
+    }
+
+    private void start() {
         this.capacity = 16u;
         this.count = 0u;
-        this.keys = malloc(this.capacity * sizeof(Key));
-        this.values = malloc(this.capacity * sizeof(Value));
-        this.states = malloc(this.capacity * 1u);
+        this.tombstones = 0u;
         unsafe {
-            for (mut size i = 0u; i < this.capacity; i = i + 1u) {
-                this.states[i] = 0;
-            }
+            this.allocate(this.capacity);
         }
     }
 
     public unsafe void set(Key key, Value value) {
-        if (this.count * 4u >= this.capacity * 3u) {
-            this._grow();
+        if ((this.count + this.tombstones) * 4u >= this.capacity * 3u) {
+            this.rehash();
         }
 
-        mut size idx = this._hash_index(key);
-        mut size insert_idx = this.capacity;
+        u32w capacity = (u32w)this.capacity;
+        u32w mask = capacity - 1w;
+        mut u32w idx = this.hash_index(key);
+        mut u32w insert_idx = capacity;
 
-        for (mut size i = 0u; i < this.capacity; i = i + 1u) {
+        for (mut u32w i = 0w; i < capacity; i = i + 1w) {
             i8 state = this.states[idx];
 
             if (state == (i8)0) {
-                if (insert_idx == this.capacity) {
-                    insert_idx = idx + 0u;
+                if (insert_idx == capacity) {
+                    insert_idx = idx;
                 }
-                this.keys[insert_idx] = key;
-                this.values[insert_idx] = value;
-                this.states[insert_idx] = 1;
-                this.count = this.count + 1u;
-                return;
+                break;
             }
 
             if (state == (i8)2) {
-                if (insert_idx == this.capacity) {
-                    insert_idx = idx + 0u;
+                if (insert_idx == capacity) {
+                    insert_idx = idx;
                 }
+            } else if (this.keys[idx] == key) {
+                this.values[idx] = value;
+                return;
             }
 
-            if (state == (i8)1) {
-                if (this.keys[idx] == key) {
-                    this.values[idx] = value;
-                    return;
-                }
-            }
-
-            idx = (idx + 1u) % this.capacity;
+            idx = (idx + 1w) & mask;
         }
 
-        if (insert_idx < this.capacity) {
+        if (insert_idx < capacity) {
+            if (this.states[insert_idx] == (i8)2) {
+                this.tombstones = this.tombstones - 1u;
+            }
             this.keys[insert_idx] = key;
             this.values[insert_idx] = value;
             this.states[insert_idx] = 1;
@@ -75,19 +83,19 @@ struct map<Key, Value> : Disposable
     }
 
     public unsafe Value get(Key key) {
-        mut size idx = this._hash_index(key);
+        u32w capacity = (u32w)this.capacity;
+        u32w mask = capacity - 1w;
+        mut u32w idx = this.hash_index(key);
 
-        for (mut size i = 0u; i < this.capacity; i = i + 1u) {
+        for (mut u32w i = 0w; i < capacity; i = i + 1w) {
             i8 state = this.states[idx];
             Debug.assert(state != (i8)0, "map::get - key not found");
 
-            if (state == (i8)1) {
-                if (this.keys[idx] == key) {
-                    return this.values[idx];
-                }
+            if (state == (i8)1 && this.keys[idx] == key) {
+                return this.values[idx];
             }
 
-            idx = (idx + 1u) % this.capacity;
+            idx = (idx + 1w) & mask;
         }
 
         Debug.assert(false, "map::get - key not found");
@@ -95,103 +103,158 @@ struct map<Key, Value> : Disposable
     }
 
     public unsafe bool has(Key key) {
-        mut size idx = this._hash_index(key);
+        u32w capacity = (u32w)this.capacity;
+        u32w mask = capacity - 1w;
+        mut u32w idx = this.hash_index(key);
 
-        for (mut size i = 0u; i < this.capacity; i = i + 1u) {
+        for (mut u32w i = 0w; i < capacity; i = i + 1w) {
             i8 state = this.states[idx];
 
             if (state == (i8)0) {
                 return false;
             }
 
-            if (state == (i8)1) {
-                if (this.keys[idx] == key) {
-                    return true;
-                }
+            if (state == (i8)1 && this.keys[idx] == key) {
+                return true;
             }
 
-            idx = (idx + 1u) % this.capacity;
+            idx = (idx + 1w) & mask;
         }
 
         return false;
     }
 
     public unsafe bool remove(Key key) {
-        mut size idx = this._hash_index(key);
+        u32w capacity = (u32w)this.capacity;
+        u32w mask = capacity - 1w;
+        mut u32w idx = this.hash_index(key);
 
-        for (mut size i = 0u; i < this.capacity; i = i + 1u) {
+        for (mut u32w i = 0w; i < capacity; i = i + 1w) {
             i8 state = this.states[idx];
 
             if (state == (i8)0) {
                 return false;
             }
 
-            if (state == (i8)1) {
-                if (this.keys[idx] == key) {
-                    this.states[idx] = (i8)2;
-                    this.count = this.count - 1u;
-                    return true;
-                }
+            if (state == (i8)1 && this.keys[idx] == key) {
+                this.states[idx] = (i8)2;
+                this.count = this.count - 1u;
+                this.tombstones = this.tombstones + 1u;
+                return true;
             }
 
-            idx = (idx + 1u) % this.capacity;
+            idx = (idx + 1w) & mask;
         }
 
         return false;
     }
 
-    public size length() {
+    public unsafe void clear() {
+        memset(this.states, 0, (u64)this.capacity);
+        this.count = 0u;
+        this.tombstones = 0u;
+    }
+
+    public unsafe array<Key> keys() {
+        array<Key> result = array<Key>();
+        result.reserve(this.count);
+        u32w capacity = (u32w)this.capacity;
+        for (mut u32w i = 0w; i < capacity; i = i + 1w) {
+            if (this.states[i] == (i8)1) {
+                result.push(this.keys[i]);
+            }
+        }
+        return result;
+    }
+
+    public unsafe array<Value> values() {
+        array<Value> result = array<Value>();
+        result.reserve(this.count);
+        u32w capacity = (u32w)this.capacity;
+        for (mut u32w i = 0w; i < capacity; i = i + 1w) {
+            if (this.states[i] == (i8)1) {
+                result.push(this.values[i]);
+            }
+        }
+        return result;
+    }
+
+    public constexpr size length() {
         return this.count;
     }
 
     public unsafe u64 hash() {
-        mut u64 hash_result = 1;
-        for (mut size i = 0u; i < this.capacity; i = i + 1u) {
+        mut u64w total = 1;
+        u32w capacity = (u32w)this.capacity;
+        for (mut u32w i = 0w; i < capacity; i = i + 1w) {
             if (this.states[i] == (i8)1) {
-                hash_result = 31 * hash_result + (u64)this.keys[i]; // TODO: does not support non-integer generic types
+                mut u64w entry = (u64w)this.keys[i].hash() * 31w + (u64w)this.values[i].hash();
+                entry = (entry ^ (entry >> 29)) * 0x9e3779b97f4a7c15;
+                total = total + (entry ^ (entry >> 32));
             }
         }
-        return hash_result;
+        return (u64)total;
     }
 
-    public void disposable() {
-        free(this.keys);
-        free(this.values);
-        free(this.states);
+    public unsafe void disposable() {
+        this.source.release((i8*)this.keys, this.block_bytes(this.capacity));
     }
 
-    size _hash_index(Key key) {
-        mut u32 h = (u32)key;
-        if (h < 0u) {
-            h = 0u - h;
+    private u64 block_bytes(size capacity) {
+        u64 slots = (u64)capacity;
+        return (slots * sizeof(Key) + 15) / 16 * 16 + (slots * sizeof(Value) + 15) / 16 * 16 + slots;
+    }
+
+    private constexpr u32w hash_index(Key key) {
+        mut u64w x = (u64w)key.hash();
+        x = (x ^ (x >> 32)) * 0x9e3779b97f4a7c15;
+        x = x ^ (x >> 29);
+        return (u32w)(x & ((u64w)this.capacity - 1w));
+    }
+
+    private unsafe void allocate(size capacity) {
+        u64 slots = (u64)capacity;
+        u64 keys_bytes = (slots * sizeof(Key) + 15u) / 16u * 16u;
+        u64 values_bytes = (slots * sizeof(Value) + 15u) / 16u * 16u;
+        i8* block = this.source.alloc(keys_bytes + values_bytes + slots);
+        this.keys = (Key*)block;
+        this.values = (Value*)(block + keys_bytes);
+        this.states = block + keys_bytes + values_bytes;
+        memset(this.states, 0, slots);
+    }
+
+    private unsafe void insert_fresh(Key key, Value value) {
+        u32w mask = (u32w)this.capacity - 1w;
+        mut u32w idx = this.hash_index(key);
+        while (this.states[idx] != (i8)0) {
+            idx = (idx + 1w) & mask;
         }
-        return h % this.capacity;
+        this.keys[idx] = key;
+        this.values[idx] = value;
+        this.states[idx] = 1;
+        this.count = this.count + 1u;
     }
 
-    unsafe void _grow() {
+    private unsafe void rehash() {
         size old_capacity = this.capacity;
         Key* old_keys = this.keys;
         Value* old_values = this.values;
         i8* old_states = this.states;
 
-        this.capacity = this.capacity * 2u;
-        this.count = 0u;
-        this.keys = malloc(this.capacity * sizeof(Key));
-        this.values = malloc(this.capacity * sizeof(Value));
-        this.states = malloc(this.capacity * 1u);
-
-        for (mut size i = 0u; i < this.capacity; i = i + 1u) {
-            this.states[i] = 0;
+        if (this.count * 2u >= old_capacity) {
+            this.capacity = old_capacity * 2u;
         }
+        this.count = 0u;
+        this.tombstones = 0u;
+        this.allocate(this.capacity);
 
-        for (mut size i = 0u; i < old_capacity; i = i + 1u) {
+        u32w old_slots = (u32w)old_capacity;
+        for (mut u32w i = 0w; i < old_slots; i = i + 1w) {
             if (old_states[i] == (i8)1) {
-                this.set(old_keys[i], old_values[i]);
+                this.insert_fresh(old_keys[i], old_values[i]);
             }
         }
 
-        free(old_keys);
-        free(old_values);
-        free(old_states);
+        this.source.release((i8*)old_keys, this.block_bytes(old_capacity));
     }
 }

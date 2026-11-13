@@ -1,0 +1,134 @@
+import std::types;
+import std::text;
+
+namespace std::encoding;
+
+struct Hex {
+    public static unsafe string encode(str data, bool upper) {
+        string_builder builder = string_builder();
+        for (mut size i = 0u; i < data.length; i = i + 1u) {
+            u32 byte = (u32)(u8)data.data[i];
+            builder.append_byte(Hex.digit(byte >> 4, upper));
+            builder.append_byte(Hex.digit(byte & 15, upper));
+        }
+        return builder.to_string();
+    }
+
+    public static unsafe bool decode(str text, byte_buffer* out) {
+        if (text.length % 2u != 0u) {
+            return false;
+        }
+        for (mut size i = 0u; i < text.length; i = i + 2u) {
+            i32 high = Chars.digit_value((char)(i32)text.data[i]);
+            i32 low = Chars.digit_value((char)(i32)text.data[i + 1u]);
+            if (high < 0 || low < 0) {
+                return false;
+            }
+            out.write_u8((u8)(high * 16 + low));
+        }
+        return true;
+    }
+
+    static constexpr i8 digit(u32 value, bool upper) {
+        if (value < 10) {
+            return (i8)(48 + (i32)value);
+        }
+        if (upper) {
+            return (i8)(55 + (i32)value);
+        }
+        return (i8)(87 + (i32)value);
+    }
+}
+
+struct Base64 {
+    public static unsafe string encode(str data, bool url_safe) {
+        string_builder builder = string_builder();
+        mut size i = 0u;
+        while (i + 3u <= data.length) {
+            u32 triple = ((u32)(u8)data.data[i] << 16) | ((u32)(u8)data.data[i + 1u] << 8) | (u32)(u8)data.data[i + 2u];
+            builder.append_byte(Base64.symbol((triple >> 18) & 63, url_safe));
+            builder.append_byte(Base64.symbol((triple >> 12) & 63, url_safe));
+            builder.append_byte(Base64.symbol((triple >> 6) & 63, url_safe));
+            builder.append_byte(Base64.symbol(triple & 63, url_safe));
+            i = i + 3u;
+        }
+        size rest = data.length - i;
+        if (rest == 1u) {
+            u32 single = (u32)(u8)data.data[i] << 16;
+            builder.append_byte(Base64.symbol((single >> 18) & 63, url_safe));
+            builder.append_byte(Base64.symbol((single >> 12) & 63, url_safe));
+            builder.append("==");
+        } else if (rest == 2u) {
+            u32 pair = ((u32)(u8)data.data[i] << 16) | ((u32)(u8)data.data[i + 1u] << 8);
+            builder.append_byte(Base64.symbol((pair >> 18) & 63, url_safe));
+            builder.append_byte(Base64.symbol((pair >> 12) & 63, url_safe));
+            builder.append_byte(Base64.symbol((pair >> 6) & 63, url_safe));
+            builder.append("=");
+        }
+        return builder.to_string();
+    }
+
+    public static unsafe bool decode(str text, byte_buffer* out) {
+        mut u32 accumulator = 0;
+        mut u32 bits = 0;
+        mut size end = text.length;
+        while (end > 0u && text.data[end - 1u] == 61) {
+            end = end - 1u;
+        }
+        for (mut size i = 0u; i < end; i = i + 1u) {
+            i32 value = Base64.value_of(text.data[i]);
+            if (value < 0) {
+                return false;
+            }
+            accumulator = ((accumulator << 6) | (u32)value) & 16777215;
+            bits = bits + 6;
+            if (bits >= 8) {
+                bits = bits - 8;
+                out.write_u8((u8)((accumulator >> bits) & 255));
+            }
+        }
+        return true;
+    }
+
+    static constexpr i8 symbol(u32 value, bool url_safe) {
+        if (value < 26) {
+            return (i8)(65 + (i32)value);
+        }
+        if (value < 52) {
+            return (i8)(71 + (i32)value);
+        }
+        if (value < 62) {
+            return (i8)((i32)value - 4);
+        }
+        if (value == 62) {
+            if (url_safe) {
+                return 45;
+            }
+            return 43;
+        }
+        if (url_safe) {
+            return 95;
+        }
+        return 47;
+    }
+
+    static constexpr i32 value_of(i8 raw) {
+        i32 c = (i32)raw;
+        if (c >= 65 && c <= 90) {
+            return c - 65;
+        }
+        if (c >= 97 && c <= 122) {
+            return c - 71;
+        }
+        if (c >= 48 && c <= 57) {
+            return c + 4;
+        }
+        if (c == 43 || c == 45) {
+            return 62;
+        }
+        if (c == 47 || c == 95) {
+            return 63;
+        }
+        return -1;
+    }
+}

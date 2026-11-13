@@ -44,9 +44,17 @@ Files in `std/` directory
 - `types/constraints.djinn` — interfaces (Hashable, Comparable, Equatable, Addition, Serializable)
 - `collections/array.djinn` — generic `array<T>` with push, get, set, reserve, destroy
 - `collections/map.djinn` — generic `map<Key, Value>` hash map
+- `collections/` also: `slice`, `sorting` (`Sorting.sort`/`binary_search` on `slice<T>`), `set`, `bag`, `stack`, `queue` (deque),
+  `priority_queue` (4-ary min-heap), `ring_buffer`, `bitset`, `linked_list`; `array` and `map` take an optional `allocator`
+- `memory/` also: `arena`, `pool`, `allocator` (heap, arena or pool handle)
+- `text/` — `string_builder`, `Text` (join, number to text, utf-8), `Numbers`, `Chars`, and `str`/`string` methods
+  (`split`, `replace`, `repeat`, `toUpper`, `parseI64`, `utf8At`, ...)
+- `encoding/` — `byte_buffer`, `Hex`, `Base64`; `hashing/` — `Hash` (FNV-1a, xxHash64, SHA-256)
+- `format/` — `csv_reader`/`csv_writer`, `toml_reader` (streaming)
 - `collections/range.djinn` — `range` struct (start, end, step, bounds) with length(), contains(), is_empty()
 - `sys/console.djinn`, `sys/io.djinn`, `sys/debug.djinn` — I/O, assertions
 - `sys/libc.djinn` — FFI bindings (malloc, free, printf, memcpy, etc.)
+- `memory/arena.djinn` — `std::memory::arena`: bump allocator with `mark`/`reset_to`/`reset`, blocks from `__djinn_alloc`
 - `filesystem/` — `std::filesystem`: validated `Path`, `Directory` capability, `File`, `FsError`; `std::filesystem::native` for
   the unsafe layer (see `std/filesystem/README.md`)
 - `builtin/coro.djinn` — coroutine utilities
