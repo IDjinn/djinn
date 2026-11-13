@@ -71,8 +71,7 @@ struct Spectre {
     private static unsafe i32 writeCode(i8* buf, i32 pos, i32 code) {
         mut i32 p = pos;
         p = Spectre.escStart(buf, p);
-        i32 len = snprintf(buf + p, 16, "%d", code);
-        p = p + len;
+        p = Spectre.writeNumber(buf, p, code);
         buf[p] = 109;
         return p + 1;
     }
@@ -84,13 +83,26 @@ struct Spectre {
     private static unsafe i32 writeCodes2(i8* buf, i32 pos, i32 c1, i32 c2) {
         mut i32 p = pos;
         p = Spectre.escStart(buf, p);
-        i32 len = snprintf(buf + p, 16, "%d;%d", c1, c2);
-        p = p + len;
+        p = Spectre.writeNumber(buf, p, c1);
+        p = Spectre.writeParam(buf, p, c2);
         buf[p] = 109;
         return p + 1;
     }
 
-    private static i32 writeText(i8* buf, i32 pos, i8* text) {
+    public static unsafe i32 writeNumber(i8* buf, i32 pos, i32 value) {
+        return pos + (i32)Numbers.format_i64(buf + pos, (i64)value);
+    }
+
+    public static unsafe i32 writeParam(i8* buf, i32 pos, i32 value) {
+        buf[pos] = 59;
+        return Spectre.writeNumber(buf, pos + 1, value);
+    }
+
+    public static unsafe i32 writeRgb(i8* buf, i32 pos, i32 r, i32 g, i32 b) {
+        return Spectre.writeParam(buf, Spectre.writeParam(buf, Spectre.writeNumber(buf, pos, r), g), b);
+    }
+
+    public static unsafe i32 writeText(i8* buf, i32 pos, i8* text) {
         i32 len = strlen(text);
         memcpy(buf + pos, text, (u64)len);
         return pos + len;
@@ -140,8 +152,8 @@ struct Spectre {
         i8* buf = i8[bufSize];
         mut i32 pos = 0;
         pos = Spectre.escStart(buf, pos);
-        i32 len = snprintf(buf + pos, 16, "38;5;%d", color);
-        pos = pos + len;
+        pos = Spectre.writeText(buf, pos, "38;5;");
+        pos = Spectre.writeNumber(buf, pos, color);
         buf[pos] = 109;
         pos = pos + 1;
         pos = Spectre.writeText(buf, pos, text);
@@ -153,8 +165,8 @@ struct Spectre {
         i8* buf = i8[bufSize];
         mut i32 pos = 0;
         pos = Spectre.escStart(buf, pos);
-        i32 len = snprintf(buf + pos, 16, "48;5;%d", color);
-        pos = pos + len;
+        pos = Spectre.writeText(buf, pos, "48;5;");
+        pos = Spectre.writeNumber(buf, pos, color);
         buf[pos] = 109;
         pos = pos + 1;
         pos = Spectre.writeText(buf, pos, text);
@@ -166,8 +178,8 @@ struct Spectre {
         i8* buf = i8[bufSize];
         mut i32 pos = 0;
         pos = Spectre.escStart(buf, pos);
-        i32 len = snprintf(buf + pos, 24, "38;2;%d;%d;%d", r, g, b);
-        pos = pos + len;
+        pos = Spectre.writeText(buf, pos, "38;2;");
+        pos = Spectre.writeRgb(buf, pos, r, g, b);
         buf[pos] = 109;
         pos = pos + 1;
         pos = Spectre.writeText(buf, pos, text);
@@ -179,8 +191,8 @@ struct Spectre {
         i8* buf = i8[bufSize];
         mut i32 pos = 0;
         pos = Spectre.escStart(buf, pos);
-        i32 len = snprintf(buf + pos, 24, "48;2;%d;%d;%d", r, g, b);
-        pos = pos + len;
+        pos = Spectre.writeText(buf, pos, "48;2;");
+        pos = Spectre.writeRgb(buf, pos, r, g, b);
         buf[pos] = 109;
         pos = pos + 1;
         pos = Spectre.writeText(buf, pos, text);
@@ -232,10 +244,10 @@ struct Spectre {
     }
 
     private static unsafe i32 writeBytes(i8* buf, i32 pos, i32 count, i32 b0, i32 b1, i32 b2, i32 b3) {
-        buf[pos] = (i8)b0;
-        buf[pos + 1] = (i8)b1;
-        if (count > 2) { buf[pos + 2] = (i8)b2; }
-        if (count > 3) { buf[pos + 3] = (i8)b3; }
+        buf[pos] = (i8)(u8)b0;
+        buf[pos + 1] = (i8)(u8)b1;
+        if (count > 2) { buf[pos + 2] = (i8)(u8)b2; }
+        if (count > 3) { buf[pos + 3] = (i8)(u8)b3; }
         return pos + count;
     }
 
@@ -266,8 +278,9 @@ struct Spectre {
     private static unsafe i32 writeTrueColor(i8* buf, i32 pos, i32 base, i32 r, i32 g, i32 b) {
         mut i32 p = pos;
         p = Spectre.escStart(buf, p);
-        i32 len = snprintf(buf + p, 24, "%d;2;%d;%d;%d", base, r, g, b);
-        p = p + len;
+        p = Spectre.writeNumber(buf, p, base);
+        p = Spectre.writeText(buf, p, ";2;");
+        p = Spectre.writeRgb(buf, p, r, g, b);
         buf[p] = 109;
         return p + 1;
     }
@@ -305,8 +318,8 @@ struct Spectre {
             }
             mut i32 p = pos;
             p = Spectre.escStart(buf, p);
-            i32 wrote = snprintf(buf + p, 16, "38;5;%d", n);
-            p = p + wrote;
+            p = Spectre.writeText(buf, p, "38;5;");
+            p = Spectre.writeNumber(buf, p, n);
             buf[p] = 109;
             return p + 1;
         }
@@ -615,8 +628,9 @@ struct Spectre {
         pos = pos + 1;
 
         i32 pct = (current * 100) / total;
-        i32 len = snprintf(buf + pos, 8, "%d%%", pct);
-        pos = pos + len;
+        pos = Spectre.writeNumber(buf, pos, pct);
+        buf[pos] = 37;
+        pos = pos + 1;
 
         pos = Spectre.writeReset(buf, pos);
         write(1, buf, (u64)pos);
@@ -1058,8 +1072,7 @@ struct SpectreBar {
 
         buf[pos] = 32;
         pos = pos + 1;
-        i32 len = snprintf(buf + pos, 16, "%d", value);
-        pos = pos + len;
+        pos = Spectre.writeNumber(buf, pos, value);
         buf[pos] = 10;
         pos = pos + 1;
         write(1, buf, (u64)pos);
@@ -1378,8 +1391,7 @@ struct SpectreLive {
     private unsafe i32 writeCursorUp(i8* buf, i32 pos, i32 n) {
         mut i32 p = pos;
         p = Spectre.escStart(buf, p);
-        i32 len = snprintf(buf + p, 8, "%d", n);
-        p = p + len;
+        p = Spectre.writeNumber(buf, p, n);
         buf[p] = 65;
         return p + 1;
     }
@@ -1584,8 +1596,7 @@ struct SpectreSelect {
                 mut i32 upos = 0;
                 upos = Spectre.escStart(up, upos);
                 i32 lines = this.count + 1;
-                i32 ulen = snprintf(up + upos, 8, "%d", lines);
-                upos = upos + ulen;
+                upos = Spectre.writeNumber(up, upos, lines);
                 up[upos] = 65;
                 upos = upos + 1;
                 write(1, up, (u64)upos);
@@ -1600,8 +1611,7 @@ struct SpectreSelect {
         mut i32 cpos = 0;
         cpos = Spectre.escStart(clearBuf, cpos);
         i32 clines = this.count + 1;
-        mut i32 clen = snprintf(clearBuf + cpos, 8, "%d", clines);
-        cpos = cpos + clen;
+        cpos = Spectre.writeNumber(clearBuf, cpos, clines);
         clearBuf[cpos] = 65;
         cpos = cpos + 1;
         mut i32 cl = 0;
@@ -1612,8 +1622,7 @@ struct SpectreSelect {
             cl = cl + 1;
         }
         cpos = Spectre.escStart(clearBuf, cpos);
-        clen = snprintf(clearBuf + cpos, 8, "%d", clines);
-        cpos = cpos + clen;
+        cpos = Spectre.writeNumber(clearBuf, cpos, clines);
         clearBuf[cpos] = 65;
         cpos = cpos + 1;
         write(1, clearBuf, (u64)cpos);
@@ -1665,8 +1674,7 @@ struct SpectreSelect {
                 mut i32 upos = 0;
                 upos = Spectre.escStart(up, upos);
                 i32 lines = this.count + 1;
-                i32 ulen = snprintf(up + upos, 8, "%d", lines);
-                upos = upos + ulen;
+                upos = Spectre.writeNumber(up, upos, lines);
                 up[upos] = 65;
                 upos = upos + 1;
                 write(1, up, (u64)upos);
@@ -1683,8 +1691,7 @@ struct SpectreSelect {
         mut i32 cpos = 0;
         cpos = Spectre.escStart(clearBuf, cpos);
         i32 clines = this.count + 1;
-        mut i32 clen = snprintf(clearBuf + cpos, 8, "%d", clines);
-        cpos = cpos + clen;
+        cpos = Spectre.writeNumber(clearBuf, cpos, clines);
         clearBuf[cpos] = 65;
         cpos = cpos + 1;
         mut i32 cl = 0;
@@ -1695,8 +1702,7 @@ struct SpectreSelect {
             cl = cl + 1;
         }
         cpos = Spectre.escStart(clearBuf, cpos);
-        clen = snprintf(clearBuf + cpos, 8, "%d", clines);
-        cpos = cpos + clen;
+        cpos = Spectre.writeNumber(clearBuf, cpos, clines);
         clearBuf[cpos] = 65;
         cpos = cpos + 1;
         write(1, clearBuf, (u64)cpos);
@@ -1889,8 +1895,9 @@ struct SpectreBreakdown {
             buf[pos] = 32;
             pos = pos + 1;
             pos = Spectre.writeCode(buf, pos, Spectre.DIM);
-            i32 len = snprintf(buf + pos, 16, "%d%%", (this.values[i] * 100) / total);
-            pos = pos + len;
+            pos = Spectre.writeNumber(buf, pos, (this.values[i] * 100) / total);
+            buf[pos] = 37;
+            pos = pos + 1;
             pos = Spectre.writeReset(buf, pos);
             buf[pos] = 32;
             buf[pos + 1] = 32;
@@ -1950,7 +1957,10 @@ struct SpectreCalendar {
         mut i32 pos = 0;
 
         i8* title = i8[64];
-        i32 titleLen = snprintf(title, 64, "%s %d", SpectreCalendar.monthName(month), year);
+        mut i32 titleLen = Spectre.writeText(title, 0, SpectreCalendar.monthName(month));
+        title[titleLen] = 32;
+        titleLen = Spectre.writeNumber(title, titleLen + 1, year);
+        title[titleLen] = 0;
         mut i32 pad = (20 - titleLen) / 2;
         while (pad > 0) {
             buf[pos] = 32;
@@ -1986,8 +1996,11 @@ struct SpectreCalendar {
                 pos = Spectre.writeCode(buf, pos, 7);
                 pos = Spectre.writeCode(buf, pos, Spectre.FG_GREEN);
             }
-            i32 len = snprintf(buf + pos, 8, "%2d", day);
-            pos = pos + len;
+            if (day < 10) {
+                buf[pos] = 32;
+                pos = pos + 1;
+            }
+            pos = Spectre.writeNumber(buf, pos, day);
             if (day == highlightDay) {
                 pos = Spectre.writeReset(buf, pos);
             }
@@ -2114,9 +2127,9 @@ struct SpectreCanvas {
     public unsafe void setPixel(i32 x, i32 y, i32 r, i32 g, i32 b) {
         if (x < 0 || y < 0 || x >= this.width || y >= this.height) { return; }
         i32 o = (y * this.width + x) * 3;
-        this.pixels[o] = (i8)r;
-        this.pixels[o + 1] = (i8)g;
-        this.pixels[o + 2] = (i8)b;
+        this.pixels[o] = (i8)(u8)r;
+        this.pixels[o + 1] = (i8)(u8)g;
+        this.pixels[o + 2] = (i8)(u8)b;
     }
 
     public void fillRect(i32 x, i32 y, i32 w, i32 h, i32 r, i32 g, i32 b) {
@@ -2195,8 +2208,12 @@ struct SpectreCanvas {
                     bb = SpectreCanvas.byteAt(this.pixels, bottom + 2);
                 }
                 pos = Spectre.escStart(buf, pos);
-                i32 len = snprintf(buf + pos, 48, "38;2;%d;%d;%d;48;2;%d;%d;%dm", tr, tg, tb, br, bg, bb);
-                pos = pos + len;
+                pos = Spectre.writeText(buf, pos, "38;2;");
+                pos = Spectre.writeRgb(buf, pos, tr, tg, tb);
+                pos = Spectre.writeText(buf, pos, ";48;2;");
+                pos = Spectre.writeRgb(buf, pos, br, bg, bb);
+                buf[pos] = 109;
+                pos = pos + 1;
                 pos = Spectre.writeBytes(buf, pos, 3, 0xE2, 0x96, 0x80, 0);
                 if (pos >= 8000) {
                     write(1, buf, (u64)pos);
@@ -2277,8 +2294,7 @@ struct SpectreException {
         buf[pos] = 58;
         pos = pos + 1;
         pos = Spectre.writeCode(buf, pos, Spectre.FG_BLUE);
-        i32 len = snprintf(buf + pos, 16, "%d", line);
-        pos = pos + len;
+        pos = Spectre.writeNumber(buf, pos, line);
         pos = Spectre.writeReset(buf, pos);
         buf[pos] = 10;
         pos = pos + 1;

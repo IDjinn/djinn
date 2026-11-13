@@ -313,6 +313,9 @@ impl CodeGenerator {
         if (id == Intrinsic.FLOAT_BITS) {
             return this.generate_float_bits(node);
         }
+        if (Intrinsic.is_atomic(id)) {
+            return this.generate_atomic(node, id);
+        }
         ptr condition = this.to_condition(this.gen_expression(node.first()));
         ptr<ptr> args = CodeGenerator.array_of(2);
         args[0] = condition;
@@ -352,6 +355,42 @@ impl CodeGenerator {
         ptr value = this.coerce(this.gen_expression(node.first()), node.first().value_type());
         ptr bits = LLVMBuildCast(this.builder, LlvmConst.OP_BITCAST, value, this.llvm_type(node.value_type()), "float.bits");
         return Value.create(bits, node.value_type());
+    }
+
+    unsafe Value* generate_atomic(Node* node, i32 id) {
+        i32 order = LlvmConst.ATOMIC_SEQ_CST;
+        if (id == Intrinsic.ATOMIC_FENCE) {
+            LLVMBuildFence(this.builder, order, 0, "");
+            return Value.create(null, Types.void_type());
+        }
+        u32 address_type = node.first().value_type();
+        u32 element = Types.element(address_type);
+        ptr address = this.coerce(this.gen_expression(node.first()), address_type);
+        if (id == Intrinsic.ATOMIC_LOAD) {
+            ptr loaded = LLVMBuildLoad2(this.builder, this.llvm_type(element), address, "atomic.load");
+            LLVMSetOrdering(loaded, order);
+            return Value.create(loaded, element);
+        }
+        ptr value = this.coerce(this.gen_expression(node.second()), element);
+        if (id == Intrinsic.ATOMIC_STORE) {
+            LLVMSetOrdering(LLVMBuildStore(this.builder, value, address), order);
+            return Value.create(null, Types.void_type());
+        }
+        if (id == Intrinsic.ATOMIC_CAS) {
+            ptr desired = this.coerce(this.gen_expression(node.third()), element);
+            ptr exchanged = LLVMBuildAtomicCmpXchg(this.builder, address, value, desired, order, order, 0);
+            return Value.create(LLVMBuildExtractValue(this.builder, exchanged, 1, "atomic.swapped"), Types.bool_type());
+        }
+        return Value.create(LLVMBuildAtomicRMW(this.builder, CodeGenerator.atomic_operation(id), address, value, order, 0), element);
+    }
+
+    static i32 atomic_operation(i32 id) {
+        if (id == Intrinsic.ATOMIC_ADD) { return LlvmConst.ATOMIC_RMW_ADD; }
+        if (id == Intrinsic.ATOMIC_SUB) { return LlvmConst.ATOMIC_RMW_SUB; }
+        if (id == Intrinsic.ATOMIC_AND) { return LlvmConst.ATOMIC_RMW_AND; }
+        if (id == Intrinsic.ATOMIC_OR) { return LlvmConst.ATOMIC_RMW_OR; }
+        if (id == Intrinsic.ATOMIC_XOR) { return LlvmConst.ATOMIC_RMW_XOR; }
+        return LlvmConst.ATOMIC_RMW_XCHG;
     }
 
     unsafe Value* generate_expect(Node* node) {

@@ -480,4 +480,42 @@ i32 main() {
 """;
         Verify.source(source).links_library(library, Expected.exit(3));
     }
+
+    [Test]
+    void atomic_intrinsics_cross_the_library() {
+        str library = """
+namespace counters;
+
+struct Counter<T> {
+    mut T value;
+
+    public unsafe T bump(T delta) {
+        return atomic_add(&this.value, delta);
+    }
+
+    public unsafe bool replace(T expected, T desired) {
+        return atomic_cas(&this.value, expected, desired);
+    }
+}
+
+public unsafe i32 drain(i32* value) {
+    return atomic_swap(value, 0);
+}
+""";
+        str source = """
+namespace app;
+import counters;
+
+i32 main() {
+    mut Counter<i64> wide = { .value = 40 };
+    wide.bump(2);
+    mut Counter<i32> narrow = { .value = 1 };
+    if (!narrow.replace(1, 5)) { return 1; }
+    mut i32 left = 3;
+    if (drain(&left) != 3 || left != 0) { return 2; }
+    return (i32)wide.value + narrow.value - 5;
+}
+""";
+        Verify.source(source).links_library(library, Expected.exit(42));
+    }
 }
