@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.4.0] - 2026-11-13
+
+### Standard library
+
+- `map`: one allocation for keys, values and states, power-of-two mask instead of `%`, mixed `Hashable` hash, tombstones counted in the load factor, `hash()` independent of insertion order, `keys()`, `values()`, `clear()`. Sequential lookups no longer degrade to a quadratic scan.
+- `array`: `pop`, `insert`, `remove_at`, `swap_remove`, `clear`, `index_of`, `contains`, `reverse`, `first`, `last`, `get[]`; `reserve` never shrinks; no `malloc(0)`; OOM-checked allocation; wrapping loop counters; `hash()` no longer overflows.
+- New collections: `slice`, `Sorting` (`sort`, `binary_search`, `is_sorted`), `set`, `bag`, `stack`, `queue` (deque), `priority_queue` (4-ary heap), `ring_buffer`, `bitset`, `linked_list`.
+- Memory: `arena`, `pool` and `allocator` (heap, arena or pool); `array` and `map` accept an allocator.
+- Text: `string_builder`, `Text`, `Numbers`, `Chars` and `str`/`string` methods (`split`, `replace`, `repeat`, `toUpper`, `toLower`, `count`, `parseI64`, `parseU64`, `parseHex`, `parseF64`, UTF-8 helpers).
+- Encoding and formats: `byte_buffer`, `Hex`, `Base64`, `Hash` (FNV-1a, xxHash64, SHA-256), streaming `csv_reader`/`csv_writer` and `toml_reader`.
+
+### Tooling
+
+- Conformance: `std_library.djinn` and new `std.djinn` cases for the collections, text, encoding and hashing modules.
+
 ## [0.3.0] - 2026-11-12
 
 ### Compiler

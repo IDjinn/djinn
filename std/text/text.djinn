@@ -1,0 +1,246 @@
+import std::types;
+import std::libc;
+import std::debug;
+import std::collections;
+
+namespace std::text;
+
+struct Text {
+    public static unsafe string join(array<str>* parts, str separator) {
+        string_builder builder = string_builder();
+        u32w count = (u32w)parts.length();
+        for (mut u32w i = 0w; i < count; i = i + 1w) {
+            if (i != 0w) {
+                builder.append(separator);
+            }
+            builder.append(parts.get((size)i));
+        }
+        return builder.to_string();
+    }
+
+    public static unsafe string from_i64(i64 value) {
+        string_builder builder = string_builder();
+        builder.append_i64(value);
+        return builder.to_string();
+    }
+
+    public static unsafe string from_u64(u64 value) {
+        string_builder builder = string_builder();
+        builder.append_u64(value);
+        return builder.to_string();
+    }
+
+    public static unsafe string from_hex(u64 value) {
+        string_builder builder = string_builder();
+        builder.append_hex(value);
+        return builder.to_string();
+    }
+
+    public static unsafe string from_char(char value) {
+        string_builder builder = string_builder();
+        builder.append_char(value);
+        return builder.to_string();
+    }
+
+    public static constexpr size utf8_width(i8 lead) {
+        u32 byte = (u32)(u8)lead;
+        if (byte < 128) {
+            return 1u;
+        }
+        if (byte >= 194 && byte < 224) {
+            return 2u;
+        }
+        if (byte >= 224 && byte < 240) {
+            return 3u;
+        }
+        if (byte >= 240 && byte < 245) {
+            return 4u;
+        }
+        return 0u;
+    }
+}
+
+interface Textual {
+    str asStr();
+}
+
+impl Textual for str, string {
+    str asStr() {
+        return { .data = this.data, .length = this.length };
+    }
+
+    unsafe bool matchesAt(size position, str needle) {
+        if (needle.length > this.length - position) {
+            return false;
+        }
+        for (mut size i = 0u; i < needle.length; i = i + 1u) {
+            if (this.data[position + i] != needle.data[i]) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    unsafe array<str> split(str separator) {
+        array<str> parts = array<str>();
+        if (separator.length == 0u) {
+            parts.push(this.asStr());
+            return parts;
+        }
+        mut size start = 0u;
+        mut size i = 0u;
+        while (i + separator.length <= this.length) {
+            if (this.matchesAt(i, separator)) {
+                str piece = { .data = &this.data[start], .length = i - start };
+                parts.push(piece);
+                i = i + separator.length;
+                start = i;
+            } else {
+                i = i + 1u;
+            }
+        }
+        str rest = { .data = &this.data[start], .length = this.length - start };
+        parts.push(rest);
+        return parts;
+    }
+
+    unsafe array<str> splitChar(char separator) {
+        mut u64 buffer = 0;
+        i8* bytes = (i8*)&buffer;
+        size count = encodeChar(bytes, separator);
+        str encoded = { .data = bytes, .length = count };
+        return this.split(encoded);
+    }
+
+    unsafe i32 count(str needle) {
+        if (needle.length == 0u) {
+            return 0;
+        }
+        mut i32 found = 0;
+        mut size i = 0u;
+        while (i + needle.length <= this.length) {
+            if (this.matchesAt(i, needle)) {
+                found = found + 1;
+                i = i + needle.length;
+            } else {
+                i = i + 1u;
+            }
+        }
+        return found;
+    }
+
+    unsafe string replace(str from, str to) {
+        string_builder builder = string_builder();
+        if (from.length == 0u) {
+            builder.append(this.asStr());
+            return builder.to_string();
+        }
+        mut size i = 0u;
+        while (i < this.length) {
+            if (this.matchesAt(i, from)) {
+                builder.append(to);
+                i = i + from.length;
+            } else {
+                builder.append_byte(this.data[i]);
+                i = i + 1u;
+            }
+        }
+        return builder.to_string();
+    }
+
+    unsafe string repeat(size times) {
+        string_builder builder = string_builder();
+        for (mut size i = 0u; i < times; i = i + 1u) {
+            builder.append(this.asStr());
+        }
+        return builder.to_string();
+    }
+
+    unsafe string toUpper() {
+        string_builder builder = string_builder();
+        for (mut size i = 0u; i < this.length; i = i + 1u) {
+            i8 value = this.data[i];
+            if (value >= 97 && value <= 122) {
+                builder.append_byte(value - 32);
+            } else {
+                builder.append_byte(value);
+            }
+        }
+        return builder.to_string();
+    }
+
+    unsafe string toLower() {
+        string_builder builder = string_builder();
+        for (mut size i = 0u; i < this.length; i = i + 1u) {
+            i8 value = this.data[i];
+            if (value >= 65 && value <= 90) {
+                builder.append_byte(value + 32);
+            } else {
+                builder.append_byte(value);
+            }
+        }
+        return builder.to_string();
+    }
+
+    unsafe optional<i64> parseI64() {
+        return Numbers.parse_i64(this.data, this.length);
+    }
+
+    unsafe optional<u64> parseU64() {
+        return Numbers.parse_u64(this.data, this.length, 10);
+    }
+
+    unsafe optional<u64> parseHex() {
+        return Numbers.parse_u64(this.data, this.length, 16);
+    }
+
+    unsafe optional<f64> parseF64() {
+        return Numbers.parse_f64(this.data, this.length);
+    }
+
+    unsafe bool isValidUtf8() {
+        mut size i = 0u;
+        while (i < this.length) {
+            size width = Text.utf8_width(this.data[i]);
+            if (width == 0u || width > this.length - i) {
+                return false;
+            }
+            for (mut size k = 1u; k < width; k = k + 1u) {
+                if (((u32)(u8)this.data[i + k] & 192) != 128) {
+                    return false;
+                }
+            }
+            i = i + width;
+        }
+        return true;
+    }
+
+    unsafe size utf8Length() {
+        mut size count = 0u;
+        mut size i = 0u;
+        while (i < this.length) {
+            mut size width = Text.utf8_width(this.data[i]);
+            if (width == 0u) {
+                width = 1u;
+            }
+            i = i + width;
+            count = count + 1u;
+        }
+        return count;
+    }
+
+    unsafe char utf8At(size byteIndex) {
+        Debug.assert(byteIndex < this.length, "utf8At - index out of bounds");
+        size width = Text.utf8_width(this.data[byteIndex]);
+        Debug.assert(width != 0u && width <= this.length - byteIndex, "utf8At - invalid utf-8 sequence");
+        u32 lead = (u32)(u8)this.data[byteIndex];
+        if (width == 1u) {
+            return (char)lead;
+        }
+        mut u32 code = lead & (255 >> (width + 1u));
+        for (mut size k = 1u; k < width; k = k + 1u) {
+            code = (code << 6) | ((u32)(u8)this.data[byteIndex + k] & 63);
+        }
+        return (char)code;
+    }
+}

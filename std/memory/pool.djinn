@@ -1,0 +1,74 @@
+import std::libc;
+import std::debug;
+import std::types::constraints;
+
+namespace std::memory;
+
+struct pool : Disposable {
+    i8* chunks;
+    i8* free_list;
+    u64 block_bytes;
+    u64 blocks_per_chunk;
+    u64 live_blocks;
+
+    pool(u64 block_size, u64 blocks_per_chunk) {
+        Debug.assert(block_size > 0 && blocks_per_chunk > 0, "pool - block size and blocks per chunk must be greater than zero");
+        this.block_bytes = (block_size + 15) / 16 * 16;
+        this.blocks_per_chunk = blocks_per_chunk;
+        this.live_blocks = 0;
+        unsafe {
+            this.chunks = (i8*)0;
+            this.free_list = (i8*)0;
+        }
+    }
+
+    public unsafe i8* acquire() {
+        if (this.free_list == (i8*)0) {
+            this.add_chunk();
+        }
+        i8* block = this.free_list;
+        this.free_list = *(i8**)block;
+        this.live_blocks = this.live_blocks + 1;
+        return block;
+    }
+
+    public unsafe void release(i8* block) {
+        Debug.assert(this.live_blocks > 0, "pool::release - no block is in use");
+        *(i8**)block = this.free_list;
+        this.free_list = block;
+        this.live_blocks = this.live_blocks - 1;
+    }
+
+    public u64 block_size() {
+        return this.block_bytes;
+    }
+
+    public u64 in_use() {
+        return this.live_blocks;
+    }
+
+    public unsafe void disposable() {
+        mut i8* chunk = this.chunks;
+        while (chunk != (i8*)0) {
+            i8* next = *(i8**)chunk;
+            __djinn_free((void*)chunk);
+            chunk = next;
+        }
+        this.chunks = (i8*)0;
+        this.free_list = (i8*)0;
+        this.live_blocks = 0;
+    }
+
+    private unsafe void add_chunk() {
+        i8* chunk = (i8*)__djinn_alloc(16 + this.block_bytes * this.blocks_per_chunk);
+        *(i8**)chunk = this.chunks;
+        this.chunks = chunk;
+        mut u64 index = this.blocks_per_chunk;
+        while (index > 0) {
+            index = index - 1;
+            i8* block = &chunk[16 + index * this.block_bytes];
+            *(i8**)block = this.free_list;
+            this.free_list = block;
+        }
+    }
+}

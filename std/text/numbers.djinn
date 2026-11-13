@@ -1,0 +1,142 @@
+import std::types;
+import std::libc;
+
+namespace std::text;
+
+struct Numbers {
+    const u64 MAX_DIGITS = 20;
+
+    public static unsafe size format_u64(i8* out, u64 value) {
+        mut u64 rest = value;
+        mut size count = 0u;
+        if (rest == 0) {
+            out[0] = 48;
+            return 1u;
+        }
+        while (rest != 0) {
+            out[count] = (i8)(48 + (i32)(rest % 10));
+            rest = rest / 10;
+            count = count + 1u;
+        }
+        mut size low = 0u;
+        mut size high = count - 1u;
+        while (low < high) {
+            i8 swap = out[low];
+            out[low] = out[high];
+            out[high] = swap;
+            low = low + 1u;
+            high = high - 1u;
+        }
+        return count;
+    }
+
+    public static unsafe size format_i64(i8* out, i64 value) {
+        if (value >= 0) {
+            return Numbers.format_u64(out, (u64)value);
+        }
+        u64w magnitude = (u64w)0 - (u64w)value;
+        out[0] = 45;
+        return Numbers.format_u64(&out[1], (u64)magnitude) + 1u;
+    }
+
+    public static unsafe size format_radix(i8* out, u64 value, u64 radix, bool upper) {
+        if (value == 0) {
+            out[0] = 48;
+            return 1u;
+        }
+        mut u64 rest = value;
+        mut size count = 0u;
+        while (rest != 0) {
+            i32 digit = (i32)(rest % radix);
+            if (digit < 10) {
+                out[count] = (i8)(48 + digit);
+            } else if (upper) {
+                out[count] = (i8)(55 + digit);
+            } else {
+                out[count] = (i8)(87 + digit);
+            }
+            rest = rest / radix;
+            count = count + 1u;
+        }
+        mut size low = 0u;
+        mut size high = count - 1u;
+        while (low < high) {
+            i8 swap = out[low];
+            out[low] = out[high];
+            out[high] = swap;
+            low = low + 1u;
+            high = high - 1u;
+        }
+        return count;
+    }
+
+    public static unsafe optional<u64> parse_u64(i8* data, size length, u64 radix) {
+        if (length == 0u || radix < 2 || radix > 16) {
+            return optional::Empty();
+        }
+        mut u64 result = 0;
+        for (mut size i = 0u; i < length; i = i + 1u) {
+            i8 raw = data[i];
+            i32 digit = Chars.digit_value((char)(i32)raw);
+            if (digit < 0 || (u64)digit >= radix) {
+                return optional::Empty();
+            }
+            u64 limit = (18446744073709551615 - (u64)digit) / radix;
+            if (result > limit) {
+                return optional::Empty();
+            }
+            result = result * radix + (u64)digit;
+        }
+        return optional::Value(result);
+    }
+
+    public static unsafe optional<i64> parse_i64(i8* data, size length) {
+        if (length == 0u) {
+            return optional::Empty();
+        }
+        mut bool negative = false;
+        mut size start = 0u;
+        if (data[0] == 45) {
+            negative = true;
+            start = 1u;
+        } else if (data[0] == 43) {
+            start = 1u;
+        }
+        optional<u64> parsed = Numbers.parse_u64(&data[start], length - start, 10);
+        return switch parsed {
+            Value magnitude -> Numbers.signed_from(magnitude, negative),
+            Empty -> optional::Empty()
+        };
+    }
+
+    static optional<i64> signed_from(u64 magnitude, bool negative) {
+        if (negative) {
+            if (magnitude > 9223372036854775808) {
+                return optional::Empty();
+            }
+            u64w wrapped = (u64w)0 - (u64w)magnitude;
+            return optional::Value((i64)wrapped);
+        }
+        if (magnitude > 9223372036854775807) {
+            return optional::Empty();
+        }
+        return optional::Value((i64)magnitude);
+    }
+
+    public static unsafe optional<f64> parse_f64(i8* data, size length) {
+        if (length == 0u) {
+            return optional::Empty();
+        }
+        i8* copy = __djinn_alloc((u64)length + 1);
+        memcpy(copy, data, length);
+        copy[length] = 0;
+        mut i8* end = copy;
+        f64 value = strtod(copy, &end);
+        bool whole = end == &copy[length];
+        __djinn_free(copy);
+        if (!whole) {
+            return optional::Empty();
+        }
+        return optional::Value(value);
+    }
+}

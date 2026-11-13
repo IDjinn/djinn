@@ -1,0 +1,119 @@
+import std::types;
+import std::text;
+
+namespace std::format;
+
+struct csv_reader {
+    str text;
+    size position;
+    i8 delimiter;
+    bool in_record;
+
+    csv_reader(str text, i8 delimiter) {
+        this.text = text;
+        this.position = 0u;
+        this.delimiter = delimiter;
+        this.in_record = false;
+    }
+
+    public bool next_record() {
+        if (this.position >= this.text.length) {
+            return false;
+        }
+        this.in_record = true;
+        return true;
+    }
+
+    public unsafe bool next_field(string_builder* field) {
+        if (!this.in_record) {
+            return false;
+        }
+        field.clear();
+        i8* data = this.text.data;
+        size length = this.text.length;
+        if (this.position < length && data[this.position] == 34) {
+            this.position = this.position + 1u;
+            mut bool closed = false;
+            while (this.position < length && !closed) {
+                i8 current = data[this.position];
+                if (current == 34) {
+                    if (this.position + 1u < length && data[this.position + 1u] == 34) {
+                        field.append_byte(34);
+                        this.position = this.position + 2u;
+                    } else {
+                        closed = true;
+                        this.position = this.position + 1u;
+                    }
+                } else {
+                    field.append_byte(current);
+                    this.position = this.position + 1u;
+                }
+            }
+        } else {
+            while (this.position < length && data[this.position] != this.delimiter && data[this.position] != 10 && data[this.position] != 13) {
+                field.append_byte(data[this.position]);
+                this.position = this.position + 1u;
+            }
+        }
+        if (this.position < length && data[this.position] == this.delimiter) {
+            this.position = this.position + 1u;
+            return true;
+        }
+        if (this.position < length && data[this.position] == 13) {
+            this.position = this.position + 1u;
+        }
+        if (this.position < length && data[this.position] == 10) {
+            this.position = this.position + 1u;
+        }
+        this.in_record = false;
+        return true;
+    }
+}
+
+struct csv_writer {
+    string_builder output;
+    i8 delimiter;
+    bool at_record_start;
+
+    csv_writer(i8 delimiter) {
+        this.output = string_builder();
+        this.delimiter = delimiter;
+        this.at_record_start = true;
+    }
+
+    public unsafe void field(str value) {
+        if (!this.at_record_start) {
+            this.output.append_byte(this.delimiter);
+        }
+        this.at_record_start = false;
+        mut bool quote = false;
+        for (mut size i = 0u; i < value.length; i = i + 1u) {
+            i8 current = value.data[i];
+            if (current == this.delimiter || current == 34 || current == 10 || current == 13) {
+                quote = true;
+            }
+        }
+        if (!quote) {
+            this.output.append(value);
+            return;
+        }
+        this.output.append_byte(34);
+        for (mut size i = 0u; i < value.length; i = i + 1u) {
+            i8 current = value.data[i];
+            if (current == 34) {
+                this.output.append_byte(34);
+            }
+            this.output.append_byte(current);
+        }
+        this.output.append_byte(34);
+    }
+
+    public unsafe void end_record() {
+        this.output.append_byte(10);
+        this.at_record_start = true;
+    }
+
+    public unsafe string to_string() {
+        return this.output.to_string();
+    }
+}

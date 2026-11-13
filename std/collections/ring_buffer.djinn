@@ -1,0 +1,94 @@
+import std::types;
+import std::debug;
+import std::types::constraints;
+
+namespace std::collections;
+
+struct ring_buffer<T> : Disposable
+    where T : Hashable, Equatable
+{
+    T* data;
+    size head;
+    size count;
+    size capacity;
+
+    ring_buffer(size capacity) {
+        Debug.assert(capacity > 0u, "ring_buffer - capacity must be greater than zero");
+        this.head = 0u;
+        this.count = 0u;
+        this.capacity = capacity;
+        unsafe {
+            this.data = (T*)__djinn_alloc((u64)capacity * sizeof(T));
+        }
+    }
+
+    public unsafe bool push(T value) {
+        mut bool overwrote = false;
+        mut size slot = this.head + this.count;
+        if (this.count == this.capacity) {
+            slot = this.head;
+            this.head = this.wrap(this.head + 1u);
+            overwrote = true;
+        } else {
+            slot = this.wrap(slot);
+            this.count = this.count + 1u;
+        }
+        this.data[slot] = value;
+        return overwrote;
+    }
+
+    public unsafe T pop() {
+        Debug.assert(this.count > 0u, "ring_buffer::pop - buffer is empty");
+        T value = this.data[this.head];
+        this.head = this.wrap(this.head + 1u);
+        this.count = this.count - 1u;
+        return value;
+    }
+
+    public unsafe T oldest() {
+        Debug.assert(this.count > 0u, "ring_buffer::oldest - buffer is empty");
+        return this.data[this.head];
+    }
+
+    public unsafe T newest() {
+        Debug.assert(this.count > 0u, "ring_buffer::newest - buffer is empty");
+        return this.data[this.wrap(this.head + this.count - 1u)];
+    }
+
+    public unsafe T get(size index) {
+        Debug.assert(index < this.count, "ring_buffer::get - index out of bounds");
+        return this.data[this.wrap(this.head + index)];
+    }
+
+    public size length() {
+        return this.count;
+    }
+
+    public size capacity() {
+        return this.capacity;
+    }
+
+    public bool is_empty() {
+        return this.count == 0u;
+    }
+
+    public bool is_full() {
+        return this.count == this.capacity;
+    }
+
+    public void clear() {
+        this.head = 0u;
+        this.count = 0u;
+    }
+
+    public unsafe void disposable() {
+        __djinn_free((void*)this.data);
+    }
+
+    private size wrap(size position) {
+        if (position >= this.capacity) {
+            return position - this.capacity;
+        }
+        return position;
+    }
+}

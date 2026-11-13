@@ -1,0 +1,115 @@
+import std::types;
+import std::libc;
+import std::debug;
+import std::types::constraints;
+
+namespace std::text;
+
+struct string_builder : Disposable {
+    i8* data;
+    size length;
+    size capacity;
+
+    string_builder() {
+        this.length = 0u;
+        this.capacity = 0u;
+        unsafe {
+            this.data = (i8*)0;
+        }
+    }
+
+    public unsafe void reserve(size extra) {
+        u64 needed = (u64)this.length + (u64)extra;
+        if (needed <= (u64)this.capacity) {
+            return;
+        }
+        mut u64 grown = 16;
+        if (this.capacity != 0u) {
+            grown = (u64)this.capacity * 2;
+        }
+        if (grown < needed) {
+            grown = needed;
+        }
+        this.data = (i8*)__djinn_realloc((void*)this.data, grown);
+        this.capacity = (size)grown;
+    }
+
+    public unsafe void append(str value) {
+        this.reserve(value.length);
+        memcpy((void*)&this.data[this.length], (void*)value.data, (u64)value.length);
+        this.length = this.length + value.length;
+    }
+
+    public unsafe void append_string(string value) {
+        this.reserve(value.length);
+        memcpy((void*)&this.data[this.length], (void*)value.data, (u64)value.length);
+        this.length = this.length + value.length;
+    }
+
+    public unsafe void append_byte(i8 value) {
+        this.reserve(1u);
+        this.data[this.length] = value;
+        this.length = this.length + 1u;
+    }
+
+    public unsafe void append_char(char value) {
+        this.reserve(4u);
+        size written = encodeChar(&this.data[this.length], value);
+        this.length = this.length + written;
+    }
+
+    public unsafe void append_i64(i64 value) {
+        this.reserve(20u);
+        this.length = this.length + Numbers.format_i64(&this.data[this.length], value);
+    }
+
+    public unsafe void append_u64(u64 value) {
+        this.reserve(20u);
+        this.length = this.length + Numbers.format_u64(&this.data[this.length], value);
+    }
+
+    public unsafe void append_hex(u64 value) {
+        this.reserve(16u);
+        this.length = this.length + Numbers.format_radix(&this.data[this.length], value, 16, false);
+    }
+
+    public unsafe void append_bool(bool value) {
+        if (value) {
+            this.append("true");
+        } else {
+            this.append("false");
+        }
+    }
+
+    public void clear() {
+        this.length = 0u;
+    }
+
+    public size length() {
+        return this.length;
+    }
+
+    public bool is_empty() {
+        return this.length == 0u;
+    }
+
+    public str as_str() {
+        return { .data = this.data, .length = this.length };
+    }
+
+    public unsafe string to_string() {
+        u64 capacity = (u64)this.length + 1;
+        i8* copy = __djinn_alloc(capacity);
+        if (this.length != 0u) {
+            memcpy((void*)copy, (void*)this.data, (u64)this.length);
+        }
+        copy[this.length] = 0;
+        return { .data = copy, .length = this.length, .capacity = (size)capacity };
+    }
+
+    public unsafe void disposable() {
+        if (this.capacity != 0u) {
+            __djinn_free((void*)this.data);
+        }
+    }
+}

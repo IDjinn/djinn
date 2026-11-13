@@ -1,0 +1,116 @@
+import std::types;
+import std::libc;
+import std::debug;
+import std::types::constraints;
+
+namespace std::collections;
+
+struct queue<T> : Disposable
+    where T : Hashable, Equatable
+{
+    T* data;
+    size head;
+    size count;
+    size capacity;
+
+    queue() {
+        this.head = 0u;
+        this.count = 0u;
+        this.capacity = 0u;
+        unsafe {
+            this.data = (T*)0;
+        }
+    }
+
+    public unsafe void push_back(T value) {
+        this.ensure_room();
+        u32w mask = (u32w)this.capacity - 1w;
+        u32w slot = ((u32w)this.head + (u32w)this.count) & mask;
+        this.data[slot] = value;
+        this.count = this.count + 1u;
+    }
+
+    public unsafe void push_front(T value) {
+        this.ensure_room();
+        u32w mask = (u32w)this.capacity - 1w;
+        u32w slot = ((u32w)this.head - 1w) & mask;
+        this.data[slot] = value;
+        this.head = (size)slot;
+        this.count = this.count + 1u;
+    }
+
+    public unsafe T pop_front() {
+        Debug.assert(this.count > 0u, "queue::pop_front - queue is empty");
+        T value = this.data[this.head];
+        u32w mask = (u32w)this.capacity - 1w;
+        this.head = (size)(((u32w)this.head + 1w) & mask);
+        this.count = this.count - 1u;
+        return value;
+    }
+
+    public unsafe T pop_back() {
+        Debug.assert(this.count > 0u, "queue::pop_back - queue is empty");
+        this.count = this.count - 1u;
+        u32w mask = (u32w)this.capacity - 1w;
+        return this.data[((u32w)this.head + (u32w)this.count) & mask];
+    }
+
+    public unsafe T front() {
+        Debug.assert(this.count > 0u, "queue::front - queue is empty");
+        return this.data[this.head];
+    }
+
+    public unsafe T back() {
+        Debug.assert(this.count > 0u, "queue::back - queue is empty");
+        u32w mask = (u32w)this.capacity - 1w;
+        return this.data[((u32w)this.head + (u32w)this.count - 1w) & mask];
+    }
+
+    public unsafe T get(size index) {
+        Debug.assert(index < this.count, "queue::get - index out of bounds");
+        u32w mask = (u32w)this.capacity - 1w;
+        return this.data[((u32w)this.head + (u32w)index) & mask];
+    }
+
+    public size length() {
+        return this.count;
+    }
+
+    public bool is_empty() {
+        return this.count == 0u;
+    }
+
+    public void clear() {
+        this.head = 0u;
+        this.count = 0u;
+    }
+
+    public unsafe void disposable() {
+        if (this.capacity != 0u) {
+            __djinn_free((void*)this.data);
+        }
+    }
+
+    private unsafe void ensure_room() {
+        if (this.count < this.capacity) {
+            return;
+        }
+        size old_capacity = this.capacity;
+        mut size new_capacity = 8u;
+        if (old_capacity != 0u) {
+            new_capacity = old_capacity * 2u;
+        }
+        T* grown = (T*)__djinn_alloc((u64)new_capacity * sizeof(T));
+        u32w old_mask = (u32w)old_capacity - 1w;
+        u32w count = (u32w)this.count;
+        for (mut u32w i = 0w; i < count; i = i + 1w) {
+            grown[i] = this.data[((u32w)this.head + i) & old_mask];
+        }
+        if (old_capacity != 0u) {
+            __djinn_free((void*)this.data);
+        }
+        this.data = grown;
+        this.head = 0u;
+        this.capacity = new_capacity;
+    }
+}

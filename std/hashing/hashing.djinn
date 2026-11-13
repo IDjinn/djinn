@@ -1,0 +1,174 @@
+import std::types;
+import std::libc;
+import std::encoding;
+
+namespace std::hashing;
+
+struct Hash {
+    public static constexpr u32 fnv1a_32(str data) {
+        mut u32w hash = 2166136261w;
+        unsafe {
+            for (mut size i = 0u; i < data.length; i = i + 1u) {
+                hash = (hash ^ (u32w)(u8)data.data[i]) * 16777619w;
+            }
+        }
+        return (u32)hash;
+    }
+
+    public static unsafe u64 fnv1a_64(str data) {
+        mut u64w hash = 14695981039346656037w;
+        for (mut size i = 0u; i < data.length; i = i + 1u) {
+            hash = (hash ^ (u64w)(u8)data.data[i]) * 1099511628211w;
+        }
+        return (u64)hash;
+    }
+
+    public static unsafe u64 xxh64(str data, u64 seed) {
+        u64w prime1 = 11400714785074694791w;
+        u64w prime2 = 14029467366897019727w;
+        u64w prime3 = 1609587929392839161w;
+        u64w prime4 = 9650029242287828579w;
+        u64w prime5 = 2870177450012600261w;
+        mut size offset = 0u;
+        mut u64w hash = 0w;
+        if (data.length >= 32u) {
+            mut u64w v1 = (u64w)seed + prime1 + prime2;
+            mut u64w v2 = (u64w)seed + prime2;
+            mut u64w v3 = (u64w)seed;
+            mut u64w v4 = (u64w)seed - prime1;
+            while (offset + 32u <= data.length) {
+                v1 = Hash.xxh_round(v1, Hash.read64(data.data, offset), prime1, prime2);
+                v2 = Hash.xxh_round(v2, Hash.read64(data.data, offset + 8u), prime1, prime2);
+                v3 = Hash.xxh_round(v3, Hash.read64(data.data, offset + 16u), prime1, prime2);
+                v4 = Hash.xxh_round(v4, Hash.read64(data.data, offset + 24u), prime1, prime2);
+                offset = offset + 32u;
+            }
+            hash = Hash.rotl64(v1, 1w) + Hash.rotl64(v2, 7w) + Hash.rotl64(v3, 12w) + Hash.rotl64(v4, 18w);
+            hash = Hash.xxh_merge(hash, v1, prime1, prime2);
+            hash = Hash.xxh_merge(hash, v2, prime1, prime2);
+            hash = Hash.xxh_merge(hash, v3, prime1, prime2);
+            hash = Hash.xxh_merge(hash, v4, prime1, prime2);
+        } else {
+            hash = (u64w)seed + prime5;
+        }
+        hash = hash + (u64w)data.length;
+        while (offset + 8u <= data.length) {
+            u64w lane = Hash.xxh_round(0w, Hash.read64(data.data, offset), prime1, prime2);
+            hash = Hash.rotl64(hash ^ lane, 27w) * prime1 + prime4;
+            offset = offset + 8u;
+        }
+        if (offset + 4u <= data.length) {
+            hash = Hash.rotl64(hash ^ (Hash.read32(data.data, offset) * prime1), 23w) * prime2 + prime3;
+            offset = offset + 4u;
+        }
+        while (offset < data.length) {
+            hash = Hash.rotl64(hash ^ ((u64w)(u8)data.data[offset] * prime5), 11w) * prime1;
+            offset = offset + 1u;
+        }
+        hash = (hash ^ (hash >> 33)) * prime2;
+        hash = (hash ^ (hash >> 29)) * prime3;
+        hash = hash ^ (hash >> 32);
+        return (u64)hash;
+    }
+
+    public static unsafe void sha256(str data, byte_buffer* digest) {
+        arr<u32> k = [
+            0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+            0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+            0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+            0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+            0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+            0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+            0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+            0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
+        ];
+        u32w* state = (u32w*)__djinn_alloc(32);
+        state[0] = 0x6a09e667w; state[1] = 0xbb67ae85w; state[2] = 0x3c6ef372w; state[3] = 0xa54ff53aw;
+        state[4] = 0x510e527fw; state[5] = 0x9b05688cw; state[6] = 0x1f83d9abw; state[7] = 0x5be0cd19w;
+        u32w* schedule = (u32w*)__djinn_alloc(256);
+
+        byte_buffer message = byte_buffer();
+        message.write_str(data);
+        message.write_u8(128);
+        while (message.length() % 64u != 56u) {
+            message.write_u8(0);
+        }
+        message.write_be((u64)data.length * 8, 8u);
+
+        for (mut size block = 0u; block < message.length(); block = block + 64u) {
+            for (mut size t = 0u; t < 16u; t = t + 1u) {
+                schedule[t] = Hash.read32_be(message.data, block + t * 4u);
+            }
+            for (mut size t = 16u; t < 64u; t = t + 1u) {
+                u32w s0 = Hash.rotr32(schedule[t - 15u], 7w) ^ Hash.rotr32(schedule[t - 15u], 18w) ^ (schedule[t - 15u] >> 3);
+                u32w s1 = Hash.rotr32(schedule[t - 2u], 17w) ^ Hash.rotr32(schedule[t - 2u], 19w) ^ (schedule[t - 2u] >> 10);
+                schedule[t] = schedule[t - 16u] + s0 + schedule[t - 7u] + s1;
+            }
+            mut u32w a = state[0]; mut u32w b = state[1]; mut u32w c = state[2]; mut u32w d = state[3];
+            mut u32w e = state[4]; mut u32w f = state[5]; mut u32w g = state[6]; mut u32w h = state[7];
+            for (mut size t = 0u; t < 64u; t = t + 1u) {
+                u32w big1 = Hash.rotr32(e, 6w) ^ Hash.rotr32(e, 11w) ^ Hash.rotr32(e, 25w);
+                u32w choose = (e & f) ^ ((e ^ 0xffffffffw) & g);
+                u32w first = h + big1 + choose + (u32w)k.data[t] + schedule[t];
+                u32w big0 = Hash.rotr32(a, 2w) ^ Hash.rotr32(a, 13w) ^ Hash.rotr32(a, 22w);
+                u32w majority = (a & b) ^ (a & c) ^ (b & c);
+                u32w second = big0 + majority;
+                h = g; g = f; f = e; e = d + first; d = c; c = b; b = a; a = first + second;
+            }
+            state[0] = state[0] + a; state[1] = state[1] + b; state[2] = state[2] + c; state[3] = state[3] + d;
+            state[4] = state[4] + e; state[5] = state[5] + f; state[6] = state[6] + g; state[7] = state[7] + h;
+        }
+        for (mut size i = 0u; i < 8u; i = i + 1u) {
+            digest.write_be((u64)state[i], 4u);
+        }
+        __djinn_free((void*)state);
+        __djinn_free((void*)schedule);
+    }
+
+    public static unsafe string sha256_hex(str data) {
+        byte_buffer digest = byte_buffer();
+        Hash.sha256(data, &digest);
+        return Hex.encode(digest.as_str(), false);
+    }
+
+    static constexpr u32w rotr32(u32w value, u32w amount) {
+        return (value >> amount) | (value << (32w - amount));
+    }
+
+    static constexpr u64w rotl64(u64w value, u64w amount) {
+        return (value << amount) | (value >> (64w - amount));
+    }
+
+    static unsafe u64w read64(i8* data, size offset) {
+        mut u64w value = 0w;
+        for (mut size i = 0u; i < 8u; i = i + 1u) {
+            value = value | ((u64w)(u8)data[offset + i] << ((u64w)i * 8w));
+        }
+        return value;
+    }
+
+    static unsafe u64w read32(i8* data, size offset) {
+        mut u64w value = 0w;
+        for (mut size i = 0u; i < 4u; i = i + 1u) {
+            value = value | ((u64w)(u8)data[offset + i] << ((u64w)i * 8w));
+        }
+        return value;
+    }
+
+    static unsafe u32w read32_be(i8* data, size offset) {
+        mut u32w value = 0w;
+        for (mut size i = 0u; i < 4u; i = i + 1u) {
+            value = (value << 8) | (u32w)(u8)data[offset + i];
+        }
+        return value;
+    }
+
+    static u64w xxh_round(u64w accumulator, u64w input, u64w prime1, u64w prime2) {
+        return Hash.rotl64(accumulator + input * prime2, 31w) * prime1;
+    }
+
+    static u64w xxh_merge(u64w hash, u64w value, u64w prime1, u64w prime2) {
+        u64w mixed = Hash.xxh_round(0w, value, prime1, prime2);
+        return (hash ^ mixed) * prime1 + 9650029242287828579w;
+    }
+}

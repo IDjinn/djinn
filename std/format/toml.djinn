@@ -1,0 +1,181 @@
+import std::types;
+import std::text;
+
+namespace std::format;
+
+struct toml_entry {
+    str table;
+    str key;
+    str raw;
+    i32 kind;
+}
+
+struct Toml {
+    const i32 UNKNOWN = 0;
+    const i32 STRING = 1;
+    const i32 INTEGER = 2;
+    const i32 FLOAT = 3;
+    const i32 BOOLEAN = 4;
+    const i32 ARRAY = 5;
+    const i32 INLINE_TABLE = 6;
+
+    public static unsafe string unquote(str raw) {
+        string_builder builder = string_builder();
+        if (raw.length < 2u) {
+            return builder.to_string();
+        }
+        i8 quote = raw.data[0];
+        mut size i = 1u;
+        while (i + 1u < raw.length) {
+            i8 current = raw.data[i];
+            if (quote == 34 && current == 92 && i + 2u < raw.length) {
+                i8 escaped = raw.data[i + 1u];
+                if (escaped == 110) {
+                    builder.append_byte(10);
+                } else if (escaped == 116) {
+                    builder.append_byte(9);
+                } else if (escaped == 114) {
+                    builder.append_byte(13);
+                } else {
+                    builder.append_byte(escaped);
+                }
+                i = i + 2u;
+            } else {
+                builder.append_byte(current);
+                i = i + 1u;
+            }
+        }
+        return builder.to_string();
+    }
+
+    public static unsafe optional<i64> integer(str raw) {
+        string_builder digits = string_builder();
+        for (mut size i = 0u; i < raw.length; i = i + 1u) {
+            if (raw.data[i] != 95) {
+                digits.append_byte(raw.data[i]);
+            }
+        }
+        str view = digits.as_str();
+        return Numbers.parse_i64(view.data, view.length);
+    }
+
+    public static unsafe optional<f64> number(str raw) {
+        string_builder digits = string_builder();
+        for (mut size i = 0u; i < raw.length; i = i + 1u) {
+            if (raw.data[i] != 95) {
+                digits.append_byte(raw.data[i]);
+            }
+        }
+        str view = digits.as_str();
+        return Numbers.parse_f64(view.data, view.length);
+    }
+
+    public static unsafe bool boolean(str raw) {
+        return raw.length == 4u && raw.data[0] == 116;
+    }
+}
+
+struct toml_reader {
+    str text;
+    size position;
+    str table;
+
+    toml_reader(str text) {
+        this.text = text;
+        this.position = 0u;
+        this.table = { .data = text.data, .length = 0u };
+    }
+
+    public unsafe bool next(toml_entry* entry) {
+        i8* data = this.text.data;
+        size length = this.text.length;
+        while (this.position < length) {
+            size line_start = this.position;
+            mut size line_end = line_start;
+            while (line_end < length && data[line_end] != 10) {
+                line_end = line_end + 1u;
+            }
+            this.position = line_end;
+            if (this.position < length) {
+                this.position = this.position + 1u;
+            }
+            mut str line = { .data = &data[line_start], .length = line_end - line_start };
+            line = this.strip_comment(line).trim();
+            if (line.length == 0u) {
+                continue;
+            }
+            if (line.data[0] == 91) {
+                mut size open = 1u;
+                mut size close = line.length - 1u;
+                if (line.length > 1u && line.data[1] == 91) {
+                    open = 2u;
+                }
+                while (close > open && line.data[close] != 93) {
+                    close = close - 1u;
+                }
+                str name = { .data = &line.data[open], .length = close - open };
+                this.table = name.trim();
+                continue;
+            }
+            mut size equals = 0u;
+            while (equals < line.length && line.data[equals] != 61) {
+                equals = equals + 1u;
+            }
+            if (equals >= line.length) {
+                continue;
+            }
+            str key = { .data = line.data, .length = equals };
+            str raw = { .data = &line.data[equals + 1u], .length = line.length - equals - 1u };
+            entry.table = this.table;
+            entry.key = key.trim();
+            entry.raw = raw.trim();
+            entry.kind = this.classify(entry.raw);
+            return true;
+        }
+        return false;
+    }
+
+    private unsafe str strip_comment(str line) {
+        mut i8 quote = 0;
+        for (mut size i = 0u; i < line.length; i = i + 1u) {
+            i8 current = line.data[i];
+            if (quote != 0) {
+                if (current == quote && !(quote == 34 && i > 0u && line.data[i - 1u] == 92)) {
+                    quote = 0;
+                }
+            } else if (current == 34 || current == 39) {
+                quote = current;
+            } else if (current == 35) {
+                str kept = { .data = line.data, .length = i };
+                return kept;
+            }
+        }
+        return line;
+    }
+
+    private unsafe i32 classify(str raw) {
+        if (raw.length == 0u) {
+            return 0;
+        }
+        i8 first = raw.data[0];
+        if (first == 34 || first == 39) {
+            return 1;
+        }
+        if (first == 91) {
+            return 5;
+        }
+        if (first == 123) {
+            return 6;
+        }
+        if (raw.startsWith("true") || raw.startsWith("false")) {
+            return 4;
+        }
+        for (mut size i = 0u; i < raw.length; i = i + 1u) {
+            i8 current = raw.data[i];
+            if (current == 46 || current == 101 || current == 69) {
+                return 3;
+            }
+        }
+        return 2;
+    }
+}

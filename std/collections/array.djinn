@@ -1,4 +1,5 @@
 import std::types;
+import std::memory;
 import std::libc;
 import std::debug;
 import std::types::constraints;
@@ -11,19 +12,35 @@ where T : Hashable, Equatable {
     size length;
     size capacity;
 
+    allocator source;
+
     array() {
-        this.data = malloc(0);
+        unsafe {
+            this.source = allocator.heap();
+            this.data = (T*)0;
+        }
+        this.length = 0u;
+        this.capacity = 0u;
+    }
+
+    array(allocator source) {
+        this.source = source;
+        unsafe {
+            this.data = (T*)0;
+        }
         this.length = 0u;
         this.capacity = 0u;
     }
 
     public unsafe u64 hash() {
-        mut u64 result = 1;
-        for (mut size i = 0; i < this.length; i = i + 1) {
-            u64 item_hash = this.data[i].hash();
-            result = 31 * result + (u32)(item_hash ^ (item_hash >> 32));
+        mut u64w result = 1;
+        u32w length = (u32w)this.length;
+        T* data = this.data;
+        for (mut u32w i = 0w; i < length; i = i + 1w) {
+            u64 item_hash = data[i].hash();
+            result = 31 * result + (u64w)(item_hash ^ (item_hash >> 32));
         }
-        return result;
+        return (u64)result;
     }
 
     public unsafe void push(T value) {
@@ -35,17 +52,97 @@ where T : Hashable, Equatable {
     }
 
     public unsafe T get(size index) {
-        Debug.assert(index < this.length || index < 0, "array::get - index out of bounds");
+        Debug.assert(index < this.length, "array::get - index out of bounds");
         return this.data[index];
     }
 
     public unsafe void set(size index, T value) {
-        Debug.assert(index < this.length || index < 0, "array::set - index out of bounds");
+        Debug.assert(index < this.length, "array::set - index out of bounds");
         this.data[index] = value;
     }
 
     public size length() {
         return this.length;
+    }
+
+    public bool is_empty() {
+        return this.length == 0u;
+    }
+
+    operator get[](array<T> list, size index) -> T {
+        Debug.assert(index < list.length, "array::get[] - index out of bounds");
+        unsafe {
+            return list.data[index];
+        }
+    }
+
+    public unsafe T pop() {
+        Debug.assert(this.length > 0u, "array::pop - array is empty");
+        this.length = this.length - 1u;
+        return this.data[this.length];
+    }
+
+    public unsafe T first() {
+        Debug.assert(this.length > 0u, "array::first - array is empty");
+        return this.data[0];
+    }
+
+    public unsafe T last() {
+        Debug.assert(this.length > 0u, "array::last - array is empty");
+        return this.data[this.length - 1u];
+    }
+
+    public void clear() {
+        this.length = 0u;
+    }
+
+    public unsafe void insert(size index, T value) {
+        Debug.assert(index <= this.length, "array::insert - index out of bounds");
+        if (this.length == this.capacity) {
+            this.grow();
+        }
+        memmove((void*)&this.data[index + 1u], (void*)&this.data[index], (u64)(this.length - index) * sizeof(T));
+        this.data[index] = value;
+        this.length = this.length + 1u;
+    }
+
+    public unsafe T remove_at(size index) {
+        Debug.assert(index < this.length, "array::remove_at - index out of bounds");
+        T removed = this.data[index];
+        memmove((void*)&this.data[index], (void*)&this.data[index + 1u], (u64)(this.length - index - 1u) * sizeof(T));
+        this.length = this.length - 1u;
+        return removed;
+    }
+
+    public unsafe T swap_remove(size index) {
+        Debug.assert(index < this.length, "array::swap_remove - index out of bounds");
+        T removed = this.data[index];
+        this.length = this.length - 1u;
+        this.data[index] = this.data[this.length];
+        return removed;
+    }
+
+    public unsafe i32 index_of(T value) {
+        u32w length = (u32w)this.length;
+        for (mut u32w i = 0w; i < length; i = i + 1w) {
+            if (this.data[i] == value) {
+                return (i32)i;
+            }
+        }
+        return -1;
+    }
+
+    public bool contains(T value) {
+        return this.index_of(value) >= 0;
+    }
+
+    public unsafe void reverse() {
+        this.as_slice().reverse();
+    }
+
+    public unsafe slice<T> as_slice() {
+        slice<T> view = { .data = this.data, .length = this.length };
+        return view;
     }
 
     private void grow() {
@@ -56,13 +153,18 @@ where T : Hashable, Equatable {
         this.reserve(this.capacity * 2u);
     }
 
-    public void reserve(size capacity) {
+    public unsafe void reserve(size capacity) {
+        if (capacity <= this.capacity) {
+            return;
+        }
+        this.data = (T*)this.source.resize((i8*)this.data, (u64)this.capacity * sizeof(T), (u64)capacity * sizeof(T));
         this.capacity = capacity;
-        this.data = realloc(this.data, this.capacity * sizeof(T));
     }
 
-    public void disposable() {
-        free(this.data);
+    public unsafe void disposable() {
+        if (this.capacity != 0u) {
+            this.source.release((i8*)this.data, (u64)this.capacity * sizeof(T));
+        }
     }
 
     operator ==(array<T> left, array<T> right) -> bool {
@@ -70,7 +172,8 @@ where T : Hashable, Equatable {
             return false;
         }
         unsafe {
-            for (mut size i = 0; i < left.length; i = i + 1) {
+            u32w length = (u32w)left.length;
+            for (mut u32w i = 0w; i < length; i = i + 1w) {
                 if (left.data[i] != right.data[i]) {
                     return false;
                 }
