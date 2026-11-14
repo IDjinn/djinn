@@ -1,0 +1,165 @@
+namespace conformance;
+
+import testing;
+import djinnc::testing;
+import djinnc;
+
+struct AtomicIntrinsicTests {
+    [Test]
+    void read_modify_write_returns_the_previous_value() {
+        str source = """
+i32 main() {
+    mut i64 counter = 5;
+    if (atomic_add(&counter, 3) != 5) { return 1; }
+    if (atomic_sub(&counter, 1) != 8) { return 2; }
+    if (atomic_load(&counter) != 7) { return 3; }
+    mut u32 bits = 12u;
+    if (atomic_or(&bits, 3u) != 12u) { return 4; }
+    if (atomic_and(&bits, 14u) != 15u) { return 5; }
+    if (atomic_xor(&bits, 1u) != 14u) { return 6; }
+    if (atomic_swap(&bits, 40u) != 15u) { return 7; }
+    atomic_store(&counter, 2);
+    atomic_fence();
+    return (i32)atomic_load(&counter) + (i32)bits;
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void compare_and_swap_reports_whether_it_stored() {
+        str source = """
+i32 main() {
+    mut i32 value = 7;
+    bool stored = atomic_cas(&value, 7, 9);
+    bool missed = atomic_cas(&value, 7, 11);
+    if (!stored || missed) { return 1; }
+    return value;
+}
+""";
+        Verify.source(source).runs(Expected.exit(9));
+    }
+
+    [Test]
+    void narrow_integers_wrap_and_pointers_swap() {
+        str source = """
+i32 main() {
+    mut u8 tiny = 250;
+    atomic_add(&tiny, 10);
+    mut i32 first = 1;
+    mut i32 second = 2;
+    mut i32* slot = &first;
+    i32* previous = atomic_swap(&slot, &second);
+    if (*previous != 1 || *atomic_load(&slot) != 2) { return 1; }
+    if (!atomic_cas(&slot, &second, &first)) { return 2; }
+    return (i32)tiny;
+}
+""";
+        Verify.source(source).runs(Expected.exit(4));
+    }
+
+    [Test]
+    void lowers_to_llvm_atomic_instructions() {
+        str source = """
+i32 work(i32* value) {
+    i32 previous = atomic_add(value, 1);
+    atomic_cas(value, 1, 2);
+    atomic_store(value, atomic_load(value));
+    atomic_fence();
+    return previous;
+}
+
+i32 main() {
+    mut i32 value = 0;
+    return work(&value);
+}
+""";
+        Verify.source(source).emits_ir(Expected.ir_contains("atomicrmw add").and_ir_contains("cmpxchg").and_ir_contains("load atomic").and_ir_contains("store atomic").and_ir_contains("fence seq_cst").and_ir_lacks("__djinn_atomic").in_function("work"));
+    }
+
+    [Test]
+    void arithmetic_needs_an_integer() {
+        str source = """
+i32 main() {
+    mut f64 value = 1.0;
+    atomic_add(&value, 1.0);
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.INVALID_ATOMIC).at(3, 5));
+    }
+
+    [Test]
+    void address_must_be_a_pointer() {
+        str source = """
+i32 main() {
+    mut i32 value = 1;
+    atomic_load(value);
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.INVALID_ATOMIC).at(3, 5));
+    }
+
+    [Test]
+    void bool_is_not_atomic() {
+        str source = """
+i32 main() {
+    mut bool flag = false;
+    atomic_store(&flag, true);
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.INVALID_ATOMIC).at(3, 5));
+    }
+}
+
+struct AtomicStdTests {
+    [Test]
+    void atomic_types_use_no_runtime_helpers() {
+        str source = """
+import std::sys;
+import std::types;
+namespace app;
+
+i32 work() {
+    atomic<u32> bits = atomic<u32>(12u);
+    bits.fetchOr(3u);
+    bits.fetchAnd(14u);
+    bits.fetchXor(1u);
+    if (bits.fetchSub(2u) != 15u) { return 1; }
+    atomic_bool flag = atomic_bool(true);
+    if (flag.exchange(false) != true) { return 2; }
+    if (!flag.compareExchange(false, true) || !flag.load()) { return 3; }
+    Atomics.fence();
+    return (i32)bits.load();
+}
+
+i32 main() {
+    return work();
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(13));
+    }
+
+    [Test]
+    void atomic_types_emit_no_runtime_calls() {
+        str source = """
+import std::sys;
+import std::types;
+namespace app;
+
+i64 work(atomic<i64>* counter) {
+    counter.fetchAdd(2);
+    counter.compareExchange(2, 5);
+    return counter.load();
+}
+
+i32 main() {
+    mut atomic<i64> counter = atomic<i64>(0);
+    return (i32)work(&counter);
+}
+""";
+        Verify.source(source).with_std().emits_ir(Expected.ir_contains("atomicrmw add").and_ir_lacks("__djinn_atomic").and_ir_lacks("call").in_function("\"std::sys::atomic<i64>.fetchAdd\""));
+    }
+}

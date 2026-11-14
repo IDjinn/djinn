@@ -464,7 +464,45 @@ impl TypeChecker {
         if (id == Intrinsic.PREFETCH) {
             this.check_prefetch(node);
         }
+        if (Intrinsic.is_atomic(id)) {
+            return this.check_atomic(node, id);
+        }
         return Types.void_type();
+    }
+
+    unsafe u32 check_atomic(Node* node, i32 id) {
+        if (id == Intrinsic.ATOMIC_FENCE) {
+            return Types.void_type();
+        }
+        u32 address = this.check_expression(node.first(), Types.auto_type());
+        if (!Types.is_pointer(address)) {
+            this.error_code(node, DiagnosticErrors.INVALID_ATOMIC, "an atomic operation needs a pointer to the value it changes");
+            return Types.void_type();
+        }
+        u32 element = Types.element(address);
+        bool arithmetic = id >= Intrinsic.ATOMIC_ADD && id <= Intrinsic.ATOMIC_XOR;
+        bool integer = Types.is_integer(element) && Types.bits(element) >= 8 && Types.bits(element) <= 64;
+        if (arithmetic && !integer) {
+            this.error_code(node, DiagnosticErrors.INVALID_ATOMIC, "atomic arithmetic needs a pointer to an integer of 8 to 64 bits");
+            return element;
+        }
+        if (!integer && !Types.is_pointer(element)) {
+            this.error_code(node, DiagnosticErrors.INVALID_ATOMIC, "an atomic operation needs a pointer to an integer of 8 to 64 bits or to a pointer");
+            return Types.void_type();
+        }
+        if (node.second() != null) {
+            this.check_expression(node.second(), element);
+        }
+        if (node.third() != null) {
+            this.check_expression(node.third(), element);
+        }
+        if (id == Intrinsic.ATOMIC_STORE) {
+            return Types.void_type();
+        }
+        if (id == Intrinsic.ATOMIC_CAS) {
+            return Types.bool_type();
+        }
+        return element;
     }
 
     unsafe void check_prefetch(Node* node) {

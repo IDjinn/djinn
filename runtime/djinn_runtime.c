@@ -2,17 +2,6 @@
 
 Logger* logger;
 
-uint64_t __djinn_hash_string(const char* data, uint32_t length)
-{
-    uint64_t hash = 2166136261u;
-    for (uint32_t i = 0; i < length; ++i)
-    {
-        hash ^= (uint8_t)data[i];
-        hash *= 16777619u;
-    }
-    return hash;
-}
-
 int64_t __djinn_unix_timestamp_ms(void)
 {
     struct timespec ts;
@@ -20,79 +9,11 @@ int64_t __djinn_unix_timestamp_ms(void)
     return (int64_t)ts.tv_sec * 1000LL + ts.tv_nsec / 1000000LL;
 }
 
-uint32_t __djinn_compare_strings(
-    char* leftData,
-    char* rightData,
-    size_t leftLen,
-    size_t rightLen
-)
-{
-    if (leftData == rightData) return 1;
-
-    if (!leftData || !rightData)
-        return 0;
-
-    if (leftLen != rightLen)
-        return 0;
-
-    return memcmp(leftData, rightData, leftLen) == 0;
-}
-
 DJINN_ATTR_NONNULL_1
 void __djinn_free(void* pointer)
 {
     DJINN_TRACE("de-allocating heap memory at %p", pointer);
     free(pointer);
-}
-
-int32_t __djinn_atomic_add(int32_t* counter, int32_t delta)
-{
-    return __atomic_fetch_add(counter, delta, __ATOMIC_ACQ_REL);
-}
-
-int32_t __djinn_atomic_load_i32(int32_t* target)
-{
-    return __atomic_load_n(target, __ATOMIC_SEQ_CST);
-}
-
-void __djinn_atomic_store_i32(int32_t* target, int32_t value)
-{
-    __atomic_store_n(target, value, __ATOMIC_SEQ_CST);
-}
-
-int32_t __djinn_atomic_exchange_i32(int32_t* target, int32_t value)
-{
-    return __atomic_exchange_n(target, value, __ATOMIC_SEQ_CST);
-}
-
-int32_t __djinn_atomic_cas_i32(int32_t* target, int32_t expected, int32_t desired)
-{
-    return __atomic_compare_exchange_n(target, &expected, desired, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
-}
-
-int64_t __djinn_atomic_load_i64(int64_t* target)
-{
-    return __atomic_load_n(target, __ATOMIC_SEQ_CST);
-}
-
-void __djinn_atomic_store_i64(int64_t* target, int64_t value)
-{
-    __atomic_store_n(target, value, __ATOMIC_SEQ_CST);
-}
-
-int64_t __djinn_atomic_exchange_i64(int64_t* target, int64_t value)
-{
-    return __atomic_exchange_n(target, value, __ATOMIC_SEQ_CST);
-}
-
-int64_t __djinn_atomic_add_i64(int64_t* target, int64_t delta)
-{
-    return __atomic_fetch_add(target, delta, __ATOMIC_SEQ_CST);
-}
-
-int32_t __djinn_atomic_cas_i64(int64_t* target, int64_t expected, int64_t desired)
-{
-    return __atomic_compare_exchange_n(target, &expected, desired, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
 }
 
 DJINN_ATTR_REALLOC
