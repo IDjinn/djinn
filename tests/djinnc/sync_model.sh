@@ -130,4 +130,59 @@ SOURCE
 set +e; "$out/throws$exe"; code=$?; set -e
 [ "$code" = 32 ] || fail "throws program must exit 32, got $code"
 
+# 'private' is enforced: a private method is callable from its own type, a private free function from its namespace.
+cat > "$out/private_ok.djinn" <<'SOURCE'
+struct Counter {
+    i32 value;
+
+    Counter(i32 start) {
+        this.value = start;
+    }
+
+    private i32 bump() {
+        return this.value + 1;
+    }
+
+    public i32 next() {
+        return this.bump();
+    }
+}
+
+private i32 twice(i32 x) {
+    return x * 2;
+}
+
+i32 main() {
+    Counter counter = Counter(20);
+    return twice(counter.next());
+}
+SOURCE
+"$compiler" "$out/private_ok.djinn" -o "$out/private_ok$exe" "${flags[@]}" > "$out/private_ok.log" 2>&1 || { cat "$out/private_ok.log"; fail "private use inside its type and namespace must compile"; }
+set +e; "$out/private_ok$exe"; code=$?; set -e
+[ "$code" = 42 ] || fail "private program must exit 42, got $code"
+
+rm -rf "$out/private_bad"; mkdir -p "$out/private_bad"
+cat > "$out/private_bad/lib.djinn" <<'SOURCE'
+namespace hidden;
+
+private i32 secret() {
+    return 7;
+}
+
+i32 shown() {
+    return secret();
+}
+SOURCE
+cat > "$out/private_bad/main.djinn" <<'SOURCE'
+namespace app;
+
+import hidden;
+
+i32 main() {
+    return secret() + shown();
+}
+SOURCE
+if "$compiler" "$out/private_bad/lib.djinn" "$out/private_bad/main.djinn" -o "$out/private_bad$exe" "${flags[@]}" > "$out/private_bad.log" 2>&1; then fail "calling a private function from another namespace must fail"; fi
+grep -q "E3062" "$out/private_bad.log" || { cat "$out/private_bad.log"; fail "private access must report E3062"; }
+
 echo "sync_model: ok"

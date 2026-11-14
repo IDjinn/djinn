@@ -552,6 +552,9 @@ impl TypeChecker {
             return Types.i32_type();
         }
 
+        if (!this.can_access(info)) {
+            this.error_code(callee, DiagnosticErrors.PRIVATE_ACCESS, "call to a private function from outside its type or namespace");
+        }
         IdList* param_types = info.param_types;
         i32 fixed = param_types.length;
         if (node.count() + offset + 1 == fixed && this.takes_location(info)) {
@@ -594,6 +597,24 @@ impl TypeChecker {
             this.fold_call(node, info);
         }
         return info.return_type;
+    }
+
+    // Private means private to the namespace: the std types call each other's private helpers within one namespace. A
+    // private function used from another namespace is rejected, unless the caller is a method of the same type.
+    unsafe bool can_access(FunctionInfo* info) {
+        if (!info.is_private || info.home_scope == this.scope) {
+            return true;
+        }
+        FunctionInfo* caller = this.function;
+        if (info.owner == null || caller == null || caller.owner == null) {
+            return caller == null && info.owner != null;
+        }
+        StructInfo* want = info.owner;
+        StructInfo* have = caller.owner;
+        if (want == have || want.origin == have || have.origin == want) {
+            return true;
+        }
+        return want.origin != null && want.origin == have.origin;
     }
 
     unsafe bool takes_location(FunctionInfo* info) {
