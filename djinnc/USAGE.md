@@ -72,7 +72,7 @@ The runtime (the `.c` files in `runtime/`) is compiled together with the program
 | `--emit-ir` / `--keep-ir` | Write `<output>.ll` (IR). `--keep-ir` also links. |
 | `--emit-asm` | Write the assembly to `-o` and stop. |
 | `--show-async` | In the view modes, also show the compiler-generated async infrastructure (the entry `main` that starts the runtime and event loop, and the `__djinn_coro_*` wrappers). Hidden by default. |
-| `--async-threads=<n>` | Worker threads the compiled program starts with (default 4). At run time `DJINN_THREADS` and `threads=<n>` in `runtime.properties` override it. See `djinnc/ASYNC_MODEL.md`. |
+| `--async-threads=<n>` | Worker threads the compiled program starts with (default 4). At run time `DJINN_THREADS` and `threads=<n>` in `runtime.properties` override it. `[Runtime(threads = n)]` on `main` and `async-threads: n` in the `compiler:` section of `djinn.proj` set the compiled value too; precedence: this flag, then the attribute, then `djinn.proj`, then 4. See `djinnc/ASYNC_MODEL.md`. |
 | `--no-async-elision` | Keep every `async` function a coroutine. By default an async function that can never suspend is compiled as a plain function and reported with warning `E6004` (see `djinnc/SUBSET.md`). |
 | `--emit-ast` | Print the AST (with `<line:col>`) to stdout and stop. |
 | `--version` | Print the compiler version. |
