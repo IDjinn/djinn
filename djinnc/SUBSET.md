@@ -184,7 +184,7 @@ Only a declaration initialized directly with `&x` is tracked: borrows passed to 
 checked, and there is no flow analysis (a borrow lives for the whole scope of its pointer). `return &local;` is an error.
 
 ## Macros
-`macro name { (params) => { expression } ... }`. Parameters are `expression x`, `identifier x`, `literal x`, `type T` or a bare literal token
+`macro name { (params) => { expression } ... }`, called as `name(args)` or `name!(args)`; `macro name! { ... }` is a separate macro that is only called with the `!`, so it neither shadows a function nor merges with a `macro name`. Parameters are `expression x`, `identifier x`, `literal x`, `type T` or a bare literal token
 (`add`, `debug`, ...); `local` (on a parameter or before the parameter list) evaluates the argument once. `=> void` expands to `0`.
 Rules are chosen by arity and fragment kind, in order. Expansion happens in the parser by AST substitution, so precedence is preserved,
 a macro must be declared before it is used, and `type` parameters cannot be referenced from the body. Using a non-`local` expression
