@@ -4,6 +4,7 @@ namespace std::logger;
 
 extern "C" {
     void* logger_get(i8* name, i32 output, i32 level);
+    void logger_log(void* logger, i32 level, i8* format, ...);
     void logger_trace(void* logger, i8* format, ...);
     void logger_debug(void* logger, i8* format, ...);
     void logger_info(void* logger, i8* format, ...);
@@ -11,6 +12,10 @@ extern "C" {
     void logger_error(void* logger, i8* format, ...);
     void logger_fatal(void* logger, i8* format, ...);
     void logger_set_level(void* logger, i32 level);
+    void logger_set_async(void* logger, i32 enabled);
+    void logger_set_sync_level(void* logger, i32 level);
+    void logger_flush_all();
+    i32 logger_enabled(void* logger, i32 level);
 }
 
 enum LoggerOutput {
@@ -27,6 +32,20 @@ enum LoggerLevel {
     FATAL
 }
 
+// logif(level, logger, condition, message): the message is only evaluated when the level is compiled in
+// (constexpr, so the whole expression is folded away; && short-circuits, so nothing after a false operand runs), enabled on the logger at runtime, and the condition holds.
+//   logif(debug, logger, Debug.isAttached, expensive(a, b));
+constexpr i32 LOG_COMPILE_LEVEL = 0;
+
+macro logif {
+    (trace, local expression logger, expression condition, expression message) => { Logger.compiled(0) && logger.enabled(0) && condition && logger.trace(message) }
+    (debug, local expression logger, expression condition, expression message) => { Logger.compiled(1) && logger.enabled(1) && condition && logger.debug(message) }
+    (info, local expression logger, expression condition, expression message) => { Logger.compiled(2) && logger.enabled(2) && condition && logger.info(message) }
+    (warn, local expression logger, expression condition, expression message) => { Logger.compiled(3) && logger.enabled(3) && condition && logger.warn(message) }
+    (error, local expression logger, expression condition, expression message) => { Logger.compiled(4) && logger.enabled(4) && condition && logger.error(message) }
+    (fatal, local expression logger, expression condition, expression message) => { Logger.compiled(5) && logger.enabled(5) && condition && logger.fatal(message) }
+}
+
 struct Logger {
     void* log;
     str name;
@@ -34,33 +53,60 @@ struct Logger {
     Logger(str loggerName){
         this.name = loggerName;
         this.log = logger_get(loggerName.ptr(), 1, 0);
+        logger_set_async(this.log, 1);
     }
 
-    void trace(str message) {
-        logger_trace(this.log, message.ptr());
+    static constexpr bool compiled(i32 level) {
+        return level >= LOG_COMPILE_LEVEL;
     }
 
-    void debug(str message) {
-        logger_debug(this.log, message.ptr());
+    bool enabled(i32 level) {
+        return logger_enabled(this.log, level) != 0;
     }
 
-    void info(str message) {
-        logger_info(this.log, message.ptr());
+    bool trace(str message) {
+        logger_trace(this.log, "%s", message.ptr());
+        return true;
     }
 
-    void warn(str message) {
-        logger_warn(this.log, message.ptr());
+    bool debug(str message) {
+        logger_debug(this.log, "%s", message.ptr());
+        return true;
     }
 
-    void error(str message) {
-        logger_error(this.log, message.ptr());
+    bool info(str message) {
+        logger_info(this.log, "%s", message.ptr());
+        return true;
     }
 
-    void fatal(str message) {
-        logger_fatal(this.log, message.ptr());
+    bool warn(str message) {
+        logger_warn(this.log, "%s", message.ptr());
+        return true;
+    }
+
+    bool error(str message) {
+        logger_error(this.log, "%s", message.ptr());
+        return true;
+    }
+
+    bool fatal(str message) {
+        logger_fatal(this.log, "%s", message.ptr());
+        return true;
     }
 
     void setLevel(i32 level) {
         logger_set_level(this.log, level);
+    }
+
+    void setAsync(bool enabled) {
+        if (enabled) {
+            logger_set_async(this.log, 1);
+        } else {
+            logger_set_async(this.log, 0);
+        }
+    }
+
+    static void flush() {
+        logger_flush_all();
     }
 }
