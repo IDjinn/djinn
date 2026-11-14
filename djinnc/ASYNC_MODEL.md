@@ -30,7 +30,7 @@ Decisions (confirmed 2026-11-14). Tracking issues: #121 to #125.
 
 ## Finding: inference by default is blocked on two language gaps (#121)
 
-1. ~~`public` and `private` are parsed and then dropped.~~ Done: `private` is op bit 64 / `FunctionInfo.is_private` and is enforced per namespace (E3062); `public` is the default and has no bit. Still missing: the `.djlib` interface record of visibility, so the rule is not checked for library imports, and the "public must declare async or sync" check itself.
+1. ~~`public` and `private` are parsed and then dropped.~~ Done: `private` is op bit 64 / `FunctionInfo.is_private` and is enforced per namespace (E3062); `public` is the default and has no bit. The `.djlib` interface keeps the modifier in its minified text, so library imports are checked too (tested in `sync_model.sh`). Still missing: the "public must declare async or sync" check itself.
 2. Inferring `async` for a private function changes its type from `T` to `task<T>`. With `await` explicit, every un-annotated caller would stop compiling, so inference needs either implicit await at call sites in inferred-async code or a coloring rule that keeps the signature `T` and lets the compiler hide the task. This is the open design decision.
 
 Until both are settled a function is async only when declared, and `AsyncElision` already removes the cost of declaring `async` on code that never suspends.

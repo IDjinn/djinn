@@ -185,4 +185,12 @@ SOURCE
 if "$compiler" "$out/private_bad/lib.djinn" "$out/private_bad/main.djinn" -o "$out/private_bad$exe" "${flags[@]}" > "$out/private_bad.log" 2>&1; then fail "calling a private function from another namespace must fail"; fi
 grep -q "E3062" "$out/private_bad.log" || { cat "$out/private_bad.log"; fail "private access must report E3062"; }
 
+# Visibility and 'sync' travel in the library interface (minified source keeps the modifiers).
+if "$compiler" "$out/private_bad/lib.djinn" --library -o "$out/private_bad/hidden.djlib" "${flags[@]}" > "$out/private_lib.log" 2>&1; then
+    if "$compiler" "$out/private_bad/main.djinn" --lib "$out/private_bad/hidden.djlib" -o "$out/private_lib$exe" "${flags[@]}" > "$out/private_lib_use.log" 2>&1; then fail "a private function of a library must not be callable from a consumer"; fi
+    grep -q "E3062" "$out/private_lib_use.log" || { cat "$out/private_lib_use.log"; fail "library private access must report E3062"; }
+else
+    cat "$out/private_lib.log"; fail "library with a private function must build"
+fi
+
 echo "sync_model: ok"
