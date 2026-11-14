@@ -28,6 +28,10 @@ struct Box<TKey, T> {
         return view[index];
     }
 }
+
+macro shout! {
+    (loud, local expression target, expression condition) => { condition && target.go() }
+}
 """
 
 failures = []
@@ -67,6 +71,11 @@ check("macro call twice!() is a macro", at(12, "twice") and at(12, "twice")[0] =
 check("this.count is a class member property", at(11, "count") and at(11, "count")[0] == "property" and "classMember" in at(11, "count")[1], found)
 check("parameter amount is a parameter", at(11, "amount") and at(11, "amount")[0] == "parameter", found)
 check("operator is a keyword", at(15, "operator") and at(15, "operator")[0] == "keyword", found)
+check("macro name is a macro", at(20, "shout") and at(20, "shout")[0] == "macro", found)
+check("macro arm word is an enum member", at(21, "loud") and at(21, "loud")[0] == "enumMember", found)
+check("macro fragment kind is a keyword", at(21, "expression") and at(21, "expression")[0] == "keyword", found)
+check("macro parameter is a parameter", at(21, "target") and at(21, "target")[0] == "parameter", found)
+check("macro parameter used in the body is a parameter", found.get((21, "condition"), [None])[-1] and found[(21, "condition")][-1][0] == "parameter", found)
 client.close()
 print("%d failure(s)" % len(failures))
 sys.exit(1 if failures else 0)
