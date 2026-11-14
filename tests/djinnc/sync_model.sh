@@ -238,7 +238,7 @@ SOURCE
 set +e; "$out/infer_lib$exe"; code=$?; set -e
 [ "$code" = 42 ] || fail "inferred async library program must exit 42, got $code"
 
-# A public function that blocks on a task must declare 'async' or 'sync' (warning E6006); declaring it silences it.
+# A public function that blocks on a task must declare 'async' or 'sync' (E3063); declaring it fixes it.
 cat > "$out/contract.djinn" <<'SOURCE'
 async i32 leaf(i32 x) {
     return x + 1;
@@ -248,16 +248,16 @@ public i32 undeclared(i32 x) {
     return leaf(x).sync;
 }
 
-public sync i32 declared(i32 x) {
-    return leaf(x).sync;
-}
-
 i32 main() {
-    return undeclared(1) + declared(2);
+    return undeclared(1);
 }
 SOURCE
-"$compiler" "$out/contract.djinn" --no-async-elision -o "$out/contract$exe" "${flags[@]}" > "$out/contract.log" 2>&1 || { cat "$out/contract.log"; fail "contract program must compile"; }
-[ "$(grep -c 'warning\[E6006\]' "$out/contract.log")" = 1 ] || { cat "$out/contract.log"; fail "exactly the undeclared public function must report E6006"; }
+if "$compiler" "$out/contract.djinn" --no-async-elision -o "$out/contract$exe" "${flags[@]}" > "$out/contract.log" 2>&1; then fail "an undeclared public function that blocks must fail"; fi
+grep -q "E3063" "$out/contract.log" || { cat "$out/contract.log"; fail "undeclared public function must report E3063"; }
+sed 's/^public i32 undeclared/public sync i32 undeclared/' "$out/contract.djinn" > "$out/contract_ok.djinn"
+"$compiler" "$out/contract_ok.djinn" --no-async-elision -o "$out/contract_ok$exe" "${flags[@]}" > "$out/contract_ok.log" 2>&1 || { cat "$out/contract_ok.log"; fail "a public sync function that blocks must compile"; }
+set +e; "$out/contract_ok$exe"; code=$?; set -e
+[ "$code" = 2 ] || fail "contract program must exit 2, got $code"
 
 # Async code that main cannot reach does not keep the runtime; reachable async code does.
 cat > "$out/unreached.djinn" <<'SOURCE'

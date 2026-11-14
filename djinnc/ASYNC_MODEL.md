@@ -34,7 +34,7 @@ Decisions (confirmed 2026-11-14). Tracking issues: #121 to #125.
 
 ## Public contract (#121)
 
-A function written `public` that blocks on a task (`.sync`) or calls an async function without awaiting it, and declares neither `async` nor `sync`, gets warning E6006. The choice is part of the contract for library callers. `public` is op bit 128, `private` 64.
+A function written `public` that blocks on a task (`.sync`) or calls an async function without awaiting it, and declares neither `async` nor `sync`, gets error E3063. The choice is part of the contract for library callers. `public` is op bit 128, `private` 64.
 
 ## Runtime-less `sync main` (#123)
 
@@ -42,16 +42,15 @@ The runtime is omitted when no async work is reachable from a `sync main`: the p
 
 ## Finding: inference by default is blocked on two language gaps (#121)
 
-1. ~~`public` and `private` are parsed and then dropped.~~ Done (and E6006 for public contract): `private` is op bit 64 / `FunctionInfo.is_private` and is enforced per namespace (E3062); `public` is the default and has no bit. The `.djlib` interface keeps the modifier in its minified text, so library imports are checked too (tested in `sync_model.sh`). Still missing: the "public must declare async or sync" check itself.
+1. ~~`public` and `private` are parsed and then dropped.~~ Done (and E3063 for public contract): `private` is op bit 64 / `FunctionInfo.is_private` and is enforced per namespace (E3062); `public` is the default and has no bit. The `.djlib` interface keeps the modifier in its minified text, so library imports are checked too (tested in `sync_model.sh`).
 2. Inferring `async` for a private function changes its type from `T` to `task<T>`. With `await` explicit, every un-annotated caller would stop compiling, so inference needs either implicit await at call sites in inferred-async code or a coloring rule that keeps the signature `T` and lets the compiler hide the task. This is the open design decision.
 
 Until both are settled a function is async only when declared, and `AsyncElision` already removes the cost of declaring `async` on code that never suspends.
 
 ## Decision: `await` makes a function async (2026-11-14)
 
-Resolves the implicit-await question without changing call sites: a function whose body contains `await` is async (the parser sets the async bit), so `T` becomes `task<T>` exactly as if `async` were written, and callers `await` it as usual. Functions without `await` keep their signature. Excluded: `sync` functions (`await` stays E3061) and `main` (entry point signature is fixed; write `async i32 main()` explicitly). Inference is a parser-level rule, so an inferred function keeps its body in the `.djlib` interface. A function that calls async code without awaiting is deliberately not inferred: it holds the task itself (storing it, passing it on, or `.sync`), so changing its signature would be wrong. The public contract warning (E6006) covers that case.
+Resolves the implicit-await question without changing call sites: a function whose body contains `await` is async (the parser sets the async bit), so `T` becomes `task<T>` exactly as if `async` were written, and callers `await` it as usual. Functions without `await` keep their signature. Excluded: `sync` functions (`await` stays E3061) and `main` (entry point signature is fixed; write `async i32 main()` explicitly). Inference is a parser-level rule, so an inferred function keeps its body in the `.djlib` interface. A function that calls async code without awaiting is deliberately not inferred: it holds the task itself (storing it, passing it on, or `.sync`), so changing its signature would be wrong. The public contract error (E3063) covers that case.
 
 ## Not implemented
 
 - Executing coroutines on the worker pool (real multi-threading, #125), the `.sync` scheduler-thread trap and `io_threads`: all depend on it (see "Worker pool").
-- A hard error instead of the E6006 warning for public functions without `async`/`sync`: kept a warning so existing library code keeps building.
