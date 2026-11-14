@@ -5,7 +5,7 @@ namespace std::collections;
 
 // A fixed set of up to 1024 flags indexed by T (an enum or an integer). It owns no heap memory, so it can live in a
 // constexpr or consteval evaluation and in a constant. Flag values are the indexes 0..1023.
-constexpr struct bitfield<T> {
+constexpr struct bitfield<T> : Hashable {
     u64 w0;
     u64 w1;
     u64 w2;
@@ -149,5 +149,177 @@ constexpr struct bitfield<T> {
         this.w13 = 0;
         this.w14 = 0;
         this.w15 = 0;
+    }
+
+    // Set the flags 0..1023 / drop all flags / complement every flag.
+    public void set_all() {
+        for (mut size i = 0u; i < 16u; i = i + 1u) {
+            this.put(i, ~(u64)0);
+        }
+    }
+
+    public void invert() {
+        for (mut size i = 0u; i < 16u; i = i + 1u) {
+            this.put(i, ~this.word(i));
+        }
+    }
+
+    // In-place set algebra with another bitfield.
+    public void union_with(bitfield<T> other) {
+        for (mut size i = 0u; i < 16u; i = i + 1u) {
+            this.put(i, this.word(i) | other.word(i));
+        }
+    }
+
+    public void intersect_with(bitfield<T> other) {
+        for (mut size i = 0u; i < 16u; i = i + 1u) {
+            this.put(i, this.word(i) & other.word(i));
+        }
+    }
+
+    public void subtract(bitfield<T> other) {
+        for (mut size i = 0u; i < 16u; i = i + 1u) {
+            this.put(i, this.word(i) & ~other.word(i));
+        }
+    }
+
+    public void xor_with(bitfield<T> other) {
+        for (mut size i = 0u; i < 16u; i = i + 1u) {
+            this.put(i, this.word(i) ^ other.word(i));
+        }
+    }
+
+    public void assign(bitfield<T> other) {
+        for (mut size i = 0u; i < 16u; i = i + 1u) {
+            this.put(i, other.word(i));
+        }
+    }
+
+    public bitfield<T> copy() {
+        mut bitfield<T> result = bitfield<T>();
+        result.assign(*this);
+        return result;
+    }
+
+    // Queries against another bitfield.
+    public bool intersects(bitfield<T> other) {
+        for (mut size i = 0u; i < 16u; i = i + 1u) {
+            if ((this.word(i) & other.word(i)) != 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    public bool is_subset_of(bitfield<T> other) {
+        for (mut size i = 0u; i < 16u; i = i + 1u) {
+            if ((this.word(i) & ~other.word(i)) != 0) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    public bool contains_all(bitfield<T> other) {
+        return other.is_subset_of(*this);
+    }
+
+    public bool equals(bitfield<T> other) {
+        for (mut size i = 0u; i < 16u; i = i + 1u) {
+            if (this.word(i) != other.word(i)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // Total order: the bitfield read as a 1024-bit unsigned number (flag 1023 is the most significant bit).
+    public i32 compare(bitfield<T> other) {
+        for (mut i32 i = 15; i >= 0; i = i - 1) {
+            u64 mine = this.word((size)i);
+            u64 theirs = other.word((size)i);
+            if (mine != theirs) {
+                if (mine < theirs) {
+                    return -1;
+                }
+                return 1;
+            }
+        }
+        return 0;
+    }
+
+    public u64 hash() {
+        mut u64w result = 17w;
+        for (mut size i = 0u; i < 16u; i = i + 1u) {
+            u64 item = this.word(i);
+            result = 31w * result + (u64w)(item ^ (item >> 32));
+        }
+        return (u64)result;
+    }
+
+    // Lowest set flag index at or after `from`, or -1 when there is none. Iterate with
+    // `for (i32 i = f.next_set(0); i >= 0; i = f.next_set(i + 1))`.
+    public i32 next_set(i32 from) {
+        mut i32 index = from;
+        if (index < 0) {
+            index = 0;
+        }
+        while (index < 1024) {
+            if (this.word((size)index / 64u) >> (u64)((size)index % 64u) == 0) {
+                index = (index / 64 + 1) * 64;
+            } else {
+                if (((this.word((size)index / 64u) >> (u64)((size)index % 64u)) & 1) != 0) {
+                    return index;
+                }
+                index = index + 1;
+            }
+        }
+        return -1;
+    }
+
+    public i32 first_set() {
+        return this.next_set(0);
+    }
+
+    operator==(bitfield<T> left, bitfield<T> right) -> bool {
+        return left.equals(right);
+    }
+
+    operator!=(bitfield<T> left, bitfield<T> right) -> bool {
+        return !left.equals(right);
+    }
+
+    operator<(bitfield<T> left, bitfield<T> right) -> bool {
+        return left.compare(right) < 0;
+    }
+
+    operator>(bitfield<T> left, bitfield<T> right) -> bool {
+        return left.compare(right) > 0;
+    }
+
+    operator<=(bitfield<T> left, bitfield<T> right) -> bool {
+        return left.compare(right) <= 0;
+    }
+
+    operator>=(bitfield<T> left, bitfield<T> right) -> bool {
+        return left.compare(right) >= 0;
+    }
+
+    operator|(bitfield<T> left, bitfield<T> right) -> bitfield<T> {
+        mut bitfield<T> result = left.copy();
+        result.union_with(right);
+        return result;
+    }
+
+    operator&(bitfield<T> left, bitfield<T> right) -> bitfield<T> {
+        mut bitfield<T> result = left.copy();
+        result.intersect_with(right);
+        return result;
+    }
+
+    operator^(bitfield<T> left, bitfield<T> right) -> bitfield<T> {
+        mut bitfield<T> result = left.copy();
+        result.xor_with(right);
+        return result;
     }
 }

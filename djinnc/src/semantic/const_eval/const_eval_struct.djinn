@@ -254,6 +254,82 @@ impl ConstEval {
         return ok;
     }
 
+    // A user-defined operator (`operator|(bitfield<T> left, bitfield<T> right)`, `operator==`, ...) on struct operands.
+    // `negated` is the `!=` that the checker resolves to the negation of `operator==`.
+    unsafe bool eval_operator(Node* node, bool negated) {
+        FunctionInfo* info = (FunctionInfo*)node.symbol();
+        if (info == null || info.const_kind == 0 || info.is_instance || info.is_async || info.is_extern || info.is_variadic || info.is_template) {
+            return this.fail(node, "call to an operator that is not constexpr or consteval");
+        }
+        if (!this.prepare(node, info)) {
+            return false;
+        }
+        if (this.depth >= ConstEval.DEPTH_LIMIT) {
+            return this.fail(node, "compile-time recursion is too deep");
+        }
+        Node* declaration = info.node;
+        IdList* operand_types = info.param_types;
+        i32 count = operand_types.length;
+        i32 callee_return = this.shape_of(info.return_type);
+        if ((callee_return & ConstEval.SCALAR) == 0 || ConstEval.wide(callee_return)) {
+            return this.fail(node, "the return type cannot be evaluated at compile time");
+        }
+        if (!this.tick(node)) {
+            return false;
+        }
+        i32 frame_base = this.top;
+        i32 frame_top = frame_base + info.eval_slots;
+        if (frame_top > ConstEval.FRAME_CAPACITY) {
+            return this.fail(node, "compile-time stack overflow");
+        }
+        this.top = frame_top;
+        IdList* param_types = info.param_types;
+        for (mut i32 i = 0; i < count; i = i + 1) {
+            mut Node* argument = node.first();
+            if (i == 1) {
+                argument = node.second();
+            }
+            u32 param_type = param_types.get(i);
+            i32 param_shape = this.shape_of(param_type);
+            if ((param_shape & ConstEval.SCALAR) == 0 || ConstEval.wide(param_shape)) {
+                this.top = frame_base;
+                return this.fail(argument, "parameter type cannot be evaluated at compile time");
+            }
+            if (!this.eval(argument)) {
+                this.top = frame_base;
+                return false;
+            }
+            this.convert(this.shape_of(argument.value_type()), param_shape);
+            this.own_value(argument, param_type);
+            this.ints[frame_base + i] = this.ri;
+            this.floats[frame_base + i] = this.rf;
+        }
+        i32 saved_base = this.base;
+        bool saved_frame = this.in_frame;
+        i32 saved_return = this.return_shape;
+        this.base = frame_base;
+        this.in_frame = true;
+        this.return_shape = callee_return;
+        this.depth = this.depth + 1;
+        this.trace_names[this.depth] = info.name;
+        i32 status = this.exec(declaration.first());
+        this.depth = this.depth - 1;
+        this.base = saved_base;
+        this.in_frame = saved_frame;
+        this.return_shape = saved_return;
+        this.top = frame_base;
+        if (status == EvalStatus.FAILED) {
+            return false;
+        }
+        if (status != EvalStatus.RETURN) {
+            return this.fail(node, "operator ended without returning a value");
+        }
+        if (negated) {
+            this.ri = 1 - this.ri;
+        }
+        return true;
+    }
+
     unsafe bool run_method(Node* at, FunctionInfo* info, i64 receiver) {
         Node* declaration = info.node;
         i32 frame_base = this.top;
