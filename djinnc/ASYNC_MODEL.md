@@ -28,6 +28,13 @@ Decisions (confirmed 2026-11-14). Tracking issues: #121 to #125.
 
 `djinn_worker_thread` dequeues from `djinn_rt.pool.queue`, but nothing ever enqueues there. Every coroutine runs on the event-loop thread (`drain_ready_queue`), so the thread count configured above creates idle threads today. Making it effective needs real multi-threaded scheduling: a thread-safe coroutine table, `Send`-like rules for captures (#54, #102) and a decision on `spawn`. There is no busy re-enqueue in practice (the loop in the worker is unreachable).
 
+## Finding: inference by default is blocked on two language gaps (#121)
+
+1. `public` and `private` are parsed and then dropped (`parse_function` never stores them, GRAMMAR.md lists them as modifiers only). Every function is visible to every importer, so "public functions must declare `async` or `sync`" has no node to attach to. Visibility has to exist first (an op bit on `FunctionInfo`, a checker rule for access across namespaces, and the `.djlib` interface record).
+2. Inferring `async` for a private function changes its type from `T` to `task<T>`. With `await` explicit, every un-annotated caller would stop compiling, so inference needs either implicit await at call sites in inferred-async code or a coloring rule that keeps the signature `T` and lets the compiler hide the task. This is the open design decision.
+
+Until both are settled a function is async only when declared, and `AsyncElision` already removes the cost of declaring `async` on code that never suspends.
+
 ## Not implemented
 
 - Async inference by default with explicit `async`/`sync` on public functions (#121). Today a function is sync unless declared `async`, so this would turn every un-annotated public function into an error and change `T` to `task<T>` for inferred ones. It needs a migration of `std/` and a decision on implicit await first.
