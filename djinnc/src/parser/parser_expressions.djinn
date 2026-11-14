@@ -252,6 +252,16 @@ impl Parser {
             || after == TokenKind::PLUS || after == TokenKind::MINUS || after == TokenKind::SLASH;
     }
 
+    // 'task.sync': a blocking wait. 'x.sync(...)' and 'x.sync<T>(...)' stay ordinary member calls.
+    bool is_blocking_wait() {
+        i32 name = this.peek_token(1);
+        if (this.kind_of(name) != TokenKind::IDENTIFIER || !Strings.equals(this.text_of(name), this.length_of(name), "sync")) {
+            return false;
+        }
+        TokenKind follow = this.kind_of(this.peek_token(2));
+        return follow != TokenKind::LPAREN && follow != TokenKind::LESS;
+    }
+
     Node* parse_postfix(Node* start) {
         mut Node* expr = start;
         while (!this.failed) {
@@ -290,6 +300,13 @@ impl Parser {
                 inspection.set_op(query);
                 inspection.set_first(expr);
                 expr = inspection;
+            } else if (this.kind_of(token) == TokenKind::DOT && this.is_blocking_wait()) {
+                this.advance();
+                this.advance();
+                Node* blocking = Node.create(NodeKind::AWAIT_EXPR, token);
+                blocking.set_flag(true);
+                blocking.set_first(expr);
+                expr = blocking;
             } else if (this.kind_of(token) == TokenKind::DOT) {
                 this.advance();
                 Node* access = Node.create(NodeKind::FIELD_ACCESS, token);

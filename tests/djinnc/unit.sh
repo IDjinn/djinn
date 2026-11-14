@@ -18,6 +18,7 @@ bash "$root/tools/build_std.sh" "$compiler" "$out/libs/std.djlib" --runtime-dir 
 "$compiler" test libs/testing -o "$out/testing_tests$exe" "${flags[@]}"
 "$compiler" test djinnc -o "$out/djinnc_tests$exe" "${flags[@]}"
 bash tests/djinnc/async_elision.sh "$compiler" "$runtime_lib" "$runtime"
+bash tests/djinnc/sync_model.sh "$compiler" "$runtime_lib" "$runtime"
 bash tests/djinnc/graph.sh "$compiler" "$runtime_lib" "$runtime"
 bash tests/djinnc/ieee754.sh "$compiler" "$runtime_lib" "$runtime"
 bash tests/djinnc/jit_panic.sh "$compiler" "$runtime_lib" "$runtime"
