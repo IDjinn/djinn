@@ -8,7 +8,7 @@
 - `sync` function modifier: `await` is rejected inside it (E3061). Postfix `task.sync` is a blocking wait, with warning E6005 inside async functions.
 - A `sync main` in a program with no async function left after elision starts no runtime (no `__djinn_runtime_init`/shutdown).
 - `private` is now enforced (E3062): a private function or method is callable within its own namespace, or from methods of the same type; from another namespace it is an error. `public` stays the default.
-- Warning E6006: a `public` function that blocks on a task or holds an async call without awaiting must declare `async` or `sync`.
+- Error E3063: a `public` function that blocks on a task or holds an async call without awaiting must declare `async` or `sync`.
 - A `sync main` starts no runtime unless async work is reachable from it (spawn, `.sync`, a remaining coroutine); unreachable async functions no longer keep it.
 - The runtime no longer starts idle worker threads (nothing schedules onto the pool yet); the thread setting is still resolved, `0` means the logical core count and is the new default.
 - Runtime: `Task.delay` uses a timer and the event loop sleeps when nothing is runnable (no more busy yield loop).
