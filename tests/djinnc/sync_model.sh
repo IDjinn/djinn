@@ -212,8 +212,8 @@ SOURCE
 "$compiler" "$out/infer.djinn" --no-async-elision -o "$out/infer$exe" "${flags[@]}" > "$out/infer.log" 2>&1 || { cat "$out/infer.log"; fail "await must make an un-annotated function async"; }
 set +e; "$out/infer$exe"; code=$?; set -e
 [ "$code" = 42 ] || fail "inferred async program must exit 42, got $code"
-mkdir -p "$out/infer_lib"
-cat > "$out/infer_lib/lib.djinn" <<'SOURCE'
+mkdir -p "$out/infer_pkg"
+cat > "$out/infer_pkg/lib.djinn" <<'SOURCE'
 namespace inferlib;
 
 async i32 leaf(i32 x) {
@@ -224,7 +224,7 @@ i32 middle(i32 x) {
     return await leaf(x) + 1;
 }
 SOURCE
-cat > "$out/infer_lib/main.djinn" <<'SOURCE'
+cat > "$out/infer_pkg/main.djinn" <<'SOURCE'
 namespace app;
 
 import inferlib;
@@ -233,8 +233,8 @@ i32 main() {
     return await middle(40);
 }
 SOURCE
-"$compiler" "$out/infer_lib/lib.djinn" --library -o "$out/infer_lib/inferlib.djlib" "${flags[@]}" > "$out/infer_lib.log" 2>&1 || { cat "$out/infer_lib.log"; fail "library with an inferred async function must build"; }
-"$compiler" "$out/infer_lib/main.djinn" --lib "$out/infer_lib/inferlib.djlib" -o "$out/infer_lib$exe" "${flags[@]}" > "$out/infer_lib_use.log" 2>&1 || { cat "$out/infer_lib_use.log"; fail "consumer must see the inferred task signature"; }
+"$compiler" "$out/infer_pkg/lib.djinn" --library -o "$out/infer_pkg/inferlib.djlib" "${flags[@]}" > "$out/infer_lib.log" 2>&1 || { cat "$out/infer_lib.log"; fail "library with an inferred async function must build"; }
+"$compiler" "$out/infer_pkg/main.djinn" --lib "$out/infer_pkg/inferlib.djlib" -o "$out/infer_lib$exe" "${flags[@]}" > "$out/infer_lib_use.log" 2>&1 || { cat "$out/infer_lib_use.log"; fail "consumer must see the inferred task signature"; }
 set +e; "$out/infer_lib$exe"; code=$?; set -e
 [ "$code" = 42 ] || fail "inferred async library program must exit 42, got $code"
 
