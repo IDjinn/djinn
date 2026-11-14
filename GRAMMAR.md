@@ -1,155 +1,170 @@
 ## Grammar (EBNF)
 
+Reference for the syntax accepted by `djinnc`. Semantics and what the compiler supports in detail: `djinnc/SUBSET.md`.
+Keywords come from `djinnc/src/lexer/token_kind.djinn`; the parser is `djinnc/src/parser/`. Keep this file in sync when a
+syntax change lands.
+
+### Lexical
+
+```ebnf
+keyword              = "void" | "return" | "auto" | "extern" | "struct" | "namespace" | "import" | "mut" | "if" | "else"
+                     | "for" | "while" | "do" | "switch" | "case" | "default" | "break" | "continue" | "interface"
+                     | "public" | "private" | "static" | "this" | "enum" | "new" | "impl" | "where" | "async"
+                     | "await" | "yield" | "spawn" | "in" | "true" | "false" | "operator" | "const" | "constexpr"
+                     | "consteval" | "macro" | "is" | "null" | "throw" | "throws" | "try" | "require" | "ensure" | "unsafe" ;
+(* contextual, not reserved: "var" (same as "auto"), "union", "attribute", "get", "set", "typeof", "sizeof", ... *)
+
+punctuation          = "(" ")" "{" "}" "[" "]" ";" "," ":" "::" "." ".." "..=" "..." "#" "$" "@" "?" "?." "??" "??=" "!." "=>" "->" ;
+operators            = "+" "-" "*" "/" "%" "++" "--" "==" "!=" "<" "<=" ">" ">=" "!" "&&" "||" "&" "|" "^" "~" "<<" ">>"
+                     | "=" "+=" "-=" "*=" "/=" "%=" "&=" "|=" "^=" "<<=" ">>=" ;
+
+INTEGER_LITERAL      = DIGIT_SEQ [ EXPONENT ] [ overflow_suffix ] ;     (* 42, 420_000, 800'000'000, 1e9, 123w, 123t, 123c, 123s *)
+FLOAT_LITERAL        = DIGIT_SEQ "." DIGIT_SEQ [ EXPONENT ] ;           (* 3.14, 2.5e-3 *)
+STRING_LITERAL       = '"' { any_char | escape } '"' | '"""' { any_char } '"""' ;
+CHAR_LITERAL         = "'" ( any_char | escape | "\u" HEX4 | "\U" HEX8 ) "'" ;   (* one Unicode scalar value, type char *)
+INTERP_STRING        = { "$" } ( '"' | '"""' ) { text | brace_group } ( '"' | '"""' ) ;
+brace_group          = "{" expression [ ":" format ] "}" ;
+format               = [ "-" ] [ "0" ] [ width ] [ "." precision ] ;    (* {n:6} {n:-6} {n:06} {x:.2} {s:.3}; width <= 4096, precision <= 99 *)
+IDENTIFIER           = LETTER { LETTER | DIGIT | "_" } ;
+DIGIT_SEQ            = DIGIT { DIGIT | "_" | "'" } ;
+EXPONENT             = ( "e" | "E" ) [ "+" | "-" ] DIGITS ;
+```
+
+`$"{x}"` interpolates; with `n` dollar signs, `n` braces delimit an interpolation and fewer braces are literal
+(`$$"{x} is {{x}}"`); `{{` and `}}` are literal braces in the single-dollar form. A plain `"..."` never interpolates.
+
 ### Program Structure
 
 ```ebnf
-program              = { import | extern_block | namespace | enum | interface | struct | function | constexpr_decl | macro_decl | static_var } ;
+program              = { top_level } ;
+top_level            = import | extern_block | namespace | type_alias | enum | union | interface | struct | impl | function
+                     | constexpr_decl | macro_decl | static_var | inspect_decl | attribute_decl ;
 
 import               = "import" qualified_name ";" ;
 qualified_name       = IDENTIFIER { "::" IDENTIFIER } ;
+namespace            = "namespace" qualified_name ( ";" | "{" { top_level } "}" ) ;
+type_alias           = "struct" IDENTIFIER ":" type ";" ;               (* struct size : u32; *)
 ```
 
-### Static Variables
+`import` makes a namespace visible inside the namespace declared in the same file (namespaces are flat: `std::types`
+is one namespace). In a library, `import` goes after `namespace`.
+
+### Static Variables and Constants
 
 ```ebnf
 static_var           = [ "unsafe" ] "static" [ "mut" ] type IDENTIFIER "=" expression ";" ;
-
-(* Global variables require "static" keyword. Immutable by default; "mut" makes it mutable and requires the "unsafe" prefix.
-   Accessible via namespace system. Initialized with compile-time evaluable expressions.
-
-   Examples:
-   static i32 MAX_SIZE = 1024;
-   unsafe static mut i32 counter = 0;
-*)
+const_decl           = "const" type IDENTIFIER "=" expression ";" ;     (* also inside structs and functions; same as constexpr *)
 ```
+
+Immutable by default; `mut` requires the `unsafe` prefix. `mut const` is an error.
 
 ### Extern Block
 
 ```ebnf
 extern_block         = "extern" STRING_LITERAL "{" { extern_function } "}" ;
-extern_function      = type IDENTIFIER "(" [ param_list ] [ "," "..." ] ")" ";" ;
+extern_function      = [ attributes ] type IDENTIFIER "(" [ param_list ] [ "," "..." ] ")" ";" ;
 ```
 
-### Namespace
+### Attributes
 
 ```ebnf
-namespace            = "namespace" qualified_name ( ";" | "{" { struct | function | namespace } "}" ) ;
+attributes           = { "[" attribute { "," attribute } "]" } ;
+attribute            = IDENTIFIER [ "(" [ attr_arg { "," attr_arg } ] ")" ] ;
+attr_arg             = [ IDENTIFIER "=" ] ( INTEGER_LITERAL | FLOAT_LITERAL | STRING_LITERAL | "true" | "false" | qualified_name ) ;
+attribute_decl       = "attribute" IDENTIFIER "(" targets ")" ( ";" | "{" { field } "}" ) ;
 ```
 
-### Enum (Tagged Unions / ADT)
+Valid on functions, parameters, fields, structs, enums, unions, interfaces and, for loop hints (`[Unroll]`, `[Unroll(n)]`,
+`[NoUnroll]`, `[Vectorize]`, `[NoVectorize]`), the statement before a loop. `[Reflect]` drives reflection. An unknown
+attribute name is an error.
+
+### Enum and Union (tagged unions / ADT)
 
 ```ebnf
-enum                 = "enum" IDENTIFIER [ enum_header ] "{" enum_variant { "," enum_variant } "}"
-                     | "union" IDENTIFIER [ generic_params ] "{" union_variant { "," union_variant } "}" ;
-enum_header          = "(" integer_type IDENTIFIER { "," type IDENTIFIER } ")" ;
-enum_variant         = IDENTIFIER [ "(" expression { "," expression } ")" ] ;
+enum                 = "enum" IDENTIFIER [ enum_header ] "{" enum_variant { "," enum_variant } [ "," ] "}" ;
+enum_header          = "(" type IDENTIFIER { "," type IDENTIFIER } ")" ;
+enum_variant         = IDENTIFIER [ "=" expression | "(" expression { "," expression } ")" ] ;
+
+union                = "union" IDENTIFIER [ generic_params ] [ where_clause ] "{" union_variant { "," union_variant } "}" ;
 union_variant        = IDENTIFIER [ "(" [ type { "," type } ] ")" ] ;
 ```
+
+`enum` variants carry no payload (an optional header gives each variant constant fields); `union` variants carry payloads.
+Build a variant with `Type::Variant(args)`; the type arguments of a generic union can be inferred.
 
 ### Interface
 
 ```ebnf
-interface            = "interface" IDENTIFIER [ generic_params ] "{" { method_signature } "}" ;
+interface            = [ attributes ] "interface" IDENTIFIER [ generic_params ] "{" { interface_member } "}" ;
+interface_member     = field_decl | method_signature | operator_signature ;
 method_signature     = [ modifiers ] type IDENTIFIER [ generic_params ] "(" [ param_list ] ")" ";" ;
+operator_signature   = type "operator" operator_symbol "(" [ param_list ] ")" ";" ;
 ```
 
-### Struct
+### Struct and Impl
 
 ```ebnf
-struct               = [ attributes ] "struct" IDENTIFIER [ generic_params ] [ struct_base ] ( ";" | struct_body ) ;
-struct_base          = ":" ( type | interface_list ) ;
-interface_list       = IDENTIFIER { "," IDENTIFIER } ;
-struct_body          = "{" { field | property | method } "}" ;
+struct               = [ attributes ] "struct" IDENTIFIER [ generic_params ] [ where_clause ] [ struct_base ] ( ";" | struct_body ) ;
+struct_base          = ":" [ "interface" ] type { "," type } ;
+struct_body          = "{" { member } "}" ;
+member               = field_decl | property | method | constructor | operator_decl | const_decl ;
 
-field                = [ "mut" ] type IDENTIFIER ";" ;
-property             = type IDENTIFIER "{" { getter | setter } "}" ;
+field_decl           = [ attributes ] [ modifiers ] [ "mut" ] type IDENTIFIER [ "=" expression ] ";" ;
+property             = [ modifiers ] type IDENTIFIER ( "{" { getter | setter } "}" | "=>" expression ";" ) ;
 getter               = "get" ( ";" | "=>" expression ";" | block ) ;
 setter               = "set" ( ";" | "=>" expression ";" | block ) ;
-method               = [ modifiers ] type IDENTIFIER [ generic_params ] "(" [ param_list ] ")" ( ";" | "=>" expression ";" | block ) ;
+method               = [ attributes ] [ modifiers ] [ "async" ] type IDENTIFIER [ generic_params ] "(" [ param_list ] ")"
+                       [ where_clause ] [ throws_clause ] { contract_clause } ( ";" | "=>" expression ";" | block ) ;
+constructor          = IDENTIFIER "(" [ param_list ] ")" block ;
+operator_decl        = [ modifiers ] type "operator" operator_symbol "(" [ param_list ] ")" ( "=>" expression ";" | block ) ;
+operator_symbol      = "+" | "-" | "*" | "/" | "%" | "==" | "<" | "~" | "!" | "&&" | "||" | "get[]" | "set[]" ;
+modifiers            = { "public" | "private" | "static" | "unsafe" } ;
 
-modifiers            = { "public" | "private" | "static" } ;
-attributes           = { "[" IDENTIFIER [ "(" attr_args ")" ] "]" } ;   (* [Reflect] is valid on struct, enum, union and interface *)
-member_query         = type_name "#" ( "fields" | "methods" | "properties" | "attributes" | "constructors" | "interfaces" ) ;
-inspect_decl         = "$" "inspect" qualified_name "{" { "generate" "{" { member } "}" } "}" ;
-typeof_expr          = "typeof" "(" ( type | function_name | interface_name ) ")" ;   (* type -> TypeInfo*, function -> MethodInfo*, interface -> TypeInfo* *)
-attr_args            = attr_arg { "," attr_arg } ;
-attr_arg             = [ IDENTIFIER "=" ] ( INTEGER_LITERAL | FLOAT_LITERAL | STRING_LITERAL | "true" | "false" | qualified_name ) ;
+impl                 = "impl" ( type | IDENTIFIER [ generic_args ] "for" type ) "{" { member } "}" ;
 ```
+
+`impl T { ... }` adds methods to a struct, enum or primitive; `impl Iface for T { ... }` also declares conformance, checked
+at compile time. A big struct is typically split across files with `impl` blocks. Inside instance methods a bare field or
+property name means `this.name`. `operator` members are static.
 
 ### Function
 
 ```ebnf
-function             = [ "async" ] [ "constexpr" | "consteval" ] type IDENTIFIER "(" [ param_list ] ")" [ throws_clause ] { contract_clause } block ;
+function             = [ attributes ] [ "unsafe" ] [ "async" ] [ "constexpr" | "consteval" ] type IDENTIFIER [ generic_params ]
+                       "(" [ param_list ] ")" [ where_clause ] [ throws_clause ] { contract_clause } ( block | "=>" expression ";" ) ;
 param_list           = parameter { "," parameter } ;
-parameter            = type IDENTIFIER [ "mut" ] ;
-
-throws_clause        = "throws" | "throws" "(" type { "," type } ")" ;
-contract_clause      = ( "require" | "ensure" ) "(" expression ")"
-                     | ( "require" | "ensure" ) block ;
+parameter            = [ attributes ] type [ "..." ] IDENTIFIER [ "=" expression ] | "..." IDENTIFIER | "..." ;
 ```
+
+`T... name` (last) collects extra arguments into `arr<T>`; `...name` alone means `object... name` (std); a bare `...` in an
+extern is a C variadic. Calls accept named arguments after positional ones (`clamp(50, high: 10, low: 0)`). Functions,
+methods, constructors and operators can be overloaded by parameter types.
 
 ### Error handling (throw / throws / try)
 
 ```ebnf
+throws_clause        = "throws" [ "(" type { "," type } ")" ] ;
 throw_statement      = "throw" expression ";" ;
 try_expression       = "try" expression [ "?:" expression ] ;
 ```
 
-(* Error values are structs deriving a builtin error type (`Exception`,
-`Generic`, `DivisionByZero`, `Argument`, `Overflow`, `OutOfBounds`,
-`InvalidArgument`, `ContractViolation`, or user-defined `struct MyError : Base;`)
-with layout `{ tag: i32, message: str, type_name: str }`.
+(* Errors are values, not exceptions: a throwing function returns a `{ tag, payload }` record by value.
 
-- `throws(T...)` declares what a function may throw; bare `throws` = anything.
-- `throw ErrorType("message")` sets the error state and returns the default value.
-- `try expr ?: fallback` catches a failed operand and yields the fallback; a bare `try expr` propagates (allowed inside a
-  `throws` caller).
-- A `switch` over a throwing call matches its outcome (`Result`/`_` for
-  success, `Error`/error types for failures) — see Switch expressions.
-- Calling a throwing function without `try` is an error outside `throws`
-  functions; inside them the error propagates automatically.
-- An exception escaping `main() throws` is reported at runtime (`Type: message`,
-  pointing at the outermost unhandled call — the origin rises as the error
-  propagates; debug builds also print the stack trace captured at the throw
-  site) and aborts.
-
-Runtime error reporting detail is gated by build mode (`--debug`/`--release`,
-`build-mode:` in `djinn.proj`; default is debug):
-
-- Debug: full reports — source snippet with caret, operand values, variable
-  assignment history and a shadow-stack trace.
-- Release: minimal reports — message, `file:line` and operand values only; no
-  per-site source strings, frames or tracking, keeping binaries small.
-
-Error enforcement level (CompilerOptions::errorEnforcement):
-
-- `Off`: no error-flow checks.
-- `Runtime`: `try` enforcement + propagation only (no compile-time analysis).
-- `CompileTime` (default): additionally, calls whose outcome is provable are checked — a constexpr call that always
-  throws with constant arguments, or a
-  `require` clause violated by constant arguments, is a compile error when unhandled (diagnostics 9006/9007); inside
-  `try` the error is handled and nothing is reported.
-- `Strict`: like CompileTime, but every call to a throwing function must be wrapped in `try` (bare `try` to propagate),
-  even inside `throws` functions. *)
+- `throws(T...)` lists what a function may raise; bare `throws` converts every error to the core `Error`.
+- `throw value;` sets the error state and returns.
+- `try expr ?: fallback` yields the fallback on failure; a bare `try expr` propagates (inside a `throws` caller).
+- `switch call() { Result v -> ..., ErrorType e -> ..., Error e -> ... }` matches the outcome of a throwing call.
+- Runtime panics (bounds, null, overflow in `t` mode, ...) are `R<code>` errors from `runtime_errors.djinn`, reported with
+  a source snippet and shadow-stack in debug builds and with message and `file:line` in release builds. *)
 
 ### Contracts (require / ensure)
 
 ```ebnf
-contract_clause      = ( "require" | "ensure" ) "(" expression ")"
-                     | ( "require" | "ensure" ) block ;
+contract_clause      = ( "require" | "ensure" ) ( "(" expression ")" | block ) ;
 ```
 
-(* Contracts are clauses between a function's signature and its body:
-
-- `require(cond)` — checked at function entry; throws `ContractViolation` on failure. Block form
-  `require { return cond; }` is also allowed.
-- `ensure(return == expr)` — checked before each return; the return value is exposed through the `return`
-  pseudo-variable.
-- A function with contracts is implicitly throwing: call sites must use `try`.
-- With the default enforcement level, `require` clauses decided by constant arguments are verified at compile time (see
-  error enforcement above).
-
-Example:
+`require` runs at function entry, `ensure` before each return (the value is the `return` pseudo-variable). A function with
+contracts is implicitly throwing; `require` clauses decided by constant arguments are checked at compile time.
 
 ```djinn
 i32 clamp(i32 value, i32 lo, i32 hi)
@@ -161,77 +176,51 @@ i32 clamp(i32 value, i32 lo, i32 hi)
 i32 ok = try clamp(5, 1, 10) ?: 0;
 ```
 
-*)
-
 ### Constexpr / Consteval
 
 ```ebnf
-constexpr_decl       = ( "constexpr" | "consteval" ) ( constexpr_var | constexpr_func ) ;
-constexpr_var        = type IDENTIFIER "=" expression ";" ;
-constexpr_func       = type IDENTIFIER "(" [ param_list ] ")" block ;
-
-(* constexpr: evaluated at compile time if possible, falls back to runtime
-   consteval: MUST be evaluated at compile time, error if not possible
-   Uses a stack-based bytecode VM (evaluator/) for compile-time execution
-
-   Examples:
-   constexpr i32 MAX_SIZE = 1024;
-   consteval i32 BUFFER = 64 * 1024;
-   constexpr i32 square(i32 x) { return x * x; }
-   consteval i32 factorial(i32 n) { if (n <= 1) { return 1; } return n * factorial(n - 1); }
-*)
+constexpr_decl       = ( "constexpr" | "consteval" ) ( type IDENTIFIER "=" expression ";" | function_rest ) ;
 ```
+
+`constexpr`: evaluated at compile time when possible, runtime otherwise. `consteval`: must be evaluated at compile time.
+The evaluator is a tree-walking interpreter over the type-checked AST (`semantic/const_eval/`); results are written back into
+the AST as literals. A compile-time `if` keeps only the taken branch.
 
 ### Macros
 
 ```ebnf
 macro_decl           = "macro" IDENTIFIER "{" { macro_rule } "}" ;
-macro_rule           = [ "local" ] "(" macro_params ")" "=>" "{" token_stream "}" ;
-macro_params         = macro_param { "," macro_param } ;
+macro_rule           = [ "local" ] "(" [ macro_param { "," macro_param } ] ")" "=>" ( "{" token_stream "}" | "void" ) ;
 macro_param          = [ "local" ] ( fragment_type IDENTIFIER | IDENTIFIER ) ;
 fragment_type        = "expression" | "identifier" | "literal" | "type" | "block" ;
-
-(* Macros are expanded at parse time via token substitution + re-parse.
-   Fragment types: expression (any expr), identifier (single ident), literal (int/float/string),
-   type (any type), block ({ ... }).
-   Bare identifiers in params are literal token matchers (pattern matching).
-
-   The "local" modifier creates a temp variable (__macro_<name>_<param>) to avoid
-   double evaluation / side effects. "local" before "(" applies to all expression params.
-   Without "local", arguments are substituted directly (wrapped in parens for precedence).
-
-   Multiple rules per macro: matched by arity + literal tokens (first match wins).
-   Ambiguous rules (same signature) are rejected at parse time.
-   Warning W6001 is emitted when a non-local expression param is used multiple times.
-
-   Examples:
-   macro square {
-       (local expression v) => { v * v }
-   }
-   macro add {
-       (expression a, expression b) => { a + b }
-   }
-   macro maybe_double {
-       (local expression v, expression m) => { v * m }
-       (local expression v) => { v * 2 }
-   }
-   macro calc {
-       (double, local expression v) => { v + v }  // "double" is literal token
-       (square, local expression v) => { v * v }
-       (expression v) => { v }
-   }
-   macro apply {
-       local (expression a, expression b) => { a + b }  // local on all params
-   }
-
-   i32 x = square(foo());       // evaluates foo() once via temp var
-   i32 y = add(1 + 2, 3);       // expands to (1 + 2) + (3)
-   i32 a = maybe_double(5, 3);  // matches rule 1 → 5 * 3
-   i32 b = maybe_double(5);     // matches rule 2 → 5 * 2
-   i32 c = calc(double, 5);     // matches literal "double" → 5 + 5
-   i32 d = calc(7);             // matches expression-only rule → 7
-*)
 ```
+
+(* Expanded at parse time by token substitution and re-parse; hygienic. Bare identifiers in a rule are literal token
+matchers. `local` evaluates the argument once through a temporary (`local` before `(` applies to all expression
+parameters). Several rules per macro: first match by arity and literal tokens wins; ambiguous rules are rejected;
+warning W6001 when a non-local expression parameter is used more than once. `=> void` expands to `0`.
+
+```djinn
+macro square { (local expression v) => { v * v } }
+macro calc {
+    (double, local expression v) => { v + v }
+    (expression v) => { v }
+}
+i32 x = square(foo());   // foo() evaluated once
+i32 c = calc(double, 5);
+```
+*)
+
+### Reflection and member queries
+
+```ebnf
+typeof_expr          = "typeof" "(" ( type | function_name | interface_name | expression ) ")" ;
+member_query         = type_name "#" ( "fields" | "methods" | "properties" | "attributes" | "constructors" | "interfaces" ) ;
+inspect_decl         = "$" "inspect" qualified_name "{" { "generate" "{" { member } "}" } "}" ;
+```
+
+`typeof(type)` gives `TypeInfo*`, `typeof(function)` gives `MethodInfo*`, `typeof(Interface)` a `TypeInfo*` that is also a
+`TypeInfoExt`. `Type#fields` and friends are compile-time lists; `$inspect` appends generated members to its target.
 
 ### Generics
 
@@ -239,162 +228,124 @@ fragment_type        = "expression" | "identifier" | "literal" | "type" | "block
 generic_params       = "<" generic_param { "," generic_param } ">" ;
 generic_param        = IDENTIFIER [ "=" type ] ;
 generic_args         = "<" type { "," type } ">" ;
+where_clause         = "where" constraint { ";" "where" constraint } ;
+constraint           = IDENTIFIER ":" type { "," type } ;
 ```
+
+Generic structs, unions, interfaces, functions and methods are monomorphized on demand; type arguments are inferred from
+the arguments or the expected type when omitted. `impl Box<T> { ... }` names its own parameters.
 
 ### Types
 
 ```ebnf
-type                 = base_type { "*" } [ "[" "]" ] ;
-base_type            = primitive_type | IDENTIFIER [ generic_args ] | "void" | "string" | "auto" ;
+type                 = [ "mut" ] base_type { "*" | "?" | "[" [ expression ] "]" } ;
+base_type            = primitive_type | qualified_name [ generic_args ] | "void" | "auto" | "var" | "ptr" [ "<" type ">" ] ;
 
-primitive_type       = integer_type | float_type | native_type ;
-integer_type         = ( "i" | "u" ) DIGITS { integer_suffix } ;  (* i8..i64, u8..u64, i32w, u32n, i32nt, ... *)
-float_type           = "f" DIGITS ;                                (* f16, f32, f64, f128 *)
+primitive_type       = integer_type | float_type | native_type | "bool" | "char" | "str" | "string" | "isize" | "usize" ;
+integer_type         = ( "i" | "u" ) DIGITS { integer_suffix } ;    (* i8..i128, u8..u128, i32w, u32n, i32nt, ... *)
+float_type           = "f" DIGITS ;                                  (* f32, f64 *)
 native_type          = "nint" [ overflow_suffix ] | "nfloat" | "ndouble" ;
-integer_suffix       = non_zero_suffix | overflow_suffix ;
-non_zero_suffix      = "n" ;   (* type cannot hold the value 0 (i32n: 1..MAX and MIN..-1,
-                                   u32n: 1..MAX); combinable with overflow suffix in
-                                   either order (i32nw / i32wn) *)
+integer_suffix       = "n" | overflow_suffix ;
 overflow_suffix      = "w" | "t" | "c" | "s" ;
-                     (* w = wrapped (default, C-style), t = trapped (panic on overflow),
-                        c = checked (throws Overflow, requires 'throws' function),
-                        s = saturating (clamps to MIN/MAX) *)
 ```
+
+- `T*` is a safe pointer, `ptr` / `ptr<T>` are raw pointers (dereference, indexing, arithmetic and int-to-pointer casts need
+  `unsafe`), `T?` is `optional<T>` (`T*?` uses the pointer niche), `T[]` is `arr<T>`, `i8[n]` is a stack array.
+- Overflow suffix: `w` wrapped (default, C-style), `t` trapped (panic), `c` checked (throws `Overflow`), `s` saturating.
+  `n` marks a non-zero type (`i32n` cannot hold 0), combinable in either order (`i32nw`).
+- `isize` / `usize` are always 32 bits; `nint` has the target pointer width. `char` is a 32-bit Unicode scalar value.
+  `str` is a trivial view `{ data, length }`, `string` an owned heap text.
 
 ### Statements
 
 ```ebnf
 block                = "{" { statement } "}" ;
-
-statement            = return_stmt
-                     | if_stmt
-                     | for_stmt
-                     | while_stmt
-                     | do_while_stmt
-                     | switch_stmt
-                     | break_stmt
-                     | continue_stmt
-                     | expression_stmt ;
+statement            = [ attributes ] ( return_stmt | if_stmt | for_stmt | while_stmt | do_while_stmt | switch_stmt | break_stmt
+                     | continue_stmt | throw_statement | yield_stmt | spawn_stmt | unsafe_block | block | local_decl | destructure
+                     | expression_stmt ) ;
 
 return_stmt          = "return" [ expression ] ";" ;
 break_stmt           = "break" ";" ;
 continue_stmt        = "continue" ";" ;
+yield_stmt           = "yield" [ expression ] ";" ;                   (* bare yield suspends a coroutine; in a switch-arm block it yields the arm value *)
+spawn_stmt           = "spawn" expression ";" ;
+unsafe_block         = "unsafe" block ;
+local_decl           = [ "mut" ] [ "const" ] type IDENTIFIER [ "=" expression ] ";" ;
+destructure          = "auto" "{" IDENTIFIER { "," IDENTIFIER } "}" "=" expression ";" ;
 
 if_stmt              = "if" "(" expression ")" block [ "else" ( if_stmt | block ) ] ;
-for_stmt             = "for" "(" ( for_classic | for_range ) ")" block ;
-for_classic          = [ expression ] ";" [ expression ] ";" [ expression ] ;
+for_stmt             = "for" "(" ( for_classic | for_each | for_range ) ")" block ;
+for_classic          = [ statement_expr ] ";" [ expression ] ";" [ expression ] ;
+for_each             = type IDENTIFIER "in" expression ;                (* over an arr<T> / slice / collection *)
 for_range            = [ type IDENTIFIER "in" ] range_expr ;
-range_expr           = [ "[" ] expression ( ".." | "..=" ) expression [ "]" | ")" ] ;
+range_expr           = ( "[" | "(" ) expression ".." expression ( "]" | ")" ) | expression ( ".." | "..=" ) expression ;
 while_stmt           = "while" "(" expression ")" block ;
 do_while_stmt        = "do" block "while" "(" expression ")" ";" ;
 
 switch_stmt          = "switch" "(" expression ")" "{" { switch_case } "}" ;
 switch_case          = ( "case" expression | "default" ) ":" { statement } ;
-
 expression_stmt      = expression ";" ;
 ```
 
+Range bounds: the start is inclusive unless the bracket is `(`; the end is inclusive with `..=` or `]`, exclusive with `..`
+or `)`. `for (0..5) { }` repeats without a variable. The `switch` statement has no fallthrough; `break` leaves it.
+
 ### Expressions
+
+Lowest to highest precedence:
 
 ```ebnf
 expression           = assignment ;
-
-assignment           = or_expr [ "=" assignment ] ;
+assignment           = coalesce [ assign_op assignment ] ;
+assign_op            = "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=" | "??=" ;
+coalesce             = or_expr [ "??" coalesce ] ;
 or_expr              = and_expr { "||" and_expr } ;
-and_expr             = equality { "&&" equality } ;
-equality             = comparison { ( "==" | "!=" ) comparison } [ "is" type [ IDENTIFIER ] ] ;
-comparison           = term { ( "<" | "<=" | ">" | ">=" ) term } ;
+and_expr             = bit_or { "&&" bit_or } ;
+bit_or               = bit_xor { "|" bit_xor } ;
+bit_xor              = bit_and { "^" bit_and } ;
+bit_and              = equality { "&" equality } ;
+equality             = comparison { ( "==" | "!=" ) comparison } [ "is" is_target ] ;
+is_target            = type [ IDENTIFIER ] | qualified_name "::" IDENTIFIER { IDENTIFIER } ;
+comparison           = shift { ( "<" | "<=" | ">" | ">=" ) shift } ;
+shift                = term { ( "<<" | ">>" ) term } ;
 term                 = factor { ( "+" | "-" ) factor } ;
 factor               = unary { ( "*" | "/" | "%" ) unary } ;
-unary                = ( "!" | "-" | "*" | "&" ) unary | await_expr | postfix ;
+unary                = ( "!" | "-" | "~" | "*" | "&" | "++" | "--" ) unary | cast | await_expr | try_expression | postfix ;
+cast                 = "(" type ")" unary ;
 await_expr           = "await" unary ;
-postfix              = primary { "." IDENTIFIER | "[" expression "]" | "(" [ arg_list ] ")" | "++" | "--" } ;
+postfix              = primary { "." IDENTIFIER [ generic_args ] | "?." IDENTIFIER | "!." IDENTIFIER | "[" expression "]"
+                     | "(" [ arg_list ] ")" | "++" | "--" } ;
 
-primary              = INTEGER_LITERAL
-                     | FLOAT_LITERAL
-                     | STRING_LITERAL
-                     | IDENTIFIER
-                     | "(" expression ")"
-                     | brace_initializer
-                     | type_expression
-                     | switch_expression
-                     | variable_decl ;
+primary              = INTEGER_LITERAL | FLOAT_LITERAL | STRING_LITERAL | INTERP_STRING | CHAR_LITERAL | "true" | "false" | "null"
+                     | IDENTIFIER | "this" | "(" expression ")" | array_literal | brace_initializer | new_expression
+                     | type_expression | switch_expression | intrinsic_call | local_decl_expr ;
 
-variable_decl        = type IDENTIFIER [ "=" expression ] ;
-brace_initializer    = "{" [ init_element { "," init_element } ] "}" ;
+array_literal        = "[" [ expression { "," expression } ] "]" ;
+brace_initializer    = [ type ] "{" [ init_element { "," init_element } ] "}" ;
 init_element         = [ "." IDENTIFIER "=" ] expression ;
-
-type_expression      = IDENTIFIER [ generic_args ] "::" IDENTIFIER "(" [ arg_list ] ")" ;
-
-switch_expression     = "switch" expression "{" { switch_arm [ "," ] } "}" ;
-switch_arm            = IDENTIFIER [ IDENTIFIER ] "->" arm_body ;
-arm_body              = expression | block ;
-
-arg_list             = expression { "," expression } ;
+new_expression       = "new" type [ "(" [ arg_list ] ")" | brace_initializer ] ;
+type_expression      = IDENTIFIER [ generic_args ] "::" IDENTIFIER [ "(" [ arg_list ] ")" ] ;
+intrinsic_call       = ( "sizeof" | "alignof" | "typeof" | "likely" | "unlikely" | "expect" | "prefetch" | "bounds_check" ) "(" arg_list ")" ;
+arg_list             = argument { "," argument } ;
+argument             = [ IDENTIFIER ":" ] expression ;
 ```
 
-(* Switch expressions pattern-match on two kinds of operands:
+- `p?.m` yields a nullable pointer (null when `p` is null); `p!.m` unwraps (error on a value that is not nullable); `a ?? b`
+  falls back when `a` is null; `a ??= b` assigns when null.
+- `&function` is the address of a plain, non-generic function as `ptr`.
+- `expr is T` / `expr is T name` tests a boxed `object` and optionally binds the unboxed value; `expr is Enum::Variant a b`
+  tests a union value and binds the payload.
+- `await task` suspends in async functions and runs the event loop in sync ones; `spawn task;` schedules a task.
 
-**Enum values** — arms name variants; an optional binding extracts the payload:
-
-```
-i32 result = switch opt {
-    Value val -> val,
-    Empty -> -1
-};
-```
-
-`_` is a catch-all arm matching any variant (no binding). All arms must yield
-the same type.
-
-**Throwing calls** — the arms match the call's outcome, `try`-style:
-
-```
-i32 val = switch division(1, 0) {
-    _ v -> v,
-    DivisionByZeroException divByZero -> -1
-};
-```
-
-- `Result [v]` or `_ [v]` match success; the binding receives the call's
-  return value (first success arm wins).
-- `Error [e]` matches any error; the binding receives the thrown error value
-  (`{ tag, message, type_name }`).
-- An error type name (`DivisionByZeroException e`) matches that type and every
-  type deriving from it.
-- Error arms are tried in source order; if none matches, the error propagates
-  inside a `throws` function or aborts with the uncaught-exception report.
-- For enum-returning throwing calls, variant names win over the outcome arms,
-  so `switch makeResult() { Ok v -> v, Error e -> ... }` still matches variants.
-
-Any arm body may instead be a block of statements (`Error e -> { ... }`). Inside
-an arm block, `yield expr;` produces the arm's value and execution continues
-after the switch, and `throw` exits the enclosing function; every path through
-the block must end in one of them. `return` is not allowed inside an arm block —
-it would bypass the switch value and confuse the flow, so use `yield` (arm
-value) or `throw` (propagate) instead. (A bare `yield;` is the coroutine
-suspend and is unrelated to switch arms.) *)
-
-### Literals
+#### Switch expression
 
 ```ebnf
-INTEGER_LITERAL      = DIGIT_SEQ [ EXPONENT ] ;
-FLOAT_LITERAL        = DIGIT_SEQ "." DIGIT_SEQ [ EXPONENT ] ;
-STRING_LITERAL       = '"' { any_char } '"' ;
-IDENTIFIER           = LETTER { LETTER | DIGIT | "_" } ;
-
-DIGIT_SEQ            = DIGIT { DIGIT | "_" | "'" } ;  (* separators: 420_000, 800'000'000 *)
-EXPONENT             = ( "e" | "E" ) [ "+" | "-" ] DIGITS ;  (* scientific: 1e9, 2.5e-3 *)
-DIGITS               = DIGIT { DIGIT } ;
-DIGIT                = "0" | "1" | ... | "9" ;
-LETTER               = "a" | ... | "z" | "A" | ... | "Z" | "_" ;
-
-(* Number literal examples:
-   42              — plain integer
-   420_000         — underscore separator
-   800'000'000     — tick separator (C++ style)
-   1e9             — scientific notation (1000000000)
-   2.5e-3          — float scientific (0.0025)
-   3.14            — plain float
-*)
+switch_expression    = "switch" expression "{" { switch_arm [ "," ] } "}" ;
+switch_arm           = ( IDENTIFIER | "_" ) [ IDENTIFIER { IDENTIFIER } ] "->" arm_body ;
+arm_body             = expression | block ;
 ```
+
+(* Matches union variants (an optional binding per payload field; `_` catches the rest; every variant must be covered
+or `_` present; all arms yield the same type) and the outcome of throwing calls (`Result v` / `_ v` for success, `Error e`
+or an error type name for failures, tried in source order, otherwise the error propagates). An arm block produces its value
+with `yield expr;`; `return` is not allowed in an arm block. *)
