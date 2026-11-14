@@ -2,7 +2,14 @@
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-14
+
 ### Compiler
+
+- Compile-time evaluation (`constexpr`/`consteval`) has a compile-time heap (`__djinn_alloc`, `realloc`, `free`, `memcpy`, `memset` marked by `[ConstAlloc]`, `[ConstRealloc]`, `[ConstFree]`, `[ConstMemCopy]`, `[ConstMemSet]`), pointers with bounds checks, structs with fields, constexpr constructors, methods, `disposable()` at scope exit and user-defined struct operators.
+- `constexpr struct Name { }` makes every method, constructor and operator of the struct constexpr; the std collections use it, so `array<T>` and `map<K,V>` evaluate at compile time and match run time (issue #111).
+- Evaluation limits with their own E3051 reasons (4 MiB heap, 4096 blocks, 16 MiB of struct cells, 1,000,000 steps, 2 s) and a call trace on failures. 128-bit integers are rejected explicitly.
+- Struct constants keep constexpr constructor and operator bodies in `.djlib` interfaces.
 
 - Runtime configuration: `--async-threads=N`, `[Runtime(threads = N)]` on `main` and `async-threads: N` in `djinn.proj` (in that order of precedence, default 0 = logical cores; the pool workers themselves start only when coroutines are scheduled onto them, see ASYNC_MODEL.md); at run time `DJINN_THREADS` and `threads=N` in `runtime.properties` override the compiled value.
 - `sync` function modifier: `await` is rejected inside it (E3061). Postfix `task.sync` is a blocking wait, with warning E6005 inside async functions.
@@ -13,6 +20,10 @@
 - The runtime no longer starts idle worker threads (nothing schedules onto the pool yet); the thread setting is still resolved, `0` means the logical core count and is the new default.
 - Runtime: `Task.delay` uses a timer and the event loop sleeps when nothing is runnable (no more busy yield loop).
 - A function that uses `await` is async without writing `async` (not `sync` ones, where it stays E3061, and not `main`, which keeps its signature). Its callers now get a `task<T>` and must `await` it; the body stays in the `.djlib` interface so consumers see the task signature.
+
+### Standard library
+
+- New `bitfield<T>`: up to 1024 flags, no heap, constexpr compatible, with comparison operators, `hash`, set algebra and `next_set` iteration.
 
 ## [0.4.0] - 2026-11-13
 
