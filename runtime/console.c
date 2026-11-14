@@ -1,28 +1,6 @@
 #include "runtime_internal.h"
 
 
-int64_t __djinn_console_write(const char* str, void* coro)
-{
-    if (!str) return 0;
-    const int64_t len = (int64_t)strlen(str);
-    if (len <= 0) return 0;
-    return __djinn_async_write(1, (void*)str, len, coro);
-}
-
-int64_t __djinn_console_error(const char* str, void* coro)
-{
-    if (!str) return 0;
-    const int64_t len = (int64_t)strlen(str);
-    if (len <= 0) return 0;
-    return __djinn_async_write(2, (void*)str, len, coro);
-}
-
-int64_t __djinn_console_read_line(char* buf, int64_t max, void* coro)
-{
-    if (!buf || max <= 0) return 0;
-    return __djinn_async_read(0, buf, max, coro);
-}
-
 int32_t __djinn_terminal_width(void)
 {
 #ifdef _WIN32

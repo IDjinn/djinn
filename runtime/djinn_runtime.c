@@ -1,66 +1,6 @@
 #include "runtime_internal.h"
-#if !defined(__SIZEOF_INT128__) && defined(_MSC_VER)
-#include <intrin.h>
-#endif
 
 Logger* logger;
-
-static inline uint64_t djinn_read64(const char* p)
-{
-    uint64_t value;
-    memcpy(&value, p, 8);
-    return value;
-}
-
-static inline uint64_t djinn_read32(const char* p)
-{
-    uint32_t value;
-    memcpy(&value, p, 4);
-    return value;
-}
-
-static inline uint64_t djinn_mix(uint64_t a, uint64_t b)
-{
-#if defined(__SIZEOF_INT128__)
-    __uint128_t product = (__uint128_t)a * b;
-    return (uint64_t)product ^ (uint64_t)(product >> 64);
-#else
-    uint64_t high;
-    uint64_t low = _umul128(a, b, &high);
-    return low ^ high;
-#endif
-}
-
-uint64_t __djinn_hash_string(const char* data, uint32_t length)
-{
-    const uint64_t k0 = 0xa0761d6478bd642full;
-    const uint64_t k1 = 0xe7037ed1a0b428dbull;
-    uint64_t seed = 0x9e3779b97f4a7c15ull ^ length;
-    uint32_t remaining = length;
-    while (remaining > 16)
-    {
-        seed = djinn_mix(djinn_read64(data) ^ k0, djinn_read64(data + 8) ^ seed);
-        data += 16;
-        remaining -= 16;
-    }
-    uint64_t a = 0;
-    uint64_t b = 0;
-    if (remaining >= 8)
-    {
-        a = djinn_read64(data);
-        b = djinn_read64(data + remaining - 8);
-    }
-    else if (remaining >= 4)
-    {
-        a = djinn_read32(data);
-        b = djinn_read32(data + remaining - 4);
-    }
-    else if (remaining > 0)
-    {
-        a = ((uint64_t)(uint8_t)data[0] << 16) | ((uint64_t)(uint8_t)data[remaining >> 1] << 8) | (uint8_t)data[remaining - 1];
-    }
-    return djinn_mix(a ^ k1, b ^ seed);
-}
 
 int64_t __djinn_unix_timestamp_ms(void)
 {
@@ -69,79 +9,11 @@ int64_t __djinn_unix_timestamp_ms(void)
     return (int64_t)ts.tv_sec * 1000LL + ts.tv_nsec / 1000000LL;
 }
 
-uint32_t __djinn_compare_strings(
-    char* leftData,
-    char* rightData,
-    size_t leftLen,
-    size_t rightLen
-)
-{
-    if (leftLen != rightLen)
-        return 0;
-
-    if (leftData == rightData) return 1;
-
-    if (!leftData || !rightData)
-        return 0;
-
-    return memcmp(leftData, rightData, leftLen) == 0;
-}
-
 DJINN_ATTR_NONNULL_1
 void __djinn_free(void* pointer)
 {
     DJINN_TRACE("de-allocating heap memory at %p", pointer);
     free(pointer);
-}
-
-int32_t __djinn_atomic_add(int32_t* counter, int32_t delta)
-{
-    return __atomic_fetch_add(counter, delta, __ATOMIC_ACQ_REL);
-}
-
-int32_t __djinn_atomic_load_i32(int32_t* target)
-{
-    return __atomic_load_n(target, __ATOMIC_SEQ_CST);
-}
-
-void __djinn_atomic_store_i32(int32_t* target, int32_t value)
-{
-    __atomic_store_n(target, value, __ATOMIC_SEQ_CST);
-}
-
-int32_t __djinn_atomic_exchange_i32(int32_t* target, int32_t value)
-{
-    return __atomic_exchange_n(target, value, __ATOMIC_SEQ_CST);
-}
-
-int32_t __djinn_atomic_cas_i32(int32_t* target, int32_t expected, int32_t desired)
-{
-    return __atomic_compare_exchange_n(target, &expected, desired, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
-}
-
-int64_t __djinn_atomic_load_i64(int64_t* target)
-{
-    return __atomic_load_n(target, __ATOMIC_SEQ_CST);
-}
-
-void __djinn_atomic_store_i64(int64_t* target, int64_t value)
-{
-    __atomic_store_n(target, value, __ATOMIC_SEQ_CST);
-}
-
-int64_t __djinn_atomic_exchange_i64(int64_t* target, int64_t value)
-{
-    return __atomic_exchange_n(target, value, __ATOMIC_SEQ_CST);
-}
-
-int64_t __djinn_atomic_add_i64(int64_t* target, int64_t delta)
-{
-    return __atomic_fetch_add(target, delta, __ATOMIC_SEQ_CST);
-}
-
-int32_t __djinn_atomic_cas_i64(int64_t* target, int64_t expected, int64_t desired)
-{
-    return __atomic_compare_exchange_n(target, &expected, desired, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
 }
 
 DJINN_ATTR_REALLOC
