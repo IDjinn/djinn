@@ -35,12 +35,12 @@ function findServer(context) {
   if (configured) {
     return configured;
   }
-  const candidates = [path.join(context.extensionPath, "bin", exeName())];
+  const candidates = [toolchain.installed("bin", exeName()), path.join(context.extensionPath, "bin", exeName())];
   for (const folder of vscode.workspace.workspaceFolders || []) {
     candidates.push(path.join(folder.uri.fsPath, "djinn-lsp", "build", exeName()));
   }
   for (const candidate of candidates) {
-    if (fs.existsSync(candidate)) {
+    if (candidate && fs.existsSync(candidate)) {
       return candidate;
     }
   }
@@ -70,12 +70,53 @@ async function startClient(context) {
     },
   };
   client = new LanguageClient("djinn", "Djinn Language Server", serverOptions, clientOptions);
+  if (!settings().get("server.path") && !fs.existsSync(command) && !toolchain.installed("bin", exeName())) {
+    offerInstall();
+  }
   try {
     await client.start();
   } catch (error) {
     vscode.window.showErrorMessage(
       `Could not start djinn-lsp (${command}). Build it with djinn-lsp/build.sh or set djinn.server.path. ${error.message || error}`
     );
+  }
+}
+
+function setupCommand(mode) {
+  const home = toolchain.installHome();
+  if (process.platform === "win32") {
+    const script = path.join(home, "bin", "djinn-setup.ps1");
+    if (fs.existsSync(script)) {
+      return `powershell -NoProfile -ExecutionPolicy Bypass -File "${script}" -Mode ${mode}`;
+    }
+    return "powershell -NoProfile -ExecutionPolicy Bypass -Command \"irm https://github.com/IDjinn/djinn-lang-v3/releases/latest/download/install.ps1 | iex\"";
+  }
+  const script = path.join(home, "bin", "djinn-setup");
+  if (fs.existsSync(script)) {
+    return `"${script}" ${mode}`;
+  }
+  return "curl -fsSL https://github.com/IDjinn/djinn-lang-v3/releases/latest/download/install.sh | sh";
+}
+
+function runSetup(mode) {
+  const terminal = vscode.window.createTerminal("Djinn Setup");
+  terminal.show();
+  terminal.sendText(setupCommand(mode));
+}
+
+let offered = false;
+async function offerInstall() {
+  if (offered) {
+    return;
+  }
+  offered = true;
+  const choice = await vscode.window.showWarningMessage(
+    "Djinn is not installed. Install the toolchain and language server?",
+    "Install",
+    "Later"
+  );
+  if (choice === "Install") {
+    runSetup("install");
   }
 }
 
@@ -558,6 +599,8 @@ async function activate(context) {
     vscode.window.onDidChangeTextEditorSelection((event) => assemblyView.syncWith(event.textEditor)),
     vscode.window.onDidChangeActiveTextEditor((editor) => editor && assemblyView.syncWith(editor)),
     vscode.window.onDidChangeVisibleTextEditors(() => assemblyView.decorateAll()),
+    vscode.commands.registerCommand("djinn.install", () => runSetup("install")),
+    vscode.commands.registerCommand("djinn.update", () => runSetup("update")),
     vscode.commands.registerCommand("djinn.perf.showAssembly", showAssembly),
     vscode.commands.registerCommand("djinn.perf.projectOnly", () => setProjectOnly(true)),
     vscode.commands.registerCommand("djinn.perf.projectOnly.off", () => setProjectOnly(false)),

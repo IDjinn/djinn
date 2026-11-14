@@ -24,11 +24,12 @@ struct SM {
     const i32 READONLY = 2;
     const i32 STATIC = 4;
     const i32 DEFAULT_LIBRARY = 8;
+    const i32 CLASS_MEMBER = 16;
 }
 
 struct Semantic {
     public static unsafe ptr<i8> legend() {
-        return "{\"tokenTypes\":[\"namespace\",\"type\",\"class\",\"enum\",\"interface\",\"struct\",\"typeParameter\",\"parameter\",\"variable\",\"property\",\"enumMember\",\"function\",\"method\",\"macro\",\"keyword\",\"decorator\"],\"tokenModifiers\":[\"declaration\",\"readonly\",\"static\",\"defaultLibrary\"]}";
+        return "{\"tokenTypes\":[\"namespace\",\"type\",\"class\",\"enum\",\"interface\",\"struct\",\"typeParameter\",\"parameter\",\"variable\",\"property\",\"enumMember\",\"function\",\"method\",\"macro\",\"keyword\",\"decorator\"],\"tokenModifiers\":[\"declaration\",\"readonly\",\"static\",\"defaultLibrary\",\"classMember\"]}";
     }
 
     static unsafe i32 type_for(Sym* sym) {
@@ -79,13 +80,75 @@ struct Semantic {
         if (sym.unit.library) {
             mods = mods | SM.DEFAULT_LIBRARY;
         }
+        if (sym.kind == SK.FIELD) {
+            mods = mods | SM.CLASS_MEMBER;
+        }
         return mods;
+    }
+
+    // A generic argument list: `<` ... `>` holding only type-like tokens, right after a name.
+    static unsafe bool opens_type_arguments(Unit* u, i32 c) {
+        if (!u.is_punct(c + 1, 60)) {
+            return false;
+        }
+        mut i32 depth = 0;
+        for (mut i32 i = c + 1; i < u.code_count && i < c + 40; i = i + 1) {
+            i32 raw = u.code[i];
+            i32 kind = u.tkind[raw];
+            if (u.is_punct(i, 60)) {
+                depth = depth + 1;
+            } else if (u.is_punct(i, 62)) {
+                depth = depth - 1;
+                if (depth == 0) {
+                    return true;
+                }
+            } else if (kind == Tk.IDENT || kind == Tk.TYPE || kind == Tk.NUMBER) {
+                continue;
+            } else if (u.is_punct(i, 44) || u.is_punct(i, 63) || u.is_punct(i, 42) || u.is_scope(i)) {
+                continue;
+            } else {
+                return false;
+            }
+        }
+        return false;
+    }
+
+    static unsafe bool inside_type_arguments(Unit* u, i32 c) {
+        mut i32 depth = 0;
+        for (mut i32 i = c - 1; i >= 0 && i > c - 40; i = i - 1) {
+            i32 raw = u.code[i];
+            i32 kind = u.tkind[raw];
+            if (u.is_punct(i, 62)) {
+                depth = depth + 1;
+            } else if (u.is_punct(i, 60)) {
+                if (depth == 0) {
+                    if (i == 0) {
+                        return false;
+                    }
+                    i32 before = u.code[i - 1];
+                    return u.tkind[before] == Tk.IDENT || u.tkind[before] == Tk.TYPE;
+                }
+                depth = depth - 1;
+            } else if (kind == Tk.IDENT || kind == Tk.TYPE || kind == Tk.NUMBER) {
+                continue;
+            } else if (u.is_punct(i, 44) || u.is_punct(i, 63) || u.is_punct(i, 42) || u.is_scope(i)) {
+                continue;
+            } else {
+                return false;
+            }
+        }
+        return false;
     }
 
     static unsafe bool is_type_parameter_name(ptr<i8> name) {
         i32 length = strlen(name);
-        if (length > 2 || length == 0) {
+        if (length == 0) {
             return false;
+        }
+        if (length > 2) {
+            // TKey, TValue, TResult: a capital T followed by a capitalised word.
+            i32 second = (i32)name[1];
+            return name[0] == 84 && second >= 65 && second <= 90;
         }
         for (mut i32 i = 0; i < length; i = i + 1) {
             i32 c = (i32)name[i];
@@ -125,7 +188,13 @@ struct Semantic {
             if (u.is_punct(c + 1, 40)) {
                 return ST.METHOD;
             }
+            if (c > 1 && u.is_word(c - 2, "this")) {
+                mods_out[0] = SM.CLASS_MEMBER;
+            }
             return ST.PROPERTY;
+        }
+        if (u.is_punct(c + 1, 33) && u.is_punct(c + 2, 40)) {
+            return ST.MACRO;
         }
         ptr<i8> name = u.token_text(raw);
         bool scoped_left = c > 0 && u.is_scope(c - 1);
@@ -158,6 +227,15 @@ struct Semantic {
         if (Semantic.is_type_parameter_name(name)) {
             return ST.TYPE_PARAMETER;
         }
+        if (Semantic.opens_type_arguments(u, c)) {
+            return ST.TYPE;
+        }
+        if (Semantic.inside_type_arguments(u, c)) {
+            i32 first = (i32)name[0];
+            if (first >= 65 && first <= 90) {
+                return ST.TYPE;
+            }
+        }
         return 0 - 1;
     }
 
@@ -171,10 +249,15 @@ struct Semantic {
         for (mut i32 c = 0; c < u.code_count; c = c + 1) {
             i32 raw = u.code[c];
             i32 kind = u.tkind[raw];
-            if (kind != Tk.IDENT && kind != Tk.TYPE) {
-                continue;
+            mut i32 type = 0 - 1;
+            if (kind == Tk.KEYWORD) {
+                if (u.is_word(c, "operator")) {
+                    type = ST.KEYWORD;
+                    mods = 0;
+                }
+            } else if (kind == Tk.IDENT || kind == Tk.TYPE) {
+                type = Semantic.classify(u, raw, c, &mods);
             }
-            i32 type = Semantic.classify(u, raw, c, &mods);
             if (type < 0) {
                 continue;
             }

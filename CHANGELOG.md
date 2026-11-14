@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Added
+- Installers (`installer/install.sh`, `installer/install.ps1`) with optional VS Code extension, cron or scheduled-task auto update, and versioned installs; releases now ship `djinn-lsp` and `djinn-lang.vsix`.
+- Windows setup wizard (`installer/windows/djinn.iss`, Inno Setup) with extension, auto update and PATH checkboxes and an uninstaller entry.
+- VS Code extension: uses the installed toolchain, offers to install it, `Djinn: Install Toolchain` and `Djinn: Update Toolchain`.
+
+- `djinnc --help` prints grouped sections with examples (`-h` and `help` too); `djinnc interactive` asks what to do (build, check, run, test, IR) and runs the matching command; a bad command line prints a short usage.
+
+### Changed
+- Language server: `name!()` macros and same-named functions no longer share references, and files matched by the workspace `.gitignore` (such as `.claude/worktrees`) are not indexed.
+- Highlighting: generic arguments and `TKey`-style type parameters are typed, `name!()` macros are coloured, `this.field` is distinct from parameters, `operator` is a keyword.
+
 ## [0.5.0] - 2026-11-14
 
 ### Compiler

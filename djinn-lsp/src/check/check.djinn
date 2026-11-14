@@ -39,9 +39,9 @@ struct Check {
     }
 
     static unsafe void quote(ByteBuffer* command, ptr<i8> value) {
-        command.append_char(34);
+        command.append_char((char)(34));
         command.append(value);
-        command.append_char(34);
+        command.append_char((char)(34));
     }
 
     static unsafe bool wants_std(Unit* doc) {
@@ -59,7 +59,14 @@ struct Check {
         bool with_tests = ProjectInfo.is_test_file(doc.path);
         use_std[0] = project.std || (with_tests && project.test_std);
         ptr<i8> source_root = Paths.join(project.directory, "src");
-        ptr<i8> listing = __djinn_list_files(source_root, ".djinn");
+        mut ptr<i8> listing = __djinn_list_files(source_root, ".djinn");
+        // a project without a src folder (the standard library) keeps its sources in the project folder itself;
+        // the parser needs all of them to know the type names (size, ...) declared in sibling files
+        mut bool whole_directory = false;
+        if (listing == null) {
+            listing = __djinn_list_files(project.directory, ".djinn");
+            whole_directory = true;
+        }
         if (listing != null) {
             i32 length = strlen(listing);
             mut i32 start = 0;
@@ -69,7 +76,8 @@ struct Check {
                         ptr<i8> path = Paths.normalize(Strings.duplicate(listing + start, i - start));
                         bool test = ProjectInfo.is_test_file(path);
                         bool is_entry = project.entry != null && with_tests && Strings.same(Paths.base_name(path), project.entry);
-                        if (!is_entry && (with_tests || !test)) {
+                        bool generated = whole_directory && (Paths.contains(path, "/build/") || Paths.contains(path, "/.djinn/"));
+                        if (!is_entry && !generated && (with_tests || !test)) {
                             files.push((ptr)path);
                         }
                     }
@@ -195,9 +203,9 @@ struct Check {
         PointerList* overlays = PointerList.create();
         PointerList* overlay_units = PointerList.create();
         ByteBuffer* command = ByteBuffer.create();
-        command.append_char(34);
+        command.append_char((char)(34));
         command.append(ws.compiler);
-        command.append_char(34);
+        command.append_char((char)(34));
         for (mut i32 i = 0; i < files.length; i = i + 1) {
             ptr<i8> path = (ptr<i8>)files.get(i);
             Unit* unit = Workspace.find_path(path);
@@ -209,7 +217,7 @@ struct Check {
                 overlay_units.push((ptr)unit);
                 argument = temporary;
             }
-            command.append_char(32);
+            command.append_char((char)(32));
             Check.quote(command, argument);
         }
         command.append(" --check --diagnostics-format=json --runtime-dir ");
@@ -403,9 +411,9 @@ struct Check {
                 if (i > 0) {
                     message.append(", ");
                 }
-                message.append_char(39);
+                message.append_char((char)(39));
                 message.append(args.at(i).string_or(""));
-                message.append_char(39);
+                message.append_char((char)(39));
             }
         }
         ptr<i8> found = value.field_string("found");

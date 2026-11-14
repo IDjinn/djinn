@@ -36,12 +36,17 @@ jobs:
             --bench-ref /dev/null \
             --lld
 
+      - name: Build djinn-lsp
+        run: |
+          bash djinn-lsp/build.sh "$PWD/build/bootstrap/stage2/djinnc" "$PWD/runtime"
+
       - name: Package
         run: |
           name="djinn-${TAG}-linux-x86_64"
           dist="dist/$name"
           mkdir -p "$dist/bin" "$dist/lib"
           cp build/bootstrap/stage2/djinnc "$dist/bin/djinnc"
+          cp djinn-lsp/build/djinn-lsp "$dist/bin/djinn-lsp"
           cp "${{ steps.toolchain.outputs.runtime-lib }}" "$dist/lib/libdjinn_runtime.a"
           cp -r runtime std "$dist/"
           cp README.md "$dist/"
@@ -81,12 +86,17 @@ jobs:
             --bench-ref /dev/null \
             --lld
 
+      - name: Build djinn-lsp
+        run: |
+          bash djinn-lsp/build.sh "$PWD/build/bootstrap/stage2/djinnc.exe" "$PWD/runtime"
+
       - name: Package
         run: |
           name="djinn-${TAG}-windows-x86_64"
           dist="dist/$name"
           mkdir -p "$dist/bin" "$dist/lib"
           cp build/bootstrap/stage2/djinnc.exe "$dist/bin/djinnc.exe"
+          cp djinn-lsp/build/djinn-lsp.exe "$dist/bin/djinn-lsp.exe"
           cp "/c/Program Files/LLVM/bin/LLVM-C.dll" "$dist/bin/LLVM-C.dll"
           cp "${{ steps.toolchain.outputs.runtime-lib }}" "$dist/lib/djinn_runtime.lib"
           cp -r runtime std "$dist/"
@@ -101,9 +111,81 @@ jobs:
             dist/*.zip
             dist/*.sha256
 
+  extension:
+    name: Package VS Code extension
+    runs-on: ubuntu-24.04
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Package djinn-lang.vsix
+        working-directory: tools/vscode-djinn
+        run: |
+          npm ci
+          npx --yes @vscode/vsce package -o djinn-lang.vsix
+          mkdir -p ../../dist
+          cp djinn-lang.vsix ../../dist/djinn-lang.vsix
+          cp ../../installer/install.sh ../../installer/install.ps1 ../../dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-extension
+          path: |
+            dist/djinn-lang.vsix
+            dist/install.sh
+            dist/install.ps1
+
+  installer-windows:
+    name: Build Windows setup wizard
+    needs: [build-windows, extension]
+    runs-on: windows-2025
+    defaults:
+      run:
+        shell: bash
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-windows-x86_64
+          path: in/windows
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-extension
+          path: in/extension
+
+      - name: Build setup.exe
+        run: |
+          choco install innosetup -y --no-progress
+          name="djinn-${TAG}-windows-x86_64"
+          mkdir -p in/unpacked dist
+          powershell -NoProfile -Command "Expand-Archive -Path 'in/windows/$name.zip' -DestinationPath 'in/unpacked'"
+          iscc="/c/Program Files (x86)/Inno Setup 6/ISCC.exe"
+          "$iscc" "/DTag=$TAG" "/DSource=$PWD/in/unpacked/$name" "/DVsix=$PWD/in/extension/djinn-lang.vsix" installer/windows/djinn.iss
+          (cd dist && sha256sum "$name-setup.exe" > "$name-setup.exe.sha256")
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-windows-setup
+          path: |
+            dist/*-setup.exe
+            dist/*-setup.exe.sha256
+
   publish:
     name: Publish GitHub release
-    needs: [build, build-windows]
+    needs: [build, build-windows, extension, installer-windows]
     runs-on: ubuntu-24.04
     env:
       TAG: ${{ github.event.inputs.tag || github.ref_name }}

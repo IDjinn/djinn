@@ -136,11 +136,26 @@ struct Workspace {
         return Paths.contains(path, "/build/") || Paths.contains(path, "/node_modules/") || Paths.contains(path, "/.git/") || Paths.contains(path, "/cmake-build") || Paths.contains(path, "/.scratch/");
     }
 
+    // honours the .gitignore of the folder being indexed (the compiler's own build output, .claude/worktrees, ...)
+    static unsafe bool ignored(Gitignore* git, ptr<i8> directory, ptr<i8> path) {
+        i32 root_length = strlen(directory);
+        if (root_length == 0 || !Strings.starts_with(path, 0, strlen(path), directory)) {
+            return false;
+        }
+        mut ptr<i8> relative = path + root_length;
+        if (relative[0] == 47) {
+            relative = relative + 1;
+        }
+        return git.ignores(relative);
+    }
+
     public static unsafe i32 index_directory(ptr<i8> directory, bool library) {
         ptr<i8> listing = __djinn_list_files(directory, ".djinn");
         if (listing == null) {
             return 0;
         }
+        Gitignore* git = Gitignore.load(directory);
+        ptr<i8> root = Paths.normalize(directory);
         Arena* arena = Memory.arena();
         ArenaMark* mark = arena.mark();
         i32 length = strlen(listing);
@@ -150,7 +165,7 @@ struct Workspace {
             if (i == length || listing[i] == 10) {
                 if (i > start) {
                     ptr<i8> path = Paths.normalize(Strings.duplicate(listing + start, i - start));
-                    if (!Workspace.skipped_directory(path) && Workspace.find_path(path) == null) {
+                    if (!Workspace.skipped_directory(path) && !Workspace.ignored(git, root, path) && Workspace.find_path(path) == null) {
                         Unit* unit = Workspace.ensure_unit(path, null);
                         unit.library = library;
                         if (Workspace.load_from_disk(unit)) {

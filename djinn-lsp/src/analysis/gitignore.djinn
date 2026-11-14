@@ -1,0 +1,130 @@
+namespace djinnc;
+
+struct GitPattern {
+    ptr<i8> text;
+    i32 length;
+    bool directory_only;
+    bool anchored;
+}
+
+// A small reader of .gitignore files: comments, blank lines, '!' negations (not honoured), a trailing '/' for
+// directories, a leading or inner '/' to anchor at the root, and the wildcards '*', '**' and '?'.
+struct Gitignore {
+    PointerList* patterns;
+
+    public static unsafe Gitignore* load(ptr<i8> directory) {
+        Gitignore* result = (Gitignore*)Memory.zalloc(sizeof(Gitignore));
+        result.patterns = PointerList.create();
+        ptr<i8> text = Files.read_all(Paths.join(directory, ".gitignore"));
+        if (text == null) {
+            return result;
+        }
+        i32 length = strlen(text);
+        mut i32 start = 0;
+        for (mut i32 i = 0; i <= length; i = i + 1) {
+            if (i == length || text[i] == 10) {
+                mut i32 first = start;
+                mut i32 last = i;
+                while (last > first && (text[last - 1] == 13 || text[last - 1] == 32 || text[last - 1] == 9)) {
+                    last = last - 1;
+                }
+                while (first < last && (text[first] == 32 || text[first] == 9)) {
+                    first = first + 1;
+                }
+                if (last > first && text[first] != 35 && text[first] != 33) {
+                    result.add(text, first, last);
+                }
+                start = i + 1;
+            }
+        }
+        return result;
+    }
+
+    unsafe void add(ptr<i8> text, i32 first_in, i32 last_in) {
+        mut i32 first = first_in;
+        mut i32 last = last_in;
+        GitPattern* pattern = (GitPattern*)Memory.zalloc(sizeof(GitPattern));
+        if (text[last - 1] == 47) {
+            pattern.directory_only = true;
+            last = last - 1;
+        }
+        if (first < last && text[first] == 47) {
+            pattern.anchored = true;
+            first = first + 1;
+        }
+        if (first >= last) {
+            return;
+        }
+        for (mut i32 i = first; i < last; i = i + 1) {
+            if (text[i] == 47) {
+                pattern.anchored = true;
+            }
+        }
+        pattern.text = Strings.duplicate(text + first, last - first);
+        pattern.length = last - first;
+        this.patterns.push((ptr)pattern);
+    }
+
+    static unsafe bool glob(ptr<i8> pattern, i32 pi, i32 pattern_length, ptr<i8> text, i32 ti, i32 text_length) {
+        if (pi == pattern_length) {
+            return ti == text_length;
+        }
+        if (pattern[pi] == 42) {
+            bool deep = pi + 1 < pattern_length && pattern[pi + 1] == 42;
+            mut i32 next = pi + 1;
+            if (deep) {
+                next = pi + 2;
+                if (next < pattern_length && pattern[next] == 47) {
+                    next = next + 1;
+                }
+            }
+            for (mut i32 k = ti; k <= text_length; k = k + 1) {
+                if (Gitignore.glob(pattern, next, pattern_length, text, k, text_length)) {
+                    return true;
+                }
+                if (k < text_length && !deep && text[k] == 47) {
+                    break;
+                }
+            }
+            return false;
+        }
+        if (ti == text_length) {
+            return false;
+        }
+        if (pattern[pi] == 63) {
+            if (text[ti] == 47) {
+                return false;
+            }
+            return Gitignore.glob(pattern, pi + 1, pattern_length, text, ti + 1, text_length);
+        }
+        if (pattern[pi] != text[ti]) {
+            return false;
+        }
+        return Gitignore.glob(pattern, pi + 1, pattern_length, text, ti + 1, text_length);
+    }
+
+    // relative: a normalized path below the folder that holds the .gitignore, without a leading '/'
+    public unsafe bool ignores(ptr<i8> relative) {
+        i32 length = strlen(relative);
+        for (mut i32 p = 0; p < this.patterns.length; p = p + 1) {
+            GitPattern* pattern = (GitPattern*)this.patterns.get(p);
+            mut i32 segment_start = 0;
+            for (mut i32 i = 0; i <= length; i = i + 1) {
+                if (i == length || relative[i] == 47) {
+                    bool last = i == length;
+                    if (!(pattern.directory_only && last)) {
+                        if (pattern.anchored) {
+                            if (Gitignore.glob(pattern.text, 0, pattern.length, relative, 0, i)) {
+                                return true;
+                            }
+                        } else if (Gitignore.glob(pattern.text, 0, pattern.length, relative + segment_start, 0, i - segment_start)) {
+                            return true;
+                        }
+                    }
+                    segment_start = i + 1;
+                }
+            }
+        }
+        return false;
+    }
+}

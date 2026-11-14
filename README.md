@@ -146,6 +146,29 @@ constexpr i32 BUFFER = 64 * 1024;
 - **Reflection**: `[Reflect]` or `--reflect-all`; `typeof(function)`; compile-time member queries and `$inspect`
 - **Tooling**: LSP server, `--inspect-lib`, `djinnc test`, tiered JIT, `--emit-ir` / `--emit-asm` / `--emit-ast`
 
+## Install
+
+Prebuilt toolchain (`djinnc`, `djinn-lsp`, runtime and std) from the latest release. The installer asks whether to also
+install the VS Code extension (a checkbox on Windows, a prompt on Linux and macOS) and registers an auto update
+(cron on Linux and macOS, a scheduled task on Windows, every 6 hours).
+
+```bash
+curl -fsSL https://github.com/IDjinn/djinn-lang-v3/releases/latest/download/install.sh | sh        # Linux, macOS
+```
+
+```powershell
+irm https://github.com/IDjinn/djinn-lang-v3/releases/latest/download/install.ps1 | iex             # Windows, script
+```
+
+On Windows there is also a setup wizard, `djinn-<tag>-windows-x86_64-setup.exe` (per user, no administrator rights): checkboxes for the VS Code extension, auto update and PATH, an entry in *Apps > Installed apps* to uninstall, and `/VERYSILENT /TASKS="extension,autoupdate,addtopath"` for unattended installs.
+
+Options: `--extension` / `--no-extension`, `--no-auto-update`, `--prefix <dir>`, `--version <tag>` (PowerShell:
+`-Extension`, `-NoExtension`, `-NoAutoUpdate`, `-Prefix`, `-Version`). Installed in `~/.djinn` (Windows:
+`%LOCALAPPDATA%\Djinn`) as `versions/<tag>` plus a `current` link that updates swap atomically. Update by hand with
+`djinn-setup update`; remove with `djinn-setup uninstall`. The VS Code extension and `djinn-lsp` use this installed
+`djinnc` automatically (`djinn.compilerPath` and `djinn.server.path` still override it). Releases are built for
+linux-x86_64 and windows-x86_64.
+
 ## Getting started
 
 Requirements: LLVM 21 with the C API (`LLVM-C.dll` / `libLLVM-C.so` on `PATH`), `clang`, and Bash. The C++ compiler

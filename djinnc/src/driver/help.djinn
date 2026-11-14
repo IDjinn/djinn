@@ -1,0 +1,212 @@
+namespace djinnc;
+
+extern "C" {
+    i32 __djinn_read_line(ptr<i8> buffer, i32 max_length);
+}
+
+struct Help {
+    public static void short_usage() {
+        logger_error(Log.get(), "usage: djinnc <input.djinn>...|<project dir> [-o <output>] [options]");
+        logger_error(Log.get(), "       djinnc test <project dir>      run the tests of a project");
+        logger_error(Log.get(), "       djinnc interactive             guided mode, asks what to do");
+        logger_error(Log.get(), "       djinnc --help                  every option, with examples");
+    }
+
+    public static void print() {
+        printf("%s", """
+djinnc - the Djinn compiler
+
+USAGE
+  djinnc <file.djinn>... [options]       compile one or more files
+  djinnc <project dir> [options]         compile a project (reads djinn.proj)
+  djinnc test <project dir> [--watch]    build and run the tests of a project
+  djinnc interactive                     guided mode: answer a few questions
+  djinnc --help | --version
+
+EXAMPLES
+  djinnc hello.djinn -o hello --std      build hello (with the standard library)
+  djinnc . -O2                           build the project in this folder, optimized
+  djinnc app --check                     only report errors, produce nothing
+  djinnc app --run --runtime-lib rt.lib  run it right away through the JIT
+  djinnc test mylib --watch              rerun the tests whenever a file changes
+
+OUTPUT
+  -o <path>                  output file (default: a.out)
+  --no-link                  stop after code generation, write <output>.ll
+  --emit-ir | --emit-asm     write LLVM IR (<output>.ll) or assembly instead of linking
+  --emit-ast | --emit-tokens print the syntax tree or the tokens and stop
+  --keep-ir                  also write <output>.ll while linking normally
+
+RUN AND CHECK
+  --check                    type-check only (fast, used by the language server)
+  --run                      run main in process through the JIT
+  --tiered                   with --run: three-tier JIT (--tier-threshold=<hits>, --tier-settle=<ms>)
+  --diagnostics-format=text|json   how errors are printed
+  --tests                    include test files in the build
+  --watch                    with 'test': rerun when sources change (--watch-runs <n>)
+  -- <args>                  everything after -- goes to the program
+
+OPTIMIZATION AND TARGET
+  -O0 -O1 -O2 -O3 -Os -Oz    optimization level (default -O0)
+  -g                         debug information
+  --target <triple>          target triple (default: this machine)
+  --cpu <name|native>        target CPU;  --features <+feat,-feat>  CPU features
+  --lld                      link with lld directly (needs --runtime-lib)
+  --link-arg <arg>           extra linker argument (repeatable)
+  --verify-ranges            check at run time that the range analysis was right
+  --no-range-opt             do not remove checks proven safe
+
+LIBRARIES AND RUNTIME
+  --std | --std-dir <dir>    use the standard library (also: DJINN_STD_DIR)
+  --runtime-dir <dir>        runtime C sources (default: runtime)
+  --runtime-lib <lib>        prebuilt runtime library
+  --library                  produce a .djlib library instead of an executable
+  --lib <file.djlib>         link a library (repeatable);  --lib-dir <dir> where libs: are found
+  --inspect-lib <file>       list what a .djlib contains;  --emit-lib-view  same, while building
+
+LANGUAGE BEHAVIOUR
+  --reflect-all | --reflect-annotated | --reflect-none   which types keep reflection data
+  --async-threads=<n>        worker threads of the compiled program (0 = one per core)
+  --no-async-elision         keep every async function a coroutine
+  --show-async               show compiler-generated async code in the view modes
+  --no-generate              disable generate blocks
+  --ieee754=2019|2008|1985|none   floating point standard;  --fp-env=default|strict
+  --stats                    print timing and memory statistics
+
+ENVIRONMENT
+  DJINN_HOME       install folder (the installer sets it)
+  DJINN_CLANG      clang executable used to link
+  DJINN_STD_DIR    standard library folder
+  DJINN_LLD_LINK   lld-link executable (Windows);  DJINN_LD_LLD, DJINN_CRT_DIR, DJINN_DYNAMIC_LINKER (POSIX --lld)
+
+Exit codes: 0 ok, 1 compile or link error, 2 bad command line.
+""");
+    }
+
+    static unsafe ptr<i8> ask(ptr<i8> question, ptr<i8> fallback) {
+        printf("%s", question);
+        if (fallback != null && fallback[0] != 0) {
+            printf(" [%s]", fallback);
+        }
+        printf(": ");
+        fflush((ptr)0);
+        ptr<i8> buffer = (ptr<i8>)Memory.zalloc(1024);
+        i32 length = __djinn_read_line(buffer, 1023);
+        mut i32 start = 0;
+        mut i32 end = length;
+        while (start < end && (buffer[start] == 32 || buffer[start] == 9)) {
+            start = start + 1;
+        }
+        while (end > start && (buffer[end - 1] == 32 || buffer[end - 1] == 9)) {
+            end = end - 1;
+        }
+        if (end == start) {
+            return fallback;
+        }
+        return Strings.duplicate(buffer + start, end - start);
+    }
+
+    static unsafe bool yes(ptr<i8> question, bool fallback) {
+        mut ptr<i8> hint = "y/N";
+        if (fallback) {
+            hint = "Y/n";
+        }
+        printf("%s [%s]: ", question, hint);
+        fflush((ptr)0);
+        ptr<i8> buffer = (ptr<i8>)Memory.zalloc(64);
+        i32 length = __djinn_read_line(buffer, 63);
+        if (length == 0) {
+            return fallback;
+        }
+        if (buffer[0] == 121 || buffer[0] == 89) {
+            return true;
+        }
+        if (buffer[0] == 110 || buffer[0] == 78) {
+            return false;
+        }
+        return fallback;
+    }
+
+    static unsafe void quote(ByteBuffer* command, ptr<i8> value) {
+        command.append(" \"");
+        command.append(value);
+        command.append("\"");
+    }
+
+    // Guided mode: asks a few questions, shows the command that matches and runs it.
+    public static unsafe i32 interactive() {
+        printf("djinnc interactive - press Enter to accept the value in [brackets], q to quit\n\n");
+        printf("  1) build an executable\n");
+        printf("  2) type-check only\n");
+        printf("  3) run through the JIT\n");
+        printf("  4) run the tests\n");
+        printf("  5) look at the LLVM IR\n");
+        ptr<i8> choice = Help.ask("What do you want to do", "1");
+        if (choice[0] == 113 || choice[0] == 81) {
+            return 0;
+        }
+        i32 action = (i32)choice[0] - 48;
+        if (action < 1 || action > 5) {
+            printf("unknown choice '%s'\n", choice);
+            return 2;
+        }
+        ptr<i8> input = Help.ask("File or project folder", ".");
+        ByteBuffer* command = ByteBuffer.create();
+        if (Linker.is_windows()) {
+            command.append("\"");
+        }
+        Help.quote(command, Process.argv_or(0, "djinnc"));
+        if (action == 4) {
+            command.append(" test");
+        }
+        Help.quote(command, input);
+        mut ptr<i8> runtime_lib = null;
+        if (action == 1 || action == 5) {
+            mut ptr<i8> fallback = "a.out";
+            if (action == 5) {
+                fallback = "a";
+            }
+            ptr<i8> output = Help.ask("Output file", fallback);
+            command.append(" -o");
+            Help.quote(command, output);
+        }
+        if (action == 2) {
+            command.append(" --check");
+        } else if (action == 3) {
+            command.append(" --run");
+            runtime_lib = Help.ask("Prebuilt runtime library (empty to skip)", "");
+        } else if (action == 5) {
+            command.append(" --emit-ir");
+        }
+        if (action == 1 || action == 3 || action == 5) {
+            ptr<i8> level = Help.ask("Optimization level (0, 1, 2, 3, s, z)", "0");
+            command.append(" -O");
+            command.append(level);
+            if (action != 3 && Help.yes("Include debug information", false)) {
+                command.append(" -g");
+            }
+        }
+        if (Help.yes("Use the standard library", true)) {
+            command.append(" --std");
+        }
+        if (action == 1 || action == 5) {
+            ptr<i8> runtime_dir = Help.ask("Runtime sources folder", "runtime");
+            command.append(" --runtime-dir");
+            Help.quote(command, runtime_dir);
+        }
+        if (runtime_lib != null && runtime_lib[0] != 0) {
+            command.append(" --runtime-lib");
+            Help.quote(command, runtime_lib);
+        }
+        ptr<i8> extra = Help.ask("Extra options (empty for none)", "");
+        if (extra != null && extra[0] != 0) {
+            command.append(" ");
+            command.append(extra);
+        }
+        if (Linker.is_windows()) {
+            command.append("\"");
+        }
+        printf("\nrunning:%s\n\n", command.cstr());
+        return Process.run(command.cstr());
+    }
+}
