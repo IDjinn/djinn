@@ -133,6 +133,12 @@ struct ConstEval {
         return shape;
     }
 
+    // The evaluator computes in 64 bits, so i128 and u128 values are not evaluated: a constexpr call that touches
+    // one falls back to run time and a consteval or constant use reports it, rather than overflow or wrap wrongly.
+    static bool wide(i32 shape) {
+        return (shape & ConstEval.INTEGER) != 0 && (shape & 255) > 64;
+    }
+
     unsafe i32 shape_of(u32 type) {
         i32 text = this.text_shape(type);
         if (text != 0) {
@@ -567,6 +573,9 @@ struct ConstEval {
         }
         i32 from = this.shape_of(operand.value_type());
         i32 to = this.shape_of(node.value_type());
+        if (ConstEval.wide(from) || ConstEval.wide(to)) {
+            return this.fail(node, "128-bit integers cannot be evaluated at compile time");
+        }
         i32 addressing = ConstEval.TEXT | ConstEval.POINTER | ConstEval.STRUCT;
         if (((from | to) & addressing) != 0) {
             bool from_ok = (from & (addressing | ConstEval.INTEGER)) != 0;
@@ -721,6 +730,9 @@ struct ConstEval {
         TokenKind op = node.op_kind();
         Node* left = node.first();
         Node* right = node.second();
+        if (ConstEval.wide(this.shape_of(left.value_type())) || ConstEval.wide(this.shape_of(right.value_type()))) {
+            return this.fail(node, "128-bit integers cannot be evaluated at compile time");
+        }
 
         if (op == TokenKind::AND_AND) {
             if (!this.eval_condition(left)) {
@@ -1281,7 +1293,7 @@ struct ConstEval {
             return this.fail(node, "wrong number of arguments");
         }
         i32 callee_return = this.shape_of(info.return_type);
-        if (!Types.is_void(info.return_type) && (callee_return & ConstEval.SCALAR) == 0) {
+        if (!Types.is_void(info.return_type) && ((callee_return & ConstEval.SCALAR) == 0 || ConstEval.wide(callee_return))) {
             return this.fail(node, "the return type cannot be evaluated at compile time");
         }
         if (!this.tick(node)) {
@@ -1326,7 +1338,7 @@ struct ConstEval {
             Node* argument = node.child(i);
             u32 param_type = param_types.get(i + shift);
             i32 param_shape = this.shape_of(param_type);
-            if ((param_shape & ConstEval.SCALAR) == 0) {
+            if ((param_shape & ConstEval.SCALAR) == 0 || ConstEval.wide(param_shape)) {
                 this.top = frame_base;
                 return this.fail(argument, "parameter type cannot be evaluated at compile time");
             }
@@ -1442,7 +1454,7 @@ struct ConstEval {
             return EvalStatus.NORMAL;
         }
         i32 shape = this.shape_of(variable.type);
-        if ((shape & ConstEval.SCALAR) == 0) {
+        if ((shape & ConstEval.SCALAR) == 0 || ConstEval.wide(shape)) {
             this.fail(node, "variable type cannot be evaluated at compile time");
             return EvalStatus.FAILED;
         }
