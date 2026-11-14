@@ -1,4 +1,5 @@
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
 const vscode = require("vscode");
 
@@ -49,26 +50,44 @@ function inRepo(...parts) {
   return candidate && fs.existsSync(candidate) ? candidate : undefined;
 }
 
+// The toolchain put in place by the installer (installer/install.sh, installer/install.ps1):
+// <home>/current -> versions/<tag> with bin, lib, runtime and std. The auto update swaps `current`.
+function installHome() {
+  if (process.env.DJINN_HOME) {
+    return process.env.DJINN_HOME;
+  }
+  if (process.platform === "win32") {
+    return path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local"), "Djinn");
+  }
+  return path.join(os.homedir(), ".djinn");
+}
+
+function installed(...parts) {
+  const candidate = path.join(installHome(), "current", ...parts);
+  return fs.existsSync(candidate) ? candidate : undefined;
+}
+
 function firstExisting(...candidates) {
   return candidates.find((candidate) => candidate && fs.existsSync(candidate));
 }
 
 function compiler(info) {
-  return settings().get("compilerPath") || bundled("bin", exe("djinnc")) || (info && info.compiler) || inRepo("djinnc", "build", exe("djinnc")) || "";
+  return settings().get("compilerPath") || installed("bin", exe("djinnc")) || bundled("bin", exe("djinnc")) || (info && info.compiler) || inRepo("djinnc", "build", exe("djinnc")) || "";
 }
 
 function stdDir(info) {
-  return settings().get("stdDir") || bundled("toolchain", "std") || (info && info.stdDir) || inRepo("std") || "";
+  return settings().get("stdDir") || installed("std") || bundled("toolchain", "std") || (info && info.stdDir) || inRepo("std") || "";
 }
 
 function runtimeDir(info) {
-  return settings().get("runtimeDir") || bundled("toolchain", "runtime") || (info && info.runtimeDir) || inRepo("runtime") || "";
+  return settings().get("runtimeDir") || installed("runtime") || bundled("toolchain", "runtime") || (info && info.runtimeDir) || inRepo("runtime") || "";
 }
 
 function runtimeLib() {
   const name = process.platform === "win32" ? "djinn_runtime.lib" : "libdjinn_runtime.a";
   return (
     settings().get("runtimeLib") ||
+    installed("lib", name) ||
     bundled("toolchain", name) ||
     inRepo("build", "runtime", name) ||
     inRepo("build", "bootstrap", "runtime", name) ||
@@ -79,6 +98,7 @@ function runtimeLib() {
 function libDir() {
   return (
     settings().get("libDir") ||
+    (installed("lib", "std.djlib") ? installed("lib") : undefined) ||
     bundled("toolchain") ||
     firstExisting(...["build/bootstrap/libs", "build/libs"].map((relative) => inRepo(...relative.split("/")))) ||
     ""
@@ -184,6 +204,8 @@ function isInsideExtension(file) {
 }
 
 module.exports = {
+  installHome,
+  installed,
   repoRoot,
   linuxCompiler,
   linuxRuntimeLib,
