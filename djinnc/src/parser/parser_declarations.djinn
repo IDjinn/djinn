@@ -121,7 +121,10 @@ impl Parser {
         if (this.kind_of(token) == TokenKind::CONSTEXPR || this.kind_of(token) == TokenKind::CONSTEVAL) {
             if (this.kind_of(this.peek_token(1)) == TokenKind::STRUCT) {
                 this.advance();
-                return this.parse_struct();
+                this.constexpr_struct = true;
+                Node* compile_time_struct = this.parse_struct();
+                this.constexpr_struct = false;
+                return compile_time_struct;
             }
             i32 end = this.scan_type_end(1);
             if (end >= 0 && this.kind_of(this.peek_token(end)) == TokenKind::IDENTIFIER && this.kind_of(this.peek_token(end + 1)) == TokenKind::EQUAL) {
@@ -388,6 +391,9 @@ impl Parser {
             this.fail("a function cannot be both 'sync' and 'async'");
             return (Node*)0;
         }
+        if (this.constexpr_struct && compile_time == 0 && !is_async) {
+            compile_time = 2;
+        }
         if (is_async && compile_time != 0) {
             this.fail("a constexpr or consteval function cannot be async");
             return (Node*)0;
@@ -532,7 +538,7 @@ impl Parser {
             return function;
         }
         if (with_body) {
-            function.set_first(this.parse_body(true));
+            function.set_first(this.parse_body(!this.keep_body));
         } else {
             this.expect(TokenKind::SEMICOLON, "expected ';' after the operator signature");
         }

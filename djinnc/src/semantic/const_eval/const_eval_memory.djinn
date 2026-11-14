@@ -1,5 +1,14 @@
 namespace djinnc;
 
+enum ConstHeapKind {
+    NONE,
+    ALLOC,
+    REALLOC,
+    FREE,
+    COPY,
+    FILL
+}
+
 impl ConstEval {
     unsafe void ensure_heap() {
         if (this.block_base != null) {
@@ -105,6 +114,7 @@ impl ConstEval {
     unsafe void heap_reset() {
         this.block_count = 0;
         this.heap_bytes = 0;
+        this.cell_bytes = 0;
     }
 
     unsafe bool check_access(Node* at, i64 address, i64 bytes) {
@@ -298,14 +308,14 @@ impl ConstEval {
         return this.store_typed(node, address, element, this.ri, this.rf);
     }
 
-    unsafe bool eval_alloc_call(Node* node, ptr<i8> name) {
-        if (Strings.same(name, "__djinn_free")) {
+    unsafe bool eval_alloc_call(Node* node, ConstHeapKind kind) {
+        if (kind == ConstHeapKind::FREE) {
             if (!this.eval(node.child(0))) {
                 return false;
             }
             return this.heap_free(node, this.ri);
         }
-        if (Strings.same(name, "__djinn_realloc")) {
+        if (kind == ConstHeapKind::REALLOC) {
             if (!this.eval(node.child(0))) {
                 return false;
             }
@@ -321,7 +331,7 @@ impl ConstEval {
         return this.heap_alloc(node, this.ri);
     }
 
-    unsafe bool eval_memory_call(Node* node, ptr<i8> name) {
+    unsafe bool eval_memory_call(Node* node, bool fill) {
         if (!this.eval(node.child(0))) {
             return false;
         }
@@ -334,7 +344,7 @@ impl ConstEval {
             return false;
         }
         i64 bytes = this.ri;
-        if (Strings.same(name, "memset")) {
+        if (fill) {
             if (bytes > 0) {
                 if (!this.check_access(node, destination, bytes)) {
                     return false;
@@ -345,18 +355,61 @@ impl ConstEval {
             if (!this.check_access(node, destination, bytes) || !this.check_access(node, source, bytes)) {
                 return false;
             }
-            memmove((ptr)destination, (ptr)source, (u64)bytes);
+            ptr<i8> to = (ptr<i8>)destination;
+            ptr<i8> from = (ptr<i8>)source;
+            if (destination <= source) {
+                [Vectorize]
+                for (mut i64 i = 0; i < bytes; i = i + 1) {
+                    to[i] = from[i];
+                }
+            } else {
+                [Vectorize]
+                for (mut i64 i = bytes - 1; i >= 0; i = i - 1) {
+                    to[i] = from[i];
+                }
+            }
         }
         this.ri = destination;
         this.rf = 0.0;
         return true;
     }
 
-    static bool is_memory_call(ptr<i8> name) {
-        return Strings.same(name, "memcpy") || Strings.same(name, "memmove") || Strings.same(name, "memset");
-    }
-
-    static bool is_alloc_call(ptr<i8> name) {
-        return Strings.same(name, "__djinn_alloc") || Strings.same(name, "__djinn_alloc_zeroed") || Strings.same(name, "__djinn_realloc") || Strings.same(name, "__djinn_free");
+    // Which compile-time heap operation an extern function is. The [ConstAlloc], [ConstRealloc], [ConstFree],
+    // [ConstMemCopy] and [ConstMemSet] attributes decide; the declarations in runtime/core cannot carry them until the
+    // seed compiler knows the attributes, so those are recognised by name.
+    static unsafe ConstHeapKind heap_kind(FunctionInfo* info, ptr<i8> name) {
+        if (info.node != null) {
+            if (Attributes.has(info.node, "ConstAlloc")) {
+                return ConstHeapKind::ALLOC;
+            }
+            if (Attributes.has(info.node, "ConstRealloc")) {
+                return ConstHeapKind::REALLOC;
+            }
+            if (Attributes.has(info.node, "ConstFree")) {
+                return ConstHeapKind::FREE;
+            }
+            if (Attributes.has(info.node, "ConstMemCopy")) {
+                return ConstHeapKind::COPY;
+            }
+            if (Attributes.has(info.node, "ConstMemSet")) {
+                return ConstHeapKind::FILL;
+            }
+        }
+        if (Strings.same(name, "__djinn_alloc") || Strings.same(name, "__djinn_alloc_zeroed")) {
+            return ConstHeapKind::ALLOC;
+        }
+        if (Strings.same(name, "__djinn_realloc")) {
+            return ConstHeapKind::REALLOC;
+        }
+        if (Strings.same(name, "__djinn_free")) {
+            return ConstHeapKind::FREE;
+        }
+        if (Strings.same(name, "memcpy") || Strings.same(name, "memmove")) {
+            return ConstHeapKind::COPY;
+        }
+        if (Strings.same(name, "memset")) {
+            return ConstHeapKind::FILL;
+        }
+        return ConstHeapKind::NONE;
     }
 }

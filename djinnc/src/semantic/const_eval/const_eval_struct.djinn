@@ -64,6 +64,7 @@ impl ConstEval {
     unsafe ptr<i64> new_struct(StructInfo* info) {
         PointerList* fields = info.fields;
         Arena* arena = Memory.arena();
+        this.cell_bytes = this.cell_bytes + (i64)(fields.length + 1) * 8;
         ptr<i64> cells = (ptr<i64>)arena.zalloc((u64)(fields.length + 1) * 8, 8);
         for (mut i32 i = 0; i < fields.length; i = i + 1) {
             FieldInfo* field = (FieldInfo*)fields.get(i);
@@ -224,6 +225,7 @@ impl ConstEval {
         Node* saved_blame = this.blame;
         if (this.nesting == 0) {
             this.steps = 0;
+            this.deadline = __djinn_now_us() + ConstEval.TIME_LIMIT_US;
         }
         this.nesting = this.nesting + 1;
         this.base = this.top;
@@ -269,6 +271,7 @@ impl ConstEval {
         this.in_frame = true;
         this.return_shape = this.shape_of(info.return_type);
         this.depth = this.depth + 1;
+        this.trace_names[this.depth] = info.name;
         i32 status = this.exec(declaration.first());
         this.depth = this.depth - 1;
         this.base = saved_base;
@@ -278,8 +281,71 @@ impl ConstEval {
         if (status == EvalStatus.FAILED) {
             return false;
         }
-        if (status != EvalStatus.RETURN) {
+        if (status != EvalStatus.RETURN && !Types.is_void(info.return_type)) {
             return this.fail(at, "function ended without returning a value");
+        }
+        return true;
+    }
+
+    unsafe bool dispose_value(Node* at, ptr<i64> cells, u32 type) {
+        StructInfo* info = this.evaluable_struct(type);
+        if (info == null || Types.is_pointer(type)) {
+            return true;
+        }
+        TypeChecker* checker = this.checker;
+        SymbolTable* symbols = checker.symbols;
+        if (Ownership.is_disposable(info)) {
+            FunctionInfo* method = symbols.find_method(info, Ast.intern_base_name("disposable", 10));
+            if (method != null) {
+                if (method.const_kind == 0 || method.is_async || method.is_template) {
+                    return this.fail(at, "disposable() is not a constexpr or consteval method");
+                }
+                if (!this.prepare(at, method)) {
+                    return false;
+                }
+                if (!this.run_method(at, method, (i64)cells)) {
+                    return false;
+                }
+            }
+        }
+        PointerList* fields = info.fields;
+        for (mut i32 i = fields.length - 1; i >= 0; i = i - 1) {
+            FieldInfo* field = (FieldInfo*)fields.get(i);
+            if (Ownership.needs_dispose(symbols, field.type) && !this.dispose_value(at, (ptr<i64>)cells[i], field.type)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    unsafe bool dispose_scope(Node* block, i32 reached) {
+        i64 kept_int = this.ri;
+        f64 kept_float = this.rf;
+        bool done = this.dispose_locals(block, reached);
+        this.ri = kept_int;
+        this.rf = kept_float;
+        return done;
+    }
+
+    unsafe bool dispose_locals(Node* block, i32 reached) {
+        TypeChecker* checker = this.checker;
+        SymbolTable* symbols = checker.symbols;
+        for (mut i32 i = reached - 1; i >= 0; i = i - 1) {
+            Node* statement = block.child(i);
+            if (statement.kind() != NodeKind::VAR_DECL) {
+                continue;
+            }
+            LocalVariable* variable = (LocalVariable*)statement.symbol();
+            if (variable == null || variable.eval_slot == 0 || variable.was_moved || variable.const_state == 2) {
+                continue;
+            }
+            if (!Ownership.needs_dispose(symbols, variable.type) || Types.is_pointer(variable.type)) {
+                continue;
+            }
+            i64 held = this.ints[this.base + variable.eval_slot - 1];
+            if (held != 0 && !this.dispose_value(statement, (ptr<i64>)held, variable.type)) {
+                return false;
+            }
         }
         return true;
     }

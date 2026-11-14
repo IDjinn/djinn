@@ -18,6 +18,8 @@ struct ConstEval {
     const i32 BLOCK_LIMIT = 4096;
     const i64 HEAP_LIMIT = 4194304;
     const i32 STEP_LIMIT = 1000000;
+    const i64 TIME_LIMIT_US = 2000000;
+    const i64 CELL_LIMIT = 16777216;
     const i32 DEPTH_LIMIT = 512;
     const i32 FRAME_CAPACITY = 16384;
     const i32 SHAPE_CAPACITY = 8192;
@@ -36,6 +38,9 @@ struct ConstEval {
     i32 top;
     i32 depth;
     i32 steps;
+    i64 deadline;
+    i64 cell_bytes;
+    ptr<ptr<i8>> trace_names;
     i32 nesting;
     bool in_frame;
     i32 return_shape;
@@ -76,6 +81,39 @@ struct ConstEval {
         Arena* arena = Memory.arena();
         this.ints = (ptr<i64>)arena.zalloc((u64)ConstEval.FRAME_CAPACITY * 8, 8);
         this.floats = (ptr<f64>)arena.zalloc((u64)ConstEval.FRAME_CAPACITY * 8, 8);
+        this.trace_names = (ptr<ptr<i8>>)arena.zalloc((u64)(ConstEval.DEPTH_LIMIT + 2) * 8, 8);
+    }
+
+    // The call chain at the first failure, innermost first, so a limit or a runtime-style error names the constexpr
+    // function that was running: "... (in 'push', called from 'fill', called from 'build')".
+    unsafe ptr<i8> with_trace(ptr<i8> reason) {
+        if (this.depth <= 0 || this.trace_names == null) {
+            return reason;
+        }
+        ByteBuffer* text = ByteBuffer.create();
+        text.append(reason);
+        mut i32 shown = 0;
+        for (mut i32 level = this.depth; level >= 1 && shown < 6; level = level - 1) {
+            ptr<i8> name = this.trace_names[level];
+            if (name == null) {
+                continue;
+            }
+            if (shown == 0) {
+                text.append(" (in '");
+            } else {
+                text.append(", called from '");
+            }
+            text.append(name);
+            text.append("'");
+            shown = shown + 1;
+        }
+        if (shown > 0) {
+            if (this.depth > 6) {
+                text.append(", ...");
+            }
+            text.append(")");
+        }
+        return text.cstr();
     }
 
     static i32 describe(u32 type) {
@@ -222,9 +260,9 @@ struct ConstEval {
         this.ri = ConstEval.wrap(this.ri, to);
     }
 
-    bool fail(Node* at, ptr<i8> reason) {
+    unsafe bool fail(Node* at, ptr<i8> reason) {
         if (this.reason == null) {
-            this.reason = reason;
+            this.reason = this.with_trace(reason);
             this.blame = at;
         }
         return false;
@@ -234,6 +272,12 @@ struct ConstEval {
         this.steps = this.steps + 1;
         if (this.steps > ConstEval.STEP_LIMIT) {
             return this.fail(at, "evaluation step limit exceeded");
+        }
+        if (this.cell_bytes > ConstEval.CELL_LIMIT) {
+            return this.fail(at, "compile-time memory limit exceeded");
+        }
+        if ((this.steps & 1023) == 0 && __djinn_now_us() > this.deadline) {
+            return this.fail(at, "evaluation time limit exceeded");
         }
         return true;
     }
@@ -248,6 +292,7 @@ struct ConstEval {
         Node* saved_blame = this.blame;
         if (this.nesting == 0) {
             this.steps = 0;
+            this.deadline = __djinn_now_us() + ConstEval.TIME_LIMIT_US;
             this.heap_reset();
         }
         this.nesting = this.nesting + 1;
@@ -390,6 +435,21 @@ struct ConstEval {
         }
         if (kind == NodeKind::INTRINSIC && node.op() == Intrinsic.SIZEOF) {
             return this.eval_sizeof(node);
+        }
+        if (kind == NodeKind::INTRINSIC && (node.op() == Intrinsic.LIKELY || node.op() == Intrinsic.UNLIKELY)) {
+            return this.eval_condition(node.first());
+        }
+        if (kind == NodeKind::INTRINSIC && node.op() == Intrinsic.ASSUME) {
+            if (!this.eval_condition(node.first())) {
+                return false;
+            }
+            if (this.ri == 0) {
+                return this.fail(node, "an assumption does not hold");
+            }
+            return true;
+        }
+        if (kind == NodeKind::INTRINSIC && (node.op() == Intrinsic.UNREACHABLE || node.op() == Intrinsic.DEBUGTRAP)) {
+            return this.fail(node, "execution reached a trap or unreachable code");
         }
         return this.fail(node, "expression cannot be evaluated at compile time");
     }
@@ -1191,11 +1251,12 @@ struct ConstEval {
         }
         if (info != null && info.is_extern) {
             ptr<i8> external = callee.text();
-            if (ConstEval.is_alloc_call(external)) {
-                return this.eval_alloc_call(node, external);
+            ConstHeapKind heap = ConstEval.heap_kind(info, external);
+            if (heap == ConstHeapKind::ALLOC || heap == ConstHeapKind::REALLOC || heap == ConstHeapKind::FREE) {
+                return this.eval_alloc_call(node, heap);
             }
-            if (ConstEval.is_memory_call(external)) {
-                return this.eval_memory_call(node, external);
+            if (heap == ConstHeapKind::COPY || heap == ConstHeapKind::FILL) {
+                return this.eval_memory_call(node, heap == ConstHeapKind::FILL);
             }
             return this.eval_libm(node, external, info);
         }
@@ -1286,6 +1347,7 @@ struct ConstEval {
         this.in_frame = true;
         this.return_shape = callee_return;
         this.depth = this.depth + 1;
+        this.trace_names[this.depth] = info.name;
         i32 status = this.exec(declaration.first());
         this.depth = this.depth - 1;
         this.base = saved_base;
@@ -1324,14 +1386,23 @@ struct ConstEval {
         };
     }
 
-    i32 exec_block(Node* node) {
-        for (mut i32 i = 0; i < node.count(); i = i + 1) {
-            i32 status = this.exec(node.child(i));
-            if (status != EvalStatus.NORMAL) {
-                return status;
+    unsafe i32 exec_block(Node* node) {
+        mut i32 status = EvalStatus.NORMAL;
+        mut i32 reached = 0;
+        for (mut i32 i = 0; i < node.count() && status == EvalStatus.NORMAL; i = i + 1) {
+            status = this.exec(node.child(i));
+            reached = i;
+            if (status == EvalStatus.NORMAL) {
+                reached = i + 1;
             }
         }
-        return EvalStatus.NORMAL;
+        if (status == EvalStatus.FAILED) {
+            return status;
+        }
+        if (!this.dispose_scope(node, reached)) {
+            return EvalStatus.FAILED;
+        }
+        return status;
     }
 
     i32 exec_expression_statement(Node* node) {

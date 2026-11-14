@@ -662,4 +662,270 @@ i32 main() {
 """;
         Verify.source(source).with_std().runs(Expected.exit(4));
     }
+
+    [Test]
+    void HeapPointerRoundTrip() {
+        str source = """
+unsafe constexpr i32 run() {
+    ptr<i32> data = (ptr<i32>)__djinn_alloc(16);
+    data[0] = 5;
+    data[3] = 7;
+    i32 total = data[0] + *(data + 3);
+    __djinn_free((ptr)data);
+    return total;
+}
+constexpr i32 R = run();
+i32 main() { return R; }
+""";
+        Verify.source(source).with_std().runs(Expected.exit(12));
+    }
+
+    [Test]
+    void HeapLeakIsError() {
+        str source = """
+unsafe constexpr i32 run() {
+    ptr<i32> data = (ptr<i32>)__djinn_alloc(16);
+    data[0] = 5;
+    return data[0];
+}
+constexpr i32 R = run();
+i32 main() { return R; }
+""";
+        Verify.source(source).with_std().diagnostics(Expected.error(DiagnosticErrors.INVALID_CONSTANT_EXPRESSION).with_message("not a compile-time constant: compile-time allocation is never freed"));
+    }
+
+    [Test]
+    void HeapOutOfBounds() {
+        str source = """
+unsafe constexpr i32 run() {
+    ptr<i32> data = (ptr<i32>)__djinn_alloc(16);
+    data[4] = 5;
+    __djinn_free((ptr)data);
+    return 0;
+}
+constexpr i32 R = run();
+i32 main() { return R; }
+""";
+        Verify.source(source).with_std().diagnostics(Expected.error(DiagnosticErrors.INVALID_CONSTANT_EXPRESSION).with_message("not a compile-time constant: pointer access is out of bounds"));
+    }
+
+    [Test]
+    void HeapDoubleFree() {
+        str source = """
+unsafe constexpr i32 run() {
+    ptr<i32> data = (ptr<i32>)__djinn_alloc(16);
+    __djinn_free((ptr)data);
+    __djinn_free((ptr)data);
+    return 0;
+}
+constexpr i32 R = run();
+i32 main() { return R; }
+""";
+        Verify.source(source).with_std().diagnostics(Expected.error(DiagnosticErrors.INVALID_CONSTANT_EXPRESSION).with_message("not a compile-time constant: compile-time allocation is freed twice"));
+    }
+
+    [Test]
+    void HeapUseAfterFree() {
+        str source = """
+unsafe constexpr i32 run() {
+    ptr<i32> data = (ptr<i32>)__djinn_alloc(16);
+    __djinn_free((ptr)data);
+    return data[0];
+}
+constexpr i32 R = run();
+i32 main() { return R; }
+""";
+        Verify.source(source).with_std().diagnostics(Expected.error(DiagnosticErrors.INVALID_CONSTANT_EXPRESSION).with_message("not a compile-time constant: use of a compile-time allocation after it was freed"));
+    }
+
+    [Test]
+    void HeapSizeLimit() {
+        str source = """
+unsafe constexpr i32 run() {
+    ptr<i32> data = (ptr<i32>)__djinn_alloc(100000000);
+    __djinn_free((ptr)data);
+    return 0;
+}
+constexpr i32 R = run();
+i32 main() { return R; }
+""";
+        Verify.source(source).with_std().diagnostics(Expected.error(DiagnosticErrors.INVALID_CONSTANT_EXPRESSION).with_message("not a compile-time constant: compile-time heap limit exceeded"));
+    }
+
+    [Test]
+    void StepLimit() {
+        str source = """
+constexpr i32 run() {
+    mut i32 n = 0;
+    while (true) { n = n + 1; }
+    return n;
+}
+constexpr i32 R = run();
+i32 main() { return R; }
+""";
+        Verify.source(source).with_std().diagnostics(Expected.error(DiagnosticErrors.INVALID_CONSTANT_EXPRESSION).with_message("not a compile-time constant: evaluation step limit exceeded"));
+    }
+
+    [Test]
+    void StructMethodAndConstructor() {
+        str source = """
+struct counter {
+    i32 value;
+    constexpr counter(i32 start) { this.value = start; }
+    constexpr void bump(i32 by) { this.value = this.value + by; }
+    constexpr i32 get() { return this.value; }
+}
+constexpr i32 run() {
+    mut counter c = counter(3);
+    c.bump(4);
+    return c.get();
+}
+constexpr i32 R = run();
+i32 main() { return R; }
+""";
+        Verify.source(source).with_std().runs(Expected.exit(7));
+    }
+
+    [Test]
+    void ConstexprStructMarksMethods() {
+        str source = """
+constexpr struct pair {
+    i32 left;
+    i32 right;
+    i32 sum() { return this.left + this.right; }
+}
+constexpr i32 run() {
+    mut pair p;
+    p.left = 2;
+    p.right = 5;
+    return p.sum();
+}
+constexpr i32 R = run();
+i32 main() { return R; }
+""";
+        Verify.source(source).with_std().runs(Expected.exit(7));
+    }
+
+    [Test]
+    void ArrayAtCompileTime() {
+        str source = """
+import std::collections;
+import std::types;
+constexpr i32 run() {
+    mut array<i32> a = array<i32>();
+    a.push(1);
+    a.push(2);
+    a.push(3);
+    a.set(1u, 50);
+    return a.get(1u) + (i32)a.length();
+}
+constexpr i32 R = run();
+i32 main() { if (R != run()) { return 1; } return R; }
+""";
+        Verify.source(source).with_std().runs(Expected.exit(53));
+    }
+
+    [Test]
+    void ArrayHashMatchesRuntime() {
+        str source = """
+import std::collections;
+import std::types;
+constexpr u32 run() {
+    mut array<i32> a = array<i32>();
+    a.push(7);
+    a.push(9);
+    return (u32)a.hash();
+}
+constexpr u32 H = run();
+i32 main() { if (H != run()) { return 1; } return 0; }
+""";
+        Verify.source(source).with_std().runs(Expected.exit(0));
+    }
+
+    [Test]
+    void MapAtCompileTime() {
+        str source = """
+import std::collections;
+import std::types;
+constexpr i32 run() {
+    mut map<i32, i32> m = map<i32, i32>();
+    m.set(1, 10);
+    m.set(2, 20);
+    m.set(3, 30);
+    m.remove(2);
+    mut i32 r = m.get(1) + m.get(3);
+    if (m.has(2)) { r = r + 1000; }
+    return r + (i32)m.length();
+}
+constexpr i32 R = run();
+i32 main() { if (R != run()) { return 1; } return R; }
+""";
+        Verify.source(source).with_std().runs(Expected.exit(42));
+    }
+
+    [Test]
+    void ConstevalFailureIsError() {
+        str source = """
+unsafe consteval i32 run() {
+    ptr<i32> data = (ptr<i32>)__djinn_alloc(8);
+    return data[0];
+}
+unsafe i32 main() { return run(); }
+""";
+        Verify.source(source).with_std().diagnostics(Expected.error(DiagnosticErrors.INVALID_CONSTANT_EXPRESSION));
+    }
+
+    [Test]
+    void FailureNamesTheCallChain() {
+        str source = """
+constexpr i32 inner(i32 n) {
+    mut i32 k = 0;
+    while (true) { k = k + n; }
+    return k;
+}
+constexpr i32 outer() { return inner(1); }
+constexpr i32 R = outer();
+i32 main() { return R; }
+""";
+        Verify.source(source).with_std().diagnostics(Expected.error(DiagnosticErrors.INVALID_CONSTANT_EXPRESSION).with_message("not a compile-time constant: evaluation step limit exceeded (in 'inner', called from 'outer')"));
+    }
+
+    [Test]
+    void BitfieldAtCompileTime() {
+        str source = """
+import std::collections;
+import std::types;
+enum Perm { Read, Write, Exec, Admin = 700 }
+constexpr i32 run() {
+    mut bitfield<Perm> f = bitfield<Perm>();
+    f.set(Perm.Read);
+    f.set(Perm.Admin);
+    f.flip(Perm.Exec);
+    f.clear(Perm.Read);
+    mut i32 r = (i32)f.count();
+    if (f.test(Perm.Admin)) { r = r + 10; }
+    if (f.test(Perm.Read)) { r = r + 100; }
+    return r;
+}
+constexpr i32 R = run();
+i32 main() { if (R != run()) { return 1; } return R; }
+""";
+        Verify.source(source).with_std().runs(Expected.exit(12));
+    }
+
+    [Test]
+    void BitfieldRejectsFlagsPast1024() {
+        str source = """
+import std::collections;
+import std::types;
+constexpr i32 run() {
+    mut bitfield<i32> f = bitfield<i32>();
+    f.set(1024);
+    return 0;
+}
+constexpr i32 R = run();
+i32 main() { return R; }
+""";
+        Verify.source(source).with_std().diagnostics(Expected.error(DiagnosticErrors.INVALID_CONSTANT_EXPRESSION));
+    }
 }
