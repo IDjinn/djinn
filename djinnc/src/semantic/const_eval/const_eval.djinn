@@ -13,7 +13,10 @@ struct ConstEval {
     const i32 TEXT = 4096;
     const i32 STRING = 8192;
     const i32 STRUCT = 16384;
-    const i32 SCALAR = 22016;
+    const i32 POINTER = 32768;
+    const i32 SCALAR = 54784;
+    const i32 BLOCK_LIMIT = 4096;
+    const i64 HEAP_LIMIT = 4194304;
     const i32 STEP_LIMIT = 1000000;
     const i32 DEPTH_LIMIT = 512;
     const i32 FRAME_CAPACITY = 16384;
@@ -23,6 +26,12 @@ struct ConstEval {
     ptr<i64> ints;
     ptr<f64> floats;
     ptr<i32> shapes;
+    ptr<i32> struct_cache;
+    ptr<i64> block_base;
+    ptr<i64> block_size;
+    ptr<i64> block_live;
+    i32 block_count;
+    i64 heap_bytes;
     i32 base;
     i32 top;
     i32 depth;
@@ -46,6 +55,7 @@ struct ConstEval {
         ConstEval* evaluator = (ConstEval*)arena.zalloc(sizeof(ConstEval), 8);
         evaluator.checker = checker;
         evaluator.shapes = (ptr<i32>)arena.zalloc((u64)ConstEval.SHAPE_CAPACITY * 4, 4);
+        evaluator.struct_cache = (ptr<i32>)arena.zalloc((u64)ConstEval.SHAPE_CAPACITY * 4, 4);
         return evaluator;
     }
 
@@ -79,6 +89,8 @@ struct ConstEval {
             shape = shape | ConstEval.FLOAT | (i32)Types.bits(type);
         } else if (type == Types.byte_pointer()) {
             shape = shape | ConstEval.TEXT | 64;
+        } else if (Types.is_pointer(type)) {
+            shape = shape | ConstEval.POINTER | 64;
         }
         return shape;
     }
@@ -236,6 +248,7 @@ struct ConstEval {
         Node* saved_blame = this.blame;
         if (this.nesting == 0) {
             this.steps = 0;
+            this.heap_reset();
         }
         this.nesting = this.nesting + 1;
         this.base = this.top;
@@ -246,12 +259,18 @@ struct ConstEval {
         i32 own = this.shape_of(own_type);
         i32 target = this.shape_of(target_type);
         mut bool ok = false;
-        if ((own & ConstEval.SCALAR) == 0 || (target & ConstEval.SCALAR) == 0 || ((own | target) & ConstEval.STRUCT) != 0) {
+        if ((own & ConstEval.SCALAR) == 0 || (target & ConstEval.SCALAR) == 0 || ((own | target) & (ConstEval.STRUCT | ConstEval.POINTER)) != 0) {
             ok = this.fail(expression, "only integers, floats, booleans, enums and string literals are supported");
         } else {
             ok = this.eval(expression);
             if (ok) {
                 this.convert(own, target);
+            }
+            if (ok && (own & ConstEval.TEXT) != 0 && this.find_block(this.ri) >= 0) {
+                ok = this.fail(expression, "a pointer into compile-time memory cannot be the result of a constant expression");
+            }
+            if (ok && this.nesting == 1 && this.heap_leaks()) {
+                ok = this.fail(expression, "compile-time allocation is never freed");
             }
         }
 
@@ -332,6 +351,11 @@ struct ConstEval {
         }
         if (kind == NodeKind::UNARY) {
             return this.eval_unary(node);
+        }
+        if (kind == NodeKind::NULL_LITERAL) {
+            this.ri = 0;
+            this.rf = 0.0;
+            return true;
         }
         if (kind == NodeKind::BOOL_LITERAL) {
             this.ri = node.int_value();
@@ -483,6 +507,19 @@ struct ConstEval {
         }
         i32 from = this.shape_of(operand.value_type());
         i32 to = this.shape_of(node.value_type());
+        i32 addressing = ConstEval.TEXT | ConstEval.POINTER | ConstEval.STRUCT;
+        if (((from | to) & addressing) != 0) {
+            bool from_ok = (from & (addressing | ConstEval.INTEGER)) != 0;
+            bool to_ok = (to & (addressing | ConstEval.INTEGER)) != 0;
+            if (!from_ok || !to_ok || ((from | to) & ConstEval.STRING) != 0) {
+                return this.fail(node, "this cast cannot be evaluated at compile time");
+            }
+            if ((to & ConstEval.INTEGER) != 0 && (to & 255) < 64) {
+                this.ri = ConstEval.wrap(this.ri, to);
+            }
+            this.rf = 0.0;
+            return true;
+        }
         if ((from & ConstEval.NUMERIC) == 0 || (to & ConstEval.NUMERIC) == 0) {
             return this.fail(node, "only numeric casts can be evaluated at compile time");
         }
@@ -507,6 +544,13 @@ struct ConstEval {
         if (offset < 0) {
             return this.fail(at, "string index is negative");
         }
+        i32 block = this.find_block((i64)text);
+        if (block >= 0) {
+            if ((i64)text + offset > this.block_base[block] + this.block_size[block]) {
+                return this.fail(at, "pointer access is out of bounds");
+            }
+            return true;
+        }
         for (mut i64 i = 0; i < offset; i = i + 1) {
             if (text[i] == 0) {
                 return this.fail(at, "string index is out of bounds");
@@ -517,8 +561,12 @@ struct ConstEval {
 
     unsafe bool eval_index(Node* node) {
         Node* base = node.first();
-        if ((this.shape_of(base.value_type()) & ConstEval.TEXT) == 0) {
-            return this.fail(node, "only strings can be indexed at compile time");
+        i32 base_shape = this.shape_of(base.value_type());
+        if ((base_shape & ConstEval.POINTER) != 0 || ((base_shape & ConstEval.TEXT) != 0 && (base_shape & ConstEval.STRING) == 0 && base.value_type() != Types.byte_pointer())) {
+            return this.eval_pointer_load(node, base, node.second());
+        }
+        if ((base_shape & ConstEval.TEXT) == 0) {
+            return this.fail(node, "only strings and pointers can be indexed at compile time");
         }
         if (!this.eval(base)) {
             return false;
@@ -530,6 +578,9 @@ struct ConstEval {
         if (!this.text_reaches(node, text, this.ri)) {
             return false;
         }
+        if (this.find_block((i64)text) >= 0) {
+            return this.load_typed(node, (i64)text + this.ri, Types.integer(8, true));
+        }
         i8 character = text[this.ri];
         this.ri = (i64)character;
         this.rf = (f64)this.ri;
@@ -540,13 +591,23 @@ struct ConstEval {
         TokenKind op = node.op_kind();
         Node* operand = node.first();
         if (op == TokenKind::STAR) {
-            if ((this.shape_of(operand.value_type()) & ConstEval.TEXT) == 0) {
-                return this.fail(node, "only strings can be dereferenced at compile time");
+            i32 operand_shape = this.shape_of(operand.value_type());
+            if ((operand_shape & ConstEval.POINTER) != 0) {
+                return this.eval_pointer_load(node, operand, (Node*)0);
+            }
+            if ((operand_shape & ConstEval.STRUCT) != 0) {
+                return this.eval(operand);
+            }
+            if ((operand_shape & ConstEval.TEXT) == 0) {
+                return this.fail(node, "only strings and pointers can be dereferenced at compile time");
             }
             if (!this.eval(operand)) {
                 return false;
             }
             ptr<i8> text = (ptr<i8>)this.ri;
+            if (this.find_block((i64)text) >= 0) {
+                return this.load_typed(node, (i64)text, Types.integer(8, true));
+            }
             i8 first = text[0];
             this.ri = (i64)first;
             this.rf = (f64)this.ri;
@@ -624,6 +685,28 @@ struct ConstEval {
         i32 right_shape = this.shape_of(right.value_type());
         if ((left_shape & ConstEval.STRING) != 0 && (right_shape & ConstEval.STRING) != 0) {
             return this.eval_text_binary(node, op);
+        }
+        i32 addressing = ConstEval.TEXT | ConstEval.POINTER | ConstEval.STRUCT;
+        if ((left_shape & ConstEval.POINTER) != 0 && (right_shape & ConstEval.INTEGER) != 0 && (op == TokenKind::PLUS || op == TokenKind::MINUS)) {
+            return this.eval_pointer_offset(node, op, left, right);
+        }
+        if ((left_shape & ConstEval.POINTER) != 0 && (right_shape & ConstEval.POINTER) != 0 && op == TokenKind::MINUS) {
+            return this.eval_pointer_difference(node);
+        }
+        if (((left_shape | right_shape) & addressing) != 0 && TypeChecker.is_comparison(op)) {
+            if (!this.eval(left)) {
+                return false;
+            }
+            i64 first = this.ri;
+            if (!this.eval(right)) {
+                return false;
+            }
+            this.ri = ConstEval.compare(op, first, this.ri, true);
+            this.rf = 0.0;
+            return true;
+        }
+        if ((left_shape & ConstEval.TEXT) != 0 && op == TokenKind::MINUS && (right_shape & ConstEval.INTEGER) != 0 && left.value_type() != Types.byte_pointer()) {
+            return this.eval_pointer_offset(node, op, left, right);
         }
         if ((left_shape & ConstEval.TEXT) != 0 && op == TokenKind::PLUS && (right_shape & ConstEval.INTEGER) != 0) {
             if (!this.eval(left)) {
@@ -945,8 +1028,18 @@ struct ConstEval {
 
     unsafe bool eval_assign(Node* node) {
         Node* target = node.first();
-        if (target.kind() != NodeKind::IDENTIFIER || target.symbol_kind() != SymbolKind.LOCAL) {
-            return this.fail(node, "only local variables can be assigned at compile time");
+        NodeKind target_kind = target.kind();
+        if (target_kind == NodeKind::FIELD_ACCESS && target.symbol_kind() == SymbolKind.FIELD) {
+            return this.eval_field_store(node, target, node.second());
+        }
+        if (target_kind == NodeKind::INDEX) {
+            return this.eval_pointer_store(node, target, node.second());
+        }
+        if (target_kind == NodeKind::UNARY && target.op_kind() == TokenKind::STAR) {
+            return this.eval_pointer_store(node, target, node.second());
+        }
+        if (target_kind != NodeKind::IDENTIFIER || target.symbol_kind() != SymbolKind.LOCAL) {
+            return this.fail(node, "only local variables, fields and pointer targets can be assigned at compile time");
         }
         LocalVariable* variable = (LocalVariable*)target.symbol();
         if (!this.in_frame || variable.eval_slot == 0 || variable.const_state == 2) {
@@ -958,6 +1051,7 @@ struct ConstEval {
         }
         i32 shape = this.shape_of(variable.type);
         this.convert(this.shape_of(value.value_type()), shape);
+        this.own_value(value, variable.type);
         i32 index = this.base + variable.eval_slot - 1;
         this.ints[index] = this.ri;
         this.floats[index] = this.rf;
@@ -1081,18 +1175,37 @@ struct ConstEval {
         if (symbol_kind == SymbolKind.FLOAT_BUILTIN) {
             return this.eval_float_builtin(node, callee);
         }
-        if (symbol_kind != SymbolKind.FUNCTION && symbol_kind != SymbolKind.STATIC_METHOD && symbol_kind != SymbolKind.INSTANCE_METHOD) {
+        bool constructing = symbol_kind == SymbolKind.CONSTRUCTOR;
+        if (!constructing && symbol_kind != SymbolKind.FUNCTION && symbol_kind != SymbolKind.STATIC_METHOD && symbol_kind != SymbolKind.INSTANCE_METHOD) {
             return this.fail(node, "only calls to constexpr functions can be evaluated");
         }
         FunctionInfo* info = (FunctionInfo*)callee.symbol();
+        if (constructing && info == null) {
+            StructInfo* plain = this.evaluable_struct(node.value_type());
+            if (plain == null || node.count() != 0) {
+                return this.fail(node, "this struct cannot be constructed at compile time");
+            }
+            this.ri = (i64)this.new_struct(plain);
+            this.rf = 0.0;
+            return true;
+        }
         if (info != null && info.is_extern) {
-            return this.eval_libm(node, callee.text(), info);
+            ptr<i8> external = callee.text();
+            if (ConstEval.is_alloc_call(external)) {
+                return this.eval_alloc_call(node, external);
+            }
+            if (ConstEval.is_memory_call(external)) {
+                return this.eval_memory_call(node, external);
+            }
+            return this.eval_libm(node, external, info);
         }
         if (info == null || info.const_kind == 0) {
             return this.fail(node, "call to a function that is not constexpr or consteval");
         }
         bool scalar_receiver = info.is_instance && symbol_kind == SymbolKind.INSTANCE_METHOD && (this.shape_of(callee.first().value_type()) & ConstEval.NUMERIC) != 0;
-        if ((info.is_instance && !scalar_receiver) || info.is_async || info.is_extern || info.is_variadic || info.is_template) {
+        bool struct_receiver = info.is_instance && symbol_kind == SymbolKind.INSTANCE_METHOD && (this.shape_of(callee.first().value_type()) & ConstEval.STRUCT) != 0;
+        bool has_receiver = scalar_receiver || struct_receiver || constructing;
+        if ((info.is_instance && !has_receiver) || info.is_async || info.is_extern || info.is_variadic || info.is_template) {
             return this.fail(node, "this function cannot be evaluated at compile time");
         }
         if (!this.prepare(node, info)) {
@@ -1122,11 +1235,26 @@ struct ConstEval {
         this.top = frame_top;
 
         mut i32 shift = 0;
-        if (scalar_receiver) {
+        mut i64 constructed = 0;
+        if (constructing) {
+            StructInfo* owner = this.evaluable_struct(node.value_type());
+            if (owner == null) {
+                this.top = frame_base;
+                return this.fail(node, "this struct cannot be constructed at compile time");
+            }
+            constructed = (i64)this.new_struct(owner);
+            this.ints[frame_base] = constructed;
+            this.floats[frame_base] = 0.0;
+            shift = 1;
+        } else if (scalar_receiver || struct_receiver) {
             Node* receiver = callee.first();
             if (!this.eval(receiver)) {
                 this.top = frame_base;
                 return false;
+            }
+            if (struct_receiver && this.ri == 0) {
+                this.top = frame_base;
+                return this.fail(receiver, "null pointer dereference");
             }
             this.ints[frame_base] = this.ri;
             this.floats[frame_base] = this.rf;
@@ -1135,7 +1263,8 @@ struct ConstEval {
         IdList* param_types = info.param_types;
         for (mut i32 i = 0; i < count; i = i + 1) {
             Node* argument = node.child(i);
-            i32 param_shape = this.shape_of(param_types.get(i));
+            u32 param_type = param_types.get(i + shift);
+            i32 param_shape = this.shape_of(param_type);
             if ((param_shape & ConstEval.SCALAR) == 0) {
                 this.top = frame_base;
                 return this.fail(argument, "parameter type cannot be evaluated at compile time");
@@ -1145,6 +1274,7 @@ struct ConstEval {
                 return false;
             }
             this.convert(this.shape_of(argument.value_type()), param_shape);
+            this.own_value(argument, param_type);
             this.ints[frame_base + i + shift] = this.ri;
             this.floats[frame_base + i + shift] = this.rf;
         }
@@ -1165,6 +1295,11 @@ struct ConstEval {
 
         if (status == EvalStatus.FAILED) {
             return false;
+        }
+        if (constructing) {
+            this.ri = constructed;
+            this.rf = 0.0;
+            return true;
         }
         if (status != EvalStatus.RETURN && !Types.is_void(info.return_type)) {
             return this.fail(node, "function ended without returning a value");
@@ -1216,6 +1351,7 @@ struct ConstEval {
                 return EvalStatus.FAILED;
             }
             this.convert(this.shape_of(value.value_type()), this.return_shape);
+            this.own_value(value, value.value_type());
         }
         return EvalStatus.RETURN;
     }
@@ -1244,12 +1380,17 @@ struct ConstEval {
         if (initial == null) {
             this.ints[index] = 0;
             this.floats[index] = 0.0;
+            StructInfo* fresh = this.evaluable_struct(variable.type);
+            if (fresh != null && !Types.is_pointer(variable.type)) {
+                this.ints[index] = (i64)this.new_struct(fresh);
+            }
             return EvalStatus.NORMAL;
         }
         if (!this.eval(initial)) {
             return EvalStatus.FAILED;
         }
         this.convert(this.shape_of(initial.value_type()), shape);
+        this.own_value(initial, variable.type);
         this.ints[index] = this.ri;
         this.floats[index] = this.rf;
         return EvalStatus.NORMAL;

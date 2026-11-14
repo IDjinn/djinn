@@ -15,16 +15,41 @@ impl ConstEval {
         TypeChecker* checker = this.checker;
         SymbolTable* symbols = checker.symbols;
         StructInfo* info = symbols.struct_at(Types.struct_index(target));
-        if (info == null || info.is_enum || info.is_primitive || info.has_payload || info.origin != null || info.is_template || info.fields == null) {
+        if (info == null || info.is_enum || info.is_primitive || info.has_payload || info.is_template || info.fields == null) {
             return (StructInfo*)0;
         }
-        PointerList* fields = info.fields;
-        for (mut i32 i = 0; i < fields.length; i = i + 1) {
-            FieldInfo* field = (FieldInfo*)fields.get(i);
-            i32 field_shape = this.text_shape(field.type) | ConstEval.describe(field.type);
-            if ((field_shape & (ConstEval.INTEGER | ConstEval.FLOAT | ConstEval.TEXT)) == 0) {
+        bool cacheable = target < (u32)ConstEval.SHAPE_CAPACITY;
+        if (cacheable) {
+            i32 cached = this.struct_cache[target];
+            if (cached == 2) {
                 return (StructInfo*)0;
             }
+            if (cached == 1) {
+                return info;
+            }
+            this.struct_cache[target] = 3;
+        }
+        mut bool usable = true;
+        PointerList* fields = info.fields;
+        for (mut i32 i = 0; i < fields.length && usable; i = i + 1) {
+            FieldInfo* field = (FieldInfo*)fields.get(i);
+            mut i32 field_shape = this.text_shape(field.type) | ConstEval.describe(field.type);
+            if (Types.is_struct(field.type) && this.evaluable_struct(field.type) != null) {
+                field_shape = field_shape | ConstEval.STRUCT;
+            }
+            if ((field_shape & (ConstEval.INTEGER | ConstEval.FLOAT | ConstEval.TEXT | ConstEval.POINTER | ConstEval.STRUCT)) == 0) {
+                usable = false;
+            }
+        }
+        if (cacheable) {
+            if (usable) {
+                this.struct_cache[target] = 1;
+            } else {
+                this.struct_cache[target] = 2;
+            }
+        }
+        if (!usable) {
+            return (StructInfo*)0;
         }
         return info;
     }
@@ -34,6 +59,55 @@ impl ConstEval {
             return 0;
         }
         return ConstEval.KNOWN | ConstEval.STRUCT | 64;
+    }
+
+    unsafe ptr<i64> new_struct(StructInfo* info) {
+        PointerList* fields = info.fields;
+        Arena* arena = Memory.arena();
+        ptr<i64> cells = (ptr<i64>)arena.zalloc((u64)(fields.length + 1) * 8, 8);
+        for (mut i32 i = 0; i < fields.length; i = i + 1) {
+            FieldInfo* field = (FieldInfo*)fields.get(i);
+            if (!Types.is_pointer(field.type)) {
+                StructInfo* nested = this.evaluable_struct(field.type);
+                if (nested != null) {
+                    cells[i] = (i64)this.new_struct(nested);
+                }
+            }
+        }
+        return cells;
+    }
+
+    unsafe ptr<i64> clone_struct(StructInfo* info, ptr<i64> source) {
+        PointerList* fields = info.fields;
+        ptr<i64> cells = this.new_struct(info);
+        for (mut i32 i = 0; i < fields.length; i = i + 1) {
+            FieldInfo* field = (FieldInfo*)fields.get(i);
+            mut StructInfo* nested = (StructInfo*)0;
+            if (!Types.is_pointer(field.type)) {
+                nested = this.evaluable_struct(field.type);
+            }
+            if (nested != null) {
+                cells[i] = (i64)this.clone_struct(nested, (ptr<i64>)source[i]);
+            } else {
+                cells[i] = source[i];
+            }
+        }
+        return cells;
+    }
+
+    unsafe void own_value(Node* source, u32 type) {
+        if (Types.is_pointer(type)) {
+            return;
+        }
+        StructInfo* info = this.evaluable_struct(type);
+        if (info == null) {
+            return;
+        }
+        NodeKind kind = source.kind();
+        if (kind == NodeKind::CALL || kind == NodeKind::STRUCT_INIT) {
+            return;
+        }
+        this.ri = (i64)this.clone_struct(info, (ptr<i64>)this.ri);
     }
 
     unsafe i32 field_position(StructInfo* info, FieldInfo* wanted) {
@@ -46,14 +120,30 @@ impl ConstEval {
         return -1;
     }
 
+    unsafe void write_cell(ptr<i64> cells, i32 position, i32 shape) {
+        if ((shape & ConstEval.FLOAT) != 0) {
+            cells[position] = ConstBits.of_float(this.rf);
+        } else {
+            cells[position] = this.ri;
+        }
+    }
+
+    unsafe void read_cell(ptr<i64> cells, i32 position, i32 shape) {
+        if ((shape & ConstEval.FLOAT) != 0) {
+            this.rf = ConstBits.to_float(cells[position]);
+            this.ri = 0;
+        } else {
+            this.ri = cells[position];
+            this.rf = (f64)this.ri;
+        }
+    }
+
     unsafe bool eval_struct_init(Node* node) {
         StructInfo* info = this.evaluable_struct(node.value_type());
         if (info == null) {
             return this.fail(node, "this struct cannot be evaluated at compile time");
         }
-        PointerList* fields = info.fields;
-        Arena* arena = Memory.arena();
-        ptr<i64> cells = (ptr<i64>)arena.zalloc((u64)(fields.length + 1) * 8, 8);
+        ptr<i64> cells = this.new_struct(info);
         for (mut i32 i = 0; i < node.count(); i = i + 1) {
             Node* init = node.child(i);
             FieldInfo* field = (FieldInfo*)init.symbol();
@@ -67,11 +157,8 @@ impl ConstEval {
             }
             i32 shape = this.shape_of(field.type);
             this.convert(this.shape_of(value.value_type()), shape);
-            if ((shape & ConstEval.FLOAT) != 0) {
-                cells[position] = ConstBits.of_float(this.rf);
-            } else {
-                cells[position] = this.ri;
-            }
+            this.own_value(value, field.type);
+            this.write_cell(cells, position, shape);
         }
         this.ri = (i64)cells;
         this.rf = 0.0;
@@ -92,15 +179,38 @@ impl ConstEval {
         if (!this.eval(base)) {
             return false;
         }
-        ptr<i64> cells = (ptr<i64>)this.ri;
-        i32 shape = this.shape_of(field.type);
-        if ((shape & ConstEval.FLOAT) != 0) {
-            this.rf = ConstBits.to_float(cells[position]);
-            this.ri = 0;
-        } else {
-            this.ri = cells[position];
-            this.rf = (f64)this.ri;
+        if (this.ri == 0) {
+            return this.fail(node, "null pointer dereference");
         }
+        this.read_cell((ptr<i64>)this.ri, position, this.shape_of(field.type));
+        return true;
+    }
+
+    unsafe bool eval_field_store(Node* node, Node* target, Node* value) {
+        Node* base = target.first();
+        StructInfo* info = this.evaluable_struct(base.value_type());
+        if (info == null) {
+            return this.fail(node, "field assignment cannot be evaluated at compile time");
+        }
+        FieldInfo* field = (FieldInfo*)target.symbol();
+        i32 position = this.field_position(info, field);
+        if (position < 0) {
+            return this.fail(node, "field assignment cannot be evaluated at compile time");
+        }
+        if (!this.eval(base)) {
+            return false;
+        }
+        if (this.ri == 0) {
+            return this.fail(node, "null pointer dereference");
+        }
+        ptr<i64> cells = (ptr<i64>)this.ri;
+        if (!this.eval(value)) {
+            return false;
+        }
+        i32 shape = this.shape_of(field.type);
+        this.convert(this.shape_of(value.value_type()), shape);
+        this.own_value(value, field.type);
+        this.write_cell(cells, position, shape);
         return true;
     }
 
