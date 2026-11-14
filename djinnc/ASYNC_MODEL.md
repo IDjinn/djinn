@@ -28,6 +28,10 @@ Decisions (confirmed 2026-11-14). Tracking issues: #121 to #125.
 
 `djinn_worker_thread` dequeues from `pool.queue`, but nothing enqueues there: every coroutine runs on the event-loop thread (`drain_ready_queue`). Idle workers only burn resources, so the runtime no longer starts them (`DJINN_SCHEDULE_ON_POOL 0` in `scheduler.c`). The thread setting is still resolved (env > properties > `[Runtime]` > `.proj` > default, where `0` means the logical core count) and kept in `pool.configured_threads`. Turning the pool on needs a thread-safe coroutine table, `Send`-like capture rules (#54, #102) and a decision on `spawn`; flip the macro when that exists. Until then `.sync` inside a coroutine nests the event loop on the same thread, so the scheduler-thread trap and `io_threads` are not meaningful and are not implemented.
 
+### Timers and idle loop (done)
+
+`Task.delay` no longer busy-yields. It registers a timer (`__djinn_async_sleep`), marks the coroutine waiting and suspends; the event loop re-enqueues it when the deadline passes. When nothing is runnable the loop waits on the ready queue's condition variable (I/O threads signal it) for at most 20 ms or until the next timer, instead of spinning with `sched_yield`/`Sleep(0)`. Timers live on the loop thread, so they need no lock.
+
 ## Public contract (#121)
 
 A function written `public` that blocks on a task (`.sync`) or calls an async function without awaiting it, and declares neither `async` nor `sync`, gets warning E6006. The choice is part of the contract for library callers. `public` is op bit 128, `private` 64.

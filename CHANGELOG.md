@@ -11,6 +11,7 @@
 - Warning E6006: a `public` function that blocks on a task or holds an async call without awaiting must declare `async` or `sync`.
 - A `sync main` starts no runtime unless async work is reachable from it (spawn, `.sync`, a remaining coroutine); unreachable async functions no longer keep it.
 - The runtime no longer starts idle worker threads (nothing schedules onto the pool yet); the thread setting is still resolved, `0` means the logical core count and is the new default.
+- Runtime: `Task.delay` uses a timer and the event loop sleeps when nothing is runnable (no more busy yield loop).
 - A function that uses `await` is async without writing `async` (not `sync` ones, where it stays E3061, and not `main`, which keeps its signature). Its callers now get a `task<T>` and must `await` it; the body stays in the `.djlib` interface so consumers see the task signature.
 
 ## [0.4.0] - 2026-11-13

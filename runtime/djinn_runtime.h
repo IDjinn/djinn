@@ -342,6 +342,7 @@ int __djinn_event_loop(void* main_handle);
 void __djinn_event_loop_run(void* main_handle);
 
 void __djinn_mark_waiting(void* handle);
+int64_t __djinn_async_sleep(int64_t milliseconds, void* coro);
 void __djinn_await(void* child_handle, void* parent_handle);
 
 
