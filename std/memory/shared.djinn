@@ -1,40 +1,51 @@
 import std::libc;
+import std::debug;
 import std::sys;
 import std::types::constraints;
 
 namespace std::memory;
 
+struct shared_block<T> {
+    mut atomic<i32> count;
+    mut owner<T> payload;
+}
+
 struct shared<T> : Disposable {
-    atomic<i32>* count;
-    owner<T>* block;
+    shared_block<T>* block;
 
     shared(T value) {
-        this.count = (atomic<i32>*)malloc(sizeof(atomic<i32>));
-        *this.count = atomic<i32>(1);
-        this.block = (owner<T>*)malloc(sizeof(owner<T>));
-        *this.block = owner<T>(value);
+        shared_block<T>* created = (shared_block<T>*)__djinn_alloc(sizeof(shared_block<T>));
+        created.count = atomic<i32>(1);
+        created.payload = owner<T>(value);
+        this.block = created;
     }
 
     public unsafe T* get() {
-        return this.block.get();
+        return this.block.payload.get();
     }
 
     public unsafe i32 references() {
-        return this.count.load();
+        return this.block.count.load();
     }
 
     public unsafe shared<T> clone() {
-        this.count.fetchAdd(1);
-        shared<T> copy = { .count = this.count, .block = this.block };
+        mut i32 current = this.block.count.load();
+        while (true) {
+            Debug.assert(current > 0, "shared::clone - the last reference was already released");
+            if (this.block.count.compareExchange(current, current + 1)) {
+                break;
+            }
+            current = this.block.count.load();
+        }
+        shared<T> copy = { .block = this.block };
         return copy;
     }
 
     public unsafe void disposable() {
-        if (this.count.fetchSub(1) != 1) {
+        if (this.block.count.fetchSub(1) != 1) {
             return;
         }
-        owner<T> last = *this.block;
-        free(this.block);
-        free(this.count);
+        owner<T> last = this.block.payload;
+        __djinn_free(this.block);
     }
 }

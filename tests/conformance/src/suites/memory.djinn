@@ -937,7 +937,7 @@ i32 main() {
     }
 
     [Test]
-    void ParameterStoredInFieldIsDisposedOnce() {
+    void ParameterStoredInFieldDisposesThePreviousValue() {
         str source = """
 import std::types::constraints;
 
@@ -968,7 +968,7 @@ i32 main() {
     return log;
 }
 """;
-        Verify.source(source).with_std().runs(Expected.exit(2));
+        Verify.source(source).with_std().runs(Expected.exit(6));
     }
 
     [Test]
@@ -1090,5 +1090,634 @@ i32 main() {
 }
 """;
         Verify.source(source).with_std().runs(Expected.exit(8));
+    }
+
+    [Test]
+    void ExplicitDisposeCallIsError() {
+        str source = """
+import std::types::constraints;
+
+unsafe static mut i32 log = 0;
+
+struct Handle : Disposable {
+    i32 id;
+
+    public void disposable() {
+        log = log * 4 + this.id;
+    }
+}
+
+i32 main() {
+    Handle h = { .id = 1 };
+    h.disposable();
+    return 0;
+}
+""";
+        Verify.source(source).with_std().diagnostics(Expected.error(DiagnosticErrors.EXPLICIT_DISPOSE));
+    }
+
+    [Test]
+    void ExplicitFieldDisposeInsideDisposeIsError() {
+        str source = """
+import std::types::constraints;
+
+unsafe static mut i32 log = 0;
+
+struct Handle : Disposable {
+    i32 id;
+
+    public void disposable() {
+        log = log * 4 + this.id;
+    }
+}
+
+struct Holder : Disposable {
+    Handle inner;
+
+    public void disposable() {
+        this.inner.disposable();
+    }
+}
+
+i32 main() {
+    return 0;
+}
+""";
+        Verify.source(source).with_std().diagnostics(Expected.error(DiagnosticErrors.EXPLICIT_DISPOSE));
+    }
+
+    [Test]
+    void FieldIsDisposedByGlueOnce() {
+        str source = """
+import std::types::constraints;
+
+unsafe static mut i32 log = 0;
+
+struct Handle : Disposable {
+    i32 id;
+
+    public void disposable() {
+        log = log * 4 + this.id;
+    }
+}
+
+struct Holder : Disposable {
+    Handle inner;
+
+    public void disposable() {
+    }
+}
+
+i32 main() {
+    {
+        Holder h = { .inner = { .id = 3 } };
+    }
+    return log;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(3));
+    }
+
+    [Test]
+    void EarlyReturnDisposesOnce() {
+        str source = """
+import std::types::constraints;
+
+unsafe static mut i32 log = 0;
+
+struct Handle : Disposable {
+    i32 id;
+
+    public void disposable() {
+        log = log * 4 + this.id;
+    }
+}
+
+i32 work(bool early) {
+    Handle h = { .id = 2 };
+    if (early) {
+        return 1;
+    }
+    return 0;
+}
+
+i32 main() {
+    work(true);
+    return log;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(2));
+    }
+
+    [Test]
+    void MovedIntoFunctionDisposesOnce() {
+        str source = """
+import std::types::constraints;
+
+unsafe static mut i32 log = 0;
+
+struct Handle : Disposable {
+    i32 id;
+
+    public void disposable() {
+        log = log * 4 + this.id;
+    }
+}
+
+void consume(Handle h) {
+}
+
+i32 main() {
+    Handle h = { .id = 3 };
+    consume(h);
+    return log;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(3));
+    }
+
+    [Test]
+    void MoveOutOfFieldIsError() {
+        str source = """
+import std::types::constraints;
+
+unsafe static mut i32 log = 0;
+
+struct Handle : Disposable {
+    i32 id;
+
+    public void disposable() {
+        log = log * 4 + this.id;
+    }
+}
+
+struct Box {
+    mut Handle h;
+}
+
+struct Holder : Disposable {
+    mut Handle inner;
+
+    Holder(i32 first) {
+        this.inner = { .id = first };
+        this.inner = { .id = first + 1 };
+    }
+
+    public void disposable() {
+    }
+}
+
+i32 main() {
+    Box b = { .h = { .id = 1 } };
+    Handle x = b.h;
+    return 0;
+}
+""";
+        Verify.source(source).with_std().diagnostics(Expected.error(DiagnosticErrors.MOVE_OUT_OF_PLACE));
+    }
+
+    [Test]
+    void MoveOutOfFieldIntoArgumentIsError() {
+        str source = """
+import std::types::constraints;
+
+unsafe static mut i32 log = 0;
+
+struct Handle : Disposable {
+    i32 id;
+
+    public void disposable() {
+        log = log * 4 + this.id;
+    }
+}
+
+struct Box {
+    mut Handle h;
+}
+
+struct Holder : Disposable {
+    mut Handle inner;
+
+    Holder(i32 first) {
+        this.inner = { .id = first };
+        this.inner = { .id = first + 1 };
+    }
+
+    public void disposable() {
+    }
+}
+
+void eat(Handle h) {
+}
+
+i32 main() {
+    Box b = { .h = { .id = 1 } };
+    eat(b.h);
+    return 0;
+}
+""";
+        Verify.source(source).with_std().diagnostics(Expected.error(DiagnosticErrors.MOVE_OUT_OF_PLACE));
+    }
+
+    [Test]
+    void MoveOutOfPointerIsError() {
+        str source = """
+import std::types::constraints;
+
+unsafe static mut i32 log = 0;
+
+struct Handle : Disposable {
+    i32 id;
+
+    public void disposable() {
+        log = log * 4 + this.id;
+    }
+}
+
+struct Box {
+    mut Handle h;
+}
+
+struct Holder : Disposable {
+    mut Handle inner;
+
+    Holder(i32 first) {
+        this.inner = { .id = first };
+        this.inner = { .id = first + 1 };
+    }
+
+    public void disposable() {
+    }
+}
+
+i32 main() {
+    Handle a = { .id = 1 };
+    Handle* p = &a;
+    Handle x = *p;
+    return 0;
+}
+""";
+        Verify.source(source).with_std().diagnostics(Expected.error(DiagnosticErrors.MOVE_OUT_OF_PLACE));
+    }
+
+    [Test]
+    void ReadingAFieldOfAFieldedStructIsNotAMove() {
+        str source = """
+import std::types::constraints;
+
+unsafe static mut i32 log = 0;
+
+struct Handle : Disposable {
+    i32 id;
+
+    public void disposable() {
+        log = log * 4 + this.id;
+    }
+}
+
+struct Box {
+    mut Handle h;
+}
+
+struct Holder : Disposable {
+    mut Handle inner;
+
+    Holder(i32 first) {
+        this.inner = { .id = first };
+        this.inner = { .id = first + 1 };
+    }
+
+    public void disposable() {
+    }
+}
+
+i32 main() {
+    mut i32 total = 0;
+    {
+        Box b = { .h = { .id = 3 } };
+        total = b.h.id;
+    }
+    return total * 10 + log;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(33));
+    }
+
+    [Test]
+    void FieldReassignmentDisposesThePreviousValue() {
+        str source = """
+import std::types::constraints;
+
+unsafe static mut i32 log = 0;
+
+struct Handle : Disposable {
+    i32 id;
+
+    public void disposable() {
+        log = log * 4 + this.id;
+    }
+}
+
+struct Box {
+    mut Handle h;
+}
+
+struct Holder : Disposable {
+    mut Handle inner;
+
+    Holder(i32 first) {
+        this.inner = { .id = first };
+        this.inner = { .id = first + 1 };
+    }
+
+    public void disposable() {
+    }
+}
+
+i32 main() {
+    {
+        Box b = { .h = { .id = 1 } };
+        b.h = { .id = 2 };
+    }
+    return log;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(6));
+    }
+
+    [Test]
+    void ConstructorFieldAssignmentDoesNotDisposeUninitializedField() {
+        str source = """
+import std::types::constraints;
+
+unsafe static mut i32 log = 0;
+
+struct Handle : Disposable {
+    i32 id;
+
+    public void disposable() {
+        log = log * 4 + this.id;
+    }
+}
+
+struct Box {
+    mut Handle h;
+}
+
+struct Holder : Disposable {
+    mut Handle inner;
+
+    Holder(i32 first) {
+        this.inner = { .id = first };
+        this.inner = { .id = first + 1 };
+    }
+
+    public void disposable() {
+    }
+}
+
+i32 main() {
+    {
+        Holder h = Holder(1);
+    }
+    return log;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(2));
+    }
+
+    [Test]
+    void UninitializedLocalFieldAssignmentDoesNotDisposeGarbage() {
+        str source = """
+import std::types::constraints;
+
+unsafe static mut i32 log = 0;
+
+struct Handle : Disposable {
+    i32 id;
+
+    public void disposable() {
+        log = log * 4 + this.id;
+    }
+}
+
+struct Box {
+    mut Handle h;
+}
+
+struct Holder : Disposable {
+    mut Handle inner;
+
+    Holder(i32 first) {
+        this.inner = { .id = first };
+        this.inner = { .id = first + 1 };
+    }
+
+    public void disposable() {
+    }
+}
+
+i32 main() {
+    {
+        Box b;
+        b.h = { .id = 3 };
+    }
+    return log;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(0));
+    }
+
+    [Test]
+    void ConstructorReturningEarlyBeforeAssigningAFieldIsError() {
+        str source = """
+import std::types::constraints;
+
+unsafe static mut i32 log = 0;
+
+struct Handle : Disposable {
+    i32 id;
+
+    public void disposable() {
+        log = log * 4 + this.id;
+    }
+}
+
+struct Wrap : Disposable {
+    Handle h;
+
+    Wrap(i32 v, bool early) {
+        if (early) {
+            return;
+        }
+        this.h = { .id = v };
+    }
+
+    public void disposable() {
+    }
+}
+
+i32 main() {
+    return 0;
+}
+""";
+        Verify.source(source).with_std().diagnostics(Expected.error(DiagnosticErrors.FIELD_NOT_INITIALIZED));
+    }
+
+    [Test]
+    void ConstructorNeverAssigningADisposableFieldIsError() {
+        str source = """
+import std::types::constraints;
+
+unsafe static mut i32 log = 0;
+
+struct Handle : Disposable {
+    i32 id;
+
+    public void disposable() {
+        log = log * 4 + this.id;
+    }
+}
+
+struct Wrap : Disposable {
+    Handle h;
+
+    Wrap(i32 v) {
+    }
+
+    public void disposable() {
+    }
+}
+
+i32 main() {
+    return 0;
+}
+""";
+        Verify.source(source).with_std().diagnostics(Expected.error(DiagnosticErrors.FIELD_NOT_INITIALIZED));
+    }
+
+    [Test]
+    void InitializerOmittingADisposableFieldIsError() {
+        str source = """
+import std::types::constraints;
+
+unsafe static mut i32 log = 0;
+
+struct Handle : Disposable {
+    i32 id;
+
+    public void disposable() {
+        log = log * 4 + this.id;
+    }
+}
+
+struct Pair {
+    Handle left;
+    Handle right;
+}
+
+i32 main() {
+    Pair p = { .left = { .id = 1 } };
+    return 0;
+}
+""";
+        Verify.source(source).with_std().diagnostics(Expected.error(DiagnosticErrors.FIELD_NOT_INITIALIZED));
+    }
+
+    [Test]
+    void ConstructorAssigningEveryDisposableFieldIsDisposedOnce() {
+        str source = """
+import std::types::constraints;
+
+unsafe static mut i32 log = 0;
+
+struct Handle : Disposable {
+    i32 id;
+
+    public void disposable() {
+        log = log * 4 + this.id;
+    }
+}
+
+struct Wrap : Disposable {
+    Handle h;
+
+    Wrap(i32 v) {
+        this.h = { .id = v };
+    }
+
+    public void disposable() {
+    }
+}
+
+i32 main() {
+    {
+        Wrap w = Wrap(3);
+    }
+    return log;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(3));
+    }
+
+    [Test]
+    void AsyncParameterIsDisposedWhenTheCoroutineEnds() {
+        str source = """
+import std::memory;
+import std::types;
+import std::types::constraints;
+import std::sys;
+namespace app;
+
+unsafe static mut i32 disposals = 0;
+
+struct Payload : Disposable {
+    i32 id;
+    public void disposable() { atomic_add(&disposals, 1); }
+}
+
+async void a(shared<Payload> mine) { }
+void s(shared<Payload> mine) { }
+
+async i32 main() {
+    {
+        shared<Payload> x = shared<Payload>({ .id = 7 });
+        s(x);
+    }
+    i32 sync_count = atomic_load(&disposals);
+    {
+        shared<Payload> y = shared<Payload>({ .id = 7 });
+        await a(y);
+    }
+    i32 await_count = atomic_load(&disposals);
+    {
+        shared<Payload> z = shared<Payload>({ .id = 7 });
+        spawn a(z);
+    }
+    await Task.pause();
+    await Task.pause();
+    return sync_count * 16 + await_count * 4 + atomic_load(&disposals);
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(27));
+    }
+
+    [Test]
+    void PointerFromGetBorrowsTheHandle() {
+        str source = """
+import std::memory;
+import std::types;
+import std::types::constraints;
+namespace app;
+struct P : Disposable { i32 id; public void disposable() { } }
+void eat(shared<P> s) { }
+i32 main() {
+    shared<P> a = shared<P>({ .id = 7 });
+    P* p = a.get();
+    eat(a);
+    return p.id;
+}
+""";
+        Verify.source(source).with_std().diagnostics(Expected.error(DiagnosticErrors.BORROW_CONFLICT));
     }
 }

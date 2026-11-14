@@ -1,0 +1,96 @@
+namespace djinnc;
+
+impl TypeChecker {
+    unsafe bool contains_return(Node* node) {
+        if (node == null) {
+            return false;
+        }
+        if (node.kind() == NodeKind::RETURN) {
+            return true;
+        }
+        if (this.contains_return(node.first()) || this.contains_return(node.second())
+            || this.contains_return(node.third()) || this.contains_return(node.fourth())) {
+            return true;
+        }
+        if (!node.has_items()) {
+            return false;
+        }
+        for (mut i32 i = 0; i < node.count(); i = i + 1) {
+            if (this.contains_return(node.child(i))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    unsafe bool assigns_field(Node* statement, FieldInfo* field) {
+        if (statement.kind() != NodeKind::EXPR_STMT) {
+            return false;
+        }
+        Node* assignment = statement.first();
+        if (assignment.kind() != NodeKind::ASSIGN) {
+            return false;
+        }
+        Node* target = assignment.first();
+        bool implicit = target.kind() == NodeKind::IDENTIFIER && target.symbol_kind() == SymbolKind.IMPLICIT_FIELD;
+        bool explicit = target.kind() == NodeKind::FIELD_ACCESS && target.symbol_kind() == SymbolKind.FIELD;
+        return (implicit || explicit) && target.symbol() == (ptr)field;
+    }
+
+    unsafe bool constructor_initializes(Node* body, FieldInfo* field) {
+        if (!body.has_items()) {
+            return false;
+        }
+        for (mut i32 i = 0; i < body.count(); i = i + 1) {
+            Node* statement = body.child(i);
+            if (this.assigns_field(statement, field)) {
+                return true;
+            }
+            if (this.contains_return(statement)) {
+                return false;
+            }
+        }
+        return false;
+    }
+
+    unsafe void check_constructor_initialization(FunctionInfo* info) {
+        StructInfo* owner = info.owner;
+        if (owner == null || owner.fields == null || info.name_atom != Ast.intern_base_name(".ctor", 5)) {
+            return;
+        }
+        SymbolTable* symbols = this.symbols;
+        Node* declaration = info.node;
+        Node* body = declaration.first();
+        PointerList* fields = owner.fields;
+        for (mut i32 i = 0; i < fields.length; i = i + 1) {
+            FieldInfo* field = (FieldInfo*)fields.get(i);
+            if (Ownership.needs_dispose(symbols, field.type) && !this.constructor_initializes(body, field)) {
+                this.error_code(declaration, DiagnosticErrors.FIELD_NOT_INITIALIZED, "the constructor must assign every field that needs disposal before it can return");
+            }
+        }
+    }
+
+    unsafe void check_initializer_fields(Node* node, StructInfo* info) {
+        if (info.fields == null) {
+            return;
+        }
+        SymbolTable* symbols = this.symbols;
+        PointerList* fields = info.fields;
+        for (mut i32 i = 0; i < fields.length; i = i + 1) {
+            FieldInfo* field = (FieldInfo*)fields.get(i);
+            if (!Ownership.needs_dispose(symbols, field.type)) {
+                continue;
+            }
+            mut bool given = false;
+            for (mut i32 j = 0; node.has_items() && j < node.count(); j = j + 1) {
+                Node* init = node.child(j);
+                if (init.symbol() == (ptr)field) {
+                    given = true;
+                }
+            }
+            if (!given) {
+                this.error_code(node, DiagnosticErrors.FIELD_NOT_INITIALIZED, "the initializer must give every field that needs disposal a value");
+            }
+        }
+    }
+}
