@@ -8,6 +8,7 @@
 - `sync` function modifier: `await` is rejected inside it (E3061). Postfix `task.sync` is a blocking wait, with warning E6005 inside async functions.
 - A `sync main` in a program with no async function left after elision starts no runtime (no `__djinn_runtime_init`/shutdown).
 - `private` is now enforced (E3062): a private function or method is callable within its own namespace, or from methods of the same type; from another namespace it is an error. `public` stays the default.
+- A function that uses `await` is async without writing `async` (not `sync` ones, where it stays E3061, and not `main`, which keeps its signature). Its callers now get a `task<T>` and must `await` it; the body stays in the `.djlib` interface so consumers see the task signature.
 
 ## [0.4.0] - 2026-11-13
 

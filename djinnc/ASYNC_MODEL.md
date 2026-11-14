@@ -35,6 +35,10 @@ Decisions (confirmed 2026-11-14). Tracking issues: #121 to #125.
 
 Until both are settled a function is async only when declared, and `AsyncElision` already removes the cost of declaring `async` on code that never suspends.
 
+## Decision: `await` makes a function async (2026-11-14)
+
+Resolves the implicit-await question without changing call sites: a function whose body contains `await` is async (the parser sets the async bit), so `T` becomes `task<T>` exactly as if `async` were written, and callers `await` it as usual. Functions without `await` keep their signature. Excluded: `sync` functions (`await` stays E3061) and `main` (entry point signature is fixed; write `async i32 main()` explicitly). Inference is a parser-level rule, so an inferred function keeps its body in the `.djlib` interface. Unchanged: a function that only calls async code without awaiting is not inferred, and the "public must declare async or sync" check is not built.
+
 ## Not implemented
 
 - Async inference by default with explicit `async`/`sync` on public functions (#121). Today a function is sync unless declared `async`, so this would turn every un-annotated public function into an error and change `T` to `task<T>` for inferred ones. It needs a migration of `std/` and a decision on implicit await first.

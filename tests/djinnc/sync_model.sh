@@ -123,7 +123,7 @@ sync i32 blocked() throws(Oops) {
 
 i32 main() {
     i32 ok = try blocked() ?: 100;
-    return plain() + ok;
+    return await plain() + ok;
 }
 SOURCE
 "$compiler" "$out/throws.djinn" --no-async-elision -o "$out/throws$exe" "${flags[@]}" > "$out/throws.log" 2>&1 || { cat "$out/throws.log"; fail "throws with sync must compile"; }
@@ -192,5 +192,50 @@ if "$compiler" "$out/private_bad/lib.djinn" --library -o "$out/private_bad/hidde
 else
     cat "$out/private_lib.log"; fail "library with a private function must build"
 fi
+
+# A function that uses 'await' is async without the keyword, also through a library interface.
+cat > "$out/infer.djinn" <<'SOURCE'
+namespace infer;
+
+async i32 leaf(i32 x) {
+    return x + 1;
+}
+
+i32 middle(i32 x) {
+    return await leaf(x) + 1;
+}
+
+i32 main() {
+    return await middle(40);
+}
+SOURCE
+"$compiler" "$out/infer.djinn" --no-async-elision -o "$out/infer$exe" "${flags[@]}" > "$out/infer.log" 2>&1 || { cat "$out/infer.log"; fail "await must make an un-annotated function async"; }
+set +e; "$out/infer$exe"; code=$?; set -e
+[ "$code" = 42 ] || fail "inferred async program must exit 42, got $code"
+mkdir -p "$out/infer_lib"
+cat > "$out/infer_lib/lib.djinn" <<'SOURCE'
+namespace inferlib;
+
+async i32 leaf(i32 x) {
+    return x + 1;
+}
+
+i32 middle(i32 x) {
+    return await leaf(x) + 1;
+}
+SOURCE
+cat > "$out/infer_lib/main.djinn" <<'SOURCE'
+namespace app;
+
+import inferlib;
+
+i32 main() {
+    return await middle(40);
+}
+SOURCE
+"$compiler" "$out/infer_lib/lib.djinn" --library -o "$out/infer_lib/inferlib.djlib" "${flags[@]}" > "$out/infer_lib.log" 2>&1 || { cat "$out/infer_lib.log"; fail "library with an inferred async function must build"; }
+"$compiler" "$out/infer_lib/main.djinn" --lib "$out/infer_lib/inferlib.djlib" -o "$out/infer_lib$exe" "${flags[@]}" > "$out/infer_lib_use.log" 2>&1 || { cat "$out/infer_lib_use.log"; fail "consumer must see the inferred task signature"; }
+set +e; "$out/infer_lib$exe"; code=$?; set -e
+[ "$code" = 42 ] || fail "inferred async library program must exit 42, got $code"
 
 echo "sync_model: ok"
