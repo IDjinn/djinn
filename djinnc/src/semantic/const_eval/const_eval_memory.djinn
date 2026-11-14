@@ -1,0 +1,415 @@
+namespace djinnc;
+
+enum ConstHeapKind {
+    NONE,
+    ALLOC,
+    REALLOC,
+    FREE,
+    COPY,
+    FILL
+}
+
+impl ConstEval {
+    unsafe void ensure_heap() {
+        if (this.block_base != null) {
+            return;
+        }
+        Arena* arena = Memory.arena();
+        this.block_base = (ptr<i64>)arena.zalloc((u64)ConstEval.BLOCK_LIMIT * 8, 8);
+        this.block_size = (ptr<i64>)arena.zalloc((u64)ConstEval.BLOCK_LIMIT * 8, 8);
+        this.block_live = (ptr<i64>)arena.zalloc((u64)ConstEval.BLOCK_LIMIT * 8, 8);
+    }
+
+    unsafe i32 find_block(i64 address) {
+        if (this.block_base == null || address == 0) {
+            return -1;
+        }
+        mut i32 past_end = -1;
+        for (mut i32 i = 0; i < this.block_count; i = i + 1) {
+            i64 start = this.block_base[i];
+            i64 end = start + this.block_size[i];
+            if (address >= start && address < end) {
+                return i;
+            }
+            if (address == end) {
+                past_end = i;
+            }
+        }
+        return past_end;
+    }
+
+    unsafe bool heap_alloc(Node* at, i64 size) {
+        this.ensure_heap();
+        if (size < 0 || size > ConstEval.HEAP_LIMIT || this.heap_bytes + size > ConstEval.HEAP_LIMIT) {
+            return this.fail(at, "compile-time heap limit exceeded");
+        }
+        if (this.block_count >= ConstEval.BLOCK_LIMIT) {
+            return this.fail(at, "too many compile-time allocations");
+        }
+        Arena* arena = Memory.arena();
+        mut i64 reserved = size;
+        if (reserved < 8) {
+            reserved = 8;
+        }
+        ptr<i8> memory = (ptr<i8>)arena.zalloc((u64)reserved, 16);
+        i32 index = this.block_count;
+        this.block_base[index] = (i64)memory;
+        this.block_size[index] = size;
+        this.block_live[index] = 1;
+        this.block_count = this.block_count + 1;
+        this.heap_bytes = this.heap_bytes + size;
+        this.ri = (i64)memory;
+        this.rf = 0.0;
+        return true;
+    }
+
+    unsafe bool heap_free(Node* at, i64 address) {
+        if (address == 0) {
+            return true;
+        }
+        i32 index = this.find_block(address);
+        if (index < 0 || this.block_base[index] != address) {
+            return this.fail(at, "free of a pointer that was not allocated at compile time");
+        }
+        if (this.block_live[index] == 0) {
+            return this.fail(at, "compile-time allocation is freed twice");
+        }
+        this.block_live[index] = 0;
+        this.heap_bytes = this.heap_bytes - this.block_size[index];
+        return true;
+    }
+
+    unsafe bool heap_realloc(Node* at, i64 address, i64 size) {
+        if (address == 0) {
+            return this.heap_alloc(at, size);
+        }
+        i32 index = this.find_block(address);
+        if (index < 0 || this.block_base[index] != address || this.block_live[index] == 0) {
+            return this.fail(at, "realloc of a pointer that is not a live compile-time allocation");
+        }
+        i64 old_size = this.block_size[index];
+        if (!this.heap_alloc(at, size)) {
+            return false;
+        }
+        i64 fresh = this.ri;
+        mut i64 kept = old_size;
+        if (size < kept) {
+            kept = size;
+        }
+        memcpy((ptr)fresh, (ptr)address, (u64)kept);
+        this.heap_free(at, address);
+        this.ri = fresh;
+        return true;
+    }
+
+    unsafe bool heap_leaks() {
+        for (mut i32 i = 0; i < this.block_count; i = i + 1) {
+            if (this.block_live[i] != 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    unsafe void heap_reset() {
+        this.block_count = 0;
+        this.heap_bytes = 0;
+        this.cell_bytes = 0;
+    }
+
+    unsafe bool check_access(Node* at, i64 address, i64 bytes) {
+        if (address == 0) {
+            return this.fail(at, "null pointer dereference");
+        }
+        i32 index = this.find_block(address);
+        if (index < 0) {
+            return this.fail(at, "pointer does not point into compile-time memory");
+        }
+        if (this.block_live[index] == 0) {
+            return this.fail(at, "use of a compile-time allocation after it was freed");
+        }
+        if (address + bytes > this.block_base[index] + this.block_size[index]) {
+            return this.fail(at, "pointer access is out of bounds");
+        }
+        return true;
+    }
+
+    static i32 width_of(i32 shape) {
+        i32 bits = shape & 255;
+        if (bits <= 8) {
+            return 1;
+        }
+        return bits / 8;
+    }
+
+    unsafe bool load_typed(Node* at, i64 address, u32 type) {
+        i32 shape = this.shape_of(type);
+        if ((shape & (ConstEval.INTEGER | ConstEval.FLOAT | ConstEval.TEXT | ConstEval.POINTER | ConstEval.STRUCT)) == 0) {
+            return this.fail(at, "this element type cannot be read at compile time");
+        }
+        i32 width = ConstEval.width_of(shape);
+        if (!this.check_access(at, address, (i64)width)) {
+            return false;
+        }
+        if ((shape & ConstEval.STRUCT) != 0) {
+            return this.fail(at, "a struct stored in compile-time memory is not supported");
+        }
+        if ((shape & ConstEval.FLOAT) != 0) {
+            if (width == 4) {
+                mut f32 narrow = (f32)0.0;
+                memcpy((ptr)&narrow, (ptr)address, 4);
+                this.rf = (f64)narrow;
+            } else {
+                mut f64 wide = 0.0;
+                memcpy((ptr)&wide, (ptr)address, 8);
+                this.rf = wide;
+            }
+            this.ri = 0;
+            return true;
+        }
+        mut i64 value = 0;
+        memcpy((ptr)&value, (ptr)address, (u64)width);
+        this.ri = ConstEval.wrap(value, shape);
+        this.rf = (f64)this.ri;
+        return true;
+    }
+
+    unsafe bool store_typed(Node* at, i64 address, u32 type, i64 whole, f64 real) {
+        i32 shape = this.shape_of(type);
+        if ((shape & (ConstEval.INTEGER | ConstEval.FLOAT | ConstEval.TEXT | ConstEval.POINTER)) == 0) {
+            return this.fail(at, "this element type cannot be written at compile time");
+        }
+        i32 width = ConstEval.width_of(shape);
+        if (!this.check_access(at, address, (i64)width)) {
+            return false;
+        }
+        if ((shape & ConstEval.FLOAT) != 0) {
+            if (width == 4) {
+                mut f32 narrow = (f32)real;
+                memcpy((ptr)address, (ptr)&narrow, 4);
+            } else {
+                mut f64 wide = real;
+                memcpy((ptr)address, (ptr)&wide, 8);
+            }
+            return true;
+        }
+        mut i64 source = whole;
+        memcpy((ptr)address, (ptr)&source, (u64)width);
+        return true;
+    }
+
+    unsafe i64 element_width(Node* at, u32 pointer_type) {
+        u32 element = Types.element(pointer_type);
+        i32 shape = this.shape_of(element);
+        if ((shape & ConstEval.STRUCT) != 0 && !Types.is_pointer(element)) {
+            this.fail(at, "pointer arithmetic over structs is not supported at compile time");
+            return 0;
+        }
+        if (Types.is_void(element)) {
+            return 1;
+        }
+        return (i64)ConstEval.width_of(shape);
+    }
+
+    unsafe bool eval_pointer_offset(Node* node, TokenKind op, Node* pointer, Node* count) {
+        if (!this.eval(pointer)) {
+            return false;
+        }
+        i64 address = this.ri;
+        if (!this.eval(count)) {
+            return false;
+        }
+        mut i64 amount = this.ri;
+        i64 width = this.element_width(node, pointer.value_type());
+        if (width == 0) {
+            return false;
+        }
+        if (op == TokenKind::MINUS) {
+            amount = 0 - amount;
+        }
+        i64 moved = address + amount * width;
+        i32 block = this.find_block(address);
+        if (block >= 0) {
+            i64 start = this.block_base[block];
+            if (moved < start || moved > start + this.block_size[block]) {
+                return this.fail(node, "pointer arithmetic leaves its compile-time allocation");
+            }
+        }
+        this.ri = moved;
+        this.rf = 0.0;
+        return true;
+    }
+
+    unsafe bool eval_pointer_difference(Node* node) {
+        Node* left = node.first();
+        if (!this.eval(left)) {
+            return false;
+        }
+        i64 a = this.ri;
+        if (!this.eval(node.second())) {
+            return false;
+        }
+        i64 b = this.ri;
+        i64 width = this.element_width(node, left.value_type());
+        if (width == 0) {
+            return false;
+        }
+        this.ri = (a - b) / width;
+        this.rf = 0.0;
+        return true;
+    }
+
+    unsafe bool eval_pointer_load(Node* node, Node* pointer, Node* position) {
+        if (!this.eval(pointer)) {
+            return false;
+        }
+        mut i64 address = this.ri;
+        u32 pointer_type = pointer.value_type();
+        u32 element = Types.element(pointer_type);
+        if (position != null) {
+            if (!this.eval(position)) {
+                return false;
+            }
+            i64 width = this.element_width(node, pointer_type);
+            if (width == 0) {
+                return false;
+            }
+            address = address + this.ri * width;
+        }
+        return this.load_typed(node, address, element);
+    }
+
+    unsafe bool eval_pointer_store(Node* node, Node* target, Node* value) {
+        mut Node* pointer = target.first();
+        mut Node* position = (Node*)0;
+        if (target.kind() == NodeKind::INDEX) {
+            position = target.second();
+        }
+        if (!this.eval(pointer)) {
+            return false;
+        }
+        mut i64 address = this.ri;
+        u32 pointer_type = pointer.value_type();
+        u32 element = Types.element(pointer_type);
+        if (position != null) {
+            if (!this.eval(position)) {
+                return false;
+            }
+            i64 width = this.element_width(node, pointer_type);
+            if (width == 0) {
+                return false;
+            }
+            address = address + this.ri * width;
+        }
+        if (!this.eval(value)) {
+            return false;
+        }
+        this.convert(this.shape_of(value.value_type()), this.shape_of(element));
+        return this.store_typed(node, address, element, this.ri, this.rf);
+    }
+
+    unsafe bool eval_alloc_call(Node* node, ConstHeapKind kind) {
+        if (kind == ConstHeapKind::FREE) {
+            if (!this.eval(node.child(0))) {
+                return false;
+            }
+            return this.heap_free(node, this.ri);
+        }
+        if (kind == ConstHeapKind::REALLOC) {
+            if (!this.eval(node.child(0))) {
+                return false;
+            }
+            i64 address = this.ri;
+            if (!this.eval(node.child(1))) {
+                return false;
+            }
+            return this.heap_realloc(node, address, this.ri);
+        }
+        if (!this.eval(node.child(0))) {
+            return false;
+        }
+        return this.heap_alloc(node, this.ri);
+    }
+
+    unsafe bool eval_memory_call(Node* node, bool fill) {
+        if (!this.eval(node.child(0))) {
+            return false;
+        }
+        i64 destination = this.ri;
+        if (!this.eval(node.child(1))) {
+            return false;
+        }
+        i64 source = this.ri;
+        if (!this.eval(node.child(2))) {
+            return false;
+        }
+        i64 bytes = this.ri;
+        if (fill) {
+            if (bytes > 0) {
+                if (!this.check_access(node, destination, bytes)) {
+                    return false;
+                }
+                memset((ptr)destination, (i32)source, (u64)bytes);
+            }
+        } else if (bytes > 0) {
+            if (!this.check_access(node, destination, bytes) || !this.check_access(node, source, bytes)) {
+                return false;
+            }
+            ptr<i8> to = (ptr<i8>)destination;
+            ptr<i8> from = (ptr<i8>)source;
+            if (destination <= source) {
+                [Vectorize]
+                for (mut i64 i = 0; i < bytes; i = i + 1) {
+                    to[i] = from[i];
+                }
+            } else {
+                [Vectorize]
+                for (mut i64 i = bytes - 1; i >= 0; i = i - 1) {
+                    to[i] = from[i];
+                }
+            }
+        }
+        this.ri = destination;
+        this.rf = 0.0;
+        return true;
+    }
+
+    // Which compile-time heap operation an extern function is. The [ConstAlloc], [ConstRealloc], [ConstFree],
+    // [ConstMemCopy] and [ConstMemSet] attributes decide; the declarations in runtime/core cannot carry them until the
+    // seed compiler knows the attributes, so those are recognised by name.
+    static unsafe ConstHeapKind heap_kind(FunctionInfo* info, ptr<i8> name) {
+        if (info.node != null) {
+            if (Attributes.has(info.node, "ConstAlloc")) {
+                return ConstHeapKind::ALLOC;
+            }
+            if (Attributes.has(info.node, "ConstRealloc")) {
+                return ConstHeapKind::REALLOC;
+            }
+            if (Attributes.has(info.node, "ConstFree")) {
+                return ConstHeapKind::FREE;
+            }
+            if (Attributes.has(info.node, "ConstMemCopy")) {
+                return ConstHeapKind::COPY;
+            }
+            if (Attributes.has(info.node, "ConstMemSet")) {
+                return ConstHeapKind::FILL;
+            }
+        }
+        if (Strings.same(name, "__djinn_alloc") || Strings.same(name, "__djinn_alloc_zeroed")) {
+            return ConstHeapKind::ALLOC;
+        }
+        if (Strings.same(name, "__djinn_realloc")) {
+            return ConstHeapKind::REALLOC;
+        }
+        if (Strings.same(name, "__djinn_free")) {
+            return ConstHeapKind::FREE;
+        }
+        if (Strings.same(name, "memcpy") || Strings.same(name, "memmove")) {
+            return ConstHeapKind::COPY;
+        }
+        if (Strings.same(name, "memset")) {
+            return ConstHeapKind::FILL;
+        }
+        return ConstHeapKind::NONE;
+    }
+}

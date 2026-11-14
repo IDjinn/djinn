@@ -296,26 +296,51 @@ impl Parser {
         i32 afterHead = this.peek_token(lookahead + 1);
         bool isConstructor = this.kind_of(head) == TokenKind::IDENTIFIER && this.kind_of(afterHead) == TokenKind::LPAREN;
         if (isConstructor) {
+            mut i32 compile_time = 0;
+            if (this.constexpr_struct) {
+                compile_time = 2;
+            }
             for (mut i32 i = 0; i < lookahead; i = i + 1) {
+                if (this.kind_of(this.current()) == TokenKind::CONSTEXPR) {
+                    compile_time = 2;
+                }
+                if (this.kind_of(this.current()) == TokenKind::CONSTEVAL) {
+                    compile_time = 4;
+                }
                 this.advance();
             }
             this.advance();
             Node* constructor = Node.create_list(NodeKind::FUNCTION, head);
+            constructor.set_op(compile_time);
             constructor.set_type(TypeRef.create(TypeKind.VOID));
             constructor.set_text(".ctor");
             this.expect(TokenKind::LPAREN, "expected '(' after the constructor name");
             this.parse_parameters(constructor);
             this.expect(TokenKind::RPAREN, "expected ')' after parameters");
-            constructor.set_first(this.parse_body(true));
+            constructor.set_first(this.parse_body(compile_time == 0));
             owner.add(constructor);
             return;
         }
 
         if (this.kind_of(head) == TokenKind::OPERATOR) {
+            mut i32 operator_time = 0;
+            if (this.constexpr_struct) {
+                operator_time = 2;
+            }
             for (mut i32 i = 0; i < lookahead; i = i + 1) {
+                if (this.kind_of(this.current()) == TokenKind::CONSTEXPR) {
+                    operator_time = 2;
+                }
+                if (this.kind_of(this.current()) == TokenKind::CONSTEVAL) {
+                    operator_time = 4;
+                }
                 this.advance();
             }
-            owner.add(this.parse_operator(true));
+            this.keep_body = operator_time != 0;
+            Node* operator_node = this.parse_operator(true);
+            this.keep_body = false;
+            operator_node.set_op(operator_time);
+            owner.add(operator_node);
             return;
         }
 
