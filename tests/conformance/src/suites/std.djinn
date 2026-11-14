@@ -27,6 +27,105 @@ i32 main() {
     }
 
     [Test]
+    void prefix_slices_sharing_a_pointer_are_different_keys() {
+        str source = """
+import std::collections;
+import std::types;
+namespace app;
+
+i32 main() {
+    string text = $"key_{123456789}";
+    str short = text.slice(0, 1);
+    str longer = text.slice(0, 3);
+    if (short == longer) { return 1; }
+    map<str, i32> table = map<str, i32>();
+    for (mut u32 i = 0; i < 10; i = i + 1) {
+        table.set(text.slice(0, i + 1), (i32)i);
+    }
+    mut i32 total = 0;
+    for (mut u32 i = 0; i < 10; i = i + 1) {
+        total = total + table.get(text.slice(0, i + 1));
+    }
+    return total - 3 + (i32)table.count;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(52));
+    }
+
+    [Test]
+    void string_and_str_hash_the_same_text() {
+        str source = """
+import std::types;
+namespace app;
+
+i32 main() {
+    string owned = $"hash {7}";
+    string literal = "hash 7";
+    str view = "hash 7";
+    if (owned.hash() != view.hash() || literal.hash() != view.hash()) { return 1; }
+    str other = "hash 8";
+    if (other.hash() == view.hash()) { return 2; }
+    return 0;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(0));
+    }
+
+    [Test]
+    void scoped_interner_interns_clears_and_disposes() {
+        str source = """
+import std::types;
+import std::text;
+namespace app;
+
+i32 main() {
+    interner pool = interner();
+    symbol a = pool.intern("name");
+    symbol b = pool.intern("na" + "me");
+    symbol c = pool.intern("other");
+    if (a != b || a.entry != b.entry) { return 1; }
+    if (a == c) { return 2; }
+    if (a.hash() != a.text().hash()) { return 3; }
+    for (mut i32 i = 0; i < 5000; i = i + 1) {
+        string key = $"key_{i % 1000}";
+        pool.intern(key);
+    }
+    if (pool.length() != 1002u) { return 4; }
+    if (!pool.contains("key_999") || pool.contains("key_1000")) { return 5; }
+    pool.clear();
+    if (pool.length() != 0u || pool.contains("name")) { return 6; }
+    symbol fresh = pool.intern("name");
+    return (i32)fresh.length() + 38;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(42));
+    }
+
+    [Test]
+    void shared_interner_is_global_and_clearable() {
+        str source = """
+import std::types;
+import std::text;
+namespace app;
+
+i32 main() {
+    symbol first = interner.shared("global");
+    symbol second = interner.shared("glo" + "bal");
+    if (first.entry != second.entry) { return 1; }
+    interner pool = interner();
+    symbol local = pool.intern("global");
+    if (local != first || local.entry == first.entry) { return 2; }
+    interner.shared("another");
+    if (interner.shared_length() != 2u) { return 3; }
+    interner.clear_shared();
+    if (interner.shared_length() != 0u) { return 4; }
+    return 42;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(42));
+    }
+
+    [Test]
     void async_delay() {
         str source = """
 import std::sys;

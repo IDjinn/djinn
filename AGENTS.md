@@ -39,7 +39,7 @@ The compiler generates async code by default.
 
 Files in `std/` directory
 
-- `types/types.djinn` — core types (size, bool, str, string, arr\<T\>, optional\<T\>, result\<T,E\>, TypeInfo, object),
+- `types/types.djinn` — core types (size, bool, str, immutable string with a static flag, arr\<T\>, optional\<T\>, result\<T,E\>, TypeInfo, object),
   primitive impl blocks (Hashable, constants), string operators
 - `types/constraints.djinn` — interfaces (Hashable, Comparable, Equatable, Addition, Serializable)
 - `collections/array.djinn` — generic `array<T>` with push, get, set, reserve, destroy
@@ -47,8 +47,8 @@ Files in `std/` directory
 - `collections/` also: `slice`, `sorting` (`Sorting.sort`/`binary_search` on `slice<T>`), `set`, `bag`, `stack`, `queue` (deque),
   `priority_queue` (4-ary min-heap), `ring_buffer`, `bitset`, `linked_list`; `array` and `map` take an optional `allocator`
 - `memory/` also: `arena`, `pool`, `allocator` (heap, arena or pool handle)
-- `text/` — `string_builder`, `Text` (join, number to text, utf-8), `Numbers`, `Chars`, and `str`/`string` methods
-  (`split`, `replace`, `repeat`, `toUpper`, `parseI64`, `utf8At`, ...)
+- `text/` — `string_builder`, `Text` (join, number to text, utf-8), `Numbers`, `Chars`, `str`/`string` methods
+  (`split`, `replace`, `repeat`, `toUpper`, `parseI64`, `utf8At`, ...) and `interner`/`symbol` (scoped or `interner.shared`)
 - `encoding/` — `byte_buffer`, `Hex`, `Base64`; `hashing/` — `Hash` (FNV-1a, xxHash64, SHA-256)
 - `format/` — `csv_reader`/`csv_writer`, `toml_reader` (streaming)
 - `collections/range.djinn` — `range` struct (start, end, step, bounds) with length(), contains(), is_empty()

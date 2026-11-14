@@ -6,44 +6,25 @@ impl CodeGenerator {
     }
 
     unsafe Value* gen_constant_text(ptr<i8> content, ptr text, u32 type) {
-        StructInfo* info = this.struct_of(type);
-        PointerList* fields = info.fields;
-        FieldInfo* length_field = (FieldInfo*)fields.get(1);
-        ptr llvm = this.llvm_type(type);
-        ptr slot = this.create_slot(type, "text");
-        ptr data_address = LLVMBuildStructGEP2(this.builder, llvm, slot, 0, "text.data");
-        mut ptr data = text;
-        if (fields.length > 2) {
-            ptr pointer_llvm = LLVMPointerTypeInContext(this.context, 0);
-            ptr i32_type = LLVMIntTypeInContext(this.context, 32);
-            ptr<ptr> copy_parameters = CodeGenerator.array_of(2);
-            ptr<ptr> copy_arguments = CodeGenerator.array_of(2);
-            copy_parameters[0] = pointer_llvm;
-            copy_parameters[1] = i32_type;
-            copy_arguments[0] = text;
-            copy_arguments[1] = LLVMConstInt(i32_type, (u64)strlen(content), 0);
-            data = this.call_runtime("__djinn_text_duplicate", pointer_llvm, copy_parameters, copy_arguments, 2);
-        }
-        LLVMBuildStore(this.builder, data, data_address);
-        ptr length_address = LLVMBuildStructGEP2(this.builder, llvm, slot, 1, "text.length");
-        Value* length = Value.create(LLVMConstInt(LLVMIntTypeInContext(this.context, 64), (u64)strlen(content), 0), Types.i64_type());
-        LLVMBuildStore(this.builder, this.coerce(length, length_field.type), length_address);
-        if (fields.length > 2) {
-            ptr capacity_address = LLVMBuildStructGEP2(this.builder, llvm, slot, 2, "text.capacity");
-            LLVMBuildStore(this.builder, this.coerce(length, length_field.type), capacity_address);
-        }
-        return Value.create(LLVMBuildLoad2(this.builder, llvm, slot, "text.loaded"), type);
+        return Value.create(this.constant_text(content, text, type), type);
     }
 
     unsafe ptr static_text(ptr<i8> content, u32 type) {
-        ptr llvm = this.llvm_type(type);
+        return this.constant_text(content, this.string_constant(content), type);
+    }
+
+    unsafe ptr constant_text(ptr<i8> content, ptr data, u32 type) {
         StructInfo* info = this.struct_of(type);
         PointerList* fields = info.fields;
         FieldInfo* length_field = (FieldInfo*)fields.get(1);
-        ptr<ptr> values = CodeGenerator.array_of(2);
-        values[0] = this.string_constant(content);
+        ptr<ptr> values = CodeGenerator.array_of(3);
+        values[0] = data;
         values[1] = LLVMConstInt(this.llvm_type(length_field.type), (u64)strlen(content), 0);
-        return LLVMConstNamedStruct(llvm, values, 2);
+        if (fields.length > 2) {
+            FieldInfo* meta_field = (FieldInfo*)fields.get(2);
+            values[2] = LLVMConstInt(this.llvm_type(meta_field.type), 1, 0);
+        }
+        return LLVMConstNamedStruct(this.llvm_type(type), values, (u32)fields.length);
     }
 
     ptr call_runtime(ptr<i8> name, ptr return_type, ptr<ptr> parameters, ptr<ptr> arguments, i32 count) {
@@ -294,11 +275,7 @@ impl CodeGenerator {
         u32 type = node.value_type();
         ByteBuffer* folded = ByteBuffer.create();
         if (this.fold_interpolation(node, folded, 0)) {
-            if (type == this.symbols_core_type("str")) {
-                return Value.create(this.static_text(folded.cstr(), type), type);
-            }
-            ptr constant = LLVMBuildGlobalStringPtr(this.builder, folded.cstr(), "interp.const");
-            return this.gen_constant_text(folded.cstr(), constant, type);
+            return Value.create(this.static_text(folded.cstr(), type), type);
         }
         ptr pointer_llvm = LLVMPointerTypeInContext(this.context, 0);
         ptr i32_type = LLVMIntTypeInContext(this.context, 32);
@@ -376,10 +353,6 @@ impl CodeGenerator {
         LLVMBuildStore(this.builder, LLVMConstNull(llvm), slot);
         LLVMBuildStore(this.builder, data, LLVMBuildStructGEP2(this.builder, llvm, slot, 0, "interp.data.ptr"));
         LLVMBuildStore(this.builder, length, LLVMBuildStructGEP2(this.builder, llvm, slot, 1, "interp.length.ptr"));
-        PointerList* result_fields = this.struct_of(type).fields;
-        if (result_fields.length > 2) {
-            LLVMBuildStore(this.builder, length, LLVMBuildStructGEP2(this.builder, llvm, slot, 2, "interp.capacity.ptr"));
-        }
         return Value.create(LLVMBuildLoad2(this.builder, llvm, slot, "interp.loaded"), type);
     }
 }

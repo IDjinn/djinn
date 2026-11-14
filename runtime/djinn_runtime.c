@@ -1,16 +1,65 @@
 #include "runtime_internal.h"
+#if !defined(__SIZEOF_INT128__) && defined(_MSC_VER)
+#include <intrin.h>
+#endif
 
 Logger* logger;
 
+static inline uint64_t djinn_read64(const char* p)
+{
+    uint64_t value;
+    memcpy(&value, p, 8);
+    return value;
+}
+
+static inline uint64_t djinn_read32(const char* p)
+{
+    uint32_t value;
+    memcpy(&value, p, 4);
+    return value;
+}
+
+static inline uint64_t djinn_mix(uint64_t a, uint64_t b)
+{
+#if defined(__SIZEOF_INT128__)
+    __uint128_t product = (__uint128_t)a * b;
+    return (uint64_t)product ^ (uint64_t)(product >> 64);
+#else
+    uint64_t high;
+    uint64_t low = _umul128(a, b, &high);
+    return low ^ high;
+#endif
+}
+
 uint64_t __djinn_hash_string(const char* data, uint32_t length)
 {
-    uint64_t hash = 2166136261u;
-    for (uint32_t i = 0; i < length; ++i)
+    const uint64_t k0 = 0xa0761d6478bd642full;
+    const uint64_t k1 = 0xe7037ed1a0b428dbull;
+    uint64_t seed = 0x9e3779b97f4a7c15ull ^ length;
+    uint32_t remaining = length;
+    while (remaining > 16)
     {
-        hash ^= (uint8_t)data[i];
-        hash *= 16777619u;
+        seed = djinn_mix(djinn_read64(data) ^ k0, djinn_read64(data + 8) ^ seed);
+        data += 16;
+        remaining -= 16;
     }
-    return hash;
+    uint64_t a = 0;
+    uint64_t b = 0;
+    if (remaining >= 8)
+    {
+        a = djinn_read64(data);
+        b = djinn_read64(data + remaining - 8);
+    }
+    else if (remaining >= 4)
+    {
+        a = djinn_read32(data);
+        b = djinn_read32(data + remaining - 4);
+    }
+    else if (remaining > 0)
+    {
+        a = ((uint64_t)(uint8_t)data[0] << 16) | ((uint64_t)(uint8_t)data[remaining >> 1] << 8) | (uint8_t)data[remaining - 1];
+    }
+    return djinn_mix(a ^ k1, b ^ seed);
 }
 
 int64_t __djinn_unix_timestamp_ms(void)
@@ -27,12 +76,12 @@ uint32_t __djinn_compare_strings(
     size_t rightLen
 )
 {
+    if (leftLen != rightLen)
+        return 0;
+
     if (leftData == rightData) return 1;
 
     if (!leftData || !rightData)
-        return 0;
-
-    if (leftLen != rightLen)
         return 0;
 
     return memcmp(leftData, rightData, leftLen) == 0;
