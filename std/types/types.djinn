@@ -263,12 +263,18 @@ where T : Hashable, Equatable {
 }
 
 struct string : Disposable {
-    mut i8* data;
+    i8* data;
     size length;
-    size capacity;
+    u32 meta;
 
     public void disposable() {
-        __djinn_free(this.data);
+        if ((this.meta & 1) == 0) {
+            __djinn_free(this.data);
+        }
+    }
+
+    public bool is_static() {
+        return (this.meta & 1) != 0;
     }
 
     public bool is_empty() {
@@ -295,10 +301,6 @@ struct string : Disposable {
 
     public i32 length() {
         return (i32)this.length;
-    }
-
-    public i32 capacity() {
-        return (i32)this.capacity;
     }
 }
 
@@ -377,14 +379,10 @@ impl Hashable for str, string {
         return this.indexOf(value) >= 0;
     }
 
-    constexpr u64 hash() {
-        mut u64w value = 2166136261w;
+    u64 hash() {
         unsafe {
-            for (mut size i = 0u; i < this.length; i = i + 1u) {
-                value = (value ^ (u64w)(u8)this.data[i]) * 16777619w;
-            }
+            return TextHash.of(this.data, this.length);
         }
-        return (u64)value;
     }
 
     bool startsWith(str prefix) {
@@ -552,29 +550,27 @@ impl Hashable for str, string {
         Debug.assert(start <= this.length, "start out of bounds");
         Debug.assert(start + length <= this.length, "length out of bounds");
 
-        u32 capacity = (u32)length + 1;
-        i8* data_buffer = __djinn_alloc((u64)capacity);
+        i8* data_buffer = __djinn_alloc((u64)length + 1);
         memcpy(data_buffer, (this.data + start), length);
         unsafe {
             data_buffer[length] = 0;
         }
-        return { .data = data_buffer, .length = (u32)length, .capacity = capacity };
+        return { .data = data_buffer, .length = (u32)length, .meta = 0 };
     }
 
     string concat(string left, string right) {
         return left + right;
     }
 
-    operator +(string left, string right) -> string { // TODO: THIS DOESNT APPEND IF HAS CAPACITY!
+    operator +(string left, string right) -> string {
         u32 new_len = (u32)((u32t)left.length + right.length);
-        u64 alloc_size = (u64)new_len + (u64)new_len / 2 + 1;
-        i8* new_data = __djinn_alloc(alloc_size);
+        i8* new_data = __djinn_alloc((u64)new_len + 1);
         memcpy(new_data, left.data, left.length);
         memcpy(new_data + left.length, right.data, right.length);
         unsafe {
             new_data[new_len] = 0;
         }
-        return { .data = new_data, .length = new_len, .capacity = new_len };
+        return { .data = new_data, .length = new_len, .meta = 0 };
     }
 }
 

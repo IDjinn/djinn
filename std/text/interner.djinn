@@ -1,0 +1,272 @@
+import std::types;
+import std::libc;
+import std::sys;
+import std::types::constraints;
+
+namespace std::text;
+
+unsafe static mut ptr shared_interner = null;
+unsafe static mut i32 shared_interner_lock = 0;
+unsafe static mut i32 interner_next_id = 0;
+
+struct intern_entry {
+    u64 owner;
+    u64 hash;
+    u32 length;
+    u32 reserved;
+}
+
+struct intern_block {
+    intern_block* previous;
+    u64 size;
+    u64 used;
+}
+
+struct symbol : Hashable {
+    intern_entry* entry;
+
+    public unsafe str text() {
+        str view = { .data = (i8*)this.entry + sizeof(intern_entry), .length = (size)this.entry.length };
+        return view;
+    }
+
+    public unsafe i8* ptr() {
+        return (i8*)this.entry + sizeof(intern_entry);
+    }
+
+    public unsafe size length() {
+        return (size)this.entry.length;
+    }
+
+    public unsafe u64 hash() {
+        return this.entry.hash;
+    }
+}
+
+impl Equatable for symbol {
+    operator ==(symbol left, symbol right) -> bool {
+        if (left.entry == right.entry) {
+            return true;
+        }
+        unsafe {
+            if (left.entry.owner == right.entry.owner) {
+                return false;
+            }
+            return left.text() == right.text();
+        }
+    }
+}
+
+struct interner : Disposable {
+    intern_entry** slots;
+    u32 capacity;
+    u32 count;
+    intern_block* head;
+    u64 block_size;
+    u64 id;
+
+    interner() {
+        unsafe {
+            this.init(4096);
+        }
+    }
+
+    interner(u64 block_size) {
+        unsafe {
+            this.init(block_size);
+        }
+    }
+
+    public unsafe symbol intern(str text) {
+        u64 hash = text.hash();
+        u32 mask = this.capacity - 1;
+        mut u32 index = this.slot_of(hash);
+        while (this.slots[index] != (intern_entry*)0) {
+            symbol candidate = { .entry = this.slots[index] };
+            if (candidate.entry.hash == hash && candidate.text() == text) {
+                return candidate;
+            }
+            index = (index + 1) & mask;
+        }
+        intern_entry* entry = (intern_entry*)this.store(sizeof(intern_entry) + (u64)text.length + 1);
+        entry.owner = this.id;
+        entry.hash = hash;
+        entry.length = (u32)text.length;
+        entry.reserved = 0;
+        i8* bytes = (i8*)entry + sizeof(intern_entry);
+        memcpy(bytes, text.data, (u64)text.length);
+        bytes[text.length] = 0;
+        this.slots[index] = entry;
+        this.count = this.count + 1;
+        if (this.count * 4 > this.capacity * 3) {
+            this.grow();
+        }
+        symbol result = { .entry = entry };
+        return result;
+    }
+
+    public unsafe bool contains(str text) {
+        u64 hash = text.hash();
+        u32 mask = this.capacity - 1;
+        mut u32 index = this.slot_of(hash);
+        while (this.slots[index] != (intern_entry*)0) {
+            symbol candidate = { .entry = this.slots[index] };
+            if (candidate.entry.hash == hash && candidate.text() == text) {
+                return true;
+            }
+            index = (index + 1) & mask;
+        }
+        return false;
+    }
+
+    public u32 length() {
+        return this.count;
+    }
+
+    public u64 reserved() {
+        mut u64 total = 0;
+        unsafe {
+            mut intern_block* block = this.head;
+            while (block != (intern_block*)0) {
+                total = total + block.size;
+                block = block.previous;
+            }
+        }
+        return total + (u64)this.capacity * 8;
+    }
+
+    public unsafe void clear() {
+        memset(this.slots, 0, (u64)this.capacity * 8);
+        this.count = 0;
+        while (this.head.previous != (intern_block*)0) {
+            intern_block* dropped = this.head;
+            this.head = dropped.previous;
+            __djinn_free(dropped);
+        }
+        this.head.used = 0;
+    }
+
+    public unsafe void disposable() {
+        this.release();
+    }
+
+    public static unsafe symbol shared(str text) {
+        interner.lock_shared();
+        if (shared_interner == null) {
+            interner* created = (interner*)__djinn_alloc(sizeof(interner));
+            created.init(4096);
+            shared_interner = (ptr)created;
+        }
+        interner* pool = (interner*)shared_interner;
+        symbol result = pool.intern(text);
+        interner.unlock_shared();
+        return result;
+    }
+
+    public static unsafe u32 shared_length() {
+        interner.lock_shared();
+        mut u32 count = 0;
+        if (shared_interner != null) {
+            interner* pool = (interner*)shared_interner;
+            count = pool.count;
+        }
+        interner.unlock_shared();
+        return count;
+    }
+
+    public static unsafe void clear_shared() {
+        interner.lock_shared();
+        if (shared_interner != null) {
+            interner* pool = (interner*)shared_interner;
+            pool.clear();
+        }
+        interner.unlock_shared();
+    }
+
+    static unsafe void lock_shared() {
+        while (!atomic_cas(&shared_interner_lock, 0, 1)) {
+        }
+    }
+
+    static unsafe void unlock_shared() {
+        atomic_store(&shared_interner_lock, 0);
+    }
+
+    unsafe void init(u64 block_size) {
+        this.capacity = 64;
+        this.count = 0;
+        this.slots = (intern_entry**)__djinn_alloc_zeroed((u64)this.capacity * 8);
+        this.block_size = block_size;
+        this.head = (intern_block*)0;
+        this.add_block(block_size);
+        this.id = (u64)atomic_add(&interner_next_id, 1) + 1;
+    }
+
+    unsafe void release() {
+        if (this.slots != (intern_entry**)0) {
+            __djinn_free(this.slots);
+            this.slots = (intern_entry**)0;
+        }
+        while (this.head != (intern_block*)0) {
+            intern_block* dropped = this.head;
+            this.head = dropped.previous;
+            __djinn_free(dropped);
+        }
+        this.capacity = 0;
+        this.count = 0;
+    }
+
+    u32 slot_of(u64 hash) {
+        mut u64w mixed = (u64w)hash;
+        mixed = (mixed ^ (mixed >> 32)) * 0x9e3779b97f4a7c15;
+        mixed = mixed ^ (mixed >> 29);
+        return (u32)(mixed & (u64w)(this.capacity - 1));
+    }
+
+    unsafe void grow() {
+        intern_entry** old_slots = this.slots;
+        u32 old_capacity = this.capacity;
+        this.capacity = old_capacity * 2;
+        this.slots = (intern_entry**)__djinn_alloc_zeroed((u64)this.capacity * 8);
+        u32 mask = this.capacity - 1;
+        for (mut u32 i = 0; i < old_capacity; i = i + 1) {
+            intern_entry* entry = old_slots[i];
+            if (entry != (intern_entry*)0) {
+                mut u32 index = this.slot_of(entry.hash);
+                while (this.slots[index] != (intern_entry*)0) {
+                    index = (index + 1) & mask;
+                }
+                this.slots[index] = entry;
+            }
+        }
+        __djinn_free(old_slots);
+    }
+
+    unsafe i8* store(u64 bytes) {
+        u64 needed = (bytes + 7) / 8 * 8;
+        mut intern_block* block = this.head;
+        if (block.used + needed > block.size) {
+            mut u64 size = this.block_size * 2;
+            if (size > 67108864) {
+                size = 67108864;
+            }
+            this.block_size = size;
+            if (size < needed) {
+                size = needed;
+            }
+            this.add_block(size);
+            block = this.head;
+        }
+        i8* start = (i8*)block + sizeof(intern_block) + block.used;
+        block.used = block.used + needed;
+        return start;
+    }
+
+    unsafe void add_block(u64 size) {
+        intern_block* block = (intern_block*)__djinn_alloc(size + sizeof(intern_block));
+        block.previous = this.head;
+        block.size = size;
+        block.used = 0;
+        this.head = block;
+    }
+}
