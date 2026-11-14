@@ -11,7 +11,7 @@ Decisions (confirmed 2026-11-14). Tracking issues: #121 to #125.
 
 ## Order of implementation
 
-1. **Runtime thread config (#124), runtime side.** Done: `DJINN_THREADS` and `runtime.properties`. Next: replace the hardcoded `4` in `code_generator_functions.djinn`, add `[Runtime]` attribute and `.proj` key, default to logical cores, config struct.
+1. **Runtime thread config (#124), runtime side.** Done: `DJINN_THREADS` and `runtime.properties`. Done too: `--async-threads=N` replaces the hardcoded `4` in `code_generator_functions.djinn`. Next: `[Runtime]` attribute and `.proj` key, default to logical cores, config struct.
 2. **Scheduler unification (#125).** Remove the busy re-enqueue in `djinn_worker_thread`, timers without busy-wait, scheduler-thread flag.
 3. **`sync` keyword (#121).** Lexer/parser/AST, checker: sync function cannot `await`; sync main; blocking std I/O variants.
 4. **`.sync` (#122).** Postfix on `task<T>`, "may block" fixpoint, warning, runtime trap. Retire `await` running a nested event loop in sync functions.
