@@ -72,6 +72,54 @@ i32 main() {
     }
 
     [Test]
+    void long_text_hash_depends_on_every_byte_and_not_on_alignment() {
+        str source = """
+import std::types;
+namespace app;
+
+i32 main() {
+    unsafe {
+        i8* first = (i8*)malloc(4100);
+        i8* second = (i8*)malloc(4100);
+        for (mut i32 i = 0; i < 4100; i = i + 1) {
+            first[i] = (i8)(32 + (i * 7) % 90);
+        }
+        for (mut i32 i = 0; i < 3000; i = i + 1) {
+            second[i + 3] = first[i];
+        }
+        for (mut i32 length = 0; length <= 3000; length = length + 1) {
+            str left = { .data = first, .length = (u32)length };
+            str right = { .data = second + 3, .length = (u32)length };
+            if (left.hash() != right.hash()) { return 1; }
+        }
+        for (mut i32 length = 65; length < 300; length = length + 1) {
+            str base = { .data = first, .length = (u32)length };
+            u64 expected = base.hash();
+            for (mut i32 at = 0; at < length; at = at + 1) {
+                i8 saved = first[at];
+                first[at] = saved ^ 1;
+                u64 changed = base.hash();
+                first[at] = saved;
+                if (changed == expected) { return 2; }
+            }
+        }
+        for (mut i32 a = 0; a < 300; a = a + 1) {
+            str prefix = { .data = first, .length = (u32)a };
+            for (mut i32 b = a + 1; b < 300; b = b + 1) {
+                str longer = { .data = first, .length = (u32)b };
+                if (prefix.hash() == longer.hash()) { return 3; }
+            }
+        }
+        free(first);
+        free(second);
+    }
+    return 0;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(0));
+    }
+
+    [Test]
     void scoped_interner_interns_clears_and_disposes() {
         str source = """
 import std::types;
@@ -482,9 +530,12 @@ namespace app;
 
 i32 main() {
     str empty = "";
-    if (empty.hash() != 2166136261) { return 1; }
     str view = "hello";
-    if (view.hash() != 1460560186469985451) { return 2; }
+    str same = "hello";
+    str near = "hellp";
+    str prefix = "hell";
+    if (empty.hash() == view.hash() || view.hash() != same.hash()) { return 1; }
+    if (view.hash() == near.hash() || view.hash() == prefix.hash()) { return 2; }
     string owned = "hel" + "lo";
     if (!(view == "hello") || view == "help!" || view == "hell") { return 3; }
     if (!(owned == "hello")) { return 4; }

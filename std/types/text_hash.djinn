@@ -1,0 +1,117 @@
+namespace std::types;
+
+struct TextHash {
+    [ForceInline] static unsafe u64w read64(i8* at) {
+        mut u64w value = 0w;
+        memcpy((i8*)&value, at, 8);
+        return value;
+    }
+
+    [ForceInline] static unsafe u64w read32(i8* at) {
+        mut u32w value = 0w;
+        memcpy((i8*)&value, at, 4);
+        return (u64w)value;
+    }
+
+    [ForceInline] static u64w mix(u64w left, u64w right) {
+        u128w product = (u128w)left * (u128w)right;
+        return (u64w)product ^ (u64w)(product >> 64w);
+    }
+
+    [ForceInline] static u64w lane(u64w data, u64w key) {
+        u64w both = data ^ key;
+        return (both & 4294967295w) * (both >> 32w);
+    }
+
+    static unsafe u64w short_text(i8* data, size length) {
+        u64w k0 = 11562461410679940143;
+        u64w k1 = 16646288086500911323;
+        mut u64w seed = 11400714819323198485 ^ (u64w)length;
+        mut size remaining = length;
+        mut i8* at = data;
+        while (remaining > 16) {
+            seed = TextHash.mix(TextHash.read64(at) ^ k0, TextHash.read64(at + 8) ^ seed);
+            at = at + 16;
+            remaining = remaining - 16;
+        }
+        mut u64w a = 0w;
+        mut u64w b = 0w;
+        if (remaining >= 8) {
+            a = TextHash.read64(at);
+            b = TextHash.read64(at + remaining - 8);
+        } else if (remaining >= 4) {
+            a = TextHash.read32(at);
+            b = TextHash.read32(at + remaining - 4);
+        } else if (remaining > 0) {
+            a = ((u64w)(u8)at[0] << 16w) | ((u64w)(u8)at[remaining >> 1] << 8w) | (u64w)(u8)at[remaining - 1];
+        }
+        return TextHash.mix(a ^ k1, b ^ seed);
+    }
+
+    static unsafe u64w long_text(i8* data, size length) {
+        u64w key0 = 13898507668257350876;
+        u64w key1 = 9874931141998527612;
+        u64w key2 = 12936763147494389601;
+        u64w key3 = 7639117502952287850;
+        u64w key4 = 325179382338061662;
+        u64w key5 = 17399041339907576624;
+        u64w key6 = 4115426874723844861;
+        u64w key7 = 5453732345331108626;
+        u64w size_mix = (u64w)length;
+        mut u64w acc0 = key3 ^ size_mix;
+        mut u64w acc1 = key4 ^ size_mix;
+        mut u64w acc2 = key5 ^ size_mix;
+        mut u64w acc3 = key6 ^ size_mix;
+        mut u64w acc4 = key7 ^ size_mix;
+        mut u64w acc5 = key0 ^ size_mix;
+        mut u64w acc6 = key1 ^ size_mix;
+        mut u64w acc7 = key2 ^ size_mix;
+        mut size at = 0;
+        mut bool more = true;
+        [Vectorize]
+        while (more) {
+            i8* stripe = data + at;
+            u64w d0 = TextHash.read64(stripe);
+            u64w d1 = TextHash.read64(stripe + 8);
+            u64w d2 = TextHash.read64(stripe + 16);
+            u64w d3 = TextHash.read64(stripe + 24);
+            u64w d4 = TextHash.read64(stripe + 32);
+            u64w d5 = TextHash.read64(stripe + 40);
+            u64w d6 = TextHash.read64(stripe + 48);
+            u64w d7 = TextHash.read64(stripe + 56);
+            acc0 = acc0 + d1 + TextHash.lane(d0, key0);
+            acc1 = acc1 + d0 + TextHash.lane(d1, key1);
+            acc2 = acc2 + d3 + TextHash.lane(d2, key2);
+            acc3 = acc3 + d2 + TextHash.lane(d3, key3);
+            acc4 = acc4 + d5 + TextHash.lane(d4, key4);
+            acc5 = acc5 + d4 + TextHash.lane(d5, key5);
+            acc6 = acc6 + d7 + TextHash.lane(d6, key6);
+            acc7 = acc7 + d6 + TextHash.lane(d7, key7);
+            if (at + 64 >= length) {
+                more = false;
+            } else {
+                at = at + 64;
+                if (at + 64 > length) {
+                    at = length - 64;
+                }
+            }
+        }
+        mut u64w h = 11400714819323198485 ^ size_mix;
+        h = TextHash.mix(acc0 ^ key7, h ^ key0);
+        h = TextHash.mix(acc1 ^ key6, h ^ key1);
+        h = TextHash.mix(acc2 ^ key5, h ^ key2);
+        h = TextHash.mix(acc3 ^ key4, h ^ key3);
+        h = TextHash.mix(acc4 ^ key3, h ^ key4);
+        h = TextHash.mix(acc5 ^ key2, h ^ key5);
+        h = TextHash.mix(acc6 ^ key1, h ^ key6);
+        h = TextHash.mix(acc7 ^ key0, h ^ key7);
+        return h;
+    }
+
+    public static unsafe u64 of(i8* data, size length) {
+        if (length > 64) {
+            return (u64)TextHash.long_text(data, length);
+        }
+        return (u64)TextHash.short_text(data, length);
+    }
+}
