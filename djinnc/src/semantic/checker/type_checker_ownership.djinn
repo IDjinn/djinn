@@ -85,9 +85,28 @@ impl TypeChecker {
         return (LocalVariable*)0;
     }
 
+    unsafe LocalVariable* pointer_source(Node* initializer, u32 pointer_type) {
+        if (!Types.is_pointer(pointer_type) || Types.is_raw_pointer(pointer_type) || initializer.kind() != NodeKind::CALL) {
+            return (LocalVariable*)0;
+        }
+        Node* callee = initializer.first();
+        if (callee.symbol_kind() != SymbolKind.INSTANCE_METHOD || initializer.value_type() != pointer_type) {
+            return (LocalVariable*)0;
+        }
+        LocalVariable* receiver = this.owning_local(callee.first());
+        SymbolTable* symbols = this.symbols;
+        if (receiver == null || !Ownership.needs_dispose(symbols, receiver.type)) {
+            return (LocalVariable*)0;
+        }
+        return receiver;
+    }
+
     unsafe void borrow_from(Node* initializer, LocalVariable* borrower) {
         mut LocalVariable* source = this.view_source(initializer, borrower.type);
         mut bool exclusive = false;
+        if (source == null) {
+            source = this.pointer_source(initializer, borrower.type);
+        }
         if (source == null) {
             if (initializer.kind() != NodeKind::UNARY || initializer.op_kind() != TokenKind::AMPERSAND) {
                 return;

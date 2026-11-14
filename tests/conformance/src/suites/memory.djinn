@@ -1659,4 +1659,65 @@ i32 main() {
 """;
         Verify.source(source).with_std().runs(Expected.exit(3));
     }
+
+    [Test]
+    void AsyncParameterIsDisposedWhenTheCoroutineEnds() {
+        str source = """
+import std::memory;
+import std::types;
+import std::types::constraints;
+import std::sys;
+namespace app;
+
+unsafe static mut i32 disposals = 0;
+
+struct Payload : Disposable {
+    i32 id;
+    public void disposable() { atomic_add(&disposals, 1); }
+}
+
+async void a(shared<Payload> mine) { }
+void s(shared<Payload> mine) { }
+
+async i32 main() {
+    {
+        shared<Payload> x = shared<Payload>({ .id = 7 });
+        s(x);
+    }
+    i32 sync_count = atomic_load(&disposals);
+    {
+        shared<Payload> y = shared<Payload>({ .id = 7 });
+        await a(y);
+    }
+    i32 await_count = atomic_load(&disposals);
+    {
+        shared<Payload> z = shared<Payload>({ .id = 7 });
+        spawn a(z);
+    }
+    await Task.pause();
+    await Task.pause();
+    return sync_count * 16 + await_count * 4 + atomic_load(&disposals);
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(27));
+    }
+
+    [Test]
+    void PointerFromGetBorrowsTheHandle() {
+        str source = """
+import std::memory;
+import std::types;
+import std::types::constraints;
+namespace app;
+struct P : Disposable { i32 id; public void disposable() { } }
+void eat(shared<P> s) { }
+i32 main() {
+    shared<P> a = shared<P>({ .id = 7 });
+    P* p = a.get();
+    eat(a);
+    return p.id;
+}
+""";
+        Verify.source(source).with_std().diagnostics(Expected.error(DiagnosticErrors.BORROW_CONFLICT));
+    }
 }

@@ -348,6 +348,130 @@ i32 main() {
         Verify.source(source).with_std().runs(Expected.exit(2));
     }
 
+
+    [Test]
+    void shared_clone_and_drop_from_many_threads() {
+        str source = """
+import std::memory;
+import std::types;
+import std::types::constraints;
+import std::libc;
+namespace app;
+
+extern "C" {
+    ptr __djinn_thread_create(ptr func, ptr arg);
+    i32 __djinn_thread_start(ptr thread);
+    void __djinn_thread_join(ptr thread);
+}
+
+unsafe static mut i32 disposals = 0;
+
+struct Payload : Disposable {
+    i32 id;
+
+    public void disposable() {
+        atomic_add(&disposals, 1);
+    }
+}
+
+struct Job {
+    shared<Payload> handle;
+    i32 rounds;
+    ptr thread;
+    Job* next;
+}
+
+struct Worker {
+    static unsafe void run(ptr arg) {
+        Job* job = (Job*)arg;
+        shared<Payload> mine = job.handle;
+        for (mut i32 i = 0; i < job.rounds; i = i + 1) {
+            shared<Payload> copy = mine.clone();
+            if (copy.get().id != 7) { exit(90); }
+        }
+    }
+}
+
+i32 main() {
+    unsafe {
+        shared<Payload> root = shared<Payload>({ .id = 7 });
+        mut Job* jobs = (Job*)0;
+        for (mut i32 t = 0; t < 8; t = t + 1) {
+            Job* job = (Job*)__djinn_alloc(sizeof(Job));
+            job.handle = root.clone();
+            job.rounds = 20000;
+            job.next = jobs;
+            job.thread = __djinn_thread_create((ptr)typeof(Worker.run).funcPtr, (ptr)job);
+            __djinn_thread_start(job.thread);
+            jobs = job;
+        }
+        mut Job* cursor = jobs;
+        while (cursor != (Job*)0) {
+            __djinn_thread_join(cursor.thread);
+            cursor = cursor.next;
+        }
+        if (root.references() != 1) { return 91; }
+        if (atomic_load(&disposals) != 0) { return 92; }
+    }
+    return atomic_load(&disposals) + 40;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(41));
+    }
+
+    [Test]
+    void shared_clone_and_drop_across_coroutine_suspensions() {
+        str source = """
+import std::memory;
+import std::types;
+import std::types::constraints;
+import std::sys;
+import std::libc;
+namespace app;
+
+unsafe static mut i32 disposals = 0;
+unsafe static mut i32 finished = 0;
+
+struct Payload : Disposable {
+    i32 id;
+
+    public void disposable() {
+        atomic_add(&disposals, 1);
+    }
+}
+
+async void churn(shared<Payload> mine, i32 rounds) {
+    for (mut i32 i = 0; i < rounds; i = i + 1) {
+        shared<Payload> copy = mine.clone();
+        await Task.pause();
+        unsafe {
+            if (copy.get().id != 7) { exit(90); }
+        }
+    }
+}
+
+async void work(shared<Payload> mine, i32 rounds) {
+    await churn(mine, rounds);
+    atomic_add(&finished, 1);
+}
+
+async i32 main() {
+    shared<Payload> root = shared<Payload>({ .id = 7 });
+    for (mut i32 t = 0; t < 8; t = t + 1) {
+        spawn work(root.clone(), 2000);
+    }
+    unsafe {
+        while (atomic_load(&finished) < 8) {
+            await Task.pause();
+        }
+        if (root.references() != 1) { return 50 + root.references(); }
+        if (atomic_load(&disposals) != 0) { return 92; }
+    }
+    return 40;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(40));
+    }
     [Test]
     void collections() {
         str source = """
