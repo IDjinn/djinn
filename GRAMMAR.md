@@ -189,13 +189,14 @@ the AST as literals. A compile-time `if` keeps only the taken branch.
 ### Macros
 
 ```ebnf
-macro_decl           = "macro" IDENTIFIER "{" { macro_rule } "}" ;
+macro_decl           = "macro" IDENTIFIER [ "!" ] "{" { macro_rule } "}" ;
 macro_rule           = [ "local" ] "(" [ macro_param { "," macro_param } ] ")" "=>" ( "{" token_stream "}" | "void" ) ;
 macro_param          = [ "local" ] ( fragment_type IDENTIFIER | IDENTIFIER ) ;
 fragment_type        = "expression" | "identifier" | "literal" | "type" | "block" ;
 ```
 
-(* Expanded at parse time by token substitution and re-parse; hygienic. Bare identifiers in a rule are literal token
+(* Called as `name(args)` or `name!(args)`; a macro declared `macro name!` is separate from `macro name` and only called with the `!`.
+Expanded at parse time by token substitution and re-parse; hygienic. Bare identifiers in a rule are literal token
 matchers. `local` evaluates the argument once through a temporary (`local` before `(` applies to all expression
 parameters). Several rules per macro: first match by arity and literal tokens wins; ambiguous rules are rejected;
 warning W6001 when a non-local expression parameter is used more than once. `=> void` expands to `0`.
