@@ -86,6 +86,16 @@ impl TypeChecker {
         return analyzer.instantiate(template, args);
     }
 
+    // A public function that works with tasks without awaiting them ('.sync' or an unawaited async call) must say
+    // whether it is 'async' or 'sync': that choice is part of its contract for the callers of a library.
+    unsafe void check_public_contract(Node* node, FunctionInfo* owner) {
+        if (!owner.is_public || owner.is_async || owner.is_sync || owner.public_async_warned) {
+            return;
+        }
+        owner.public_async_warned = true;
+        this.warning_code(node, DiagnosticWarnings.PUBLIC_NEEDS_ASYNC_OR_SYNC, "a public function that blocks on or holds async work should declare 'async' or 'sync'");
+    }
+
     u32 check_await(Node* node) {
         FunctionInfo* waiter = this.function;
         if (waiter != null && node.flag() && waiter.is_async) {
@@ -93,6 +103,9 @@ impl TypeChecker {
         }
         if (waiter != null && !node.flag() && waiter.is_sync) {
             this.error_code(node, DiagnosticErrors.AWAIT_IN_SYNC_FUNCTION, "'await' is not allowed in a 'sync' function; use '.sync' to block on the task");
+        }
+        if (waiter != null && node.flag()) {
+            this.check_public_contract(node, waiter);
         }
         u32 operand = this.check_expression(node.first(), 0);
         u32 held = this.task_result(operand);

@@ -24,11 +24,34 @@ Decisions (confirmed 2026-11-14). Tracking issues: #121 to #125.
 - `sync` modifier and postfix `.sync` (#121, #122): `await` in a `sync` function is E3061; `.sync` in an async function is E6005. `.sync` reuses the nested event loop that `await` already used in sync functions, so it blocks the calling thread until the task is done.
 - Runtime-less `sync main` (#123): conservative rule, the runtime is omitted only when no function is still async after elision (any async declaration, used or not, keeps it).
 
-## Finding: the worker pool is not used (#125)
+## Worker pool (#125)
 
-`djinn_worker_thread` dequeues from `djinn_rt.pool.queue`, but nothing ever enqueues there. Every coroutine runs on the event-loop thread (`drain_ready_queue`), so the thread count configured above creates idle threads today. Making it effective needs real multi-threaded scheduling: a thread-safe coroutine table, `Send`-like rules for captures (#54, #102) and a decision on `spawn`. There is no busy re-enqueue in practice (the loop in the worker is unreachable).
+`djinn_worker_thread` dequeues from `pool.queue`, but nothing enqueues there: every coroutine runs on the event-loop thread (`drain_ready_queue`). Idle workers only burn resources, so the runtime no longer starts them (`DJINN_SCHEDULE_ON_POOL 0` in `scheduler.c`). The thread setting is still resolved (env > properties > `[Runtime]` > `.proj` > default, where `0` means the logical core count) and kept in `pool.configured_threads`. Turning the pool on needs a thread-safe coroutine table, `Send`-like capture rules (#54, #102) and a decision on `spawn`; flip the macro when that exists. Until then `.sync` inside a coroutine nests the event loop on the same thread, so the scheduler-thread trap and `io_threads` are not meaningful and are not implemented.
+
+### Timers and idle loop (done)
+
+`Task.delay` no longer busy-yields. It registers a timer (`__djinn_async_sleep`), marks the coroutine waiting and suspends; the event loop re-enqueues it when the deadline passes. When nothing is runnable the loop waits on the ready queue's condition variable (I/O threads signal it) for at most 20 ms or until the next timer, instead of spinning with `sched_yield`/`Sleep(0)`. Timers live on the loop thread, so they need no lock.
+
+## Public contract (#121)
+
+A function written `public` that blocks on a task (`.sync`) or calls an async function without awaiting it, and declares neither `async` nor `sync`, gets warning E6006. The choice is part of the contract for library callers. `public` is op bit 128, `private` 64.
+
+## Runtime-less `sync main` (#123)
+
+The runtime is omitted when no async work is reachable from a `sync main`: the program walks the functions main can reach and looks for `spawn`, `.sync`, awaits that are not a direct call, async functions that remain coroutines after elision, or runtime async primitives. Unreachable async code does not keep the runtime.
+
+## Finding: inference by default is blocked on two language gaps (#121)
+
+1. ~~`public` and `private` are parsed and then dropped.~~ Done (and E6006 for public contract): `private` is op bit 64 / `FunctionInfo.is_private` and is enforced per namespace (E3062); `public` is the default and has no bit. The `.djlib` interface keeps the modifier in its minified text, so library imports are checked too (tested in `sync_model.sh`). Still missing: the "public must declare async or sync" check itself.
+2. Inferring `async` for a private function changes its type from `T` to `task<T>`. With `await` explicit, every un-annotated caller would stop compiling, so inference needs either implicit await at call sites in inferred-async code or a coloring rule that keeps the signature `T` and lets the compiler hide the task. This is the open design decision.
+
+Until both are settled a function is async only when declared, and `AsyncElision` already removes the cost of declaring `async` on code that never suspends.
+
+## Decision: `await` makes a function async (2026-11-14)
+
+Resolves the implicit-await question without changing call sites: a function whose body contains `await` is async (the parser sets the async bit), so `T` becomes `task<T>` exactly as if `async` were written, and callers `await` it as usual. Functions without `await` keep their signature. Excluded: `sync` functions (`await` stays E3061) and `main` (entry point signature is fixed; write `async i32 main()` explicitly). Inference is a parser-level rule, so an inferred function keeps its body in the `.djlib` interface. A function that calls async code without awaiting is deliberately not inferred: it holds the task itself (storing it, passing it on, or `.sync`), so changing its signature would be wrong. The public contract warning (E6006) covers that case.
 
 ## Not implemented
 
-- Async inference by default with explicit `async`/`sync` on public functions (#121). Today a function is sync unless declared `async`, so this would turn every un-annotated public function into an error and change `T` to `task<T>` for inferred ones. It needs a migration of `std/` and a decision on implicit await first.
-- Trap on `.sync` from a scheduler thread: with a single event-loop thread, `.sync` inside a coroutine nests the event loop instead of deadlocking, so the trap is not needed until the pool is real.
+- Executing coroutines on the worker pool (real multi-threading, #125), the `.sync` scheduler-thread trap and `io_threads`: all depend on it (see "Worker pool").
+- A hard error instead of the E6006 warning for public functions without `async`/`sync`: kept a warning so existing library code keeps building.

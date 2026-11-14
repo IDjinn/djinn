@@ -452,9 +452,29 @@ static int djinn_resolve_thread_count(int compiled)
     return compiled;
 }
 
+static int djinn_logical_cores(void)
+{
+#ifdef _WIN32
+    SYSTEM_INFO info;
+    GetSystemInfo(&info);
+    int cores = (int)info.dwNumberOfProcessors;
+#else
+    long found = sysconf(_SC_NPROCESSORS_ONLN);
+    int cores = found > 0 ? (int)found : 1;
+#endif
+    if (cores < 1) cores = 1;
+    return cores > DJINN_MAX_THREADS ? DJINN_MAX_THREADS : cores;
+}
+
+/* Worker threads are started only when something schedules coroutines onto the pool. Today every coroutine runs on
+ * the event-loop thread (drain_ready_queue) and nothing enqueues to pool.queue, so idle workers would only burn
+ * resources. The configured count is still resolved and kept in pool.configured_threads. */
+#define DJINN_SCHEDULE_ON_POOL 0
+
 void __djinn_runtime_init(int num_threads)
 {
     num_threads = djinn_resolve_thread_count(num_threads);
+    if (num_threads <= 0) num_threads = djinn_logical_cores();
     memset(&djinn_rt, 0, sizeof(djinn_rt));
     logger = logger_get("RUNTIME", 1, LOG_TRACE);
     logger_configure_from_properties(logger, "runtime.properties");
@@ -515,6 +535,8 @@ void __djinn_runtime_init(int num_threads)
     DJINN_ASSERT(djinn_rt.epoll_fd >= 0, "epoll_create1 failed");
 #endif
 
+    djinn_rt.pool.configured_threads = num_threads;
+#if DJINN_SCHEDULE_ON_POOL
     if (num_threads > 0)
     {
         djinn_rt.pool.thread_count = num_threads;
@@ -532,6 +554,7 @@ void __djinn_runtime_init(int num_threads)
         }
 #endif
     }
+#endif
 
 #ifdef _WIN32
     djinn_rt.file_io_thread = CreateThread(NULL, 0, djinn_file_io_thread_func, NULL, 0, NULL);
@@ -636,6 +659,93 @@ void __djinn_spawn(void* coro_handle)
     djinn_enqueue_task(&djinn_rt.ready_queue, coro_handle);
 }
 
+/* Timers. Coroutines run on the event-loop thread, which is also the only thread that registers and fires timers,
+ * so the list needs no lock. A sleeping coroutine is marked waiting (the loop does not re-enqueue it) and is put back
+ * on the ready queue when its deadline passes; an idle loop sleeps until the next deadline instead of spinning. */
+typedef struct djinn_timer
+{
+    void* coro;
+    int64_t deadline_ms;
+    struct djinn_timer* next;
+} djinn_timer_t;
+
+static djinn_timer_t* djinn_timers = NULL;
+
+static int64_t djinn_now_ms(void)
+{
+#ifdef _WIN32
+    return (int64_t)GetTickCount64();
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+#endif
+}
+
+int64_t __djinn_async_sleep(int64_t milliseconds, void* coro)
+{
+    DJINN_ASSERT(coro, "coro handle is NULL");
+    djinn_timer_t* timer = (djinn_timer_t*)malloc(sizeof(djinn_timer_t));
+    if (!timer) return -1;
+    timer->coro = coro;
+    timer->deadline_ms = djinn_now_ms() + (milliseconds > 0 ? milliseconds : 0);
+    timer->next = djinn_timers;
+    djinn_timers = timer;
+    __djinn_mark_waiting(coro);
+    return 0;
+}
+
+/* Re-enqueues every due timer and returns how long (ms) the loop may sleep until the next one, or -1 if none. */
+static int64_t djinn_fire_timers(void)
+{
+    if (!djinn_timers) return -1;
+    const int64_t now = djinn_now_ms();
+    int64_t next = -1;
+    djinn_timer_t** link = &djinn_timers;
+    while (*link)
+    {
+        djinn_timer_t* timer = *link;
+        if (timer->deadline_ms <= now)
+        {
+            *link = timer->next;
+            djinn_enqueue_task(&djinn_rt.ready_queue, timer->coro);
+            free(timer);
+            continue;
+        }
+        const int64_t remaining = timer->deadline_ms - now;
+        if (next < 0 || remaining < next) next = remaining;
+        link = &timer->next;
+    }
+    return next;
+}
+
+/* Blocks until a task is queued (I/O threads signal the queue) or the timeout passes. */
+static void djinn_wait_for_task(djinn_task_queue_t* q, int64_t milliseconds)
+{
+    if (milliseconds <= 0) return;
+#ifdef _WIN32
+    EnterCriticalSection(&q->mutex);
+    if (q->count == 0) SleepConditionVariableCS(&q->cond, &q->mutex, (DWORD)milliseconds);
+    LeaveCriticalSection(&q->mutex);
+#else
+    pthread_mutex_lock(&q->mutex);
+    if (q->count == 0)
+    {
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        ts.tv_sec += milliseconds / 1000;
+        ts.tv_nsec += (milliseconds % 1000) * 1000000;
+        if (ts.tv_nsec >= 1000000000)
+        {
+            ts.tv_sec++;
+            ts.tv_nsec -= 1000000000;
+        }
+        pthread_cond_timedwait(&q->cond, &q->mutex, &ts);
+    }
+    pthread_mutex_unlock(&q->mutex);
+#endif
+}
+
 static void process_completed_coro(void* handle, void* main_handle)
 {
     djinn_remove_from_waiting(handle);
@@ -718,13 +828,11 @@ static void run_event_loop_core(void* main_handle)
             break;
         }
 
+        const int64_t until_timer = djinn_fire_timers();
         if (djinn_rt.ready_queue.count == 0)
         {
-#ifdef _WIN32
-            Sleep(0);
-#else
-            sched_yield();
-#endif
+            /* Nothing is runnable: every coroutine waits for I/O (the I/O threads signal the queue) or a timer. */
+            djinn_wait_for_task(&djinn_rt.ready_queue, until_timer < 0 || until_timer > 20 ? 20 : until_timer);
         }
     }
 }

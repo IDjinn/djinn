@@ -352,12 +352,20 @@ impl Parser {
         mut bool is_async = false;
         mut bool is_unsafe = false;
         mut bool is_sync = false;
+        mut bool is_private = false;
+        mut bool is_public = false;
         mut i32 compile_time = 0;
         while (this.is_sync_modifier(0) || this.check(TokenKind::PUBLIC) || this.check(TokenKind::PRIVATE) || this.check(TokenKind::STATIC) || this.check(TokenKind::ASYNC) || this.check(TokenKind::UNSAFE)
             || this.check(TokenKind::CONSTEXPR) || this.check(TokenKind::CONSTEVAL)) {
             i32 modifier = this.advance();
             if (this.kind_of(modifier) == TokenKind::IDENTIFIER) {
                 is_sync = true;
+            }
+            if (this.kind_of(modifier) == TokenKind::PRIVATE) {
+                is_private = true;
+            }
+            if (this.kind_of(modifier) == TokenKind::PUBLIC) {
+                is_public = true;
             }
             if (this.kind_of(modifier) == TokenKind::STATIC) {
                 is_static = true;
@@ -397,6 +405,12 @@ impl Parser {
         }
         if (is_sync) {
             modifiers = modifiers | 32;
+        }
+        if (is_private) {
+            modifiers = modifiers | 64;
+        }
+        if (is_public) {
+            modifiers = modifiers | 128;
         }
         if (modifiers != 0) {
             function.set_op(modifiers);
@@ -445,7 +459,20 @@ impl Parser {
             return function;
         }
 
-        function.set_first(this.parse_body(function.generics() == null && (function.op() & 7) == 0));
+        // A function that uses 'await' is async without writing the keyword. Its body stays in a library interface so
+        // that a consumer sees the await and therefore the task signature.
+        i32 awaits_before = this.await_count;
+        i32 open = this.current();
+        Node* body = this.parse_block();
+        bool awaits = this.await_count != awaits_before;
+        // 'main' keeps its signature: an un-annotated main blocks on what it awaits, 'async main' is explicit.
+        if (awaits && (function.op() & 33) == 0 && strcmp(function.text(), "main") != 0) {
+            function.set_op(function.op() | 1);
+        }
+        if (!awaits && function.generics() == null && (function.op() & 7) == 0 && this.generic_depth == 0 && !this.failed) {
+            Library.record_body(open, this.pos - 1);
+        }
+        function.set_first(body);
         return function;
     }
 

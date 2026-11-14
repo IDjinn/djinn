@@ -123,11 +123,172 @@ sync i32 blocked() throws(Oops) {
 
 i32 main() {
     i32 ok = try blocked() ?: 100;
-    return plain() + ok;
+    return await plain() + ok;
 }
 SOURCE
 "$compiler" "$out/throws.djinn" --no-async-elision -o "$out/throws$exe" "${flags[@]}" > "$out/throws.log" 2>&1 || { cat "$out/throws.log"; fail "throws with sync must compile"; }
 set +e; "$out/throws$exe"; code=$?; set -e
 [ "$code" = 32 ] || fail "throws program must exit 32, got $code"
+
+# 'private' is enforced: a private method is callable from its own type, a private free function from its namespace.
+cat > "$out/private_ok.djinn" <<'SOURCE'
+struct Counter {
+    i32 value;
+
+    Counter(i32 start) {
+        this.value = start;
+    }
+
+    private i32 bump() {
+        return this.value + 1;
+    }
+
+    public i32 next() {
+        return this.bump();
+    }
+}
+
+private i32 twice(i32 x) {
+    return x * 2;
+}
+
+i32 main() {
+    Counter counter = Counter(20);
+    return twice(counter.next());
+}
+SOURCE
+"$compiler" "$out/private_ok.djinn" -o "$out/private_ok$exe" "${flags[@]}" > "$out/private_ok.log" 2>&1 || { cat "$out/private_ok.log"; fail "private use inside its type and namespace must compile"; }
+set +e; "$out/private_ok$exe"; code=$?; set -e
+[ "$code" = 42 ] || fail "private program must exit 42, got $code"
+
+rm -rf "$out/private_bad"; mkdir -p "$out/private_bad"
+cat > "$out/private_bad/lib.djinn" <<'SOURCE'
+namespace hidden;
+
+private i32 secret() {
+    return 7;
+}
+
+i32 shown() {
+    return secret();
+}
+SOURCE
+cat > "$out/private_bad/main.djinn" <<'SOURCE'
+namespace app;
+
+import hidden;
+
+i32 main() {
+    return secret() + shown();
+}
+SOURCE
+if "$compiler" "$out/private_bad/lib.djinn" "$out/private_bad/main.djinn" -o "$out/private_bad$exe" "${flags[@]}" > "$out/private_bad.log" 2>&1; then fail "calling a private function from another namespace must fail"; fi
+grep -q "E3062" "$out/private_bad.log" || { cat "$out/private_bad.log"; fail "private access must report E3062"; }
+
+# Visibility and 'sync' travel in the library interface (minified source keeps the modifiers).
+if "$compiler" "$out/private_bad/lib.djinn" --library -o "$out/private_bad/hidden.djlib" "${flags[@]}" > "$out/private_lib.log" 2>&1; then
+    if "$compiler" "$out/private_bad/main.djinn" --lib "$out/private_bad/hidden.djlib" -o "$out/private_lib$exe" "${flags[@]}" > "$out/private_lib_use.log" 2>&1; then fail "a private function of a library must not be callable from a consumer"; fi
+    grep -q "E3062" "$out/private_lib_use.log" || { cat "$out/private_lib_use.log"; fail "library private access must report E3062"; }
+else
+    cat "$out/private_lib.log"; fail "library with a private function must build"
+fi
+
+# A function that uses 'await' is async without the keyword, also through a library interface.
+cat > "$out/infer.djinn" <<'SOURCE'
+namespace infer;
+
+async i32 leaf(i32 x) {
+    return x + 1;
+}
+
+i32 middle(i32 x) {
+    return await leaf(x) + 1;
+}
+
+i32 main() {
+    return await middle(40);
+}
+SOURCE
+"$compiler" "$out/infer.djinn" --no-async-elision -o "$out/infer$exe" "${flags[@]}" > "$out/infer.log" 2>&1 || { cat "$out/infer.log"; fail "await must make an un-annotated function async"; }
+set +e; "$out/infer$exe"; code=$?; set -e
+[ "$code" = 42 ] || fail "inferred async program must exit 42, got $code"
+mkdir -p "$out/infer_pkg"
+cat > "$out/infer_pkg/lib.djinn" <<'SOURCE'
+namespace inferlib;
+
+async i32 leaf(i32 x) {
+    return x + 1;
+}
+
+i32 middle(i32 x) {
+    return await leaf(x) + 1;
+}
+SOURCE
+cat > "$out/infer_pkg/main.djinn" <<'SOURCE'
+namespace app;
+
+import inferlib;
+
+i32 main() {
+    return await middle(40);
+}
+SOURCE
+"$compiler" "$out/infer_pkg/lib.djinn" --library -o "$out/infer_pkg/inferlib.djlib" "${flags[@]}" > "$out/infer_lib.log" 2>&1 || { cat "$out/infer_lib.log"; fail "library with an inferred async function must build"; }
+"$compiler" "$out/infer_pkg/main.djinn" --lib "$out/infer_pkg/inferlib.djlib" -o "$out/infer_lib$exe" "${flags[@]}" > "$out/infer_lib_use.log" 2>&1 || { cat "$out/infer_lib_use.log"; fail "consumer must see the inferred task signature"; }
+set +e; "$out/infer_lib$exe"; code=$?; set -e
+[ "$code" = 42 ] || fail "inferred async library program must exit 42, got $code"
+
+# A public function that blocks on a task must declare 'async' or 'sync' (warning E6006); declaring it silences it.
+cat > "$out/contract.djinn" <<'SOURCE'
+async i32 leaf(i32 x) {
+    return x + 1;
+}
+
+public i32 undeclared(i32 x) {
+    return leaf(x).sync;
+}
+
+public sync i32 declared(i32 x) {
+    return leaf(x).sync;
+}
+
+i32 main() {
+    return undeclared(1) + declared(2);
+}
+SOURCE
+"$compiler" "$out/contract.djinn" --no-async-elision -o "$out/contract$exe" "${flags[@]}" > "$out/contract.log" 2>&1 || { cat "$out/contract.log"; fail "contract program must compile"; }
+[ "$(grep -c 'warning\[E6006\]' "$out/contract.log")" = 1 ] || { cat "$out/contract.log"; fail "exactly the undeclared public function must report E6006"; }
+
+# Async code that main cannot reach does not keep the runtime; reachable async code does.
+cat > "$out/unreached.djinn" <<'SOURCE'
+async i32 never_called(i32 x) {
+    return x;
+}
+
+sync i32 main() {
+    return 5;
+}
+SOURCE
+"$compiler" "$out/unreached.djinn" --no-async-elision -o "$out/unreached$exe" --keep-ir "${flags[@]}" > "$out/unreached.log" 2>&1 || { cat "$out/unreached.log"; fail "unreached async must compile"; }
+if grep -q 'call .*@__djinn_runtime_init' "$out/unreached$exe.ll"; then fail "an async function main cannot reach must not start the runtime"; fi
+set +e; "$out/unreached$exe"; code=$?; set -e
+[ "$code" = 5 ] || fail "unreached async program must exit 5, got $code"
+cat > "$out/reached.djinn" <<'SOURCE'
+async i32 leaf(i32 x) {
+    return x + 1;
+}
+
+sync i32 helper() {
+    return leaf(3).sync;
+}
+
+sync i32 main() {
+    return helper() + 1;
+}
+SOURCE
+"$compiler" "$out/reached.djinn" --no-async-elision -o "$out/reached$exe" --keep-ir "${flags[@]}" > "$out/reached.log" 2>&1 || { cat "$out/reached.log"; fail "reached async must compile"; }
+grep -q 'call .*@__djinn_runtime_init' "$out/reached$exe.ll" || fail "async reachable through a helper must start the runtime"
+set +e; "$out/reached$exe"; code=$?; set -e
+[ "$code" = 5 ] || fail "reached async program must exit 5, got $code"
 
 echo "sync_model: ok"

@@ -122,7 +122,8 @@ typedef struct
 #else
     pthread_t* threads;
 #endif
-    int thread_count;
+    int thread_count;      /* worker threads actually running */
+    int configured_threads; /* resolved setting (0 = auto became the logical core count) */
     djinn_task_queue_t queue;
     volatile int shutdown;
 } djinn_thread_pool_t;
@@ -341,6 +342,7 @@ int __djinn_event_loop(void* main_handle);
 void __djinn_event_loop_run(void* main_handle);
 
 void __djinn_mark_waiting(void* handle);
+int64_t __djinn_async_sleep(int64_t milliseconds, void* coro);
 void __djinn_await(void* child_handle, void* parent_handle);
 
 

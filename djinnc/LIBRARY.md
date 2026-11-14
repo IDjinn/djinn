@@ -64,7 +64,7 @@ Section table: one 32 byte entry per section: `u32 kind, u32 pad, u64 offset, u6
 
 The interface is the original source minified (comments and whitespace removed) with the bodies of non generic,
 non constexpr functions, constructors, operators and property accessors replaced by `{}`. Generics, macros,
-constexpr and struct layouts stay complete.
+constexpr and struct layouts stay complete. Modifiers (`private`, `async`, `sync`, `unsafe`) are kept in the text, so a consumer enforces `private` (E3062) and sees `sync`/`async` signatures the same way as for source.
 
 ## How it works
 
