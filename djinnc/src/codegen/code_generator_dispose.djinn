@@ -146,11 +146,59 @@ impl CodeGenerator {
         this.dispose_value(pointee, element);
     }
 
-    unsafe void dispose_before_assign(Node* target) {
+    unsafe void dispose_before_assign(Node* target, ptr address) {
         LocalVariable* variable = this.tracked_local(target);
         if (variable != null) {
             this.emit_drop(variable);
+            return;
         }
+        this.dispose_replaced_field(target, address);
+    }
+
+    unsafe bool in_constructor() {
+        FunctionContext* function_context = this.function_context;
+        FunctionInfo* function = function_context.function;
+        return function != null && function.name_atom == Ast.intern_base_name(".ctor", 5);
+    }
+
+    unsafe void dispose_replaced_field(Node* target, ptr address) {
+        bool implicit = target.kind() == NodeKind::IDENTIFIER && target.symbol_kind() == SymbolKind.IMPLICIT_FIELD;
+        bool explicit = target.kind() == NodeKind::FIELD_ACCESS && target.symbol_kind() == SymbolKind.FIELD;
+        if (!implicit && !explicit) {
+            return;
+        }
+        SymbolTable* symbols = this.symbols;
+        u32 type = target.value_type();
+        if (!Ownership.needs_dispose(symbols, type) || this.in_constructor()) {
+            return;
+        }
+        mut LocalVariable* root = (LocalVariable*)0;
+        if (explicit) {
+            mut Node* base = target.first();
+            while (base.kind() == NodeKind::FIELD_ACCESS) {
+                base = base.first();
+            }
+            if (base.kind() != NodeKind::IDENTIFIER || base.symbol_kind() != SymbolKind.LOCAL) {
+                return;
+            }
+            root = (LocalVariable*)base.symbol();
+            if (Types.is_pointer(root.type) && root.name_atom != Ast.intern_base_name("this", 4)) {
+                return;
+            }
+        }
+        if (root == null || root.drop_flag == null) {
+            this.dispose_value(address, type);
+            return;
+        }
+        ptr flag_type = LLVMIntTypeInContext(this.context, 1);
+        ptr live = LLVMBuildLoad2(this.builder, flag_type, root.drop_flag, "field.live");
+        ptr run_block = this.new_block("field.drop");
+        ptr next_block = this.new_block("field.next");
+        LLVMBuildCondBr(this.builder, live, run_block, next_block);
+        LLVMPositionBuilderAtEnd(this.builder, run_block);
+        this.dispose_value(address, type);
+        LLVMBuildBr(this.builder, next_block);
+        LLVMPositionBuilderAtEnd(this.builder, next_block);
     }
 
     unsafe void revive_after_assign(Node* target, Node* source) {

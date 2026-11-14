@@ -550,7 +550,23 @@ impl TypeChecker {
         return Ownership.is_copy(symbols, type);
     }
 
+    unsafe bool is_owned_place(Node* source) {
+        NodeKind kind = source.kind();
+        if (kind != NodeKind::FIELD_ACCESS && kind != NodeKind::INDEX && !(kind == NodeKind::UNARY && source.op_kind() == TokenKind::STAR)) {
+            return false;
+        }
+        SymbolTable* symbols = this.symbols;
+        return Ownership.needs_dispose(symbols, source.value_type());
+    }
+
+    unsafe void reject_move_out_of_place(Node* source) {
+        if (!this.in_unsafe() && this.is_owned_place(source)) {
+            this.error_code(source, DiagnosticErrors.MOVE_OUT_OF_PLACE, "cannot move a value out of a field, element or pointer: the owner would dispose it again");
+        }
+    }
+
     unsafe void move_from(Node* source, Node* destination) {
+        this.reject_move_out_of_place(source);
         if (source.kind() != NodeKind::IDENTIFIER || source.symbol_kind() != SymbolKind.LOCAL) {
             return;
         }
@@ -566,6 +582,7 @@ impl TypeChecker {
     }
 
     unsafe void move_out(Node* source) {
+        this.reject_move_out_of_place(source);
         if (source.kind() != NodeKind::IDENTIFIER || source.symbol_kind() != SymbolKind.LOCAL) {
             return;
         }
