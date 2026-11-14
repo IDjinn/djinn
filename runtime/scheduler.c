@@ -409,8 +409,52 @@ DWORD WINAPI djinn_worker_thread(LPVOID arg)
 #endif
 }
 
+#define DJINN_MAX_THREADS 256
+
+static int parse_thread_count(const char* text, int* out)
+{
+    if (!text || !*text) return 0;
+    char* end = NULL;
+    long value = strtol(text, &end, 10);
+    while (end && (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n')) end++;
+    if (!end || *end != '\0' || value < 0 || value > DJINN_MAX_THREADS) return 0;
+    *out = (int)value;
+    return 1;
+}
+
+/* Thread count precedence: DJINN_THREADS env var > "threads=N" in runtime.properties > value
+ * compiled into the program (attribute / .proj / default). Invalid values are ignored. */
+static int djinn_resolve_thread_count(int compiled)
+{
+    int value;
+    if (parse_thread_count(getenv("DJINN_THREADS"), &value)) return value;
+
+    FILE* file = fopen("runtime.properties", "r");
+    if (file)
+    {
+        char line[128];
+        while (fgets(line, sizeof(line), file))
+        {
+            if (strncmp(line, "threads", 7) != 0) continue;
+            const char* rest = line + 7;
+            while (*rest == ' ' || *rest == '\t') rest++;
+            if (*rest != '=') continue;
+            rest++;
+            while (*rest == ' ' || *rest == '\t') rest++;
+            if (parse_thread_count(rest, &value))
+            {
+                fclose(file);
+                return value;
+            }
+        }
+        fclose(file);
+    }
+    return compiled;
+}
+
 void __djinn_runtime_init(int num_threads)
 {
+    num_threads = djinn_resolve_thread_count(num_threads);
     memset(&djinn_rt, 0, sizeof(djinn_rt));
     logger = logger_get("RUNTIME", 1, LOG_TRACE);
     logger_configure_from_properties(logger, "runtime.properties");

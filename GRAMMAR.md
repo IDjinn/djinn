@@ -113,7 +113,7 @@ field_decl           = [ attributes ] [ modifiers ] [ "mut" ] type IDENTIFIER [ 
 property             = [ modifiers ] type IDENTIFIER ( "{" { getter | setter } "}" | "=>" expression ";" ) ;
 getter               = "get" ( ";" | "=>" expression ";" | block ) ;
 setter               = "set" ( ";" | "=>" expression ";" | block ) ;
-method               = [ attributes ] [ modifiers ] [ "async" ] type IDENTIFIER [ generic_params ] "(" [ param_list ] ")"
+method               = [ attributes ] [ modifiers ] [ "async" | "sync" ] type IDENTIFIER [ generic_params ] "(" [ param_list ] ")"
                        [ where_clause ] [ throws_clause ] { contract_clause } ( ";" | "=>" expression ";" | block ) ;
 constructor          = IDENTIFIER "(" [ param_list ] ")" block ;
 operator_decl        = [ modifiers ] type "operator" operator_symbol "(" [ param_list ] ")" ( "=>" expression ";" | block ) ;
@@ -130,7 +130,7 @@ property name means `this.name`. `operator` members are static.
 ### Function
 
 ```ebnf
-function             = [ attributes ] [ "unsafe" ] [ "async" ] [ "constexpr" | "consteval" ] type IDENTIFIER [ generic_params ]
+function             = [ attributes ] [ "unsafe" ] [ "async" | "sync" ] [ "constexpr" | "consteval" ] type IDENTIFIER [ generic_params ]
                        "(" [ param_list ] ")" [ where_clause ] [ throws_clause ] { contract_clause } ( block | "=>" expression ";" ) ;
 param_list           = parameter { "," parameter } ;
 parameter            = [ attributes ] type [ "..." ] IDENTIFIER [ "=" expression ] | "..." IDENTIFIER | "..." ;
@@ -313,6 +313,7 @@ factor               = unary { ( "*" | "/" | "%" ) unary } ;
 unary                = ( "!" | "-" | "~" | "*" | "&" | "++" | "--" ) unary | cast | await_expr | try_expression | postfix ;
 cast                 = "(" type ")" unary ;
 await_expr           = "await" unary ;
+blocking_wait        = postfix "." "sync" ;   (* not followed by "(" or "<"; same node as await_expr, blocking *)
 postfix              = primary { "." IDENTIFIER [ generic_args ] | "?." IDENTIFIER | "!." IDENTIFIER | "[" expression "]"
                      | "(" [ arg_list ] ")" | "++" | "--" } ;
 
@@ -335,7 +336,7 @@ argument             = [ IDENTIFIER ":" ] expression ;
 - `&function` is the address of a plain, non-generic function as `ptr`.
 - `expr is T` / `expr is T name` tests a boxed `object` and optionally binds the unboxed value; `expr is Enum::Variant a b`
   tests a union value and binds the payload.
-- `await task` suspends in async functions and runs the event loop in sync ones; `spawn task;` schedules a task.
+- `sync` is a contextual modifier (a method may still be called `sync`); `await` is an error inside a `sync` function. `task.sync` blocks the calling thread until the task completes (C# `GetAwaiter().GetResult()`) and warns (E6005) inside async functions. `await task` suspends in async functions and runs the event loop in the others; `spawn task;` schedules a task.
 
 #### Switch expression
 

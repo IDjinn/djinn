@@ -254,8 +254,29 @@ impl CodeGenerator {
         LLVMPositionBuilderAtEnd(this.builder, entry);
 
         ptr<ptr> init_args = CodeGenerator.array_of(1);
-        init_args[0] = LLVMConstInt(i32_type, 4, 0);
-        LLVMBuildCall2(this.builder, init_type, init_fn, init_args, 1, "");
+        mut u64 thread_count = 4;
+        if (this.async_threads_set) {
+            thread_count = (u64)this.async_threads;
+        }
+        if (!this.async_threads_forced && user.node != null) {
+            PointerList* main_uses = Attributes.of(user.node);
+            for (mut i32 u = 0; u < main_uses.length; u = u + 1) {
+                AttributeUse* main_use = (AttributeUse*)main_uses.get(u);
+                if (!Strings.same(main_use.name, "Runtime")) {
+                    continue;
+                }
+                if (main_use.int_arg < 0 || main_use.int_arg > 256 || main_use.payload == null) {
+                    this.warn_attribute(main_use, "'Runtime' needs 'threads = <0 to 256>'");
+                } else {
+                    thread_count = (u64)main_use.int_arg;
+                }
+            }
+        }
+        init_args[0] = LLVMConstInt(i32_type, thread_count, 0);
+        bool needs_runtime = this.program_needs_runtime(user);
+        if (needs_runtime) {
+            LLVMBuildCall2(this.builder, init_type, init_fn, init_args, 1, "");
+        }
         this.register_reflected_types();
 
         mut ptr exit_code = LLVMConstInt(i32_type, 0, 0);
@@ -288,8 +309,27 @@ impl CodeGenerator {
             exit_code = this.coerce(wrapped, Types.i32_type());
         }
 
-        LLVMBuildCall2(this.builder, shutdown_type, shutdown_fn, CodeGenerator.array_of(0), 0, "");
+        if (needs_runtime) {
+            LLVMBuildCall2(this.builder, shutdown_type, shutdown_fn, CodeGenerator.array_of(0), 0, "");
+        }
         LLVMBuildRet(this.builder, exit_code);
+    }
+
+    // A 'sync' main starts no runtime (no event loop, no worker threads) unless some function of the
+    // program is still async after elision: then tasks may exist and '.sync' / 'spawn' need the scheduler.
+    unsafe bool program_needs_runtime(FunctionInfo* user) {
+        if (!user.is_sync || user.is_async) {
+            return true;
+        }
+        SymbolTable* symbols = this.symbols;
+        PointerList* functions = symbols.functions;
+        for (mut i32 i = 0; i < functions.length; i = i + 1) {
+            FunctionInfo* candidate = (FunctionInfo*)functions.get(i);
+            if (candidate.is_async && !candidate.is_template) {
+                return true;
+            }
+        }
+        return false;
     }
 
     unsafe void add_attribute(ptr function, u32 index, ptr<i8> name, u64 value) {

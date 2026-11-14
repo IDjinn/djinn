@@ -46,6 +46,22 @@ for level in -O0 -O2; do
     [ "$code" = 42 ] || fail "--no-async-elision program must exit 42, got $code ($level)"
 done
 
+"$compiler" "$out/app.djinn" --no-async-elision -o "$out/threads$exe" --keep-ir "${flags[@]}" > "$out/threads.log" 2>&1 || { cat "$out/threads.log"; fail "default thread build must compile"; }
+grep -q 'runtime_init(i32 4)' "$out/threads$exe.ll" || fail "default runtime thread count must be 4"
+"$compiler" "$out/app.djinn" --no-async-elision --async-threads=7 -o "$out/threads$exe" --keep-ir "${flags[@]}" > "$out/threads.log" 2>&1 || { cat "$out/threads.log"; fail "--async-threads must compile"; }
+grep -q 'runtime_init(i32 7)' "$out/threads$exe.ll" || fail "--async-threads=7 must reach __djinn_runtime_init"
+set +e; DJINN_THREADS=0 "$out/threads$exe"; code=$?; set -e
+[ "$code" = 42 ] || fail "DJINN_THREADS=0 program must exit 42, got $code"
+
+# [Runtime(threads = N)] on main, and async-threads: in djinn.proj (CLI flag > attribute > .proj > default)
+sed 's/^i32 main()/[Runtime(threads = 6)] i32 main()/' "$out/app.djinn" > "$out/attr.djinn"
+"$compiler" "$out/attr.djinn" --no-async-elision -o "$out/attr$exe" --keep-ir "${flags[@]}" > "$out/attr.log" 2>&1 || { cat "$out/attr.log"; fail "[Runtime] must compile"; }
+grep -q 'runtime_init(i32 6)' "$out/attr$exe.ll" || fail "[Runtime(threads = 6)] must reach __djinn_runtime_init"
+"$compiler" "$out/attr.djinn" --no-async-elision --async-threads=3 -o "$out/attr$exe" --keep-ir "${flags[@]}" > "$out/attr.log" 2>&1 || { cat "$out/attr.log"; fail "flag plus [Runtime] must compile"; }
+grep -q 'runtime_init(i32 3)' "$out/attr$exe.ll" || fail "--async-threads must win over [Runtime]"
+"$compiler" tests/async_threads_project --no-async-elision -o "$out/proj$exe" --keep-ir "${flags[@]}" > "$out/proj.log" 2>&1 || { cat "$out/proj.log"; fail "project with async-threads: must compile"; }
+grep -q 'runtime_init(i32 5)' "$out/proj$exe.ll" || fail "async-threads: in djinn.proj must reach __djinn_runtime_init"
+
 set +e
 "$compiler" "$out/app.djinn" --run "${flags[@]}" > "$out/jit.log" 2>&1; code=$?
 set -e
