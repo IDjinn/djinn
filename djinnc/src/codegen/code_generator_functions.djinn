@@ -254,7 +254,7 @@ impl CodeGenerator {
         LLVMPositionBuilderAtEnd(this.builder, entry);
 
         ptr<ptr> init_args = CodeGenerator.array_of(1);
-        mut u64 thread_count = 4;
+        mut u64 thread_count = 0;
         if (this.async_threads_set) {
             thread_count = (u64)this.async_threads;
         }
@@ -315,17 +315,85 @@ impl CodeGenerator {
         LLVMBuildRet(this.builder, exit_code);
     }
 
-    // A 'sync' main starts no runtime (no event loop, no worker threads) unless some function of the
-    // program is still async after elision: then tasks may exist and '.sync' / 'spawn' need the scheduler.
+    // A 'sync' main starts no runtime (no event loop, no worker threads) unless async work is reachable from it:
+    // an async function that is still a coroutine after elision, 'spawn', '.sync', or a runtime async primitive.
+    // Code that main cannot reach never runs, so it does not need the scheduler.
     unsafe bool program_needs_runtime(FunctionInfo* user) {
         if (!user.is_sync || user.is_async) {
             return true;
         }
-        SymbolTable* symbols = this.symbols;
-        PointerList* functions = symbols.functions;
-        for (mut i32 i = 0; i < functions.length; i = i + 1) {
-            FunctionInfo* candidate = (FunctionInfo*)functions.get(i);
-            if (candidate.is_async && !candidate.is_template) {
+        PointerList* seen = PointerList.create();
+        seen.push((ptr)user);
+        mut i32 next = 0;
+        mut bool needed = false;
+        while (next < seen.length && !needed) {
+            FunctionInfo* current = (FunctionInfo*)seen.get(next);
+            next = next + 1;
+            Node* declaration = current.node;
+            if (declaration == null || declaration.kind() != NodeKind::FUNCTION || declaration.first() == null) {
+                continue;
+            }
+            needed = this.reaches_async(declaration.first(), seen);
+        }
+        return needed;
+    }
+
+    unsafe bool reaches_async(Node* node, PointerList* seen) {
+        if (node == null) {
+            return false;
+        }
+        NodeKind kind = node.kind();
+        if (kind == NodeKind::SPAWN_STMT) {
+            return true;
+        }
+        if (kind == NodeKind::AWAIT_EXPR && (node.flag() || !this.awaits_direct_call(node))) {
+            return true;
+        }
+        FunctionInfo* target = this.function_of(node);
+        if (target != null) {
+            if ((target.is_async && !target.is_extern) || AsyncElision.suspends_natively(target)) {
+                return true;
+            }
+            if (!target.is_extern && !this.is_listed(seen, target)) {
+                seen.push((ptr)target);
+            }
+        }
+        for (mut i32 field = NodeField.FIRST; field <= NodeField.FOURTH; field = field + 1) {
+            u32 stored = node.get_field(field);
+            if (stored != 0 && this.reaches_async(Ast.at((i32)stored), seen)) {
+                return true;
+            }
+        }
+        if (node.has_items()) {
+            for (mut i32 i = 0; i < node.count(); i = i + 1) {
+                if (this.reaches_async(node.child(i), seen)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    unsafe bool awaits_direct_call(Node* await_node) {
+        Node* operand = await_node.first();
+        return operand != null && operand.kind() == NodeKind::CALL && operand.first() != null && this.function_of(operand.first()) != null;
+    }
+
+    // The function a node refers to, whether or not the async elision pass numbered it.
+    unsafe FunctionInfo* function_of(Node* node) {
+        i32 kind = node.symbol_kind();
+        bool function = kind == SymbolKind.FUNCTION || kind == SymbolKind.STATIC_METHOD || kind == SymbolKind.INSTANCE_METHOD
+            || kind == SymbolKind.CONSTRUCTOR || kind == SymbolKind.OPERATOR || kind == SymbolKind.PROPERTY_GET
+            || kind == SymbolKind.IMPLICIT_GET || kind == SymbolKind.INDEX_GET;
+        if (!function || node.symbol() == null) {
+            return (FunctionInfo*)0;
+        }
+        return (FunctionInfo*)node.symbol();
+    }
+
+    unsafe bool is_listed(PointerList* list, FunctionInfo* target) {
+        for (mut i32 i = 0; i < list.length; i = i + 1) {
+            if ((FunctionInfo*)list.get(i) == target) {
                 return true;
             }
         }

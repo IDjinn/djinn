@@ -238,4 +238,57 @@ SOURCE
 set +e; "$out/infer_lib$exe"; code=$?; set -e
 [ "$code" = 42 ] || fail "inferred async library program must exit 42, got $code"
 
+# A public function that blocks on a task must declare 'async' or 'sync' (warning E6006); declaring it silences it.
+cat > "$out/contract.djinn" <<'SOURCE'
+async i32 leaf(i32 x) {
+    return x + 1;
+}
+
+public i32 undeclared(i32 x) {
+    return leaf(x).sync;
+}
+
+public sync i32 declared(i32 x) {
+    return leaf(x).sync;
+}
+
+i32 main() {
+    return undeclared(1) + declared(2);
+}
+SOURCE
+"$compiler" "$out/contract.djinn" --no-async-elision -o "$out/contract$exe" "${flags[@]}" > "$out/contract.log" 2>&1 || { cat "$out/contract.log"; fail "contract program must compile"; }
+[ "$(grep -c 'warning\[E6006\]' "$out/contract.log")" = 1 ] || { cat "$out/contract.log"; fail "exactly the undeclared public function must report E6006"; }
+
+# Async code that main cannot reach does not keep the runtime; reachable async code does.
+cat > "$out/unreached.djinn" <<'SOURCE'
+async i32 never_called(i32 x) {
+    return x;
+}
+
+sync i32 main() {
+    return 5;
+}
+SOURCE
+"$compiler" "$out/unreached.djinn" --no-async-elision -o "$out/unreached$exe" --keep-ir "${flags[@]}" > "$out/unreached.log" 2>&1 || { cat "$out/unreached.log"; fail "unreached async must compile"; }
+if grep -q 'call .*@__djinn_runtime_init' "$out/unreached$exe.ll"; then fail "an async function main cannot reach must not start the runtime"; fi
+set +e; "$out/unreached$exe"; code=$?; set -e
+[ "$code" = 5 ] || fail "unreached async program must exit 5, got $code"
+cat > "$out/reached.djinn" <<'SOURCE'
+async i32 leaf(i32 x) {
+    return x + 1;
+}
+
+sync i32 helper() {
+    return leaf(3).sync;
+}
+
+sync i32 main() {
+    return helper() + 1;
+}
+SOURCE
+"$compiler" "$out/reached.djinn" --no-async-elision -o "$out/reached$exe" --keep-ir "${flags[@]}" > "$out/reached.log" 2>&1 || { cat "$out/reached.log"; fail "reached async must compile"; }
+grep -q 'call .*@__djinn_runtime_init' "$out/reached$exe.ll" || fail "async reachable through a helper must start the runtime"
+set +e; "$out/reached$exe"; code=$?; set -e
+[ "$code" = 5 ] || fail "reached async program must exit 5, got $code"
+
 echo "sync_model: ok"

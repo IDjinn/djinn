@@ -452,9 +452,29 @@ static int djinn_resolve_thread_count(int compiled)
     return compiled;
 }
 
+static int djinn_logical_cores(void)
+{
+#ifdef _WIN32
+    SYSTEM_INFO info;
+    GetSystemInfo(&info);
+    int cores = (int)info.dwNumberOfProcessors;
+#else
+    long found = sysconf(_SC_NPROCESSORS_ONLN);
+    int cores = found > 0 ? (int)found : 1;
+#endif
+    if (cores < 1) cores = 1;
+    return cores > DJINN_MAX_THREADS ? DJINN_MAX_THREADS : cores;
+}
+
+/* Worker threads are started only when something schedules coroutines onto the pool. Today every coroutine runs on
+ * the event-loop thread (drain_ready_queue) and nothing enqueues to pool.queue, so idle workers would only burn
+ * resources. The configured count is still resolved and kept in pool.configured_threads. */
+#define DJINN_SCHEDULE_ON_POOL 0
+
 void __djinn_runtime_init(int num_threads)
 {
     num_threads = djinn_resolve_thread_count(num_threads);
+    if (num_threads <= 0) num_threads = djinn_logical_cores();
     memset(&djinn_rt, 0, sizeof(djinn_rt));
     logger = logger_get("RUNTIME", 1, LOG_TRACE);
     logger_configure_from_properties(logger, "runtime.properties");
@@ -515,6 +535,8 @@ void __djinn_runtime_init(int num_threads)
     DJINN_ASSERT(djinn_rt.epoll_fd >= 0, "epoll_create1 failed");
 #endif
 
+    djinn_rt.pool.configured_threads = num_threads;
+#if DJINN_SCHEDULE_ON_POOL
     if (num_threads > 0)
     {
         djinn_rt.pool.thread_count = num_threads;
@@ -532,6 +554,7 @@ void __djinn_runtime_init(int num_threads)
         }
 #endif
     }
+#endif
 
 #ifdef _WIN32
     djinn_rt.file_io_thread = CreateThread(NULL, 0, djinn_file_io_thread_func, NULL, 0, NULL);
