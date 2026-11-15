@@ -410,4 +410,64 @@ i32 main() {
         Verify.source(source).with_std().runs(Expected.exit(42));
     }
 
+    [Test]
+    void utf8_validation_is_strict() {
+        str source = """
+import std::text;
+import std::types;
+import std::libc;
+
+i8 byte(i32 value) {
+    if (value > 127) {
+        return (i8)(value - 256);
+    }
+    return (i8)value;
+}
+
+unsafe bool valid(i32 a, i32 b, i32 c, i32 d, u32 n) {
+    i8* data = (i8*)malloc(4);
+    data[0] = byte(a);
+    data[1] = byte(b);
+    data[2] = byte(c);
+    data[3] = byte(d);
+    return Utf8.is_valid(data, (size)n);
+}
+
+i32 main() {
+    unsafe {
+        if (!valid(97, 0, 0, 0, 1)) { return 1; }
+        if (!valid(195, 169, 0, 0, 2)) { return 2; }
+        if (!valid(226, 130, 172, 0, 3)) { return 3; }
+        if (!valid(240, 159, 152, 128, 4)) { return 4; }
+        if (!valid(244, 143, 191, 191, 4)) { return 5; }
+        if (valid(192, 188, 0, 0, 2)) { return 6; }
+        if (valid(224, 128, 188, 0, 3)) { return 7; }
+        if (valid(240, 128, 128, 188, 4)) { return 8; }
+        if (valid(237, 160, 128, 0, 3)) { return 9; }
+        if (valid(237, 191, 191, 0, 3)) { return 10; }
+        if (valid(244, 144, 128, 128, 4)) { return 11; }
+        if (valid(245, 128, 128, 128, 4)) { return 12; }
+        if (valid(128, 0, 0, 0, 1)) { return 13; }
+        if (valid(226, 130, 0, 0, 2)) { return 14; }
+        if (valid(226, 97, 172, 0, 3)) { return 15; }
+        if (!valid(237, 159, 191, 0, 3)) { return 16; }
+        if (!valid(238, 128, 128, 0, 3)) { return 17; }
+        i8* bad = (i8*)malloc(4);
+        bad[0] = 97;
+        bad[1] = byte(237);
+        bad[2] = byte(160);
+        bad[3] = byte(128);
+        if (Utf8.first_invalid(bad, 4u) != 1u) { return 18; }
+        str mixed = { .data = bad, .length = 4u };
+        if (mixed.isValidUtf8()) { return 19; }
+        string clean = Utf8.sanitize(mixed);
+        if (clean.length != 10u) { return 20; }
+        str fine = "héllo";
+        if (!fine.isValidUtf8()) { return 21; }
+    }
+    return 42;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(42));
+    }
 }

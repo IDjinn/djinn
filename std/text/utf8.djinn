@@ -1,0 +1,116 @@
+import std::types;
+import std::libc;
+
+namespace std::text;
+
+// Strict UTF-8 (RFC 3629): no overlong forms, no UTF-16 surrogates (U+D800..U+DFFF), nothing past U+10FFFF.
+// Text that crosses a trust boundary (HTML, JSON, file names) should be checked or sanitized with these.
+struct Utf8 {
+    public const str REPLACEMENT = "�";
+
+    // The length of the well-formed sequence starting at 'index' (1 to 4), or 0 when the bytes there are not one.
+    public static unsafe size sequence_length(i8* data, size length, size index) {
+        u32 lead = (u32)(u8)data[index];
+        if (lead < 128) {
+            return 1u;
+        }
+        mut size width = 0u;
+        mut u32 low = 128;
+        mut u32 high = 191;
+        if (lead >= 194 && lead <= 223) {
+            width = 2u;
+        } else if (lead >= 224 && lead <= 239) {
+            width = 3u;
+            if (lead == 224) {
+                low = 160;
+            } else if (lead == 237) {
+                high = 159;
+            }
+        } else if (lead >= 240 && lead <= 244) {
+            width = 4u;
+            if (lead == 240) {
+                low = 144;
+            } else if (lead == 244) {
+                high = 143;
+            }
+        } else {
+            return 0u;
+        }
+        if (width > length - index) {
+            return 0u;
+        }
+        u32 second = (u32)(u8)data[index + 1u];
+        if (second < low || second > high) {
+            return 0u;
+        }
+        for (mut size k = 2u; k < width; k = k + 1u) {
+            u32 next = (u32)(u8)data[index + k];
+            if (next < 128 || next > 191) {
+                return 0u;
+            }
+        }
+        return width;
+    }
+
+    // Skips the ASCII run at 'index' eight bytes at a time (the common case for markup, code and JSON).
+    public static unsafe size skip_ascii(i8* data, size length, size index) {
+        mut size i = index;
+        mut u64 word = 0;
+        while (i + 8u <= length) {
+            memcpy((void*)&word, (void*)(data + i), 8);
+            if ((word & 9259542123273814144) != 0) {
+                break;
+            }
+            i = i + 8u;
+        }
+        return i;
+    }
+
+    public static unsafe bool is_valid(i8* data, size length) {
+        mut size i = 0u;
+        while (i < length) {
+            i = Utf8.skip_ascii(data, length, i);
+            if (i >= length) {
+                break;
+            }
+            size width = Utf8.sequence_length(data, length, i);
+            if (width == 0u) {
+                return false;
+            }
+            i = i + width;
+        }
+        return true;
+    }
+
+    // The offset of the first byte that does not start a well-formed sequence, or 'length' when all are valid.
+    public static unsafe size first_invalid(i8* data, size length) {
+        mut size i = 0u;
+        while (i < length) {
+            size width = Utf8.sequence_length(data, length, i);
+            if (width == 0u) {
+                return i;
+            }
+            i = i + width;
+        }
+        return length;
+    }
+
+    // A copy where every byte that is not part of a well-formed sequence is replaced by U+FFFD.
+    public static unsafe string sanitize(str text) {
+        string_builder builder = string_builder();
+        mut size i = 0u;
+        while (i < text.length) {
+            size width = Utf8.sequence_length(text.data, text.length, i);
+            if (width == 0u) {
+                builder.append(Utf8.REPLACEMENT);
+                i = i + 1u;
+                continue;
+            }
+            for (mut size k = 0u; k < width; k = k + 1u) {
+                builder.append_byte(text.data[i + k]);
+            }
+            i = i + width;
+        }
+        return builder.to_string();
+    }
+}
