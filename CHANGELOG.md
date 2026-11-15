@@ -24,6 +24,7 @@
 
 ### Changed
 - Macros are token templates expanded and re-parsed (they were AST substitutions): every macro is collected before parsing, so a macro can be used before it is declared or from another file. Macros belong to their namespace and are visible only from it and from files that import it, so a user `log` macro no longer rewrites `log(...)` calls inside `std`. Parse errors inside an expansion are reported at the call.
+- An installed `djinnc` now finds `runtime/`, `std/` and the prebuilt runtime library (`lib/`) next to its own `bin/` directory, so `--runtime-dir`, `--std-dir` and `--runtime-lib` are no longer needed. Explicit flags, `DJINN_STD_DIR` and a `runtime/core` in the current directory still take precedence.
 
 ## [0.5.2] - 2026-11-14
 

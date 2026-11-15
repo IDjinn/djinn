@@ -113,7 +113,17 @@ impl Parser {
         }
 
         if (this.kind_of(token) == TokenKind::EXTERN) {
-            return this.parse_extern();
+            return this.parse_extern(0);
+        }
+
+        if (this.is_internal_extern()) {
+            this.advance();
+            return this.parse_extern(256);
+        }
+
+        if (this.kind_of(token) == TokenKind::PUBLIC && this.kind_of(this.peek_token(1)) == TokenKind::EXTERN) {
+            this.advance();
+            return this.parse_extern(128);
         }
 
         if (this.kind_of(token) == TokenKind::STRUCT) {
@@ -170,6 +180,12 @@ impl Parser {
         }
 
         return this.parse_function(false);
+    }
+
+    bool is_internal_extern() {
+        TokenList* list = this.tokens;
+        i32 word = this.current();
+        return this.kind_of(word) == TokenKind::IDENTIFIER && Strings.equals(list.text(word), list.text_length(word), "internal") && this.kind_of(this.peek_token(1)) == TokenKind::EXTERN;
     }
 
     bool is_inspect_start() {
@@ -280,7 +296,7 @@ impl Parser {
         return node;
     }
 
-    unsafe Node* parse_extern() {
+    unsafe Node* parse_extern(i32 access) {
         i32 start = this.advance();
         Node* group = Node.create_list(NodeKind::NAMESPACE_DECL, start);
         group.set_text("");
@@ -296,7 +312,7 @@ impl Parser {
                 if (this.check(TokenKind::LBRACKET)) {
                     found = this.parse_attributes();
                 }
-                group.add(this.parse_extern_function(found));
+                group.add(this.parse_extern_function(found, access));
             }
             this.expect(TokenKind::RBRACE, "expected '}' to close extern block");
             return group;
@@ -306,13 +322,16 @@ impl Parser {
         if (this.check(TokenKind::LBRACKET)) {
             single = this.parse_attributes();
         }
-        group.add(this.parse_extern_function(single));
+        group.add(this.parse_extern_function(single, access));
         return group;
     }
 
-    Node* parse_extern_function(PointerList* found) {
+    Node* parse_extern_function(PointerList* found, i32 access) {
         i32 start = this.current();
         Node* node = Node.create_list(NodeKind::EXTERN_FUNCTION, start);
+        if (access != 0) {
+            node.set_op(access);
+        }
         if (found != null) {
             this.attach_attributes(found, node, AttributeTarget.FUNCTION);
         }

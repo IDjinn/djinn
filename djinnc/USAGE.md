@@ -57,7 +57,7 @@ The runtime (the `.c` files in `runtime/`) is compiled together with the program
 | Option | Effect |
 |---|---|
 | `-o <path>` | Output executable (default `a.out`). |
-| `--runtime-dir <dir>` | Directory with the runtime `.c` sources (default `runtime`). |
+| `--runtime-dir <dir>` | Directory with the runtime `.c` sources (default `runtime`; an installed djinnc uses `<install>/runtime` unless the current directory has its own `runtime/core`). The std directory and the prebuilt runtime library (`<install>/std`, `<install>/lib`) are found the same way. |
 | `--runtime-lib <lib>` | Link a prebuilt runtime instead of recompiling it (built by `tools/build_runtime.sh`). |
 | `--link-arg <arg>` | Extra linker argument; repeatable. |
 | `-O0`, `-O1`, `-O2`, `-O3`, `-Os`, `-Oz` | Optimization level: runs `default<ON>` through `LLVMRunPasses` and sets the backend codegen level. Without it the pipeline is `default<O0>`. |
@@ -73,6 +73,7 @@ The runtime (the `.c` files in `runtime/`) is compiled together with the program
 | `--emit-asm` | Write the assembly to `-o` and stop. |
 | `--show-async` | In the view modes, also show the compiler-generated async infrastructure (the entry `main` that starts the runtime and event loop, and the `__djinn_coro_*` wrappers). Hidden by default. |
 | `--async-threads=<n>` | Worker threads the compiled program starts with (default 0: the logical core count). At run time `DJINN_THREADS` and `threads=<n>` in `runtime.properties` override it. `[Runtime(threads = n)]` on `main` and `async-threads: n` in the `compiler:` section of `djinn.proj` set the compiled value too; precedence: this flag, then the attribute, then `djinn.proj`, then 0 (auto). See `djinnc/ASYNC_MODEL.md`. |
+| `--strict-externs` | An `extern` is visible only in the file that declares it. `internal extern` shares it with the files of the same namespace and `public extern` with every file. Off by default. |
 | `--no-async-elision` | Keep every `async` function a coroutine. By default an async function that can never suspend is compiled as a plain function and reported with warning `E6004` (see `djinnc/SUBSET.md`). |
 | `--emit-ast` | Print the AST (with `<line:col>`) to stdout and stop. |
 | `--version` | Print the compiler version. |

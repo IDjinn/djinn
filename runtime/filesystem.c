@@ -6,6 +6,7 @@
 #else
 #include <dirent.h>
 #include <sys/stat.h>
+#include <unistd.h>
 #endif
 
 typedef struct
@@ -105,3 +106,48 @@ char* __djinn_list_files(const char* directory, const char* extension)
 }
 
 #include "fs_safe.c"
+
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#endif
+
+// Directory of the running executable with '/' separators (heap allocated), or NULL when unknown.
+char* __djinn_executable_dir(void)
+{
+    char buffer[4096];
+    size_t length = 0;
+#ifdef _WIN32
+    DWORD written = GetModuleFileNameA(NULL, buffer, (DWORD)sizeof(buffer));
+    if (written == 0 || written >= sizeof(buffer)) return NULL;
+    length = written;
+#elif defined(__APPLE__)
+    uint32_t size = (uint32_t)sizeof(buffer);
+    if (_NSGetExecutablePath(buffer, &size) != 0) return NULL;
+    length = strlen(buffer);
+#else
+    ssize_t written = readlink("/proc/self/exe", buffer, sizeof(buffer) - 1);
+    if (written <= 0) return NULL;
+    length = (size_t)written;
+#endif
+    buffer[length] = 0;
+    for (size_t i = 0; i < length; i++)
+    {
+        if (buffer[i] == '\\') buffer[i] = '/';
+    }
+    while (length > 0 && buffer[length - 1] != '/') length--;
+    if (length == 0) return NULL;
+    buffer[length - 1] = 0;
+    char* copy = malloc(length);
+    memcpy(copy, buffer, length);
+    return copy;
+}
+
+int __djinn_path_exists(const char* path)
+{
+#ifdef _WIN32
+    return GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES;
+#else
+    struct stat info;
+    return stat(path, &info) == 0;
+#endif
+}
