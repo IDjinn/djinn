@@ -57,7 +57,7 @@ The runtime (the `.c` files in `runtime/`) is compiled together with the program
 | Option | Effect |
 |---|---|
 | `-o <path>` | Output executable (default `a.out`). |
-| `--runtime-dir <dir>` | Directory with the runtime `.c` sources (default `runtime`). |
+| `--runtime-dir <dir>` | Directory with the runtime `.c` sources (default `runtime`; an installed djinnc uses `<install>/runtime` unless the current directory has its own `runtime/core`). The std directory and the prebuilt runtime library (`<install>/std`, `<install>/lib`) are found the same way. |
 | `--runtime-lib <lib>` | Link a prebuilt runtime instead of recompiling it (built by `tools/build_runtime.sh`). |
 | `--link-arg <arg>` | Extra linker argument; repeatable. |
 | `-O0`, `-O1`, `-O2`, `-O3`, `-Os`, `-Oz` | Optimization level: runs `default<ON>` through `LLVMRunPasses` and sets the backend codegen level. Without it the pipeline is `default<O0>`. |

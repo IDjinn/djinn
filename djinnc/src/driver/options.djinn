@@ -6,6 +6,7 @@ struct Options {
     ptr<i8> output;
     ptr<i8> runtime_dir;
     ptr<i8> runtime_lib;
+    bool runtime_dir_set;
     ptr<i8> target;
     ptr<i8> std_dir;
     bool use_std;
@@ -59,6 +60,42 @@ struct Options {
     bool float_standard_set;
     bool float_environment_set;
     bool ok;
+
+    // An installed djinnc lives in <root>/bin next to <root>/runtime, <root>/std and <root>/lib. Anything not given on
+    // the command line is taken from there, unless the current directory already has its own runtime (repo checkout).
+    static unsafe ptr<i8> install_path(ptr<i8> root, ptr<i8> suffix) {
+        ByteBuffer* path = ByteBuffer.create();
+        path.append(root);
+        path.append(suffix);
+        return path.cstr();
+    }
+
+    static unsafe void apply_install_layout(Options* options) {
+        ptr<i8> executable_dir = __djinn_executable_dir();
+        if (executable_dir == null) {
+            return;
+        }
+        ptr<i8> root = Options.install_path(executable_dir, "/..");
+        if (!options.runtime_dir_set && __djinn_path_exists("runtime/core") == 0) {
+            if (__djinn_path_exists(Options.install_path(root, "/runtime/core")) != 0) {
+                options.runtime_dir = Options.install_path(root, "/runtime");
+            }
+        }
+        if (options.std_dir == null && getenv("DJINN_STD_DIR") == null) {
+            if (__djinn_path_exists(Options.install_path(root, "/std")) != 0 && __djinn_path_exists(Options.install_path(options.runtime_dir, "/../std")) == 0) {
+                options.std_dir = Options.install_path(root, "/std");
+            }
+        }
+        if (options.runtime_lib == null) {
+            ptr<i8> unix_lib = Options.install_path(root, "/lib/libdjinn_runtime.a");
+            ptr<i8> windows_lib = Options.install_path(root, "/lib/djinn_runtime.lib");
+            if (__djinn_path_exists(unix_lib) != 0) {
+                options.runtime_lib = unix_lib;
+            } else if (__djinn_path_exists(windows_lib) != 0) {
+                options.runtime_lib = windows_lib;
+            }
+        }
+    }
 
     public static unsafe Options* parse() {
         Options* options = (Options*)Memory.zalloc(sizeof(Options));
@@ -226,6 +263,7 @@ struct Options {
                     options.runtime_lib = value;
                 } else {
                     options.runtime_dir = value;
+                    options.runtime_dir_set = true;
                 }
             } else if (Strings.starts_with(argument, 0, strlen(argument), "-")) {
                 logger_error(Log.get(), "djinnc: unknown option '%s'", argument);
@@ -252,6 +290,8 @@ struct Options {
                 options.library = false;
             }
         }
+
+        Options.apply_install_layout(options);
 
         FloatSettings* float_settings = options.float_settings;
         if (!float_settings.validate()) {

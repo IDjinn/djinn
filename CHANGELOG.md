@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- An installed `djinnc` now finds `runtime/`, `std/` and the prebuilt runtime library (`lib/`) next to its own `bin/` directory, so `--runtime-dir`, `--std-dir` and `--runtime-lib` are no longer needed. Explicit flags, `DJINN_STD_DIR` and a `runtime/core` in the current directory still take precedence.
+
 ## [0.5.2] - 2026-11-14
 
 ### Fixed
