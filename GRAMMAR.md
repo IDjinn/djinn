@@ -191,15 +191,27 @@ the AST as literals. A compile-time `if` keeps only the taken branch.
 ```ebnf
 macro_decl           = "macro" IDENTIFIER [ "!" ] "{" { macro_rule } "}" ;
 macro_rule           = [ "local" ] "(" [ macro_param { "," macro_param } ] ")" "=>" ( "{" token_stream "}" | "void" ) ;
-macro_param          = [ "local" ] ( fragment_type IDENTIFIER | IDENTIFIER ) ;
-fragment_type        = "expression" | "identifier" | "literal" | "type" | "block" ;
+macro_param          = [ "local" ] ( fragment_type [ "..." ] IDENTIFIER | IDENTIFIER ) ;
+fragment_type        = "expression" | "identifier" | "literal" | "type" | "block" | "statement" | "tokens" ;
+macro_call           = [ qualified_name "::" ] IDENTIFIER ( "!" ( "(" tokens ")" | "[" tokens "]" | "{" tokens "}" ) | "(" tokens ")" ) ;
+repetition           = "$for" "(" IDENTIFIER "in" IDENTIFIER [ "," TOKEN ] ")" "{" token_stream "}" ;   (* inside a body *)
 ```
 
-(* Called as `name(args)` or `name!(args)`; a macro declared `macro name!` is separate from `macro name` and only called with the `!`.
-Expanded at parse time by token substitution and re-parse; hygienic. Bare identifiers in a rule are literal token
-matchers. `local` evaluates the argument once through a temporary (`local` before `(` applies to all expression
-parameters). Several rules per macro: first match by arity and literal tokens wins; ambiguous rules are rejected;
-warning W6001 when a non-local expression parameter is used more than once. `=> void` expands to `0`.
+(* Called as `name!(args)`, `name![args]` or `name!{args}`, or `name(args)` when declared without `!` (a macro declared
+`macro name!` is separate from `macro name` and only called with the `!`). Expanded at parse time by token substitution
+and re-parse: every macro of every file is collected before parsing, so declaration order does not matter. The call
+site decides the shape: in an expression the body must be one expression; as a statement (followed by `;`, or any
+`name!{...}`) it may be several statements, which join the enclosing block; at declaration level it produces
+declarations. Arguments are matched fragment by fragment (an `expression` is parsed, so `f<A, B>(x)` is one argument);
+a trailing comma is accepted. A variadic `expression... xs` takes the remaining comma-separated arguments and is
+expanded with `$for(x in xs) { ... }` or `$for(x in xs, sep) { ... }`. An `expression` argument of several tokens is
+parenthesized. Bare identifiers in a rule are literal token matchers. Hygiene: locals the template declares (`T name =`,
+`T name;`, `T name in`) get fresh names. `local` evaluates the argument once through a temporary (`local` before `(`
+applies to all expression parameters). Several rules per macro: the first whose fragments parse wins; ambiguous rules are
+rejected; warning W6001 when a non-local expression parameter is used more than once. `=> void` expands to `0` (nothing
+as a statement). Macros belong to their namespace: a call sees the macros of its namespace and of imported namespaces,
+or names one with `ns::name!(...)`. A function with the name of a visible `name(...)` macro warns (W6006). A parse
+error inside an expansion is reported at the call; expansion nests at most 64 levels.
 
 ```djinn
 macro square { (local expression v) => { v * v } }

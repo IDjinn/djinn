@@ -1,0 +1,280 @@
+namespace conformance;
+
+import testing;
+import djinnc::testing;
+import djinnc;
+
+struct MacroSystemTests {
+    [Test]
+    void brace_and_bracket_delimiters() {
+        str source = """
+macro add! {
+    (expression a, expression b) => { a + b }
+}
+
+i32 main() {
+    return add!(1, 2) + add![3, 4] + add!{5, 6};
+}
+""";
+        Verify.source(source).runs(Expected.exit(21));
+    }
+
+    [Test]
+    void generic_arguments_keep_their_commas() {
+        str source = """
+T first<T>(T a, T b) {
+    return a;
+}
+
+macro pick! {
+    (expression a, expression b) => { a * 10 + b }
+}
+
+i32 main() {
+    return pick!(first<i32>(4, 5), 2);
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void trailing_comma_is_accepted() {
+        str source = """
+macro pair! {
+    (expression a, expression b) => { a - b }
+}
+
+i32 main() {
+    return pair!(9, 2,);
+}
+""";
+        Verify.source(source).runs(Expected.exit(7));
+    }
+
+    [Test]
+    void type_fragment_is_bound() {
+        str source = """
+macro size_of! {
+    (type T) => { (i32)sizeof(T) }
+}
+
+i32 main() {
+    return size_of!(i64) + size_of!(i16);
+}
+""";
+        Verify.source(source).runs(Expected.exit(10));
+    }
+
+    [Test]
+    void block_fragment_runs_where_it_is_placed() {
+        str source = """
+macro twice! {
+    (block body) => { body body }
+}
+
+i32 main() {
+    mut i32 total = 1;
+    twice!({ total = total * 3; });
+    return total;
+}
+""";
+        Verify.source(source).runs(Expected.exit(9));
+    }
+
+    [Test]
+    void statement_macro_declares_a_variable_for_the_caller() {
+        str source = """
+macro let_value! {
+    (identifier name, expression value) => { i32 name = value; }
+}
+
+i32 main() {
+    let_value!(answer, 40 + 2);
+    return answer;
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void template_locals_do_not_capture_caller_names() {
+        str source = """
+macro swap! {
+    (identifier a, identifier b) => {
+        i32 tmp = a;
+        a = b;
+        b = tmp;
+    }
+}
+
+i32 main() {
+    mut i32 tmp = 1;
+    mut i32 other = 2;
+    swap!(tmp, other);
+    return tmp * 10 + other;
+}
+""";
+        Verify.source(source).runs(Expected.exit(21));
+    }
+
+    [Test]
+    void variadic_parameter_repeats_with_for() {
+        str source = """
+macro sum! {
+    (expression... items) => { 0 $for(item in items) { + item } }
+}
+
+macro list! {
+    (expression... items) => { [$for(item in items, ,) { item }] }
+}
+
+i32 main() {
+    i32[] values = list!(5, 6, 7);
+    return sum!(1, 2, 3) + sum!() + (i32)values.length;
+}
+""";
+        Verify.source(source).runs(Expected.exit(9));
+    }
+
+    [Test]
+    void item_macro_declares_a_function() {
+        str source = """
+struct Holder {
+    i32 field;
+}
+
+macro getter! {
+    (identifier field) => {
+        i32 read_field(Holder h) {
+            return h.field;
+        }
+    }
+}
+
+getter!(field);
+
+i32 main() {
+    Holder h = { .field = 12 };
+    return read_field(h);
+}
+""";
+        Verify.source(source).runs(Expected.exit(12));
+    }
+
+    [Test]
+    void macro_can_be_used_before_its_declaration() {
+        str source = """
+i32 main() {
+    return later!(41);
+}
+
+macro later! {
+    (expression x) => { x + 1 }
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void macro_of_another_file_is_found_regardless_of_order() {
+        str tools = """
+namespace tools;
+
+macro triple! {
+    (expression x) => { x * 3 }
+}
+""";
+        str program = """
+import tools;
+
+i32 main() {
+    return triple!(5);
+}
+""";
+        Verify.source(program).and_file(tools).runs(Expected.exit(15));
+    }
+
+    [Test]
+    void macro_of_a_namespace_that_is_not_imported_does_not_apply() {
+        str tools = """
+namespace tools;
+
+macro triple {
+    (expression x) => { x * 3 }
+}
+""";
+        str program = """
+i32 triple(i32 x) {
+    return x + 1;
+}
+
+i32 main() {
+    return triple(5);
+}
+""";
+        Verify.source(program).and_file(tools).runs(Expected.exit(6));
+    }
+
+    [Test]
+    void qualified_call_names_the_namespace() {
+        str tools = """
+namespace tools;
+
+macro triple! {
+    (expression x) => { x * 3 }
+}
+""";
+        str program = """
+i32 main() {
+    return tools::triple!(4);
+}
+""";
+        Verify.source(program).and_file(tools).runs(Expected.exit(12));
+    }
+
+    [Test]
+    void error_inside_an_expansion_points_at_the_call() {
+        str source = """
+macro broken! {
+    (expression x) => { x + }
+}
+
+i32 main() {
+    return broken!(1);
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.UNEXPECTED_TOKEN).at(6, 12));
+    }
+
+    [Test]
+    void runaway_recursion_is_an_error() {
+        str source = """
+macro forever! {
+    (expression x) => { forever!(x) }
+}
+
+i32 main() {
+    return forever!(1);
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.MACRO).at(6, 12));
+    }
+
+    [Test]
+    void macro_shadowing_a_function_warns() {
+        str source = """
+macro pick {
+    (expression x) => { x }
+}
+
+i32 pick(i32 x) {
+    return x;
+}
+
+i32 main() {
+    return pick(3);
+}
+""";
+        Verify.source(source).diagnostics(Expected.warning(DiagnosticWarnings.MACRO_SHADOWS_FUNCTION).at(5, 5));
+    }
+}

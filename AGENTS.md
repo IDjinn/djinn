@@ -29,8 +29,10 @@ detailed one), `djinnc/USAGE.md` (options), `djinnc/LIBRARY.md`, `examples/`.
 - **Mutability**: immutable by default, `mut` opts in. Pointer ops need `unsafe`.
 - **Attributes**: `[Name(args)]`, mapped to LLVM function/parameter attributes (`ForceInline`, `Hot`, `Cold`, `Pure`,
   `Restrict`, `Align`, `Unroll`, `Vectorize`, `Export`, ...). Unknown name is an error. `attribute X(targets);` declares new ones.
-- **Macros**: hygienic, multi-rule, pattern matched (`expression`/`identifier`/`literal`/`type`/`block` fragments, `local`
-  for single evaluation).
+- **Macros**: token templates expanded and re-parsed (`parser/parser_macros.djinn`), multi-rule, pattern matched
+  (`expression`/`identifier`/`literal`/`type`/`block`/`statement`/`tokens` fragments, variadic `expression... xs` with
+  `$for`, `local` for single evaluation), hygienic template locals, `name!(...)`/`name![...]`/`name!{...}`, namespaced
+  (visible from their namespace and importers), collected before parsing so order does not matter.
 
 ### Ownership and borrow checker
 

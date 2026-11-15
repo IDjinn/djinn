@@ -4,6 +4,10 @@
 
 ### Added
 - Closures: `fn(A, B) -> R` types, `(a, b) => expr` and `(i32 a) => { ... }` lambdas with captures (copied or moved, read-only inside), calls through locals, fields and expressions, function names as `fn` values, and `.djlib` support. New errors E3064 (assigning a captured variable), E3065 (moving a captured value) and E3066 (untyped lambda parameter without an expected type).
+- Macros: `name!{...}` and `name![...]` delimiters, statement and declaration macros, `block`, `statement`, `tokens` and variadic (`expression... xs` with `$for`) fragments, bound `type` parameters, hygienic template locals, generic arguments with commas, trailing commas, `ns::name!(...)` calls, and warning W6006 when a function shares the name of a visible `name(...)` macro.
+
+### Changed
+- Macros are token templates expanded and re-parsed (they were AST substitutions): every macro is collected before parsing, so a macro can be used before it is declared or from another file. Macros belong to their namespace and are visible only from it and from files that import it, so a user `log` macro no longer rewrites `log(...)` calls inside `std`. Parse errors inside an expansion are reported at the call.
 
 ## [0.5.2] - 2026-11-14
 
