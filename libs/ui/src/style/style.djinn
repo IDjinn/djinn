@@ -82,6 +82,8 @@ struct Style {
     mut u8 font_style;
     mut str font_family;
     mut f32 line_height;
+    mut f32 line_factor;
+    mut bool wrap_anywhere;
     mut f32 letter_spacing;
     mut u8 text_align;
     mut u8 text_decoration;
@@ -118,6 +120,27 @@ struct Style {
     mut Length flex_basis;
     mut Length row_gap;
     mut Length column_gap;
+    mut u8 align_content;
+    mut u8 justify_items;
+    mut u8 justify_self;
+    mut i32 order;
+    mut Length inset_top;
+    mut Length inset_right;
+    mut Length inset_bottom;
+    mut Length inset_left;
+    mut f32 aspect_ratio;
+    mut u32 grid_columns;
+    mut u32 grid_rows;
+    mut u32 grid_auto_columns;
+    mut u32 grid_auto_rows;
+    mut u8 grid_flow;
+    mut bool grid_dense;
+    mut GridLine grid_column;
+    mut GridLine grid_row;
+    mut f32 outline_width;
+    mut u8 outline_style;
+    mut u32 outline_color;
+    mut f32 outline_offset;
     mut CssVar* vars;
     mut u32 own_vars;
 
@@ -165,6 +188,16 @@ struct Style {
         style.flex_basis = Length.automatic();
         style.row_gap = Length.px((f32)0.0);
         style.column_gap = Length.px((f32)0.0);
+        style.align_content = Keyword.NORMAL;
+        style.justify_items = Keyword.NORMAL;
+        style.justify_self = Keyword.AUTO;
+        style.inset_top = Length.automatic();
+        style.inset_right = Length.automatic();
+        style.inset_bottom = Length.automatic();
+        style.inset_left = Length.automatic();
+        style.grid_flow = Keyword.ROW;
+        style.grid_column = GridLine.automatic();
+        style.grid_row = GridLine.automatic();
         style.vars = (CssVar*)0;
         return style;
     }
@@ -179,6 +212,8 @@ struct Style {
         style.font_style = parent.font_style;
         style.font_family = parent.font_family;
         style.line_height = parent.line_height;
+        style.line_factor = parent.line_factor;
+        style.wrap_anywhere = parent.wrap_anywhere;
         style.letter_spacing = parent.letter_spacing;
         style.text_align = parent.text_align;
         style.cursor = parent.cursor;
@@ -188,8 +223,12 @@ struct Style {
         return style;
     }
 
-    // The used line height in px ('normal' is 1.2 times the font size).
+    // The used line height in px ('normal' is 1.2 times the font size). A unitless line-height is inherited as the
+    // number, so it follows the font size of each element.
     public f32 line_px() {
+        if (this.line_factor > (f32)0.0) {
+            return this.line_factor * this.font_size;
+        }
         if (this.line_height > (f32)0.0) {
             return this.line_height;
         }
@@ -213,7 +252,8 @@ struct Props {
     public static bool is_inherited(str name) {
         return CssNames.equal(name, "color") || CssNames.equal(name, "font-size") || CssNames.equal(name, "font-weight") || CssNames.equal(name, "font-style")
             || CssNames.equal(name, "font-family") || CssNames.equal(name, "line-height") || CssNames.equal(name, "letter-spacing")
-            || CssNames.equal(name, "text-align") || CssNames.equal(name, "visibility") || CssNames.equal(name, "cursor") || CssNames.equal(name, "color-scheme");
+            || CssNames.equal(name, "text-align") || CssNames.equal(name, "visibility") || CssNames.equal(name, "cursor") || CssNames.equal(name, "color-scheme")
+            || CssNames.equal(name, "overflow-wrap") || CssNames.equal(name, "word-wrap");
     }
 
     static unsafe u8 keyword(str word) {
@@ -261,6 +301,18 @@ struct Props {
         return Keyword.UNKNOWN;
     }
 
+    // An alignment value, skipping the 'safe' / 'unsafe' / 'legacy' modifiers.
+    static unsafe u8 alignment(ValueReader* reader) {
+        mut CssToken token = reader.next();
+        while (token.kind == CssKind.IDENT && (CssNames.equal(token.text, "safe") || CssNames.equal(token.text, "unsafe") || CssNames.equal(token.text, "legacy"))) {
+            token = reader.next();
+        }
+        if (token.kind != CssKind.IDENT) {
+            return Keyword.UNKNOWN;
+        }
+        return Props.keyword(token.text);
+    }
+
     static unsafe u8 display(str word) {
         if (CssNames.equal(word, "none")) { return Display.NONE; }
         if (CssNames.equal(word, "inline")) { return Display.INLINE; }
@@ -273,8 +325,40 @@ struct Props {
         return Keyword.UNKNOWN;
     }
 
+    // The physical property a logical one maps to. Only horizontal, left-to-right writing is laid out for now, so
+    // inline is the horizontal axis and block the vertical one, start is left / top.
+    public static unsafe str physical(str name) {
+        if (name.length < 9) {
+            return name;
+        }
+        if (CssNames.equal(name, "inline-size")) { return "width"; }
+        if (CssNames.equal(name, "block-size")) { return "height"; }
+        if (CssNames.equal(name, "min-inline-size")) { return "min-width"; }
+        if (CssNames.equal(name, "max-inline-size")) { return "max-width"; }
+        if (CssNames.equal(name, "min-block-size")) { return "min-height"; }
+        if (CssNames.equal(name, "max-block-size")) { return "max-height"; }
+        if (CssNames.equal(name, "margin-inline-start")) { return "margin-left"; }
+        if (CssNames.equal(name, "margin-inline-end")) { return "margin-right"; }
+        if (CssNames.equal(name, "margin-block-start")) { return "margin-top"; }
+        if (CssNames.equal(name, "margin-block-end")) { return "margin-bottom"; }
+        if (CssNames.equal(name, "padding-inline-start")) { return "padding-left"; }
+        if (CssNames.equal(name, "padding-inline-end")) { return "padding-right"; }
+        if (CssNames.equal(name, "padding-block-start")) { return "padding-top"; }
+        if (CssNames.equal(name, "padding-block-end")) { return "padding-bottom"; }
+        if (CssNames.equal(name, "inset-inline-start")) { return "left"; }
+        if (CssNames.equal(name, "inset-inline-end")) { return "right"; }
+        if (CssNames.equal(name, "inset-block-start")) { return "top"; }
+        if (CssNames.equal(name, "inset-block-end")) { return "bottom"; }
+        if (CssNames.equal(name, "border-inline-start")) { return "border-left"; }
+        if (CssNames.equal(name, "border-inline-end")) { return "border-right"; }
+        if (CssNames.equal(name, "border-block-start")) { return "border-top"; }
+        if (CssNames.equal(name, "border-block-end")) { return "border-bottom"; }
+        return name;
+    }
+
     // Copies one property (or the properties of a shorthand) from 'from': 'inherit', 'initial' and 'unset'.
-    public static unsafe void copy(Style* style, str name, Style* from) {
+    public static unsafe void copy(Style* style, str logical, Style* from) {
+        str name = Props.physical(logical);
         if (CssNames.equal(name, "display")) { style.display = from.display; }
         else if (CssNames.equal(name, "position")) { style.position = from.position; }
         else if (CssNames.equal(name, "visibility")) { style.visibility = from.visibility; }
@@ -285,7 +369,31 @@ struct Props {
         else if (CssNames.equal(name, "font-weight")) { style.font_weight = from.font_weight; }
         else if (CssNames.equal(name, "font-style")) { style.font_style = from.font_style; }
         else if (CssNames.equal(name, "font-family")) { style.font_family = from.font_family; }
-        else if (CssNames.equal(name, "line-height")) { style.line_height = from.line_height; }
+        else if (CssNames.equal(name, "line-height")) {
+            style.line_height = from.line_height;
+            style.line_factor = from.line_factor;
+        } else if (CssNames.equal(name, "font")) {
+            style.font_size = from.font_size;
+            style.font_weight = from.font_weight;
+            style.font_style = from.font_style;
+            style.font_family = from.font_family;
+            style.line_height = from.line_height;
+            style.line_factor = from.line_factor;
+        } else if (CssNames.equal(name, "outline")) {
+            style.outline_width = from.outline_width;
+            style.outline_style = from.outline_style;
+            style.outline_color = from.outline_color;
+        } else if (CssNames.equal(name, "outline-offset")) { style.outline_offset = from.outline_offset; }
+        else if (CssNames.equal(name, "text-decoration")) { style.text_decoration = from.text_decoration; }
+        else if (CssNames.equal(name, "overflow-wrap") || CssNames.equal(name, "word-wrap")) { style.wrap_anywhere = from.wrap_anywhere; }
+        else if (CssNames.equal(name, "border")) {
+            style.border_top = from.border_top;
+            style.border_right = from.border_right;
+            style.border_bottom = from.border_bottom;
+            style.border_left = from.border_left;
+            style.border_style = from.border_style;
+            style.border_color = from.border_color;
+        }
         else if (CssNames.equal(name, "letter-spacing")) { style.letter_spacing = from.letter_spacing; }
         else if (CssNames.equal(name, "text-align")) { style.text_align = from.text_align; }
         else if (CssNames.equal(name, "cursor")) { style.cursor = from.cursor; }
@@ -304,6 +412,50 @@ struct Props {
         else if (CssNames.equal(name, "border-radius")) { style.border_radius = from.border_radius; }
         else if (CssNames.equal(name, "width")) { style.width = from.width; }
         else if (CssNames.equal(name, "height")) { style.height = from.height; }
+        else if (CssNames.equal(name, "min-width")) { style.min_width = from.min_width; }
+        else if (CssNames.equal(name, "min-height")) { style.min_height = from.min_height; }
+        else if (CssNames.equal(name, "max-width")) { style.max_width = from.max_width; }
+        else if (CssNames.equal(name, "max-height")) { style.max_height = from.max_height; }
+        else if (CssNames.equal(name, "overflow")) { style.overflow = from.overflow; }
+        else if (CssNames.equal(name, "box-sizing")) { style.box_sizing = from.box_sizing; }
+        else if (CssNames.equal(name, "flex")) {
+            style.flex_grow = from.flex_grow;
+            style.flex_shrink = from.flex_shrink;
+            style.flex_basis = from.flex_basis;
+        } else if (CssNames.equal(name, "flex-direction")) { style.flex_direction = from.flex_direction; }
+        else if (CssNames.equal(name, "flex-wrap")) { style.flex_wrap = from.flex_wrap; }
+        else if (CssNames.equal(name, "flex-grow")) { style.flex_grow = from.flex_grow; }
+        else if (CssNames.equal(name, "flex-shrink")) { style.flex_shrink = from.flex_shrink; }
+        else if (CssNames.equal(name, "flex-basis")) { style.flex_basis = from.flex_basis; }
+        else if (CssNames.equal(name, "justify-content")) { style.justify_content = from.justify_content; }
+        else if (CssNames.equal(name, "align-items")) { style.align_items = from.align_items; }
+        else if (CssNames.equal(name, "align-self")) { style.align_self = from.align_self; }
+        else if (CssNames.equal(name, "align-content")) { style.align_content = from.align_content; }
+        else if (CssNames.equal(name, "justify-items")) { style.justify_items = from.justify_items; }
+        else if (CssNames.equal(name, "justify-self")) { style.justify_self = from.justify_self; }
+        else if (CssNames.equal(name, "gap")) {
+            style.row_gap = from.row_gap;
+            style.column_gap = from.column_gap;
+        } else if (CssNames.equal(name, "order")) { style.order = from.order; }
+        else if (CssNames.equal(name, "inset")) {
+            style.inset_top = from.inset_top;
+            style.inset_right = from.inset_right;
+            style.inset_bottom = from.inset_bottom;
+            style.inset_left = from.inset_left;
+        } else if (CssNames.equal(name, "top")) { style.inset_top = from.inset_top; }
+        else if (CssNames.equal(name, "right")) { style.inset_right = from.inset_right; }
+        else if (CssNames.equal(name, "bottom")) { style.inset_bottom = from.inset_bottom; }
+        else if (CssNames.equal(name, "left")) { style.inset_left = from.inset_left; }
+        else if (CssNames.equal(name, "aspect-ratio")) { style.aspect_ratio = from.aspect_ratio; }
+        else if (CssNames.equal(name, "grid-template-columns")) { style.grid_columns = from.grid_columns; }
+        else if (CssNames.equal(name, "grid-template-rows")) { style.grid_rows = from.grid_rows; }
+        else if (CssNames.equal(name, "grid-auto-columns")) { style.grid_auto_columns = from.grid_auto_columns; }
+        else if (CssNames.equal(name, "grid-auto-rows")) { style.grid_auto_rows = from.grid_auto_rows; }
+        else if (CssNames.equal(name, "grid-auto-flow")) {
+            style.grid_flow = from.grid_flow;
+            style.grid_dense = from.grid_dense;
+        } else if (CssNames.equal(name, "grid-column")) { style.grid_column = from.grid_column; }
+        else if (CssNames.equal(name, "grid-row")) { style.grid_row = from.grid_row; }
     }
 
     static unsafe bool color(ValueReader* reader, ValueContext* context, Style* style, u32* out) {
@@ -384,9 +536,118 @@ struct Props {
         return true;
     }
 
+    // Whether '@supports (name: value)' holds here: the property is one the engine applies and the value reads.
+    public static unsafe bool supports(str name, str value) {
+        if (name.length > 2 && name.data[0] == 45 && name.data[1] == 45) {
+            return true;
+        }
+        mut Style scratch = Style.initial();
+        mut Style parent = Style.initial();
+        mut CssTokens tokens = CssLexer.tokenize(value);
+        mut ValueReader reader = ValueReader.over(&tokens, 0, tokens.count);
+        reader.text = value.data;
+        mut ValueContext context = { .font_size = 16.0, .root_font_size = 16.0, .viewport_width = 1280.0, .viewport_height = 800.0, .dark = false };
+        mut bool known = true;
+        bool valid = Props.apply_named(&scratch, Props.physical(name), &reader, &context, &parent, &known);
+        if (tokens.data != (CssToken*)0) {
+            free((void*)tokens.data);
+        }
+        return known && valid;
+    }
+
+    // 'outline: 2px solid color' in any order.
+    static unsafe bool outline(ValueReader* reader, ValueContext* context, Style* style) {
+        mut f32 width = (f32)3.0;
+        mut u8 line = Keyword.NONE;
+        mut u32 color = style.color;
+        while (!reader.done()) {
+            CssToken token = reader.peek();
+            if (token.kind == CssKind.IDENT) {
+                u8 word = Props.keyword(token.text);
+                if (word == Keyword.SOLID || word == Keyword.DASHED || word == Keyword.DOTTED || word == Keyword.NONE || word == Keyword.AUTO) {
+                    line = word;
+                    reader.next();
+                    continue;
+                }
+                if (CssNames.equal(token.text, "thin")) { width = (f32)1.0; reader.next(); continue; }
+                if (CssNames.equal(token.text, "medium")) { width = (f32)3.0; reader.next(); continue; }
+                if (CssNames.equal(token.text, "thick")) { width = (f32)5.0; reader.next(); continue; }
+            }
+            if (token.kind == CssKind.DIMENSION || token.kind == CssKind.NUMBER || (token.kind == CssKind.FUNCTION && CssNames.equal(token.text, "calc"))) {
+                width = Props.width_of(CssNumbers.length(reader, context));
+                continue;
+            }
+            if (!Props.color(reader, context, style, &color)) {
+                return false;
+            }
+        }
+        if (line == Keyword.NONE) {
+            width = (f32)0.0;
+        }
+        style.outline_width = width;
+        style.outline_style = line;
+        style.outline_color = color;
+        return true;
+    }
+
     // Applies one declaration with its value already free of var(); returns false when the value is invalid.
     public static unsafe bool apply(Style* style, str name, ValueReader* reader, ValueContext* context, Style* parent) {
+        mut bool known = true;
+        if (CssNames.equal(name, "border-inline") || CssNames.equal(name, "border-block")) {
+            u32 start = reader.pos;
+            mut str first_side = "border-left";
+            mut str second_side = "border-right";
+            if (CssNames.equal(name, "border-block")) {
+                first_side = "border-top";
+                second_side = "border-bottom";
+            }
+            if (!Props.apply_named(style, first_side, reader, context, parent, &known)) {
+                return false;
+            }
+            reader.pos = start;
+            return Props.apply_named(style, second_side, reader, context, parent, &known);
+        }
+        return Props.apply_named(style, Props.physical(name), reader, context, parent, &known);
+    }
+
+    // 'known' is set to false when the property is not one the engine applies (the declaration is then ignored).
+    static unsafe bool apply_named(Style* style, str name, ValueReader* reader, ValueContext* context, Style* parent, bool* known) {
         CssToken first = reader.peek();
+        if (CssNames.equal(name, "color-scheme")) {
+            // 'light dark' follows the system; a single scheme forces it ('only' and 'normal' need nothing else).
+            mut bool light = false;
+            mut bool dark = false;
+            while (!reader.done()) {
+                CssToken word = reader.next();
+                if (CssNames.equal(word.text, "light")) { light = true; }
+                else if (CssNames.equal(word.text, "dark")) { dark = true; }
+                else if (word.kind != CssKind.IDENT) { return false; }
+            }
+            if (light && dark) {
+                style.dark_scheme = Styles.environment().prefers_dark;
+            } else {
+                style.dark_scheme = dark;
+            }
+            return true;
+        }
+        if (CssNames.equal(name, "overflow-wrap") || CssNames.equal(name, "word-wrap")) {
+            if (CssNames.equal(first.text, "normal")) { style.wrap_anywhere = false; return true; }
+            if (CssNames.equal(first.text, "break-word") || CssNames.equal(first.text, "anywhere")) { style.wrap_anywhere = true; return true; }
+            return false;
+        }
+        if (CssNames.equal(name, "outline")) { return Props.outline(reader, context, style); }
+        if (CssNames.equal(name, "outline-width")) { style.outline_width = Props.width_of(CssNumbers.length(reader, context)); return true; }
+        if (CssNames.equal(name, "outline-style")) {
+            style.outline_style = Props.keyword(first.text);
+            return style.outline_style != Keyword.UNKNOWN;
+        }
+        if (CssNames.equal(name, "outline-color")) { return Props.color(reader, context, style, &style.outline_color); }
+        if (CssNames.equal(name, "outline-offset")) {
+            Length offset = CssNumbers.length(reader, context);
+            if (offset.unit != Unit.PX) { return false; }
+            style.outline_offset = offset.value;
+            return true;
+        }
         if (CssNames.equal(name, "display")) {
             u8 value = Props.display(first.text);
             if (value == Keyword.UNKNOWN) { return false; }
@@ -456,9 +717,10 @@ struct Props {
             return true;
         }
         if (CssNames.equal(name, "line-height")) {
+            style.line_factor = (f32)0.0;
             if (first.kind == CssKind.IDENT && CssNames.equal(first.text, "normal")) { style.line_height = (f32)0.0; return true; }
             Numeric value = CssNumbers.read(reader, context);
-            if (value.unit == Unit.NUMBER) { style.line_height = (f32)(value.value * (f64)style.font_size); return true; }
+            if (value.unit == Unit.NUMBER) { style.line_height = (f32)0.0; style.line_factor = (f32)value.value; return true; }
             if (value.unit == Unit.PX) { style.line_height = (f32)value.value; return true; }
             if (value.unit == Unit.PERCENT) { style.line_height = (f32)(value.value / 100.0 * (f64)style.font_size); return true; }
             return false;
@@ -468,10 +730,7 @@ struct Props {
             style.letter_spacing = Props.width_of(CssNumbers.length(reader, context));
             return true;
         }
-        if (CssNames.equal(name, "color-scheme")) {
-            style.dark_scheme = CssNames.equal(first.text, "dark");
-            return true;
-        }
+
         if (CssNames.equal(name, "text-align")) { style.text_align = Props.keyword(first.text); return style.text_align != Keyword.UNKNOWN; }
         if (CssNames.equal(name, "text-decoration") || CssNames.equal(name, "text-decoration-line")) { style.text_decoration = Props.keyword(first.text); return true; }
         if (CssNames.equal(name, "cursor")) { style.cursor = Props.keyword(first.text); return true; }
@@ -488,6 +747,107 @@ struct Props {
         if (CssNames.equal(name, "justify-content")) { style.justify_content = Props.keyword(first.text); return true; }
         if (CssNames.equal(name, "align-items")) { style.align_items = Props.keyword(first.text); return true; }
         if (CssNames.equal(name, "align-self")) { style.align_self = Props.keyword(first.text); return true; }
+        if (CssNames.equal(name, "align-content")) { style.align_content = Props.keyword(first.text); return style.align_content != Keyword.UNKNOWN; }
+        if (CssNames.equal(name, "justify-items")) { style.justify_items = Props.alignment(reader); return style.justify_items != Keyword.UNKNOWN; }
+        if (CssNames.equal(name, "justify-self")) { style.justify_self = Props.alignment(reader); return style.justify_self != Keyword.UNKNOWN; }
+        if (CssNames.equal(name, "place-items") || CssNames.equal(name, "place-content") || CssNames.equal(name, "place-self")) {
+            u8 align = Props.alignment(reader);
+            mut u8 justify = align;
+            if (!reader.done()) {
+                justify = Props.alignment(reader);
+            }
+            if (align == Keyword.UNKNOWN || justify == Keyword.UNKNOWN) {
+                return false;
+            }
+            if (CssNames.equal(name, "place-items")) { style.align_items = align; style.justify_items = justify; }
+            else if (CssNames.equal(name, "place-content")) { style.align_content = align; style.justify_content = justify; }
+            else { style.align_self = align; style.justify_self = justify; }
+            return true;
+        }
+        if (CssNames.equal(name, "order")) {
+            if (first.kind != CssKind.NUMBER || first.number > 1000000.0 || first.number < -1000000.0) { return false; }
+            style.order = (i32)first.number;
+            return true;
+        }
+        if (CssNames.equal(name, "top")) { style.inset_top = CssNumbers.length(reader, context); return style.inset_top.unit != Unit.INVALID; }
+        if (CssNames.equal(name, "right")) { style.inset_right = CssNumbers.length(reader, context); return style.inset_right.unit != Unit.INVALID; }
+        if (CssNames.equal(name, "bottom")) { style.inset_bottom = CssNumbers.length(reader, context); return style.inset_bottom.unit != Unit.INVALID; }
+        if (CssNames.equal(name, "left")) { style.inset_left = CssNumbers.length(reader, context); return style.inset_left.unit != Unit.INVALID; }
+        if (CssNames.equal(name, "inset")) {
+            Length* values = (Length*)__djinn_alloc_zeroed((size_long)(4 * sizeof(Length)));
+            bool ok = Props.sides(reader, context, values);
+            if (ok) {
+                style.inset_top = values[0];
+                style.inset_right = values[1];
+                style.inset_bottom = values[2];
+                style.inset_left = values[3];
+            }
+            free((void*)values);
+            return ok;
+        }
+        if (CssNames.equal(name, "inset-inline") || CssNames.equal(name, "inset-block")) {
+            Length start = CssNumbers.length(reader, context);
+            mut Length end = start;
+            if (!reader.done()) { end = CssNumbers.length(reader, context); }
+            if (start.unit == Unit.INVALID || end.unit == Unit.INVALID) { return false; }
+            if (CssNames.equal(name, "inset-inline")) { style.inset_left = start; style.inset_right = end; }
+            else { style.inset_top = start; style.inset_bottom = end; }
+            return true;
+        }
+        if (CssNames.equal(name, "aspect-ratio")) {
+            if (first.kind == CssKind.IDENT && CssNames.equal(first.text, "auto")) { style.aspect_ratio = (f32)0.0; return true; }
+            Numeric width = CssNumbers.read(reader, context);
+            if (width.unit != Unit.NUMBER || width.value <= 0.0) { return false; }
+            mut f64 height = 1.0;
+            if (reader.is_delim("/")) {
+                reader.next();
+                Numeric below = CssNumbers.read(reader, context);
+                if (below.unit != Unit.NUMBER || below.value <= 0.0) { return false; }
+                height = below.value;
+            }
+            style.aspect_ratio = (f32)(width.value / height);
+            return true;
+        }
+        if (CssNames.equal(name, "grid-template-columns")) { return GridTemplates.read(reader, context, &style.grid_columns); }
+        if (CssNames.equal(name, "grid-template-rows")) { return GridTemplates.read(reader, context, &style.grid_rows); }
+        if (CssNames.equal(name, "grid-auto-columns")) { return GridTemplates.read(reader, context, &style.grid_auto_columns); }
+        if (CssNames.equal(name, "grid-auto-rows")) { return GridTemplates.read(reader, context, &style.grid_auto_rows); }
+        if (CssNames.equal(name, "grid-auto-flow")) {
+            mut u8 flow = Keyword.ROW;
+            mut bool dense = false;
+            while (!reader.done()) {
+                CssToken word = reader.next();
+                if (CssNames.equal(word.text, "row")) { flow = Keyword.ROW; }
+                else if (CssNames.equal(word.text, "column")) { flow = Keyword.COLUMN; }
+                else if (CssNames.equal(word.text, "dense")) { dense = true; }
+                else { return false; }
+            }
+            style.grid_flow = flow;
+            style.grid_dense = dense;
+            return true;
+        }
+        if (CssNames.equal(name, "grid-column")) { return GridTemplates.placement(reader, &style.grid_column); }
+        if (CssNames.equal(name, "grid-row")) { return GridTemplates.placement(reader, &style.grid_row); }
+        if (CssNames.equal(name, "grid-column-start")) { return GridTemplates.side(reader, &style.grid_column.start, &style.grid_column.start_span); }
+        if (CssNames.equal(name, "grid-column-end")) { return GridTemplates.side(reader, &style.grid_column.end, &style.grid_column.end_span); }
+        if (CssNames.equal(name, "grid-row-start")) { return GridTemplates.side(reader, &style.grid_row.start, &style.grid_row.start_span); }
+        if (CssNames.equal(name, "grid-row-end")) { return GridTemplates.side(reader, &style.grid_row.end, &style.grid_row.end_span); }
+        if (CssNames.equal(name, "grid-area")) {
+            if (!GridTemplates.side(reader, &style.grid_row.start, &style.grid_row.start_span)) { return false; }
+            if (reader.is_delim("/")) {
+                reader.next();
+                if (!GridTemplates.side(reader, &style.grid_column.start, &style.grid_column.start_span)) { return false; }
+            }
+            if (reader.is_delim("/")) {
+                reader.next();
+                if (!GridTemplates.side(reader, &style.grid_row.end, &style.grid_row.end_span)) { return false; }
+            }
+            if (reader.is_delim("/")) {
+                reader.next();
+                if (!GridTemplates.side(reader, &style.grid_column.end, &style.grid_column.end_span)) { return false; }
+            }
+            return true;
+        }
         if (CssNames.equal(name, "flex-grow")) { style.flex_grow = (f32)CssNumbers.read(reader, context).value; return true; }
         if (CssNames.equal(name, "flex-shrink")) { style.flex_shrink = (f32)CssNumbers.read(reader, context).value; return true; }
         if (CssNames.equal(name, "flex-basis")) { style.flex_basis = CssNumbers.length(reader, context); return style.flex_basis.unit != Unit.INVALID; }
@@ -600,6 +960,7 @@ struct Props {
         if (CssNames.equal(name, "min-height")) { style.min_height = CssNumbers.length(reader, context); return true; }
         if (CssNames.equal(name, "max-width")) { style.max_width = CssNumbers.length(reader, context); return true; }
         if (CssNames.equal(name, "max-height")) { style.max_height = CssNumbers.length(reader, context); return true; }
+        known[0] = false;
         return true;
     }
 }

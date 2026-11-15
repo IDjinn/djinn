@@ -30,6 +30,8 @@ struct DomNode {
     mut i8* text;
     mut u32 text_length;
     mut u8 state;
+    mut u32 changed_children;
+    mut u32 changed_inside;
 }
 
 struct DomAttr {
@@ -68,6 +70,7 @@ struct DomTree {
 
     mut u32 document;
     mut u32 epoch;
+    mut u32 stamp;
     mut bool static_mode;
     mut bool recording;
     mut u32 operations;
@@ -145,6 +148,9 @@ struct Dom {
         memset((void*)&t.nodes[id], 0, (size_long)sizeof(DomNode));
         t.nodes[id].kind = kind;
         t.nodes[id].tag = tag;
+        t.stamp = t.stamp + 1;
+        t.nodes[id].changed_children = t.stamp;
+        t.nodes[id].changed_inside = t.stamp;
         t.live = t.live + 1;
         return id;
     }
@@ -235,7 +241,7 @@ struct Dom {
         return t.document;
     }
 
-    // Bumped by every change that can change a computed style, so cached styles know they are stale.
+    // Bumped by changes that can restyle any node (sheets, media environment, focus): every cache is stale.
     public static unsafe u32 epoch() {
         return Dom.tree().epoch;
     }
@@ -243,6 +249,87 @@ struct Dom {
     public static unsafe void touch() {
         DomTree* t = Dom.tree();
         t.epoch = t.epoch + 1;
+    }
+
+    // Local changes are stamped instead, so caches outside what a change can reach stay valid. A node's style is
+    // stale when the children list of the node or of any ancestor has a newer stamp (what sibling and descendant
+    // selectors can see); its layout is stale when that, or anything inside it, is newer.
+    public static unsafe u32 stamp() {
+        return Dom.tree().stamp;
+    }
+
+    public static unsafe u32 changed_children(u32 id) {
+        return Dom.tree().nodes[id].changed_children;
+    }
+
+    public static unsafe u32 changed_inside(u32 id) {
+        return Dom.tree().nodes[id].changed_inside;
+    }
+
+    // The newest stamp that can change the computed style of 'id'.
+    public static unsafe u32 restyle_stamp(u32 id) {
+        DomTree* t = Dom.tree();
+        mut u32 newest = 0;
+        mut u32 at = id;
+        while (at != 0) {
+            if (t.nodes[at].changed_children > newest) {
+                newest = t.nodes[at].changed_children;
+            }
+            at = t.nodes[at].parent;
+        }
+        return newest;
+    }
+
+    static unsafe u32 next_stamp() {
+        DomTree* t = Dom.tree();
+        t.stamp = t.stamp + 1;
+        return t.stamp;
+    }
+
+    static unsafe void mark_inside(u32 id, u32 stamp) {
+        DomTree* t = Dom.tree();
+        mut u32 at = id;
+        while (at != 0) {
+            t.nodes[at].changed_inside = stamp;
+            at = t.nodes[at].parent;
+        }
+    }
+
+    // Marks the children of 'id' as changed, and those of the fragments above it up to the element that really
+    // holds them (fragments are transparent to selectors).
+    static unsafe void mark_children(u32 id, u32 stamp) {
+        DomTree* t = Dom.tree();
+        mut u32 at = id;
+        while (at != 0) {
+            t.nodes[at].changed_children = stamp;
+            if (t.nodes[at].kind == DomKind.ELEMENT) {
+                return;
+            }
+            at = t.nodes[at].parent;
+        }
+    }
+
+    // An attribute or the state of 'id' changed: it, its subtree and its siblings may restyle.
+    public static unsafe void changed(u32 id) {
+        u32 stamp = Dom.next_stamp();
+        Dom.mark_children(id, stamp);
+        u32 parent = Dom.at(id).parent;
+        if (parent != 0) {
+            Dom.mark_children(parent, stamp);
+        }
+        Dom.mark_inside(id, stamp);
+    }
+
+    // The children of 'id' changed (inserted, moved, removed).
+    public static unsafe void children_changed(u32 id) {
+        u32 stamp = Dom.next_stamp();
+        Dom.mark_children(id, stamp);
+        Dom.mark_inside(id, stamp);
+    }
+
+    // Only the content of 'id' changed (text): no style changes, the boxes around it are laid out again.
+    public static unsafe void content_changed(u32 id) {
+        Dom.mark_inside(id, Dom.next_stamp());
     }
 
     public static unsafe u8 state(u32 id) {
@@ -258,7 +345,11 @@ struct Dom {
         }
         if (next != node.state) {
             node.state = next;
-            Dom.touch();
+            if ((flag & (NodeState.FOCUS | NodeState.FOCUS_VISIBLE)) != 0) {
+                Dom.touch();
+            } else {
+                Dom.changed(id);
+            }
         }
     }
 
@@ -280,6 +371,7 @@ struct Dom {
         }
         node.text = Texts.copy(data, length);
         node.text_length = length;
+        Dom.content_changed(id);
         if (Dom.logging()) {
             Dom.begin("set_text", id);
             Dom.quote(data, length);
@@ -336,7 +428,7 @@ struct Dom {
         }
         t.attrs[index].value = Texts.copy(data, length);
         t.attrs[index].length = length;
-        Dom.touch();
+        Dom.changed(id);
         if (Dom.logging()) {
             Dom.begin("set_attr", id);
             Dom.log_text(" ");
@@ -363,7 +455,7 @@ struct Dom {
                 memset((void*)&t.attrs[index], 0, (size_long)sizeof(DomAttr));
                 IdList* free_attrs = &t.free_attrs;
                 free_attrs.push(index);
-                Dom.touch();
+                Dom.changed(id);
                 if (Dom.logging()) {
                     Dom.begin("remove_attr", id);
                     Dom.log_text(" ");
@@ -393,12 +485,12 @@ struct Dom {
     }
 
     static unsafe void detach(u32 child) {
-        Dom.touch();
         DomNode* node = Dom.at(child);
         u32 parent = node.parent;
         if (parent == 0) {
             return;
         }
+        Dom.children_changed(parent);
         DomNode* owner = Dom.at(parent);
         if (node.prev != 0) {
             Dom.at(node.prev).next = node.next;
@@ -417,7 +509,6 @@ struct Dom {
 
     // Puts 'child' into 'parent' before 'before' (0 appends). A child that already had a parent is moved.
     public static unsafe void insert(u32 parent, u32 child, u32 before) {
-        Dom.touch();
         bool moving = Dom.at(child).parent != 0;
         Dom.detach(child);
         DomNode* node = Dom.at(child);
@@ -442,6 +533,7 @@ struct Dom {
             }
             after.prev = child;
         }
+        Dom.children_changed(parent);
         if (Dom.logging()) {
             if (moving) {
                 Dom.begin("move", child);

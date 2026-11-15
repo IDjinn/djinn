@@ -33,6 +33,12 @@ struct MediaKind {
     const u8 NO_HOVER = 9;
     const u8 REDUCED_MOTION = 10;
     const u8 MOTION_OK = 11;
+    const u8 COARSE = 12;
+    const u8 FINE = 13;
+    const u8 MORE_CONTRAST = 14;
+    const u8 USUAL_CONTRAST = 15;
+    const u8 FORCED_COLORS = 16;
+    const u8 FREE_COLORS = 17;
 }
 
 // One test of a media query; features with the same 'alternative' are ANDed, alternatives are ORed.
@@ -41,6 +47,7 @@ struct MediaFeature {
     mut f64 value;
     mut u32 alternative;
     mut bool negated;
+    mut bool relative;
 }
 
 // A media query and the one it is nested in ('parent', 0 for none); both must hold.
@@ -416,6 +423,8 @@ struct CssParser {
             mut u32 query = media;
             if (CssNames.equal(name, "media")) {
                 query = CssParser.media_query(sheet, at + 1, stop, media);
+            } else if (!CssParser.supports(sheet, at + 1, stop)) {
+                return close + 1;
             }
             CssParser.contents(sheet, stop + 1, close, layer, query, parent);
             return close + 1;
@@ -454,6 +463,87 @@ struct CssParser {
             return close + 1;
         }
         return stop + 1;
+    }
+
+    // An '@supports' condition in [start, end): '(property: value)' tests joined by 'and' / 'or', 'not', nested
+    // parentheses and 'selector(...)'. A declaration is supported when this engine knows the property and can read
+    // the value, so a sheet's fallbacks apply here exactly as in a browser without the feature.
+    static unsafe bool supports(StyleSheet* sheet, u32 start, u32 end) {
+        mut bool result = true;
+        mut bool first = true;
+        mut bool negate = false;
+        mut bool either = false;
+        mut u32 pos = start;
+        while (pos < end) {
+            CssToken token = CssParser.token(sheet, pos);
+            if (token.kind == CssKind.IDENT) {
+                if (CssNames.equal(token.text, "not")) {
+                    negate = true;
+                } else if (CssNames.equal(token.text, "or")) {
+                    either = true;
+                } else if (CssNames.equal(token.text, "and")) {
+                    either = false;
+                }
+                pos = pos + 1;
+                continue;
+            }
+            if (token.kind != CssKind.OPEN_PAREN && token.kind != CssKind.FUNCTION) {
+                pos = pos + 1;
+                continue;
+            }
+            u32 close = CssParser.matching(sheet, pos, end);
+            mut bool value = false;
+            if (token.kind == CssKind.OPEN_PAREN) {
+                value = CssParser.supports_test(sheet, pos + 1, close);
+            } else if (CssNames.equal(token.text, "selector")) {
+                value = CssParser.supports_selector(sheet, pos + 1, close);
+            }
+            if (negate) {
+                value = !value;
+                negate = false;
+            }
+            if (first) {
+                result = value;
+                first = false;
+            } else if (either) {
+                result = result || value;
+            } else {
+                result = result && value;
+            }
+            pos = close + 1;
+        }
+        return result;
+    }
+
+    static unsafe bool supports_test(StyleSheet* sheet, u32 start, u32 end) {
+        mut u32 pos = start;
+        while (pos < end && CssParser.token(sheet, pos).kind == CssKind.SPACE) {
+            pos = pos + 1;
+        }
+        CssToken name = CssParser.token(sheet, pos);
+        mut u32 colon = pos + 1;
+        while (colon < end && CssParser.token(sheet, colon).kind == CssKind.SPACE) {
+            colon = colon + 1;
+        }
+        if (name.kind != CssKind.IDENT || colon >= end || CssParser.token(sheet, colon).kind != CssKind.COLON) {
+            return CssParser.supports(sheet, start, end);
+        }
+        return Props.supports(name.text, CssParser.text(sheet, CssParser.source(sheet), colon + 1, end));
+    }
+
+    // 'selector(x)': supported when every part of the selector is one this engine can match.
+    static unsafe bool supports_selector(StyleSheet* sheet, u32 start, u32 end) {
+        mut SelectorTable scratch = SelectorTable();
+        mut CssTokens tokens = CssLexer.tokenize(CssParser.text(sheet, CssParser.source(sheet), start, end));
+        mut u32 first = 0;
+        u32 count = SelectorParser.parse(&scratch, &tokens, 0, tokens.count, &first);
+        mut bool known = count > 0;
+        for (mut u32 i = 0; i < scratch.parts.count; i = i + 1) {
+            if (scratch.parts.get(i).kind == PartKind.NEVER) {
+                known = false;
+            }
+        }
+        return known;
     }
 
     // A layer name, with its dotted parts ('framework.base').
@@ -550,15 +640,16 @@ struct CssParser {
     }
 
     static unsafe void feature(StyleSheet* sheet, u8 kind, f64 value, u32 alternative, bool negated) {
-        MediaFeature made = { .kind = kind, .value = value, .alternative = alternative, .negated = negated };
+        MediaFeature made = { .kind = kind, .value = value, .alternative = alternative, .negated = negated, .relative = false };
         sheet.features.push(made);
     }
 
-    static unsafe f64 media_length(CssToken token) {
-        if (token.kind == CssKind.DIMENSION && (CssNames.equal(token.text, "rem") || CssNames.equal(token.text, "em"))) {
-            return token.number * 16.0;
-        }
-        return token.number;
+    // A width test. em and rem are kept relative: they follow the OS text scale, so a layout made for wide windows
+    // also falls back to the narrow one when the text is enlarged.
+    static unsafe void width_feature(StyleSheet* sheet, u8 kind, CssToken token, u32 alternative, bool negated) {
+        bool relative = token.kind == CssKind.DIMENSION && (CssNames.equal(token.text, "rem") || CssNames.equal(token.text, "em"));
+        MediaFeature made = { .kind = kind, .value = token.number, .alternative = alternative, .negated = negated, .relative = relative };
+        sheet.features.push(made);
     }
 
     static unsafe void media_feature(StyleSheet* sheet, u32 start, u32 end, u32 alternative, bool negated) {
@@ -577,10 +668,10 @@ struct CssParser {
                 } else {
                     CssParser.feature(sheet, MediaKind.LIGHT, 0.0, alternative, negated);
                 }
-            } else if (CssNames.equal(name.text, "min-width")) {
-                CssParser.feature(sheet, MediaKind.MIN_WIDTH, CssParser.media_length(value), alternative, negated);
-            } else if (CssNames.equal(name.text, "max-width")) {
-                CssParser.feature(sheet, MediaKind.MAX_WIDTH, CssParser.media_length(value), alternative, negated);
+            } else if (CssNames.equal(name.text, "min-width") || CssNames.equal(name.text, "min-inline-size")) {
+                CssParser.width_feature(sheet, MediaKind.MIN_WIDTH, value, alternative, negated);
+            } else if (CssNames.equal(name.text, "max-width") || CssNames.equal(name.text, "max-inline-size")) {
+                CssParser.width_feature(sheet, MediaKind.MAX_WIDTH, value, alternative, negated);
             } else if (CssNames.equal(name.text, "hover") || CssNames.equal(name.text, "any-hover")) {
                 if (CssNames.equal(value.text, "hover")) {
                     CssParser.feature(sheet, MediaKind.HOVER, 0.0, alternative, negated);
@@ -593,30 +684,51 @@ struct CssParser {
                 } else {
                     CssParser.feature(sheet, MediaKind.MOTION_OK, 0.0, alternative, negated);
                 }
+            } else if (CssNames.equal(name.text, "pointer") || CssNames.equal(name.text, "any-pointer")) {
+                if (CssNames.equal(value.text, "coarse")) {
+                    CssParser.feature(sheet, MediaKind.COARSE, 0.0, alternative, negated);
+                } else if (CssNames.equal(value.text, "fine")) {
+                    CssParser.feature(sheet, MediaKind.FINE, 0.0, alternative, negated);
+                } else {
+                    CssParser.feature(sheet, MediaKind.NEVER, 0.0, alternative, negated);
+                }
+            } else if (CssNames.equal(name.text, "prefers-contrast")) {
+                if (CssNames.equal(value.text, "more")) {
+                    CssParser.feature(sheet, MediaKind.MORE_CONTRAST, 0.0, alternative, negated);
+                } else if (CssNames.equal(value.text, "no-preference")) {
+                    CssParser.feature(sheet, MediaKind.USUAL_CONTRAST, 0.0, alternative, negated);
+                } else {
+                    CssParser.feature(sheet, MediaKind.NEVER, 0.0, alternative, negated);
+                }
+            } else if (CssNames.equal(name.text, "forced-colors")) {
+                if (CssNames.equal(value.text, "active")) {
+                    CssParser.feature(sheet, MediaKind.FORCED_COLORS, 0.0, alternative, negated);
+                } else {
+                    CssParser.feature(sheet, MediaKind.FREE_COLORS, 0.0, alternative, negated);
+                }
             } else {
                 CssParser.feature(sheet, MediaKind.NEVER, 0.0, alternative, negated);
             }
             return;
         }
-        if (CssNames.equal(name.text, "width") && next.kind == CssKind.DELIM) {
+        if ((CssNames.equal(name.text, "width") || CssNames.equal(name.text, "inline-size")) && next.kind == CssKind.DELIM) {
             mut bool equal = false;
             if (reader.is_delim("=")) {
                 reader.next();
                 equal = true;
             }
             CssToken value = reader.next();
-            f64 width = CssParser.media_length(value);
             if (Texts.same(next.text, ">")) {
                 if (equal) {
-                    CssParser.feature(sheet, MediaKind.MIN_WIDTH, width, alternative, negated);
+                    CssParser.width_feature(sheet, MediaKind.MIN_WIDTH, value, alternative, negated);
                 } else {
-                    CssParser.feature(sheet, MediaKind.ABOVE_WIDTH, width, alternative, negated);
+                    CssParser.width_feature(sheet, MediaKind.ABOVE_WIDTH, value, alternative, negated);
                 }
             } else if (Texts.same(next.text, "<")) {
                 if (equal) {
-                    CssParser.feature(sheet, MediaKind.MAX_WIDTH, width, alternative, negated);
+                    CssParser.width_feature(sheet, MediaKind.MAX_WIDTH, value, alternative, negated);
                 } else {
-                    CssParser.feature(sheet, MediaKind.BELOW_WIDTH, width, alternative, negated);
+                    CssParser.width_feature(sheet, MediaKind.BELOW_WIDTH, value, alternative, negated);
                 }
             } else {
                 CssParser.feature(sheet, MediaKind.NEVER, 0.0, alternative, negated);

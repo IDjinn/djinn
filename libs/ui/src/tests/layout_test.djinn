@@ -1,0 +1,471 @@
+namespace ui;
+
+import testing;
+import std::types;
+import std::collections;
+
+// Builds trees for the layout tests. Text is 10px with 20px lines, so with the placeholder metrics every
+// character is 5px wide. Roots are laid out detached, in a viewport of the given size.
+struct Lay {
+    public static unsafe Node box(str class_name) {
+        return Node.element("div").attr("class", class_name);
+    }
+
+
+    public static unsafe i64 px(f32 value) {
+        if (value < (f32)0.0) {
+            return 0 - (i64)((f64)((f32)0.0 - value) + 0.5);
+        }
+        return (i64)((f64)value + 0.5);
+    }
+
+    // "x,y WxH" of the absolute border box.
+    public static unsafe i8* rect(Node node) {
+        Rect rect = Layout.rect(node.id);
+        mut TextBuffer out = TextBuffer.create();
+        out.append_number(Lay.px(rect.x));
+        out.append(",");
+        out.append_number(Lay.px(rect.y));
+        out.append(" ");
+        out.append_number(Lay.px(rect.width));
+        out.append("x");
+        out.append_number(Lay.px(rect.height));
+        out.append_byte(0);
+        return out.data;
+    }
+}
+
+struct LayoutFlowTests {
+    [Test]
+    unsafe void blocks_stack_and_fill_the_width() {
+        Styles.add("[data-lay] { font-size: 10px; line-height: 20px; } .f1 { padding: 10px; } .f1a { height: 30px; } .f1b { height: 50px; margin: 5px 20px; }");
+        Node a = Lay.box("f1a");
+        Node b = Lay.box("f1b");
+        Node root = Lay.box("f1").attr("data-lay", "").child(a).child(b);
+        Layout.compute(root.id, (f32)800.0, (f32)600.0);
+        Expect.equal_text("0,0 800x110", Lay.rect(root), "content height 30 + 5 + 50 + 5, plus the padding");
+        Expect.equal_text("10,10 780x30", Lay.rect(a));
+        Expect.equal_text("30,45 740x50", Lay.rect(b));
+    }
+
+    [Test]
+    unsafe void sibling_margins_collapse() {
+        Styles.add(".f2a { height: 10px; margin-bottom: 20px; } .f2b { height: 10px; margin-top: 30px; } .f2c { height: 10px; margin-top: -5px; }");
+        Node a = Lay.box("f2a");
+        Node b = Lay.box("f2b");
+        Node c = Lay.box("f2c");
+        Node root = Lay.box("f2").child(a).child(b).child(c);
+        Layout.compute(root.id, (f32)200.0, (f32)600.0);
+        Expect.equal_text("0,40 200x10", Lay.rect(b), "the larger of 20 and 30");
+        Expect.equal_text("0,45 200x10", Lay.rect(c), "a negative margin pulls it up");
+        Expect.equal_text("0,0 200x55", Lay.rect(root));
+    }
+
+    [Test]
+    unsafe void box_sizing_percentages_and_auto_margins() {
+        Styles.add(".f3a { width: 50%; padding: 10px; border: 5px solid black; height: 20px; box-sizing: content-box; } .f3b { width: 50%; padding: 10px; border: 5px solid black; height: 20px; box-sizing: border-box; } .f3c { width: 200px; height: 10px; margin: 0 auto; } .f3d { max-width: 300px; height: 10px; margin-left: auto; }");
+        Node a = Lay.box("f3a");
+        Node b = Lay.box("f3b");
+        Node c = Lay.box("f3c");
+        Node d = Lay.box("f3d");
+        Node root = Lay.box("f3").child(a).child(b).child(c).child(d);
+        Layout.compute(root.id, (f32)800.0, (f32)600.0);
+        Expect.equal_text("0,0 430x50", Lay.rect(a), "content-box: padding and border are added");
+        Expect.equal_text("0,50 400x30", Lay.rect(b), "border-box: they are inside the width; the height cannot go under them");
+        Expect.equal_text("300,80 200x10", Lay.rect(c), "auto margins center a block");
+        Expect.equal_text("500,90 300x10", Lay.rect(d), "max-width with a left auto margin goes right");
+    }
+
+    [Test]
+    unsafe void text_wraps_at_the_width() {
+        Styles.add("[data-lay] { font-size: 10px; line-height: 20px; } .f4 { width: 50px; }");
+        Node root = Lay.box("f4").attr("data-lay", "").add("aaaa bbbb cccc");
+        Layout.compute(root.id, (f32)800.0, (f32)600.0);
+        Expect.equal_text("0,0 50x40", Lay.rect(root), "'aaaa bbbb' is 45px, 'cccc' goes to a second line");
+        Node wide = Lay.box("f4w").attr("data-lay", "").add("aaaa bbbb cccc");
+        Layout.compute(wide.id, (f32)800.0, (f32)600.0);
+        Expect.equal_text("0,0 800x20", Lay.rect(wide));
+    }
+
+    [Test]
+    unsafe void a_long_word_breaks_only_when_asked() {
+        Styles.add("[data-lay] { font-size: 10px; line-height: 20px; } .f4b { width: 50px; overflow-wrap: break-word; } .f4n { width: 50px; overflow-wrap: normal; }");
+        Node text = Node.text("ab cdefghijklmnopqrstuvwxy");
+        Node breaking = Lay.box("f4b").attr("data-lay", "").child(text);
+        Layout.compute(breaking.id, (f32)800.0, (f32)600.0);
+        Expect.equal_text("0,0 50x80", Lay.rect(breaking), "'ab', then 23 letters at 10 per line");
+        Expect.equal_text("0,0 50x80", Lay.rect(text), "no line is wider than the box");
+        Node kept = Node.text("ab cdefghijklmnopqrstuvwxy");
+        Node overflowing = Lay.box("f4n").attr("data-lay", "").child(kept);
+        Layout.compute(overflowing.id, (f32)800.0, (f32)600.0);
+        Expect.equal_text("0,0 115x40", Lay.rect(kept), "'normal' lets the word overflow");
+    }
+
+    [Test]
+    unsafe void inline_boxes_break_into_lines_and_align() {
+        Styles.add(".f5 { width: 100px; text-align: center; } .f5i { display: inline-block; width: 40px; height: 10px; }");
+        Node a = Lay.box("f5i");
+        Node b = Lay.box("f5i");
+        Node c = Lay.box("f5i");
+        Node root = Lay.box("f5").child(a).child(b).child(c);
+        Layout.compute(root.id, (f32)800.0, (f32)600.0);
+        Expect.equal_text("10,0 40x10", Lay.rect(a), "two fit on the first line, centered");
+        Expect.equal_text("50,0 40x10", Lay.rect(b));
+        Expect.equal_text("30,10 40x10", Lay.rect(c));
+        Expect.equal_text("0,0 100x20", Lay.rect(root));
+    }
+
+    [Test]
+    unsafe void inline_block_shrinks_to_its_content() {
+        Styles.add("[data-lay] { font-size: 10px; line-height: 20px; } .f6i { display: inline-block; padding: 0 5px; }");
+        Node pill = Lay.box("f6i").add("abcd");
+        Node root = Lay.box("f6").attr("data-lay", "").child(pill);
+        Layout.compute(root.id, (f32)300.0, (f32)600.0);
+        Expect.equal_text("0,0 30x20", Lay.rect(pill));
+    }
+
+    [Test]
+    unsafe void none_contents_and_fragments() {
+        Styles.add(".f7a { height: 10px; } .f7n { display: none; height: 99px; } .f7c { display: contents; }");
+        Node a = Lay.box("f7a");
+        Node hidden = Lay.box("f7n");
+        Node b = Lay.box("f7a");
+        Node c = Lay.box("f7a");
+        Node group = Node.fragment().child(b);
+        Node wrapper = Lay.box("f7c").child(c);
+        Node root = Lay.box("f7").child(a).child(hidden).child(group).child(wrapper);
+        Layout.compute(root.id, (f32)100.0, (f32)600.0);
+        Expect.equal_text("0,10 100x10", Lay.rect(b), "a fragment's children are laid out in its parent");
+        Expect.equal_text("0,20 100x10", Lay.rect(c), "and those of 'display: contents'");
+        Expect.equal_text("0,0 100x30", Lay.rect(root), "'display: none' takes no space");
+        Expect.is_false(Layout.box(hidden.id).visible);
+    }
+
+    [Test]
+    unsafe void min_max_and_aspect_ratio() {
+        Styles.add(".f8a { max-width: 120px; min-height: 40px; } .f8b { width: 100px; aspect-ratio: 2 / 1; } .f8c { width: 10px; min-width: 60px; height: 5px; }");
+        Node a = Lay.box("f8a");
+        Node b = Lay.box("f8b");
+        Node c = Lay.box("f8c");
+        Node root = Lay.box("f8").child(a).child(b).child(c);
+        Layout.compute(root.id, (f32)800.0, (f32)600.0);
+        Expect.equal_text("0,0 120x40", Lay.rect(a));
+        Expect.equal_text("0,40 100x50", Lay.rect(b));
+        Expect.equal_text("0,90 60x5", Lay.rect(c), "the minimum wins over the width");
+    }
+
+    [Test]
+    unsafe void absolute_relative_and_fixed() {
+        Styles.add(".f9 { position: relative; padding: 10px; border: 2px solid black; height: 100px; box-sizing: content-box; } .f9a { position: absolute; top: 5px; right: 5px; width: 50px; height: 20px; } .f9b { position: absolute; inset: 0; } .f9r { position: relative; left: 7px; top: 3px; height: 10px; } .f9f { position: fixed; bottom: 0; left: 0; right: 0; height: 30px; }");
+        Node a = Lay.box("f9a");
+        Node b = Lay.box("f9b");
+        Node r = Lay.box("f9r");
+        Node fixed = Lay.box("f9f");
+        Node root = Lay.box("f9").child(a).child(b).child(r).child(fixed);
+        Layout.compute(root.id, (f32)400.0, (f32)300.0);
+        Expect.equal_text("0,0 400x124", Lay.rect(root));
+        Expect.equal_text("343,7 50x20", Lay.rect(a), "from the padding box of the positioned parent");
+        Expect.equal_text("2,2 396x120", Lay.rect(b), "inset: 0 fills the padding box");
+        Expect.equal_text("19,15 376x10", Lay.rect(r), "a relative box is shifted after layout");
+        Expect.equal_text("0,270 400x30", Lay.rect(fixed), "fixed is placed in the viewport");
+    }
+}
+
+struct LayoutFlexTests {
+    [Test]
+    unsafe void grow_shares_the_free_space() {
+        Styles.add(".x1 { display: flex; height: 40px; } .x1a { flex: 1; } .x1b { flex: 2; } .x1c { width: 60px; }");
+        Node a = Lay.box("x1a");
+        Node b = Lay.box("x1b");
+        Node c = Lay.box("x1c");
+        Node root = Lay.box("x1").child(a).child(b).child(c);
+        Layout.compute(root.id, (f32)300.0, (f32)600.0);
+        Expect.equal_text("0,0 80x40", Lay.rect(a), "stretched to the line");
+        Expect.equal_text("80,0 160x40", Lay.rect(b));
+        Expect.equal_text("240,0 60x40", Lay.rect(c));
+    }
+
+    [Test]
+    unsafe void shrink_stops_at_the_content() {
+        Styles.add("[data-lay] { font-size: 10px; line-height: 20px; } .x2 { display: flex; } .x2b { width: 80px; } .x2c { width: 80px; min-width: 0; }");
+        Node a = Lay.box("x2a").add("aaaaaaaaaaaaaa");
+        Node b = Lay.box("x2b");
+        Node root = Lay.box("x2").attr("data-lay", "").child(a).child(b);
+        Layout.compute(root.id, (f32)100.0, (f32)600.0);
+        Expect.equal_text("0,0 70x20", Lay.rect(a), "a 14-character word is 70px and cannot shrink");
+        Expect.equal_text("70,0 30x20", Lay.rect(b), "so the other item takes all the shrinking");
+        Node c = Lay.box("x2c");
+        Node d = Lay.box("x2c");
+        Node even = Lay.box("x2").child(c).child(d);
+        Layout.compute(even.id, (f32)100.0, (f32)600.0);
+        Expect.equal_text("0,0 50x0", Lay.rect(c));
+        Expect.equal_text("50,0 50x0", Lay.rect(d));
+    }
+
+    [Test]
+    unsafe void justify_and_align() {
+        Styles.add(".x3 { display: flex; height: 100px; justify-content: space-between; align-items: center; } .x3i { width: 50px; height: 20px; } .x3e { align-self: flex-end; } .x3 > .x3s { align-self: flex-start; }");
+        Node a = Lay.box("x3i");
+        Node b = Lay.box("x3i x3e");
+        Node c = Lay.box("x3i x3s");
+        Node root = Lay.box("x3").child(a).child(b).child(c);
+        Layout.compute(root.id, (f32)300.0, (f32)600.0);
+        Expect.equal_text("0,40 50x20", Lay.rect(a));
+        Expect.equal_text("125,80 50x20", Lay.rect(b));
+        Expect.equal_text("250,0 50x20", Lay.rect(c));
+        Styles.add(".x3v { display: flex; justify-content: space-evenly; } .x3c { display: flex; justify-content: center; gap: 10px; }");
+        Node d = Lay.box("x3i");
+        Node e = Lay.box("x3i");
+        Node evenly = Lay.box("x3v").child(d).child(e);
+        Layout.compute(evenly.id, (f32)400.0, (f32)600.0);
+        Expect.equal_text("100,0 50x20", Lay.rect(d));
+        Expect.equal_text("250,0 50x20", Lay.rect(e));
+        Node f = Lay.box("x3i");
+        Node g = Lay.box("x3i");
+        Node centered = Lay.box("x3c").child(f).child(g);
+        Layout.compute(centered.id, (f32)400.0, (f32)600.0);
+        Expect.equal_text("145,0 50x20", Lay.rect(f));
+        Expect.equal_text("205,0 50x20", Lay.rect(g));
+    }
+
+    [Test]
+    unsafe void wrap_and_gap() {
+        Styles.add(".x4 { display: flex; flex-wrap: wrap; gap: 10px; } .x4i { width: 90px; height: 20px; } .x4g { flex: 1 1 90px; height: 20px; }");
+        Node a = Lay.box("x4i");
+        Node b = Lay.box("x4i");
+        Node c = Lay.box("x4i");
+        Node root = Lay.box("x4").child(a).child(b).child(c);
+        Layout.compute(root.id, (f32)200.0, (f32)600.0);
+        Expect.equal_text("100,0 90x20", Lay.rect(b));
+        Expect.equal_text("0,30 90x20", Lay.rect(c), "the third item wraps, one gap below");
+        Expect.equal_text("0,0 200x50", Lay.rect(root));
+        Node d = Lay.box("x4g");
+        Node e = Lay.box("x4g");
+        Node f = Lay.box("x4g");
+        Node growing = Lay.box("x4").child(d).child(e).child(f);
+        Layout.compute(growing.id, (f32)200.0, (f32)600.0);
+        Expect.equal_text("0,0 95x20", Lay.rect(d), "items grow to fill their line");
+        Expect.equal_text("0,30 200x20", Lay.rect(f), "and the last one fills its own");
+        Layout.compute(growing.id, (f32)80.0, (f32)600.0);
+        Expect.equal_text("0,60 80x20", Lay.rect(f), "narrower than one item: a single column");
+    }
+
+    [Test]
+    unsafe void column_direction() {
+        Styles.add("[data-lay] { font-size: 10px; line-height: 20px; } .x5 { display: flex; flex-direction: column; gap: 4px; } .x5c { display: flex; flex-direction: column; height: 100px; } .x5g { flex: 1; } .x5h { height: 10px; align-self: center; width: 30px; }");
+        Node a = Lay.box("x5a").add("hello");
+        Node b = Lay.box("x5a").add("hi");
+        Node root = Lay.box("x5").attr("data-lay", "").child(a).child(b);
+        Layout.compute(root.id, (f32)200.0, (f32)600.0);
+        Expect.equal_text("0,0 200x20", Lay.rect(a), "items stretch across the column");
+        Expect.equal_text("0,24 200x20", Lay.rect(b));
+        Expect.equal_text("0,0 200x44", Lay.rect(root));
+        Node c = Lay.box("x5g");
+        Node d = Lay.box("x5h");
+        Node fixed = Lay.box("x5c").child(c).child(d);
+        Layout.compute(fixed.id, (f32)200.0, (f32)600.0);
+        Expect.equal_text("0,0 200x90", Lay.rect(c), "grows along the column");
+        Expect.equal_text("85,90 30x10", Lay.rect(d));
+    }
+
+    [Test]
+    unsafe void auto_margins_order_and_reverse() {
+        Styles.add(".x6 { display: flex; } .x6i { width: 40px; height: 10px; } .x6p { margin-left: auto; } .x6o { order: -1; } .x6r { display: flex; flex-direction: row-reverse; }");
+        Node a = Lay.box("x6i");
+        Node b = Lay.box("x6i x6p");
+        Node c = Lay.box("x6i x6o");
+        Node root = Lay.box("x6").child(a).child(b).child(c);
+        Layout.compute(root.id, (f32)300.0, (f32)600.0);
+        Expect.equal_text("0,0 40x10", Lay.rect(c), "order: -1 goes first");
+        Expect.equal_text("40,0 40x10", Lay.rect(a));
+        Expect.equal_text("260,0 40x10", Lay.rect(b), "an auto margin takes the free space");
+        Node d = Lay.box("x6i");
+        Node e = Lay.box("x6i");
+        Node reversed = Lay.box("x6r").child(d).child(e);
+        Layout.compute(reversed.id, (f32)300.0, (f32)600.0);
+        Expect.equal_text("260,0 40x10", Lay.rect(d));
+        Expect.equal_text("220,0 40x10", Lay.rect(e));
+    }
+
+    [Test]
+    unsafe void nested_flex_sizes_by_content() {
+        Styles.add("[data-lay] { font-size: 10px; line-height: 20px; } .x7 { display: flex; gap: 10px; align-items: flex-start; } .x7n { display: flex; gap: 5px; padding: 5px; } .x7g { flex: 1; }");
+        Node inner = Lay.box("x7n").child(Lay.box("x7t").add("ab")).child(Lay.box("x7t").add("cdef"));
+        Node rest = Lay.box("x7g");
+        Node root = Lay.box("x7").attr("data-lay", "").child(inner).child(rest);
+        Layout.compute(root.id, (f32)300.0, (f32)600.0);
+        Expect.equal_text("0,0 45x30", Lay.rect(inner), "10 + 5 + 20 of content, 5 of padding on each side");
+        Expect.equal_text("55,0 245x0", Lay.rect(rest));
+    }
+}
+
+struct LayoutGridTests {
+    [Test]
+    unsafe void fixed_and_flexible_tracks() {
+        Styles.add(".g1 { display: grid; grid-template-columns: 100px 1fr 2fr; } .g1i { height: 30px; } .g1t { height: 50px; }");
+        Node a = Lay.box("g1i");
+        Node b = Lay.box("g1i");
+        Node c = Lay.box("g1t");
+        Node d = Lay.box("g1i");
+        Node root = Lay.box("g1").child(a).child(b).child(c).child(d);
+        Layout.compute(root.id, (f32)400.0, (f32)600.0);
+        Expect.equal_text("0,0 100x30", Lay.rect(a));
+        Expect.equal_text("100,0 100x30", Lay.rect(b));
+        Expect.equal_text("200,0 200x50", Lay.rect(c));
+        Expect.equal_text("0,50 100x30", Lay.rect(d), "the next row starts under the tallest item");
+        Expect.equal_text("0,0 400x80", Lay.rect(root));
+    }
+
+    [Test]
+    unsafe void spans_lines_and_gaps() {
+        Styles.add(".g2 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px 20px; } .g2i { height: 20px; } .g2s { grid-column: span 2; } .g2f { grid-column: 1 / -1; } .g2p { grid-column: 3; grid-row: 1; }");
+        Node a = Lay.box("g2i g2s");
+        Node b = Lay.box("g2i g2p");
+        Node c = Lay.box("g2i g2f");
+        Node d = Lay.box("g2i");
+        Node root = Lay.box("g2").child(a).child(b).child(c).child(d);
+        Layout.compute(root.id, (f32)460.0, (f32)600.0);
+        Expect.equal_text("0,0 220x20", Lay.rect(a), "two 100px columns and the gap between them");
+        Expect.equal_text("240,0 100x20", Lay.rect(b), "placed at column 3 of row 1");
+        Expect.equal_text("0,30 460x20", Lay.rect(c), "1 / -1 spans the whole row");
+        Expect.equal_text("0,60 100x20", Lay.rect(d));
+    }
+
+    [Test]
+    unsafe void auto_fit_reflows_with_the_width() {
+        Styles.add(".g3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 100px), 1fr)); } .g3i { height: 10px; }");
+        Node a = Lay.box("g3i");
+        Node b = Lay.box("g3i");
+        Node c = Lay.box("g3i");
+        Node root = Lay.box("g3").child(a).child(b).child(c);
+        Layout.compute(root.id, (f32)300.0, (f32)600.0);
+        Expect.equal_text("200,0 100x10", Lay.rect(c), "three columns fit in 300px");
+        Layout.compute(root.id, (f32)250.0, (f32)600.0);
+        Expect.equal_text("125,0 125x10", Lay.rect(b), "two columns in 250px");
+        Expect.equal_text("0,10 125x10", Lay.rect(c));
+        Layout.compute(root.id, (f32)80.0, (f32)600.0);
+        Expect.equal_text("0,20 80x10", Lay.rect(c), "one column that never overflows, narrower than the minimum");
+        Node only = Lay.box("g3i");
+        Node lonely = Lay.box("g3").child(only);
+        Layout.compute(lonely.id, (f32)300.0, (f32)600.0);
+        Expect.equal_text("0,0 300x10", Lay.rect(only), "auto-fit collapses the empty columns");
+    }
+
+    [Test]
+    unsafe void content_sized_tracks() {
+        Styles.add("[data-lay] { font-size: 10px; line-height: 20px; } .g4 { display: grid; grid-template-columns: auto 1fr; } .g4m { display: grid; grid-template-columns: max-content minmax(0, 1fr); }");
+        Node label = Lay.box("g4l").add("name");
+        Node value = Lay.box("g4v").add("a long value here");
+        Node root = Lay.box("g4m").attr("data-lay", "").child(label).child(value);
+        Layout.compute(root.id, (f32)100.0, (f32)600.0);
+        Expect.equal_text("0,0 20x40", Lay.rect(label), "max-content: as wide as the text, stretched to the row");
+        Expect.equal_text("20,0 80x40", Lay.rect(value), "the flexible column wraps its text");
+    }
+
+    [Test]
+    unsafe void alignment_in_the_area_and_of_the_tracks() {
+        Styles.add(".g5 { display: grid; grid-template-columns: 100px 100px; grid-template-rows: 100px; place-items: center; } .g5i { width: 40px; height: 20px; } .g5e { place-self: end; } .g5c { display: grid; grid-template-columns: 50px 50px; justify-content: space-between; height: 60px; align-content: end; } .g5j { height: 20px; }");
+        Node a = Lay.box("g5i");
+        Node b = Lay.box("g5i g5e");
+        Node root = Lay.box("g5").child(a).child(b);
+        Layout.compute(root.id, (f32)200.0, (f32)600.0);
+        Expect.equal_text("30,40 40x20", Lay.rect(a));
+        Expect.equal_text("160,80 40x20", Lay.rect(b));
+        Node c = Lay.box("g5j");
+        Node d = Lay.box("g5j");
+        Node tracks = Lay.box("g5c").child(c).child(d);
+        Layout.compute(tracks.id, (f32)300.0, (f32)600.0);
+        Expect.equal_text("0,40 50x20", Lay.rect(c));
+        Expect.equal_text("250,40 50x20", Lay.rect(d));
+    }
+
+    [Test]
+    unsafe void extreme_values_are_clamped() {
+        Styles.add(".g7 { display: grid; grid-template-columns: repeat(auto-fill, 0.001px) repeat(99999999999, 1px); } .g7i { grid-column: 99999999999 / span 99999999999; order: 99999999999; height: 5px; } .g7f { display: flex; }");
+        Node item = Lay.box("g7i");
+        Node root = Lay.box("g7f").child(Lay.box("g7").child(item));
+        Layout.compute(root.id, (f32)300.0, (f32)600.0);
+        Expect.equal(5, Lay.px(Layout.rect(item.id).height), "the layout survives numbers no grid can hold");
+    }
+
+    [Test]
+    unsafe void column_flow_and_dense_packing() {
+        Styles.add(".g6 { display: grid; grid-template-rows: 20px 20px; grid-auto-flow: column; grid-auto-columns: 50px; } .g6d { display: grid; grid-template-columns: repeat(3, 50px); grid-auto-rows: 10px; grid-auto-flow: dense; } .g6w { grid-column: span 2; }");
+        Node a = Lay.box("g6i");
+        Node b = Lay.box("g6i");
+        Node c = Lay.box("g6i");
+        Node root = Lay.box("g6").child(a).child(b).child(c);
+        Layout.compute(root.id, (f32)300.0, (f32)600.0);
+        Expect.equal_text("0,20 50x20", Lay.rect(b), "column flow fills the rows first");
+        Expect.equal_text("50,0 50x20", Lay.rect(c));
+        Node d = Lay.box("g6w");
+        Node e = Lay.box("g6w");
+        Node f = Lay.box("g6i");
+        Node dense = Lay.box("g6d").child(d).child(e).child(f);
+        Layout.compute(dense.id, (f32)300.0, (f32)600.0);
+        Expect.equal_text("0,10 100x10", Lay.rect(e), "two columns do not fit after the first item");
+        Expect.equal_text("100,0 50x10", Lay.rect(f), "dense packing fills the hole on the first row");
+    }
+}
+
+struct LayoutCacheTests {
+    [Test]
+    unsafe void an_unchanged_tree_is_not_laid_out_again() {
+        Styles.add(".c1 { display: flex; font-size: 10px; line-height: 20px; } .c1s { flex: 1; } .c1i { height: 10px; }");
+        mut Node left = Lay.box("c1s");
+        mut Node right = Lay.box("c1s");
+        for (mut i32 i = 0; i < 10; i = i + 1) {
+            left = left.child(Lay.box("c1i"));
+            right = right.child(Lay.box("c1i"));
+        }
+        Node label = Lay.box("c1p").add("one");
+        left = left.child(label);
+        Node root = Lay.box("c1").child(left).child(right);
+        u32 start = Layout.runs();
+        Layout.compute(root.id, (f32)400.0, (f32)600.0);
+        u32 first = Layout.runs() - start;
+        Layout.compute(root.id, (f32)400.0, (f32)600.0);
+        Expect.equal((i64)(start + first), (i64)Layout.runs(), "nothing changed: no box is laid out");
+        str words = "three words here";
+        Dom.set_text(Dom.first_child(label.id), words.data, (u32)words.length);
+        Layout.compute(root.id, (f32)400.0, (f32)600.0);
+        u32 second = Layout.runs() - start - first;
+        Expect.is_true(second > 0, "the text change is laid out");
+        Expect.is_true(second * 2 < first, "but only the boxes around it");
+        Expect.equal_text("200,0 200x120", Lay.rect(right), "stretched to the line: ten 10px rows and one 20px line of text");
+    }
+
+    [Test]
+    unsafe void a_change_restyles_only_what_it_can_reach() {
+        Styles.add(".c2 .c2on { color: red; } .c2 .c2on + .c2n { color: blue; }");
+        Node first = Lay.box("c2a");
+        Node second = Lay.box("c2n");
+        Node inner = Lay.box("c2i");
+        Node group = Lay.box("c2g").child(first).child(second);
+        Node other = Lay.box("c2o").child(inner);
+        Node root = Page.attach(Lay.box("c2").child(group).child(other));
+        Styles.of(first.id);
+        Styles.of(second.id);
+        Styles.of(inner.id);
+        u32 before = Styles.computed_count();
+        Styles.of(inner.id);
+        Expect.equal((i64)before, (i64)Styles.computed_count(), "cached");
+        first.attr("class", "c2a c2on");
+        Styles.of(inner.id);
+        Styles.of(other.id);
+        Expect.equal((i64)before, (i64)Styles.computed_count(), "another subtree keeps its styles");
+        Expect.equal_text("#ff0000", Colors.format(Styles.of(first.id).color).data);
+        Expect.equal_text("#0000ff", Colors.format(Styles.of(second.id).color).data, "the sibling selector sees the change");
+        Expect.is_true(Styles.computed_count() > before);
+    }
+
+    [Test]
+    unsafe void the_host_can_measure_text() {
+        Node root = Lay.box("c3").add("anything");
+        Layout.set_text_measure((u32 node, f32 limit) => Size.of((f32)123.0, (f32)17.0));
+        Layout.compute(root.id, (f32)400.0, (f32)600.0);
+        Layout.reset_text_measure();
+        Expect.equal_text("0,0 400x17", Lay.rect(root));
+        Expect.equal_text("0,0 123x17", Lay.rect(Node.of(Dom.first_child(root.id))));
+    }
+}

@@ -1,0 +1,377 @@
+import std::types;
+import std::libc;
+
+namespace ui;
+
+unsafe static mut ptr grid_templates = null;
+
+struct TrackKind {
+    const u8 FIXED = 0;
+    const u8 PERCENT = 1;
+    const u8 FR = 2;
+    const u8 AUTO = 3;
+    const u8 MIN_CONTENT = 4;
+    const u8 MAX_CONTENT = 5;
+    const u8 FIT_CONTENT = 6;
+    const u8 CAPPED = 7;
+}
+
+// One track sizing function, minmax(min, max). A plain size is minmax(size, size), '1fr' is minmax(auto, 1fr),
+// fit-content(x) is minmax(auto, FIT_CONTENT x). FIXED values are px; PERCENT is kept for the layout to resolve;
+// CAPPED is min(percentage, px), the smaller of the two once the percentage resolves ('min(100%, 16rem)').
+struct TrackSize {
+    mut u8 min_kind;
+    mut f32 min;
+    mut f32 min_percent;
+    mut u8 max_kind;
+    mut f32 max;
+    mut f32 max_percent;
+
+    public static TrackSize of(u8 min_kind, f32 min, u8 max_kind, f32 max) {
+        TrackSize track = { .min_kind = min_kind, .min = min, .min_percent = (f32)0.0, .max_kind = max_kind, .max = max, .max_percent = (f32)0.0 };
+        return track;
+    }
+
+    public static TrackSize automatic() {
+        return TrackSize.of(TrackKind.AUTO, (f32)0.0, TrackKind.AUTO, (f32)0.0);
+    }
+}
+
+struct RepeatMode {
+    const u8 NONE = 0;
+    const u8 FILL = 1;
+    const u8 FIT = 2;
+}
+
+// A track list read from grid-template-* or grid-auto-*. Its tracks are 'count' entries from 'first' in the shared
+// table; with repeat(auto-fill | auto-fit, ...), the 'repeat_count' tracks from 'repeat_at' repeat as often as fit.
+// Lists are interned: the same text in the same unit context is read once and shared by every style.
+struct GridTemplate {
+    mut i8* text;
+    mut u32 length;
+    mut f64 font_size;
+    mut f64 root_font_size;
+    mut f64 viewport_width;
+    mut f64 viewport_height;
+    mut u32 first;
+    mut u32 count;
+    mut u32 repeat_at;
+    mut u32 repeat_count;
+    mut u8 repeat_mode;
+}
+
+struct GridTemplateTable {
+    mut Growable<GridTemplate> templates;
+    mut Growable<TrackSize> tracks;
+}
+
+// A grid-row or grid-column placement: line numbers (negative ones count from the end of the explicit grid, 0 is
+// auto) and 'span n' on either side.
+struct GridLine {
+    mut i32 start;
+    mut i32 end;
+    mut u32 start_span;
+    mut u32 end_span;
+
+    public static GridLine automatic() {
+        GridLine line = { .start = 0, .end = 0, .start_span = 0, .end_span = 0 };
+        return line;
+    }
+}
+
+struct GridTemplates {
+    static unsafe GridTemplateTable* table() {
+        if (grid_templates == null) {
+            GridTemplateTable* created = (GridTemplateTable*)__djinn_alloc_zeroed((size_long)sizeof(GridTemplateTable));
+            created.templates.push(GridTemplate());
+            grid_templates = (ptr)created;
+        }
+        return (GridTemplateTable*)grid_templates;
+    }
+
+    public static unsafe GridTemplate* get(u32 index) {
+        return GridTemplates.table().templates.at(index);
+    }
+
+    public static unsafe TrackSize track(u32 index) {
+        return GridTemplates.table().tracks.get(index);
+    }
+
+    // Reads a track list into 'out' (0 for 'none'): sizes, %, fr, auto, min-content, max-content, minmax(),
+    // fit-content(), repeat(n | auto-fill | auto-fit, ...); line names in [brackets] are skipped.
+    public static unsafe bool read(ValueReader* reader, ValueContext* context, u32* out) {
+        CssToken first = reader.peek();
+        if (first.kind == CssKind.IDENT && CssNames.equal(first.text, "none")) {
+            *out = 0;
+            return true;
+        }
+        GridTemplateTable* table = GridTemplates.table();
+        CssToken last = reader.tokens.get(reader.end - 1);
+        i8* text = CssDeclarations.source_of(reader, first);
+        u32 length = last.end - first.start;
+        for (mut u32 i = 1; i < table.templates.count; i = i + 1) {
+            GridTemplate* known = table.templates.at(i);
+            if (known.length == length && Texts.same_bytes(known.text, known.length, text, length) && known.font_size == context.font_size
+                && known.root_font_size == context.root_font_size && known.viewport_width == context.viewport_width
+                && known.viewport_height == context.viewport_height) {
+                *out = i;
+                return true;
+            }
+        }
+        mut GridTemplate template = GridTemplate();
+        template.first = table.tracks.count;
+        if (!GridTemplates.list(reader, context, table, &template, true) || table.tracks.count == template.first) {
+            table.tracks.count = template.first;
+            return false;
+        }
+        template.count = table.tracks.count - template.first;
+        template.text = Texts.copy(text, length);
+        template.length = length;
+        template.font_size = context.font_size;
+        template.root_font_size = context.root_font_size;
+        template.viewport_width = context.viewport_width;
+        template.viewport_height = context.viewport_height;
+        *out = table.templates.push(template);
+        return true;
+    }
+
+    static unsafe bool list(ValueReader* reader, ValueContext* context, GridTemplateTable* table, GridTemplate* template, bool top) {
+        while (!reader.done()) {
+            CssToken token = reader.peek();
+            if (token.kind == CssKind.OPEN_SQUARE) {
+                while (!reader.done() && reader.peek().kind != CssKind.CLOSE_SQUARE) {
+                    reader.next();
+                }
+                reader.next();
+                continue;
+            }
+            if (token.kind == CssKind.FUNCTION && CssNames.equal(token.text, "repeat")) {
+                if (!top) {
+                    return false;
+                }
+                reader.next();
+                u32 close = reader.closing();
+                mut ValueReader inner = ValueReader.over(reader.tokens, reader.pos, close);
+                inner.text = reader.text;
+                CssToken times = inner.next();
+                mut u32 count = 0;
+                mut u8 mode = RepeatMode.NONE;
+                if (times.kind == CssKind.NUMBER && times.number >= 1.0) {
+                    count = 10000;
+                    if (times.number < 10000.0) {
+                        count = (u32)times.number;
+                    }
+                } else if (times.kind == CssKind.IDENT && CssNames.equal(times.text, "auto-fill")) {
+                    mode = RepeatMode.FILL;
+                } else if (times.kind == CssKind.IDENT && CssNames.equal(times.text, "auto-fit")) {
+                    mode = RepeatMode.FIT;
+                } else {
+                    return false;
+                }
+                if (inner.next().kind != CssKind.COMMA) {
+                    return false;
+                }
+                u32 start = table.tracks.count;
+                if (!GridTemplates.list(&inner, context, table, template, false) || table.tracks.count == start) {
+                    return false;
+                }
+                u32 pattern = table.tracks.count - start;
+                if (mode != RepeatMode.NONE) {
+                    if (template.repeat_mode != RepeatMode.NONE) {
+                        return false;
+                    }
+                    template.repeat_mode = mode;
+                    template.repeat_at = start - template.first;
+                    template.repeat_count = pattern;
+                } else {
+                    for (mut u32 again = 1; again < count && again < 10000; again = again + 1) {
+                        for (mut u32 k = 0; k < pattern; k = k + 1) {
+                            table.tracks.push(table.tracks.get(start + k));
+                        }
+                    }
+                }
+                reader.pos = close + 1;
+                continue;
+            }
+            mut TrackSize track = TrackSize.automatic();
+            if (!GridTemplates.size(reader, context, &track)) {
+                return false;
+            }
+            table.tracks.push(track);
+        }
+        return true;
+    }
+
+    // One side of minmax(): a length, %, fr (max only), auto, min-content, max-content or min(percentage, length).
+    static unsafe bool breadth(ValueReader* reader, ValueContext* context, u8* kind, f32* value, f32* percent) {
+        CssToken token = reader.peek();
+        *percent = (f32)0.0;
+        if (token.kind == CssKind.FUNCTION && CssNames.equal(token.text, "min")) {
+            u32 before = reader.pos;
+            reader.next();
+            u32 close = reader.closing();
+            mut ValueReader inner = ValueReader.over(reader.tokens, reader.pos, close);
+            inner.text = reader.text;
+            Numeric first = CssNumbers.sum(&inner, context);
+            if (inner.peek().kind == CssKind.COMMA) {
+                inner.next();
+                Numeric second = CssNumbers.sum(&inner, context);
+                bool mixed = (first.unit == Unit.PERCENT && second.unit == Unit.PX) || (first.unit == Unit.PX && second.unit == Unit.PERCENT);
+                if (mixed && inner.done()) {
+                    reader.pos = close + 1;
+                    *kind = TrackKind.CAPPED;
+                    if (first.unit == Unit.PERCENT) {
+                        *percent = (f32)first.value;
+                        *value = (f32)second.value;
+                    } else {
+                        *percent = (f32)second.value;
+                        *value = (f32)first.value;
+                    }
+                    return true;
+                }
+            }
+            reader.pos = before;
+        }
+        if (token.kind == CssKind.IDENT) {
+            reader.next();
+            *value = (f32)0.0;
+            if (CssNames.equal(token.text, "auto")) { *kind = TrackKind.AUTO; return true; }
+            if (CssNames.equal(token.text, "min-content")) { *kind = TrackKind.MIN_CONTENT; return true; }
+            if (CssNames.equal(token.text, "max-content")) { *kind = TrackKind.MAX_CONTENT; return true; }
+            return false;
+        }
+        if (token.kind == CssKind.DIMENSION && CssNames.equal(token.text, "fr")) {
+            reader.next();
+            if (token.number < 0.0) {
+                return false;
+            }
+            *kind = TrackKind.FR;
+            *value = (f32)token.number;
+            return true;
+        }
+        Length length = CssNumbers.length(reader, context);
+        if (length.unit == Unit.PX && length.value >= (f32)0.0) {
+            *kind = TrackKind.FIXED;
+            *value = length.value;
+            return true;
+        }
+        if (length.unit == Unit.PERCENT && length.value >= (f32)0.0) {
+            *kind = TrackKind.PERCENT;
+            *value = length.value;
+            return true;
+        }
+        return false;
+    }
+
+    static unsafe bool size(ValueReader* reader, ValueContext* context, TrackSize* out) {
+        CssToken token = reader.peek();
+        if (token.kind == CssKind.FUNCTION && (CssNames.equal(token.text, "minmax") || CssNames.equal(token.text, "fit-content"))) {
+            reader.next();
+            u32 close = reader.closing();
+            mut ValueReader inner = ValueReader.over(reader.tokens, reader.pos, close);
+            inner.text = reader.text;
+            reader.pos = close + 1;
+            if (CssNames.equal(token.text, "fit-content")) {
+                Length limit = CssNumbers.length(&inner, context);
+                if (limit.unit != Unit.PX || !inner.done()) {
+                    return false;
+                }
+                *out = TrackSize.of(TrackKind.AUTO, (f32)0.0, TrackKind.FIT_CONTENT, limit.value);
+                return true;
+            }
+            mut u8 min_kind = TrackKind.AUTO;
+            mut f32 min = (f32)0.0;
+            mut u8 max_kind = TrackKind.AUTO;
+            mut f32 max = (f32)0.0;
+            mut f32 min_percent = (f32)0.0;
+            mut f32 max_percent = (f32)0.0;
+            if (!GridTemplates.breadth(&inner, context, &min_kind, &min, &min_percent) || min_kind == TrackKind.FR) {
+                return false;
+            }
+            if (inner.next().kind != CssKind.COMMA) {
+                return false;
+            }
+            if (!GridTemplates.breadth(&inner, context, &max_kind, &max, &max_percent) || !inner.done()) {
+                return false;
+            }
+            mut TrackSize both = TrackSize.of(min_kind, min, max_kind, max);
+            both.min_percent = min_percent;
+            both.max_percent = max_percent;
+            *out = both;
+            return true;
+        }
+        mut u8 kind = TrackKind.AUTO;
+        mut f32 value = (f32)0.0;
+        mut f32 percent = (f32)0.0;
+        if (!GridTemplates.breadth(reader, context, &kind, &value, &percent)) {
+            return false;
+        }
+        if (kind == TrackKind.FR) {
+            *out = TrackSize.of(TrackKind.AUTO, (f32)0.0, TrackKind.FR, value);
+        } else {
+            mut TrackSize one = TrackSize.of(kind, value, kind, value);
+            one.min_percent = percent;
+            one.max_percent = percent;
+            *out = one;
+        }
+        return true;
+    }
+
+    // One side of a placement, up to '/': 'auto', a line number, 'span n' (or 'n span'); named lines count as auto.
+    static unsafe bool side(ValueReader* reader, i32* line, u32* span) {
+        *line = 0;
+        *span = 0;
+        mut bool spanning = false;
+        mut f64 number = 0.0;
+        mut bool numbered = false;
+        while (!reader.done() && !reader.is_delim("/")) {
+            CssToken token = reader.next();
+            if (token.kind == CssKind.IDENT && CssNames.equal(token.text, "span")) {
+                spanning = true;
+            } else if (token.kind == CssKind.NUMBER) {
+                // Line numbers and spans are kept within 10000, as browsers do.
+                number = token.number;
+                if (number > 10000.0) {
+                    number = 10000.0;
+                } else if (number < -10000.0) {
+                    number = -10000.0;
+                }
+                numbered = true;
+            } else if (token.kind != CssKind.IDENT) {
+                return false;
+            }
+        }
+        if (spanning) {
+            mut u32 count = 1;
+            if (numbered) {
+                if (number < 1.0) {
+                    return false;
+                }
+                count = (u32)number;
+            }
+            *span = count;
+        } else if (numbered) {
+            if (number == 0.0) {
+                return false;
+            }
+            *line = (i32)number;
+        }
+        return true;
+    }
+
+    // 'grid-column' / 'grid-row': 'a', 'a / b', 'span n', 'span n / span n', '1 / -1'.
+    public static unsafe bool placement(ValueReader* reader, GridLine* out) {
+        mut GridLine line = GridLine.automatic();
+        if (!GridTemplates.side(reader, &line.start, &line.start_span)) {
+            return false;
+        }
+        if (reader.is_delim("/")) {
+            reader.next();
+            if (!GridTemplates.side(reader, &line.end, &line.end_span)) {
+                return false;
+            }
+        }
+        *out = line;
+        return true;
+    }
+}

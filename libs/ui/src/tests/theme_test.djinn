@@ -1,0 +1,242 @@
+namespace ui;
+
+import testing;
+import std::types;
+import std::collections;
+
+struct ModernCssTests {
+    [Test]
+    unsafe void supports_takes_the_branch_the_engine_can_apply() {
+        Styles.add("@supports (color: light-dark(white, black)) { .s1 { color: red; } } @supports not (color: light-dark(white, black)) { .s1 { color: blue; } }");
+        Styles.add(".s2 { color: green; } @supports (container-type: inline-size) { .s2 { color: red; } }");
+        Styles.add("@supports (display: grid) and (not (font-size: 1cqi)) { .s3 { color: green; } } @supports (display: grid) and (font-size: 1cqi) { .s3 { color: red; } }");
+        Styles.add(".s4 { color: green; } @supports selector(:has(a)) { .s4 { color: red; } } @supports selector(:where(a, b)) or (unknown: thing) { .s5 { color: green; } }");
+        Expect.equal_text("#ff0000", Page.color(Page.attach(Node.element("i").attr("class", "s1"))), "light-dark() is supported, the fallback is not used");
+        Expect.equal_text("#008000", Page.color(Page.attach(Node.element("i").attr("class", "s2"))), "container queries are not: the block is skipped");
+        Expect.equal_text("#008000", Page.color(Page.attach(Node.element("i").attr("class", "s3"))));
+        Expect.equal_text("#008000", Page.color(Page.attach(Node.element("i").attr("class", "s4"))), ":has() is not matched yet");
+        Expect.equal_text("#008000", Page.color(Page.attach(Node.element("i").attr("class", "s5"))));
+    }
+
+    [Test]
+    unsafe void light_dark_and_system_colors_follow_the_color_scheme() {
+        Styles.add(".ld { color: light-dark(#111111, #eeeeee); background-color: Canvas; } .ld-dark { color-scheme: dark; } .ld-both { color-scheme: light dark; }");
+        Node light = Page.attach(Node.element("i").attr("class", "ld"));
+        Node inner = Node.element("i").attr("class", "ld");
+        Node dark = Page.attach(Node.element("div").attr("class", "ld-dark").child(inner));
+        Node system = Page.attach(Node.element("i").attr("class", "ld ld-both"));
+        Expect.equal_text("#111111", Page.color(light));
+        Expect.equal_text("#eeeeee", Page.color(inner), "the scheme is inherited");
+        Expect.equal_text("#121212", Page.background(inner), "system colors follow it too");
+        Expect.equal_text("#111111", Page.color(system));
+        Styles.set_prefers_dark(true);
+        Expect.equal_text("#eeeeee", Page.color(system), "'light dark' follows the system");
+        Expect.equal_text("#eeeeee", Page.color(inner));
+    }
+
+    [Test]
+    unsafe void logical_properties_map_to_physical_ones() {
+        Styles.add(".lp { margin-inline: 4px 8px; padding-block-start: 3px; inline-size: 50px; min-block-size: 20px; max-inline-size: 90px; inset-inline-start: 7px; border-inline: 2px solid red; margin-block-end: 5px; }");
+        Style* style = Styles.of(Page.attach(Node.element("div").attr("class", "lp")).id);
+        Expect.equal(4, (i64)style.margin_left.value);
+        Expect.equal(8, (i64)style.margin_right.value);
+        Expect.equal(5, (i64)style.margin_bottom.value);
+        Expect.equal(3, (i64)style.padding_top.value);
+        Expect.equal(50, (i64)style.width.value);
+        Expect.equal(20, (i64)style.min_height.value);
+        Expect.equal(90, (i64)style.max_width.value);
+        Expect.equal(7, (i64)style.inset_left.value);
+        Expect.equal(2, (i64)style.border_left);
+        Expect.equal(2, (i64)style.border_right);
+        Expect.equal(0, (i64)style.border_top);
+    }
+
+    [Test]
+    unsafe void a_unitless_line_height_follows_each_font_size() {
+        Styles.add(".lh { font-size: 10px; line-height: 1.5; } .lh-big { font-size: 20px; } .lh-px { font-size: 10px; line-height: 15px; }");
+        Node big = Node.element("b").attr("class", "lh-big");
+        Page.attach(Node.element("div").attr("class", "lh").child(big));
+        Node fixed = Node.element("b").attr("class", "lh-big");
+        Page.attach(Node.element("div").attr("class", "lh-px").child(fixed));
+        Expect.equal(30, (i64)Styles.of(big.id).line_px(), "1.5 times its own 20px");
+        Expect.equal(15, (i64)Styles.of(fixed.id).line_px(), "a length is inherited as it is");
+    }
+
+    [Test]
+    unsafe void viewport_units_and_fluid_values() {
+        Styles.add(".vu { width: 50dvw; height: 10dvb; padding-left: 5vi; font-size: clamp(1rem, 0.5rem + 2vi, 2rem); margin-top: 10vmin; }");
+        Node node = Page.attach(Node.element("div").attr("class", "vu"));
+        Styles.set_viewport(1000.0, 400.0);
+        Expect.equal(500, (i64)Styles.of(node.id).width.value);
+        Expect.equal(40, (i64)Styles.of(node.id).height.value);
+        Expect.equal(50, (i64)Styles.of(node.id).padding_left.value);
+        Expect.equal(40, (i64)Styles.of(node.id).margin_top.value, "vmin is the smaller side");
+        Expect.equal(28, (i64)Styles.of(node.id).font_size, "8px + 20px, between 16px and 32px");
+        Styles.set_viewport(300.0, 400.0);
+        Expect.equal(16, (i64)Styles.of(node.id).font_size, "never under the minimum");
+        Styles.set_viewport(3000.0, 400.0);
+        Expect.equal(32, (i64)Styles.of(node.id).font_size, "never over the maximum");
+    }
+
+    [Test]
+    unsafe void environment_media_features() {
+        Styles.add(".mf { color: black; } @media (pointer: coarse) { .mf { color: red; } } @media (prefers-contrast: more) { .mf { background-color: blue; } } @media (forced-colors: active) { .mf { border-color: lime; } } @media (min-width: 40em) { .mf { width: 1px; } }");
+        Node node = Page.attach(Node.element("div").attr("class", "mf"));
+        Styles.set_viewport(1000.0, 800.0);
+        Expect.equal_text("#000000", Page.color(node));
+        Expect.equal(1, (i64)Styles.of(node.id).width.value, "40em is 640px");
+        Styles.set_coarse_pointer(true);
+        Styles.set_more_contrast(true);
+        Styles.set_forced_colors(true);
+        Expect.equal_text("#ff0000", Page.color(node));
+        Expect.equal_text("#0000ff", Page.background(node));
+        Expect.equal_text("#00ff00", Colors.format(Styles.of(node.id).border_color).data);
+        Styles.set_text_scale(2.0);
+        Expect.is_true(Styles.of(node.id).width.unit == Unit.AUTO, "with text twice as large, 40em is 1280px: the narrow layout");
+    }
+}
+
+struct DefaultThemeTests {
+    [Test]
+    unsafe void a_subtree_can_force_its_own_scheme() {
+        Node dark_card = Node.element("div").attr("class", "card");
+        Node section = Page.attach(Node.element("section").attr("data-theme", "dark").child(dark_card));
+        Node light_card = Page.attach(Node.element("div").attr("class", "card"));
+        Expect.equal_text("#171a21", Page.background(dark_card));
+        Expect.equal_text("#0f1115", Page.background(section), "the section repaints its own background");
+        Expect.equal_text("#e6e9ee", Page.color(dark_card));
+        Expect.equal_text("#f6f7f9", Page.background(light_card), "the rest of the page stays light");
+        Expect.is_false(Theme.is_dark());
+    }
+
+    [Test]
+    unsafe void the_text_size_setting_scales_the_interface() {
+        Node button = Page.attach(Node.element("button"));
+        Node heading = Page.attach(Node.element("h3"));
+        Expect.equal(18, (i64)Styles.of(heading.id).font_size);
+        Styles.set_text_scale(1.5);
+        Expect.equal(24, (i64)Styles.of(button.id).font_size, "the root font size follows the OS setting");
+        Expect.equal(24, (i64)Styles.of(button.id).padding_left.value);
+        Expect.equal(60, (i64)Styles.of(button.id).min_height.value);
+        Expect.equal(27, (i64)Styles.of(heading.id).font_size);
+    }
+
+    [Test]
+    unsafe void headings_are_fluid_between_two_sizes() {
+        Node heading = Page.attach(Node.element("h1"));
+        Styles.set_viewport(320.0, 600.0);
+        Expect.equal(28, (i64)Styles.of(heading.id).font_size, "1.75rem on a phone");
+        Styles.set_viewport(2400.0, 1200.0);
+        Expect.equal(40, (i64)Styles.of(heading.id).font_size, "2.5rem at most");
+        Styles.set_viewport(800.0, 600.0);
+        Expect.equal(36, (i64)Styles.of(heading.id).font_size, "1.4rem + 1.75vi in between");
+        Expect.equal(43, (i64)Styles.of(heading.id).line_px(), "line-height 1.2 of its own size");
+    }
+
+    [Test]
+    unsafe void touch_screens_get_larger_targets() {
+        Node button = Page.attach(Node.element("button"));
+        Node field = Page.attach(Node.element("input"));
+        Expect.equal(40, (i64)Styles.of(field.id).min_height.value);
+        Styles.set_coarse_pointer(true);
+        Expect.equal(44, (i64)Styles.of(button.id).min_height.value);
+        Expect.equal(44, (i64)Styles.of(button.id).min_width.value);
+        Expect.equal(44, (i64)Styles.of(field.id).min_height.value);
+    }
+
+    [Test]
+    unsafe void focus_is_an_outline_and_states_do_not_overmatch() {
+        Node button = Page.attach(Node.element("button"));
+        Node off = Page.attach(Node.element("button").attr("disabled", ""));
+        Node primary = Page.attach(Node.element("button").attr("class", "primary"));
+        Expect.equal(0, (i64)Styles.of(button.id).outline_width);
+        Dom.set_state(button.id, NodeState.FOCUS_VISIBLE, true);
+        Expect.equal(2, (i64)Styles.of(button.id).outline_width);
+        Expect.equal(2, (i64)Styles.of(button.id).outline_offset);
+        Expect.equal_text("#1d4ed8", Colors.format(Styles.of(button.id).outline_color).data);
+        Dom.set_state(button.id, NodeState.HOVER, true);
+        Dom.set_state(off.id, NodeState.HOVER, true);
+        Dom.set_state(primary.id, NodeState.HOVER, true);
+        Expect.equal_text("#eceef2", Page.background(button));
+        Expect.equal_text("#f6f7f9", Page.background(off), "a disabled button has no hover state");
+        Expect.equal_text("#1d4ed8", Page.background(primary), "the variant keeps its own hover color");
+    }
+
+    [Test]
+    unsafe void more_contrast_and_forced_colors() {
+        Node card = Page.attach(Node.element("div").attr("class", "card"));
+        Node primary = Page.attach(Node.element("button").attr("class", "primary"));
+        Expect.equal_text("#d8dde3", Colors.format(Styles.of(card.id).border_color).data);
+        Styles.set_more_contrast(true);
+        Expect.equal_text("#1b1f24", Colors.format(Styles.of(card.id).border_color).data, "borders as strong as the text");
+        Styles.set_forced_colors(true);
+        Expect.equal_text("#ffffff", Page.background(card), "Canvas");
+        Expect.equal_text("#000000", Colors.format(Styles.of(card.id).border_color).data, "CanvasText");
+        Expect.equal_text("#0078d7", Page.background(primary), "Highlight");
+    }
+}
+
+// The layout classes of the theme reflow by the space they get, with no breakpoint.
+struct ResponsiveLayoutTests {
+    [Test]
+    unsafe void tiles_fit_as_many_columns_as_the_width_allows() {
+        Styles.add(".rt { height: 10px; }");
+        Node a = Lay.box("rt");
+        Node b = Lay.box("rt");
+        Node c = Lay.box("rt");
+        Node root = Lay.box("tiles").child(a).child(b).child(c);
+        Layout.compute(root.id, (f32)1000.0, (f32)600.0);
+        Expect.equal_text("0,0 1000x10", Lay.rect(root), "three columns of at least 16rem with 1rem gaps");
+        Expect.equal_text("677,0 323x10", Lay.rect(c));
+        Layout.compute(root.id, (f32)600.0, (f32)600.0);
+        Expect.equal_text("308,0 292x10", Lay.rect(b), "two columns");
+        Expect.equal_text("0,26 292x10", Lay.rect(c));
+        Layout.compute(root.id, (f32)200.0, (f32)600.0);
+        Expect.equal_text("0,52 200x10", Lay.rect(c), "one column, as narrow as the screen");
+    }
+
+    [Test]
+    unsafe void split_stacks_when_the_content_gets_narrow() {
+        Styles.add(".rs { height: 10px; }");
+        Node side = Lay.box("rs");
+        Node main = Lay.box("rs");
+        Node root = Lay.box("split").child(side).child(main);
+        Layout.compute(root.id, (f32)1000.0, (f32)600.0);
+        Expect.equal_text("0,0 257x10", Lay.rect(side), "the sidebar keeps about its 16rem");
+        Expect.equal_text("273,0 727x10", Lay.rect(main), "the content takes the rest");
+        Layout.compute(root.id, (f32)400.0, (f32)600.0);
+        Expect.equal_text("0,0 400x10", Lay.rect(side), "no room for 55% of content beside it: they stack");
+        Expect.equal_text("0,26 400x10", Lay.rect(main));
+    }
+
+    [Test]
+    unsafe void cluster_wraps_and_page_keeps_fluid_gutters() {
+        Styles.add(".rc { width: 150px; height: 20px; }");
+        Node a = Lay.box("rc");
+        Node b = Lay.box("rc");
+        Node c = Lay.box("rc");
+        Node cluster = Lay.box("cluster").child(a).child(b).child(c);
+        Node page = Lay.box("page").child(cluster);
+        Layout.compute(page.id, (f32)1600.0, (f32)600.0);
+        Expect.equal_text("224,0 1152x84", Lay.rect(page), "centered, 72rem wide at most, 2rem of gutter");
+        Expect.equal_text("588,32 150x20", Lay.rect(c), "everything on one line");
+        Layout.compute(page.id, (f32)320.0, (f32)600.0);
+        Expect.equal_text("0,0 320x124", Lay.rect(page), "the full width of a phone, 1rem of gutter");
+        Expect.equal_text("16,88 150x20", Lay.rect(c), "one item per line: nothing overflows");
+    }
+
+    [Test]
+    unsafe void buttons_grow_with_their_label_and_never_overflow() {
+        Styles.add(".rb { width: 120px; }");
+        Node button = Node.element("button").add("Save all the changes now");
+        Node root = Lay.box("rb").child(button);
+        Layout.compute(root.id, (f32)800.0, (f32)600.0);
+        Rect rect = Layout.rect(button.id);
+        Expect.equal(120, Lay.px(rect.width), "no wider than its container");
+        Expect.is_true(rect.height > (f32)40.0, "the label wraps and the button grows: no fixed height");
+        Node small = Node.element("button").add("OK");
+        Node other = Lay.box("rb").child(small);
+        Layout.compute(other.id, (f32)800.0, (f32)600.0);
+        Expect.equal_text("0,0 50x40", Lay.rect(small), "16px of text, 16px of padding and 1px of border on each side; 2.5rem tall");
+    }
+}

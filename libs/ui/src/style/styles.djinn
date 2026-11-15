@@ -13,6 +13,10 @@ struct StyleEnvironment {
     mut bool prefers_dark;
     mut bool hover;
     mut bool reduced_motion;
+    mut bool coarse_pointer;
+    mut bool more_contrast;
+    mut bool forced_colors;
+    mut f64 text_scale;
 }
 
 // One matched declaration and the keys that order it in the cascade.
@@ -30,14 +34,17 @@ struct StyleEngine {
     mut StyleEnvironment environment;
     mut Style* styles;
     mut u32* epochs;
+    mut u32* stamps;
     mut u32 capacity;
     mut bool themed;
     mut Growable<CascadeEntry> scratch;
+    mut u32 computed;
 }
 
 // The cascade: matches every rule against an element, orders the declarations (importance, origin, layer,
-// specificity, source order), resolves custom properties and var(), and caches the result per node until the tree
-// or the sheets change (Dom.epoch()).
+// specificity, source order), resolves custom properties and var(), and caches the result per node. A change in the
+// tree restyles only what it can reach (Dom.restyle_stamp); sheets and the environment restyle everything
+// (Dom.epoch()).
 struct Styles {
     public static unsafe StyleEngine* engine() {
         if (style_engine == null) {
@@ -45,6 +52,7 @@ struct Styles {
             engine.environment.viewport_width = 1280.0;
             engine.environment.viewport_height = 800.0;
             engine.environment.root_font_size = 16.0;
+            engine.environment.text_scale = 1.0;
             engine.environment.hover = true;
             style_engine = (ptr)engine;
             Styles.install(CssParser.parse(BrowserStyles.css(), StyleOrigin.BROWSER));
@@ -88,8 +96,46 @@ struct Styles {
 
     public static unsafe void set_viewport(f64 width, f64 height) {
         StyleEnvironment* environment = Styles.environment();
+        if (environment.viewport_width == width && environment.viewport_height == height) {
+            return;
+        }
         environment.viewport_width = width;
         environment.viewport_height = height;
+        Dom.touch();
+    }
+
+    // The OS text size setting (1.0 is the default): the root font size, and with it every rem and em, scales by
+    // it, and so do media queries written in em.
+    public static unsafe void set_text_scale(f64 scale) {
+        StyleEnvironment* environment = Styles.environment();
+        if (scale > 0.0 && environment.text_scale != scale) {
+            environment.text_scale = scale;
+            Dom.touch();
+        }
+    }
+
+    // The primary pointer is a finger or another imprecise device ('pointer: coarse'); it then also cannot hover.
+    public static unsafe void set_coarse_pointer(bool coarse) {
+        StyleEnvironment* environment = Styles.environment();
+        environment.coarse_pointer = coarse;
+        environment.hover = !coarse;
+        Dom.touch();
+    }
+
+    public static unsafe void set_reduced_motion(bool reduced) {
+        Styles.environment().reduced_motion = reduced;
+        Dom.touch();
+    }
+
+    // The user asked the OS for more contrast ('prefers-contrast: more').
+    public static unsafe void set_more_contrast(bool more) {
+        Styles.environment().more_contrast = more;
+        Dom.touch();
+    }
+
+    // The OS replaces the colors with its own small palette ('forced-colors: active', Windows High Contrast).
+    public static unsafe void set_forced_colors(bool forced) {
+        Styles.environment().forced_colors = forced;
         Dom.touch();
     }
 
@@ -104,10 +150,16 @@ struct Styles {
         if (kind == MediaKind.ALWAYS) { result = true; }
         else if (kind == MediaKind.DARK) { result = environment.prefers_dark; }
         else if (kind == MediaKind.LIGHT) { result = !environment.prefers_dark; }
-        else if (kind == MediaKind.MIN_WIDTH) { result = environment.viewport_width >= feature.value; }
-        else if (kind == MediaKind.MAX_WIDTH) { result = environment.viewport_width <= feature.value; }
-        else if (kind == MediaKind.ABOVE_WIDTH) { result = environment.viewport_width > feature.value; }
-        else if (kind == MediaKind.BELOW_WIDTH) { result = environment.viewport_width < feature.value; }
+        else if (kind == MediaKind.MIN_WIDTH) { result = environment.viewport_width >= Styles.width_of(feature, environment); }
+        else if (kind == MediaKind.MAX_WIDTH) { result = environment.viewport_width <= Styles.width_of(feature, environment); }
+        else if (kind == MediaKind.ABOVE_WIDTH) { result = environment.viewport_width > Styles.width_of(feature, environment); }
+        else if (kind == MediaKind.BELOW_WIDTH) { result = environment.viewport_width < Styles.width_of(feature, environment); }
+        else if (kind == MediaKind.COARSE) { result = environment.coarse_pointer; }
+        else if (kind == MediaKind.FINE) { result = !environment.coarse_pointer; }
+        else if (kind == MediaKind.MORE_CONTRAST) { result = environment.more_contrast; }
+        else if (kind == MediaKind.USUAL_CONTRAST) { result = !environment.more_contrast; }
+        else if (kind == MediaKind.FORCED_COLORS) { result = environment.forced_colors; }
+        else if (kind == MediaKind.FREE_COLORS) { result = !environment.forced_colors; }
         else if (kind == MediaKind.HOVER) { result = environment.hover; }
         else if (kind == MediaKind.NO_HOVER) { result = !environment.hover; }
         else if (kind == MediaKind.REDUCED_MOTION) { result = environment.reduced_motion; }
@@ -116,6 +168,14 @@ struct Styles {
             return !result;
         }
         return result;
+    }
+
+    // A width in a media query: px, or em / rem of the initial font size, which follows the OS text scale.
+    static unsafe f64 width_of(MediaFeature feature, StyleEnvironment* environment) {
+        if (feature.relative) {
+            return feature.value * 16.0 * environment.text_scale;
+        }
+        return feature.value;
     }
 
     public static unsafe bool media(StyleSheet* sheet, u32 index) {
@@ -362,7 +422,23 @@ struct Styles {
         }
         engine.styles = (Style*)Dom.resize((void*)engine.styles, engine.capacity, wanted, sizeof(Style));
         engine.epochs = (u32*)Dom.resize((void*)engine.epochs, engine.capacity, wanted, 4);
+        engine.stamps = (u32*)Dom.resize((void*)engine.stamps, engine.capacity, wanted, 4);
         engine.capacity = wanted;
+    }
+
+    // How many styles were computed (not served from the cache) so far: what tests of the invalidation read.
+    public static unsafe u32 computed_count() {
+        return Styles.engine().computed;
+    }
+
+    // Whether the cached style of 'element' is still the one the tree and the sheets give. A node outside the
+    // document still inherits from it, so the document's own changes count too.
+    static unsafe bool is_current(StyleEngine* engine, u32 element) {
+        if (engine.epochs[element] != Dom.epoch() + 1) {
+            return false;
+        }
+        u32 stamp = engine.stamps[element];
+        return Dom.restyle_stamp(element) <= stamp && Dom.changed_children(Dom.document()) <= stamp;
     }
 
     // The computed style of a node (for text and fragments, the one of the element around it).
@@ -377,10 +453,11 @@ struct Styles {
             }
         }
         u32 epoch = Dom.epoch() + 1;
-        if (engine.epochs[element] == epoch) {
+        if (Styles.is_current(engine, element)) {
             return &engine.styles[element];
         }
         mut Style parent = Style.initial();
+        parent.font_size = (f32)(16.0 * engine.environment.text_scale);
         mut u32 above = SelectorMatcher.parent_element(element);
         if (above == 0 && element != Dom.document()) {
             above = Dom.document();
@@ -395,6 +472,8 @@ struct Styles {
         Style computed = Styles.compute(element, &parent);
         engine.styles[element] = computed;
         engine.epochs[element] = epoch;
+        engine.stamps[element] = Dom.stamp();
+        engine.computed = engine.computed + 1;
         return &engine.styles[element];
     }
 
@@ -407,6 +486,10 @@ struct Styles {
             item = next;
         }
         style.own_vars = 0;
+    }
+
+    static unsafe bool is_early(str property) {
+        return CssNames.equal(property, "font-size") || CssNames.equal(property, "color-scheme");
     }
 
     static unsafe Style compute(u32 id, Style* parent) {
@@ -427,24 +510,27 @@ struct Styles {
             style.own_vars = style.own_vars + 1;
         }
         mut ValueContext context = { .font_size = (f64)parent.font_size, .root_font_size = engine.environment.root_font_size,
-            .viewport_width = engine.environment.viewport_width, .viewport_height = engine.environment.viewport_height };
+            .viewport_width = engine.environment.viewport_width, .viewport_height = engine.environment.viewport_height, .dark = parent.dark_scheme };
         if (id == Dom.document()) {
-            context.font_size = engine.environment.root_font_size;
+            context.root_font_size = (f64)parent.font_size;
         }
+        // The font size (what em resolves against) and the color scheme (what light-dark() and the system colors
+        // resolve against) come first: every other declaration may depend on them.
         for (mut u32 i = 0; i < entries.count; i = i + 1) {
             CssDeclaration declaration = Styles.declaration_of(entries.get(i));
-            if (CssNames.equal(declaration.property, "font-size")) {
+            if (Styles.is_early(declaration.property)) {
                 Styles.apply(&style, declaration, parent, &context);
             }
         }
         context.font_size = (f64)style.font_size;
+        context.dark = style.dark_scheme;
         if (id == Dom.document()) {
             engine.environment.root_font_size = (f64)style.font_size;
             context.root_font_size = (f64)style.font_size;
         }
         for (mut u32 i = 0; i < entries.count; i = i + 1) {
             CssDeclaration declaration = Styles.declaration_of(entries.get(i));
-            if (Styles.is_custom(declaration.property) || CssNames.equal(declaration.property, "font-size")) {
+            if (Styles.is_custom(declaration.property) || Styles.is_early(declaration.property)) {
                 continue;
             }
             Styles.apply(&style, declaration, parent, &context);

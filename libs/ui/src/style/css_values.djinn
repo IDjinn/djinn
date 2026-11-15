@@ -53,6 +53,7 @@ struct ValueContext {
     mut f64 root_font_size;
     mut f64 viewport_width;
     mut f64 viewport_height;
+    mut bool dark;
 }
 
 // A cursor over the tokens of one value, skipping whitespace.
@@ -151,11 +152,23 @@ struct CssNumbers {
         if (CssNames.equal(unit, "em")) {
             return Numeric.of(Unit.PX, value * context.font_size);
         }
-        if (CssNames.equal(unit, "vw")) {
+        // The dynamic, small and large viewport units are the same here: a native window has no browser bars that
+        // come and go. The inline axis is the horizontal one (horizontal writing modes only, for now).
+        if (CssNames.equal(unit, "vw") || CssNames.equal(unit, "vi") || CssNames.equal(unit, "dvw") || CssNames.equal(unit, "svw")
+            || CssNames.equal(unit, "lvw") || CssNames.equal(unit, "dvi") || CssNames.equal(unit, "svi") || CssNames.equal(unit, "lvi")) {
             return Numeric.of(Unit.PX, value * context.viewport_width / 100.0);
         }
-        if (CssNames.equal(unit, "vh")) {
+        if (CssNames.equal(unit, "vh") || CssNames.equal(unit, "vb") || CssNames.equal(unit, "dvh") || CssNames.equal(unit, "svh")
+            || CssNames.equal(unit, "lvh") || CssNames.equal(unit, "dvb") || CssNames.equal(unit, "svb") || CssNames.equal(unit, "lvb")) {
             return Numeric.of(Unit.PX, value * context.viewport_height / 100.0);
+        }
+        if (CssNames.equal(unit, "vmin") || CssNames.equal(unit, "vmax")) {
+            mut f64 side = context.viewport_width;
+            bool smaller = context.viewport_height < context.viewport_width;
+            if (smaller == CssNames.equal(unit, "vmin")) {
+                side = context.viewport_height;
+            }
+            return Numeric.of(Unit.PX, value * side / 100.0);
         }
         if (CssNames.equal(unit, "pt")) {
             return Numeric.of(Unit.PX, value * 4.0 / 3.0);
@@ -505,6 +518,33 @@ struct Colors {
         return true;
     }
 
+    // CSS system colors, which follow the color scheme. These are the defaults browsers use; a host that knows the
+    // OS palette (forced colors) will report its own.
+    public static unsafe bool system(str name, bool dark, u32* out) {
+        mut u32 light = 0;
+        mut u32 night = 0;
+        if (CssNames.equal(name, "canvas") || CssNames.equal(name, "field")) { light = 0xffffffff; night = 0x121212ff; }
+        else if (CssNames.equal(name, "canvastext") || CssNames.equal(name, "fieldtext") || CssNames.equal(name, "buttontext")) { light = 0x000000ff; night = 0xffffffff; }
+        else if (CssNames.equal(name, "linktext")) { light = 0x0000eeff; night = 0x9e9effff; }
+        else if (CssNames.equal(name, "visitedtext")) { light = 0x551a8bff; night = 0xd0adf0ff; }
+        else if (CssNames.equal(name, "activetext")) { light = 0xff0000ff; night = 0xff9e9eff; }
+        else if (CssNames.equal(name, "buttonface")) { light = 0xefefefff; night = 0x6b6b6bff; }
+        else if (CssNames.equal(name, "buttonborder")) { light = 0x767676ff; night = 0x858585ff; }
+        else if (CssNames.equal(name, "highlight") || CssNames.equal(name, "selecteditem")) { light = 0x0078d7ff; night = 0x0078d7ff; }
+        else if (CssNames.equal(name, "highlighttext") || CssNames.equal(name, "selecteditemtext")) { light = 0xffffffff; night = 0xffffffff; }
+        else if (CssNames.equal(name, "graytext")) { light = 0x6d6d6dff; night = 0x808080ff; }
+        else if (CssNames.equal(name, "mark")) { light = 0xffff00ff; night = 0xffff00ff; }
+        else if (CssNames.equal(name, "marktext")) { light = 0x000000ff; night = 0x000000ff; }
+        else if (CssNames.equal(name, "accentcolor")) { light = 0x0075ffff; night = 0x99c8ffff; }
+        else if (CssNames.equal(name, "accentcolortext")) { light = 0xffffffff; night = 0x000000ff; }
+        else { return false; }
+        out[0] = light;
+        if (dark) {
+            out[0] = night;
+        }
+        return true;
+    }
+
     public static unsafe bool named(str name, u32* out) {
         if (CssNames.equal(name, "transparent")) { out[0] = 0; return true; }
         if (CssNames.equal(name, "black")) { out[0] = 255; return true; }
@@ -578,6 +618,9 @@ struct Colors {
                 out[0] = current;
                 return true;
             }
+            if (Colors.system(token.text, context.dark, out)) {
+                return true;
+            }
             return Colors.named(token.text, out);
         }
         if (token.kind != CssKind.FUNCTION) {
@@ -587,6 +630,37 @@ struct Colors {
         mut ValueReader inner = ValueReader.over(reader.tokens, reader.pos, close);
         reader.pos = close + 1;
         str name = token.text;
+        if (CssNames.equal(name, "light-dark")) {
+            // The first color when the element's color scheme is light, the second when it is dark.
+            mut u32 comma = close;
+            mut i32 depth = 0;
+            for (mut u32 i = inner.pos; i < close; i = i + 1) {
+                u8 kind = reader.tokens.get(i).kind;
+                if (kind == CssKind.FUNCTION || kind == CssKind.OPEN_PAREN) {
+                    depth = depth + 1;
+                } else if (kind == CssKind.CLOSE_PAREN) {
+                    depth = depth - 1;
+                } else if (kind == CssKind.COMMA && depth == 0) {
+                    comma = i;
+                    break;
+                }
+            }
+            if (comma == close) {
+                return false;
+            }
+            mut ValueReader light = ValueReader.over(reader.tokens, inner.pos, comma);
+            mut ValueReader dark = ValueReader.over(reader.tokens, comma + 1, close);
+            mut u32 first = 0;
+            mut u32 second = 0;
+            if (!Colors.read(&light, context, current, &first) || !light.done() || !Colors.read(&dark, context, current, &second) || !dark.done()) {
+                return false;
+            }
+            out[0] = first;
+            if (context.dark) {
+                out[0] = second;
+            }
+            return true;
+        }
         if (CssNames.equal(name, "color-mix")) {
             return Colors.read_mix(&inner, context, current, out);
         }

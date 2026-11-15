@@ -61,3 +61,75 @@ struct ThemeShowcaseTests {
         app.unmount();
     }
 }
+
+// The page lays out for a phone and for a desktop from the same markup: the theme's classes reflow by the space
+// they get.
+struct LayoutShowcaseTests {
+    // The 'nth' element under 'root' whose class attribute is exactly 'name' (0 when there is none).
+    static unsafe u32 with_class(u32 root, str name, u32* nth) {
+        if (Dom.kind(root) == DomKind.ELEMENT && Texts.same(Dom.attr(root, "class"), name)) {
+            if (nth[0] == 0) {
+                return root;
+            }
+            nth[0] = nth[0] - 1;
+        }
+        mut u32 child = Dom.first_child(root);
+        while (child != 0) {
+            u32 found = LayoutShowcaseTests.with_class(child, name, nth);
+            if (found != 0) {
+                return found;
+            }
+            child = Dom.next_sibling(child);
+        }
+        return 0;
+    }
+
+    static unsafe u32 card(u32 index) {
+        mut u32 nth = index;
+        return LayoutShowcaseTests.with_class(Dom.document(), "card stack", &nth);
+    }
+
+    // The right edge of the widest box under 'root'.
+    static unsafe f32 reach(u32 root) {
+        mut f32 widest = (f32)0.0;
+        LayoutBox* box = Layout.box(root);
+        if (box.visible) {
+            widest = box.left + box.width;
+        }
+        mut u32 child = Dom.first_child(root);
+        while (child != 0) {
+            f32 inner = LayoutShowcaseTests.reach(child);
+            if (inner > widest) {
+                widest = inner;
+            }
+            child = Dom.next_sibling(child);
+        }
+        return widest;
+    }
+
+    [Test]
+    unsafe void the_page_reflows_from_desktop_to_phone() {
+        Showcase page = Showcase();
+        Mounted app = App.mount<Showcase>(page);
+        Layout.compute(Dom.document(), (f32)1280.0, (f32)800.0);
+        mut Rect first = Layout.rect(LayoutShowcaseTests.card(0));
+        mut Rect second = Layout.rect(LayoutShowcaseTests.card(1));
+        Expect.is_true(second.x > first.x + first.width - (f32)1.0, "on a desktop the cards are side by side");
+        Expect.is_true(second.y == first.y);
+        Expect.is_true(first.height == second.height, "and as tall as each other");
+        Expect.is_true(Layout.rect(app.node.id).x > (f32)60.0, "the page is centered with room around it");
+
+        Layout.compute(Dom.document(), (f32)360.0, (f32)640.0);
+        first = Layout.rect(LayoutShowcaseTests.card(0));
+        second = Layout.rect(LayoutShowcaseTests.card(1));
+        Expect.is_true(second.x == first.x, "on a phone they stack");
+        Expect.is_true(second.y > first.y + first.height);
+        Expect.equal(326, (i64)first.width, "the full width, less the fluid gutter (17px at this size) on each side");
+        Expect.is_true(LayoutShowcaseTests.reach(Dom.document()) <= (f32)360.5, "and nothing overflows the screen");
+
+        Styles.set_text_scale(2.0);
+        Layout.compute(Dom.document(), (f32)360.0, (f32)640.0);
+        Expect.is_true(LayoutShowcaseTests.reach(Dom.document()) <= (f32)360.5, "even with the text twice as large");
+        app.unmount();
+    }
+}
