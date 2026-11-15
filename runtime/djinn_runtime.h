@@ -216,6 +216,8 @@ char* __djinn_list_files(const char* directory, const char* extension);
 
 // Calls a JIT-compiled entry point `int main(void)` at `address` and returns its exit code.
 int __djinn_call_entry(void* address);
+uint64_t __djinn_call_proc(void* address, const char* data, uint64_t length, char** result);
+void __djinn_proc_stub(void);
 void __djinn_call_method(void* address, void* target);
 void* __djinn_call_entry_handle(void* address);
 void* __djinn_call_method_handle(void* address, void* target);

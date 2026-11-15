@@ -224,6 +224,20 @@ i32 c = calc(double, 5);
 ```
 *)
 
+#### Procedural macros
+
+```ebnf
+proc_macro_decl      = "proc" "macro" IDENTIFIER "=>" IDENTIFIER ";" ;       (* handler: TokenStream f(TokenStream input) *)
+proc_attribute_decl  = "proc" "attribute" IDENTIFIER "=>" IDENTIFIER ";" ;   (* handler: TokenStream f(TokenStream args, TokenStream item) *)
+```
+
+A procedural macro is ordinary Djinn code in a library (built with `--std`, importing `std::meta`) that receives the
+call's tokens and returns new ones. It is called like a declarative macro (`name!(...)`, `name![...]`, `name!{...}`); a
+`proc attribute Name` is written `[Name]` or `[Name(args)]` before a declaration and replaces it with what it returns.
+The program that imports the library runs the handler while parsing (the library object is loaded in a JIT inside the
+compiler; the program itself does not use the JIT), so it needs `--runtime-lib` and the host target. Tokens carry the
+span of the input token they came from (`Token.at(span)`); `Token.error(span, message)` reports an error there.
+
 ### Reflection and member queries
 
 ```ebnf

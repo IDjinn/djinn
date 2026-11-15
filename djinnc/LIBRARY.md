@@ -75,6 +75,9 @@ constexpr and struct layouts stay complete. Modifiers (`private`, `async`, `sync
   call site, so declarations it produces in the consumer are not treated as header declarations. Header
   functions become `extern`, header globals become declarations; the object is extracted next to the output and
   linked, then removed.
+- Procedural macros: a library that declares `proc macro` / `proc attribute` exports one entry per macro; a consumer runs
+  it from the library object at compile time (ORC JIT, `driver/proc_macros.djinn`). Objects of every loaded library are
+  kept for that (`Library.macro_objects`). `std::meta` code is linkonce, so it stays in the macro library object.
 - Dedup across modules: generic instances, constexpr functions and struct-instance methods are `linkonce_odr` in a
   comdat; typeinfo is `linkonce_odr`; reflection tables are internal.
 

@@ -191,5 +191,6 @@ Files in `std/` (namespaces `std::<folder>`; consumed as `std.djlib`, built by `
 - `sys/` — `console`, `io`, `debug` (assertions), `libc` (FFI: malloc, free, printf, memcpy, ...), `atomic`, `intrinsics`,
   `math`/`math_native` (`Math.sqrt`, ... foldable at compile time), `process`, `system` (panic hooks), `task`, `logger`,
   `spectre` (terminal UI: tables, trees, spinners)
+- `meta/tokens.djinn` — `Token`, `TokenStream`, `TokenClass` for procedural macros (`proc macro` / `proc attribute`)
 - `net/socket.djinn` — async sockets; `util/` — `json` (document reader over the runtime parser), `version`
 - `builtin/coro.djinn` — coroutine utilities

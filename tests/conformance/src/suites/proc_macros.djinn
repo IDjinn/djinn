@@ -1,0 +1,83 @@
+namespace conformance;
+
+import testing;
+import djinnc::testing;
+import djinnc;
+
+struct ProcMacroTests {
+    [Test]
+    void function_like_procedural_macro() {
+        str library = """
+import std::meta;
+namespace demo;
+
+TokenStream expand_double(TokenStream input) {
+    mut TokenStream out = TokenStream.create();
+    out.push(Token.open("("));
+    out.append(input);
+    out.push(Token.close(")"));
+    out.push(Token.punct("*"));
+    out.push(Token.number("2"));
+    return out;
+}
+
+proc macro double => expand_double;
+""";
+        str source = """
+import demo;
+
+i32 main() {
+    return double!(3 + 4) + double!{1};
+}
+""";
+        Verify.source(source).with_std().links_library(library, Expected.exit(16));
+    }
+
+    [Test]
+    void attribute_macro_generates_the_entry_point() {
+        str library = """
+import std::meta;
+namespace demo;
+
+unsafe TokenStream expand_app(TokenStream args, TokenStream item) {
+    mut TokenStream out = TokenStream.create();
+    out.append(item);
+    mut u32 index = 0;
+    while (index < item.length() && !item.get(index).matches("struct")) {
+        index = index + 1;
+    }
+    Token name = item.get(index + 1);
+    out.push(Token.ident("i32"));
+    out.push(Token.ident("main"));
+    out.push(Token.open("("));
+    out.push(Token.close(")"));
+    out.push(Token.open("{"));
+    out.push(Token.keyword("return"));
+    out.push(name);
+    out.push(Token.punct("."));
+    out.push(Token.ident("run"));
+    out.push(Token.open("("));
+    if (args.length() > 0) {
+        out.push(args.get(0));
+    }
+    out.push(Token.close(")"));
+    out.push(Token.punct(";"));
+    out.push(Token.close("}"));
+    return out;
+}
+
+proc attribute Application => expand_app;
+""";
+        str source = """
+import demo;
+
+[Application(40)]
+struct App {
+    public static i32 run(i32 base) {
+        return base + 2;
+    }
+}
+""";
+        Verify.source(source).with_std().links_library(library, Expected.exit(42));
+    }
+}

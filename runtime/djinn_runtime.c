@@ -169,6 +169,17 @@ void __djinn_call_method(void* address, void* target)
     ((void (*)(void*))address)(target);
 }
 
+// Stands in for the coroutine wrappers every program generates, in the JIT that runs procedural macros.
+void __djinn_proc_stub(void)
+{
+}
+
+// A procedural macro entry: tokens in as records, records out in a buffer the macro allocates.
+uint64_t __djinn_call_proc(void* address, const char* data, uint64_t length, char** result)
+{
+    return ((uint64_t (*)(const char*, uint64_t, char**))address)(data, length, result);
+}
+
 void* __djinn_call_entry_handle(void* address)
 {
     __djinn_jit = 1;
