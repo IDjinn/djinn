@@ -29,6 +29,7 @@ struct DomNode {
     mut u32 listeners;
     mut i8* text;
     mut u32 text_length;
+    mut u8 state;
 }
 
 struct DomAttr {
@@ -65,6 +66,8 @@ struct DomTree {
     mut u32 listener_capacity;
     mut IdList free_listeners;
 
+    mut u32 document;
+    mut u32 epoch;
     mut bool static_mode;
     mut bool recording;
     mut u32 operations;
@@ -110,6 +113,7 @@ struct Dom {
             t.listener_count = 1;
             t.log = TextBuffer.create();
             dom_tree = (ptr)t;
+            t.document = Dom.element("html");
         }
         return (DomTree*)dom_tree;
     }
@@ -222,6 +226,42 @@ struct Dom {
         return Dom.tree().live;
     }
 
+    // The root element every mounted app hangs under (':root' in CSS); the theme sets 'data-theme' on it.
+    public static unsafe u32 document() {
+        DomTree* t = Dom.tree();
+        if (t.document == 0 || t.nodes[t.document].kind != DomKind.ELEMENT) {
+            t.document = Dom.element("html");
+        }
+        return t.document;
+    }
+
+    // Bumped by every change that can change a computed style, so cached styles know they are stale.
+    public static unsafe u32 epoch() {
+        return Dom.tree().epoch;
+    }
+
+    public static unsafe void touch() {
+        DomTree* t = Dom.tree();
+        t.epoch = t.epoch + 1;
+    }
+
+    public static unsafe u8 state(u32 id) {
+        return Dom.at(id).state;
+    }
+
+    // Interaction state set by the host (pointer over it, focused, pressed): what :hover, :focus and :active read.
+    public static unsafe void set_state(u32 id, u8 flag, bool on) {
+        DomNode* node = Dom.at(id);
+        mut u8 next = node.state & (255 - flag);
+        if (on) {
+            next = node.state | flag;
+        }
+        if (next != node.state) {
+            node.state = next;
+            Dom.touch();
+        }
+    }
+
     public static unsafe void set_static(bool enabled) {
         Dom.tree().static_mode = enabled;
     }
@@ -296,6 +336,7 @@ struct Dom {
         }
         t.attrs[index].value = Texts.copy(data, length);
         t.attrs[index].length = length;
+        Dom.touch();
         if (Dom.logging()) {
             Dom.begin("set_attr", id);
             Dom.log_text(" ");
@@ -322,6 +363,7 @@ struct Dom {
                 memset((void*)&t.attrs[index], 0, (size_long)sizeof(DomAttr));
                 IdList* free_attrs = &t.free_attrs;
                 free_attrs.push(index);
+                Dom.touch();
                 if (Dom.logging()) {
                     Dom.begin("remove_attr", id);
                     Dom.log_text(" ");
@@ -351,6 +393,7 @@ struct Dom {
     }
 
     static unsafe void detach(u32 child) {
+        Dom.touch();
         DomNode* node = Dom.at(child);
         u32 parent = node.parent;
         if (parent == 0) {
@@ -374,6 +417,7 @@ struct Dom {
 
     // Puts 'child' into 'parent' before 'before' (0 appends). A child that already had a parent is moved.
     public static unsafe void insert(u32 parent, u32 child, u32 before) {
+        Dom.touch();
         bool moving = Dom.at(child).parent != 0;
         Dom.detach(child);
         DomNode* node = Dom.at(child);

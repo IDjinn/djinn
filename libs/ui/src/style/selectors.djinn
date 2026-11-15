@@ -1,0 +1,697 @@
+import std::types;
+import std::libc;
+
+namespace ui;
+
+struct PartKind {
+    const u8 TYPE = 1;
+    const u8 UNIVERSAL = 2;
+    const u8 CLASS = 3;
+    const u8 ID = 4;
+    const u8 ATTRIBUTE = 5;
+    const u8 PSEUDO = 6;
+    const u8 COMBINATOR = 7;
+    const u8 NOT = 8;
+    const u8 IS = 9;
+    const u8 NEVER = 10;
+}
+
+struct AttrOp {
+    const u8 EXISTS = 0;
+    const u8 EQUALS = 1;
+    const u8 INCLUDES = 2;
+    const u8 DASH = 3;
+    const u8 PREFIX = 4;
+    const u8 SUFFIX = 5;
+    const u8 SUBSTRING = 6;
+}
+
+struct Combinator {
+    const u8 DESCENDANT = 0;
+    const u8 CHILD = 1;
+    const u8 ADJACENT = 2;
+    const u8 SIBLING = 3;
+}
+
+// One simple selector or combinator. ':not(a, b)' / ':is(...)' / ':where(...)' keep their selector list as a
+// range of the table's selectors ('list_first', 'list_count').
+struct SelectorPart {
+    mut u8 kind;
+    mut u8 op;
+    mut bool insensitive;
+    mut str name;
+    mut str value;
+    mut u32 list_first;
+    mut u32 list_count;
+}
+
+// A complex selector: parts [first, first + count) left to right; specificity packed as a*65536 + b*256 + c.
+struct Selector {
+    mut u32 first;
+    mut u32 count;
+    mut u32 specificity;
+}
+
+// The argument of :is() / :where() / :not(), parsed after the selector list that contains it so every list stays
+// contiguous in the table.
+struct NestedList {
+    mut CssTokens* tokens;
+    mut u32 part;
+    mut u32 start;
+    mut u32 end;
+    mut bool weighted;
+    mut u32 owner;
+}
+
+struct SelectorTable {
+    mut Growable<SelectorPart> parts;
+    mut Growable<Selector> selectors;
+    mut Growable<NestedList> pending;
+}
+
+struct NodeState {
+    const u8 HOVER = 1;
+    const u8 FOCUS = 2;
+    const u8 ACTIVE = 4;
+    const u8 FOCUS_VISIBLE = 8;
+}
+
+struct SelectorParser {
+    static unsafe void skip_space(CssTokens* tokens, u32* pos, u32 end) {
+        while (pos[0] < end && tokens.get(pos[0]).kind == CssKind.SPACE) {
+            pos[0] = pos[0] + 1;
+        }
+    }
+
+    static unsafe u32 closing(CssTokens* tokens, u32 open, u32 end) {
+        mut i32 depth = 0;
+        for (mut u32 i = open; i < end; i = i + 1) {
+            u8 kind = tokens.get(i).kind;
+            if (kind == CssKind.FUNCTION || kind == CssKind.OPEN_PAREN || kind == CssKind.OPEN_SQUARE) {
+                depth = depth + 1;
+            } else if (kind == CssKind.CLOSE_PAREN || kind == CssKind.CLOSE_SQUARE) {
+                depth = depth - 1;
+                if (depth == 0) {
+                    return i;
+                }
+            }
+        }
+        return end;
+    }
+
+    static SelectorPart part(u8 kind, str name) {
+        str empty = "";
+        SelectorPart made = { .kind = kind, .op = 0, .insensitive = false, .name = name, .value = empty, .list_first = 0, .list_count = 0 };
+        return made;
+    }
+
+    // A comma-separated list in tokens [start, end); returns how many selectors were added (0 if any is invalid,
+    // which drops the whole rule as CSS requires).
+    // A selector list with the lists nested in it; returns how many top-level selectors were added.
+    public static unsafe u32 parse(SelectorTable* table, CssTokens* tokens, u32 start, u32 end, u32* first) {
+        u32 count = SelectorParser.list(table, tokens, start, end, first);
+        mut u32 done = 0;
+        while (done < table.pending.count) {
+            NestedList item = table.pending.get(done);
+            done = done + 1;
+            mut u32 inner_first = 0;
+            u32 inner_count = SelectorParser.list(table, item.tokens, item.start, item.end, &inner_first);
+            SelectorPart* part = table.parts.at(item.part);
+            part.list_first = inner_first;
+            part.list_count = inner_count;
+            if (item.weighted) {
+                mut u32 highest = 0;
+                for (mut u32 i = 0; i < inner_count; i = i + 1) {
+                    u32 inner = table.selectors.get(inner_first + i).specificity;
+                    if (inner > highest) {
+                        highest = inner;
+                    }
+                }
+                Selector* owner = table.selectors.at(item.owner);
+                owner.specificity = owner.specificity + highest;
+            }
+        }
+        table.pending.count = 0;
+        return count;
+    }
+
+    public static unsafe u32 list(SelectorTable* table, CssTokens* tokens, u32 start, u32 end, u32* first) {
+        first[0] = table.selectors.count;
+        u32 pending_start = table.pending.count;
+        mut u32 count = 0;
+        mut u32 item = start;
+        mut i32 depth = 0;
+        for (mut u32 i = start; i <= end; i = i + 1) {
+            mut bool split = i == end;
+            if (!split) {
+                u8 kind = tokens.get(i).kind;
+                if (kind == CssKind.FUNCTION || kind == CssKind.OPEN_PAREN || kind == CssKind.OPEN_SQUARE) {
+                    depth = depth + 1;
+                } else if (kind == CssKind.CLOSE_PAREN || kind == CssKind.CLOSE_SQUARE) {
+                    depth = depth - 1;
+                } else if (kind == CssKind.COMMA && depth == 0) {
+                    split = true;
+                }
+            }
+            if (split) {
+                u32 pending_before = table.pending.count;
+                Selector parsed = SelectorParser.complex(table, tokens, item, i);
+                if (parsed.count == 0) {
+                    table.selectors.count = first[0];
+                    table.pending.count = pending_start;
+                    return 0;
+                }
+                u32 owner = table.selectors.push(parsed);
+                for (mut u32 p = pending_before; p < table.pending.count; p = p + 1) {
+                    NestedList* nested = table.pending.at(p);
+                    nested.owner = owner;
+                }
+                count = count + 1;
+                item = i + 1;
+            }
+        }
+        return count;
+    }
+
+    static unsafe Selector complex(SelectorTable* table, CssTokens* tokens, u32 start, u32 end) {
+        mut Selector selector = { .first = table.parts.count, .count = 0, .specificity = 0 };
+        Selector invalid = { .first = 0, .count = 0, .specificity = 0 };
+        mut u32 pos = start;
+        SelectorParser.skip_space(tokens, &pos, end);
+        mut bool need_compound = true;
+        while (pos < end) {
+            CssToken token = tokens.get(pos);
+            if (token.kind == CssKind.SPACE || (token.kind == CssKind.DELIM && (Texts.same(token.text, ">") || Texts.same(token.text, "+") || Texts.same(token.text, "~")))) {
+                mut u8 combinator = Combinator.DESCENDANT;
+                SelectorParser.skip_space(tokens, &pos, end);
+                if (pos >= end) {
+                    break;
+                }
+                CssToken next = tokens.get(pos);
+                if (next.kind == CssKind.DELIM && Texts.same(next.text, ">")) {
+                    combinator = Combinator.CHILD;
+                    pos = pos + 1;
+                } else if (next.kind == CssKind.DELIM && Texts.same(next.text, "+")) {
+                    combinator = Combinator.ADJACENT;
+                    pos = pos + 1;
+                } else if (next.kind == CssKind.DELIM && Texts.same(next.text, "~")) {
+                    combinator = Combinator.SIBLING;
+                    pos = pos + 1;
+                }
+                SelectorParser.skip_space(tokens, &pos, end);
+                if (need_compound || pos >= end) {
+                    return invalid;
+                }
+                mut SelectorPart joint = SelectorParser.part(PartKind.COMBINATOR, "");
+                joint.op = combinator;
+                table.parts.push(joint);
+                need_compound = true;
+                continue;
+            }
+            u32 before = pos;
+            u32 added = SelectorParser.simple(table, tokens, &pos, end, &selector.specificity);
+            if (added == 0 || pos == before) {
+                return invalid;
+            }
+            need_compound = false;
+        }
+        if (need_compound) {
+            return invalid;
+        }
+        selector.count = table.parts.count - selector.first;
+        return selector;
+    }
+
+    // One simple selector at 'pos'; returns 1 when it was understood.
+    static unsafe u32 simple(SelectorTable* table, CssTokens* tokens, u32* pos, u32 end, u32* specificity) {
+        CssToken token = tokens.get(pos[0]);
+        if (token.kind == CssKind.IDENT) {
+            pos[0] = pos[0] + 1;
+            table.parts.push(SelectorParser.part(PartKind.TYPE, token.text));
+            specificity[0] = specificity[0] + 1;
+            return 1;
+        }
+        if (token.kind == CssKind.DELIM && Texts.same(token.text, "*")) {
+            pos[0] = pos[0] + 1;
+            table.parts.push(SelectorParser.part(PartKind.UNIVERSAL, ""));
+            return 1;
+        }
+        if (token.kind == CssKind.HASH) {
+            pos[0] = pos[0] + 1;
+            table.parts.push(SelectorParser.part(PartKind.ID, token.text));
+            specificity[0] = specificity[0] + 65536;
+            return 1;
+        }
+        if (token.kind == CssKind.DELIM && Texts.same(token.text, ".")) {
+            CssToken name = tokens.get(pos[0] + 1);
+            if (name.kind != CssKind.IDENT) {
+                return 0;
+            }
+            pos[0] = pos[0] + 2;
+            table.parts.push(SelectorParser.part(PartKind.CLASS, name.text));
+            specificity[0] = specificity[0] + 256;
+            return 1;
+        }
+        if (token.kind == CssKind.OPEN_SQUARE) {
+            u32 close = SelectorParser.closing(tokens, pos[0], end);
+            u32 added = SelectorParser.attribute(table, tokens, pos[0] + 1, close);
+            pos[0] = close + 1;
+            specificity[0] = specificity[0] + 256;
+            return added;
+        }
+        if (token.kind == CssKind.COLON) {
+            return SelectorParser.pseudo(table, tokens, pos, end, specificity);
+        }
+        return 0;
+    }
+
+    static unsafe u32 attribute(SelectorTable* table, CssTokens* tokens, u32 start, u32 end) {
+        mut u32 pos = start;
+        SelectorParser.skip_space(tokens, &pos, end);
+        CssToken name = tokens.get(pos);
+        if (name.kind != CssKind.IDENT) {
+            return 0;
+        }
+        mut SelectorPart made = SelectorParser.part(PartKind.ATTRIBUTE, name.text);
+        pos = pos + 1;
+        SelectorParser.skip_space(tokens, &pos, end);
+        if (pos >= end) {
+            table.parts.push(made);
+            return 1;
+        }
+        CssToken op = tokens.get(pos);
+        if (op.kind != CssKind.DELIM) {
+            return 0;
+        }
+        if (Texts.same(op.text, "=")) {
+            made.op = AttrOp.EQUALS;
+            pos = pos + 1;
+        } else {
+            CssToken equals = tokens.get(pos + 1);
+            if (!(equals.kind == CssKind.DELIM && Texts.same(equals.text, "="))) {
+                return 0;
+            }
+            if (Texts.same(op.text, "~")) {
+                made.op = AttrOp.INCLUDES;
+            } else if (Texts.same(op.text, "|")) {
+                made.op = AttrOp.DASH;
+            } else if (Texts.same(op.text, "^")) {
+                made.op = AttrOp.PREFIX;
+            } else if (Texts.same(op.text, "$")) {
+                made.op = AttrOp.SUFFIX;
+            } else if (Texts.same(op.text, "*")) {
+                made.op = AttrOp.SUBSTRING;
+            } else {
+                return 0;
+            }
+            pos = pos + 2;
+        }
+        SelectorParser.skip_space(tokens, &pos, end);
+        CssToken value = tokens.get(pos);
+        if (value.kind != CssKind.IDENT && value.kind != CssKind.STRING) {
+            return 0;
+        }
+        made.value = value.text;
+        pos = pos + 1;
+        SelectorParser.skip_space(tokens, &pos, end);
+        if (pos < end) {
+            CssToken flag = tokens.get(pos);
+            if (flag.kind == CssKind.IDENT && CssNames.equal(flag.text, "i")) {
+                made.insensitive = true;
+            }
+        }
+        table.parts.push(made);
+        return 1;
+    }
+
+    static bool known_pseudo(str name) {
+        return CssNames.equal(name, "hover") || CssNames.equal(name, "focus") || CssNames.equal(name, "active") || CssNames.equal(name, "focus-visible")
+            || CssNames.equal(name, "focus-within") || CssNames.equal(name, "disabled") || CssNames.equal(name, "enabled") || CssNames.equal(name, "checked")
+            || CssNames.equal(name, "first-child") || CssNames.equal(name, "last-child") || CssNames.equal(name, "only-child") || CssNames.equal(name, "root")
+            || CssNames.equal(name, "empty") || CssNames.equal(name, "host");
+    }
+
+    static unsafe u32 pseudo(SelectorTable* table, CssTokens* tokens, u32* pos, u32 end, u32* specificity) {
+        CssToken next = tokens.get(pos[0] + 1);
+        if (next.kind == CssKind.COLON) {
+            CssToken element = tokens.get(pos[0] + 2);
+            pos[0] = pos[0] + 3;
+            if (element.kind == CssKind.FUNCTION) {
+                pos[0] = SelectorParser.closing(tokens, pos[0] - 1, end) + 1;
+            }
+            table.parts.push(SelectorParser.part(PartKind.NEVER, element.text));
+            specificity[0] = specificity[0] + 1;
+            return 1;
+        }
+        if (next.kind == CssKind.IDENT) {
+            pos[0] = pos[0] + 2;
+            if (CssNames.equal(next.text, "before") || CssNames.equal(next.text, "after") || CssNames.equal(next.text, "placeholder")) {
+                table.parts.push(SelectorParser.part(PartKind.NEVER, next.text));
+                return 1;
+            }
+            if (!SelectorParser.known_pseudo(next.text)) {
+                table.parts.push(SelectorParser.part(PartKind.NEVER, next.text));
+                specificity[0] = specificity[0] + 256;
+                return 1;
+            }
+            table.parts.push(SelectorParser.part(PartKind.PSEUDO, next.text));
+            specificity[0] = specificity[0] + 256;
+            return 1;
+        }
+        if (next.kind == CssKind.FUNCTION) {
+            u32 open = pos[0] + 1;
+            u32 close = SelectorParser.closing(tokens, open, end);
+            pos[0] = close + 1;
+            bool negate = CssNames.equal(next.text, "not");
+            bool zero_weight = CssNames.equal(next.text, "where");
+            if (!negate && !zero_weight && !CssNames.equal(next.text, "is") && !CssNames.equal(next.text, "matches")) {
+                table.parts.push(SelectorParser.part(PartKind.NEVER, next.text));
+                specificity[0] = specificity[0] + 256;
+                return 1;
+            }
+            mut SelectorPart made = SelectorParser.part(PartKind.IS, next.text);
+            if (negate) {
+                made.kind = PartKind.NOT;
+            }
+            u32 index = table.parts.push(made);
+            NestedList nested = { .tokens = tokens, .part = index, .start = open + 1, .end = close, .weighted = !zero_weight, .owner = 0 };
+            table.pending.push(nested);
+            return 1;
+        }
+        return 0;
+    }
+}
+
+// Matches selectors against the retained tree. Fragments, islands and server slots are transparent: an element's
+// parent and siblings are the nearest elements around it, as in the DOM the host builds.
+struct SelectorMatcher {
+    public static unsafe bool is_box(u32 id) {
+        return Dom.kind(id) == DomKind.ELEMENT;
+    }
+
+    public static unsafe u32 parent_element(u32 id) {
+        mut u32 node = Dom.parent(id);
+        while (node != 0 && !SelectorMatcher.is_box(node)) {
+            node = Dom.parent(node);
+        }
+        return node;
+    }
+
+    static unsafe u32 last_element_in(u32 id) {
+        mut u32 child = Dom.at(id).last;
+        while (child != 0) {
+            if (SelectorMatcher.is_box(child)) {
+                return child;
+            }
+            if (Dom.kind(child) != DomKind.TEXT && Dom.kind(child) != DomKind.RAW) {
+                u32 inner = SelectorMatcher.last_element_in(child);
+                if (inner != 0) {
+                    return inner;
+                }
+            }
+            child = Dom.at(child).prev;
+        }
+        return 0;
+    }
+
+    static unsafe u32 first_element_in(u32 id) {
+        mut u32 child = Dom.at(id).first;
+        while (child != 0) {
+            if (SelectorMatcher.is_box(child)) {
+                return child;
+            }
+            if (Dom.kind(child) != DomKind.TEXT && Dom.kind(child) != DomKind.RAW) {
+                u32 inner = SelectorMatcher.first_element_in(child);
+                if (inner != 0) {
+                    return inner;
+                }
+            }
+            child = Dom.at(child).next;
+        }
+        return 0;
+    }
+
+    public static unsafe u32 previous_element(u32 id) {
+        mut u32 node = id;
+        while (node != 0) {
+            mut u32 sibling = Dom.at(node).prev;
+            while (sibling != 0) {
+                if (SelectorMatcher.is_box(sibling)) {
+                    return sibling;
+                }
+                if (Dom.kind(sibling) != DomKind.TEXT && Dom.kind(sibling) != DomKind.RAW) {
+                    u32 inner = SelectorMatcher.last_element_in(sibling);
+                    if (inner != 0) {
+                        return inner;
+                    }
+                }
+                sibling = Dom.at(sibling).prev;
+            }
+            u32 parent = Dom.parent(node);
+            if (parent == 0 || SelectorMatcher.is_box(parent)) {
+                return 0;
+            }
+            node = parent;
+        }
+        return 0;
+    }
+
+    public static unsafe u32 next_element(u32 id) {
+        mut u32 node = id;
+        while (node != 0) {
+            mut u32 sibling = Dom.at(node).next;
+            while (sibling != 0) {
+                if (SelectorMatcher.is_box(sibling)) {
+                    return sibling;
+                }
+                if (Dom.kind(sibling) != DomKind.TEXT && Dom.kind(sibling) != DomKind.RAW) {
+                    u32 inner = SelectorMatcher.first_element_in(sibling);
+                    if (inner != 0) {
+                        return inner;
+                    }
+                }
+                sibling = Dom.at(sibling).next;
+            }
+            u32 parent = Dom.parent(node);
+            if (parent == 0 || SelectorMatcher.is_box(parent)) {
+                return 0;
+            }
+            node = parent;
+        }
+        return 0;
+    }
+
+    static unsafe bool has_class(u32 id, str name) {
+        if (!Dom.has_attr(id, "class")) {
+            return false;
+        }
+        str classes = Dom.attr(id, "class");
+        mut u32 i = 0;
+        u32 length = (u32)classes.length;
+        while (i < length) {
+            while (i < length && (classes.data[i] == 32 || classes.data[i] == 9 || classes.data[i] == 10)) {
+                i = i + 1;
+            }
+            u32 start = i;
+            while (i < length && classes.data[i] != 32 && classes.data[i] != 9 && classes.data[i] != 10) {
+                i = i + 1;
+            }
+            if (i > start && Texts.same_bytes(classes.data + start, i - start, name.data, (u32)name.length)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static unsafe bool lower_equal(i8* left, i8* right, u32 length, bool insensitive) {
+        for (mut u32 i = 0; i < length; i = i + 1) {
+            mut i8 a = left[i];
+            mut i8 b = right[i];
+            if (insensitive) {
+                if (a >= 65 && a <= 90) {
+                    a = a + 32;
+                }
+                if (b >= 65 && b <= 90) {
+                    b = b + 32;
+                }
+            }
+            if (a != b) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    static unsafe bool attribute(u32 id, SelectorPart part) {
+        if (!Dom.has_attr(id, part.name)) {
+            return false;
+        }
+        if (part.op == AttrOp.EXISTS) {
+            return true;
+        }
+        str value = Dom.attr(id, part.name);
+        u32 length = (u32)value.length;
+        u32 wanted = (u32)part.value.length;
+        if (part.op == AttrOp.EQUALS) {
+            return length == wanted && SelectorMatcher.lower_equal(value.data, part.value.data, length, part.insensitive);
+        }
+        if (part.op == AttrOp.PREFIX) {
+            return wanted > 0 && length >= wanted && SelectorMatcher.lower_equal(value.data, part.value.data, wanted, part.insensitive);
+        }
+        if (part.op == AttrOp.SUFFIX) {
+            return wanted > 0 && length >= wanted && SelectorMatcher.lower_equal(value.data + (length - wanted), part.value.data, wanted, part.insensitive);
+        }
+        if (part.op == AttrOp.DASH) {
+            if (length == wanted) {
+                return SelectorMatcher.lower_equal(value.data, part.value.data, wanted, part.insensitive);
+            }
+            return length > wanted && value.data[wanted] == 45 && SelectorMatcher.lower_equal(value.data, part.value.data, wanted, part.insensitive);
+        }
+        if (wanted == 0 || length < wanted) {
+            return false;
+        }
+        for (mut u32 i = 0; i + wanted <= length; i = i + 1) {
+            if (SelectorMatcher.lower_equal(value.data + i, part.value.data, wanted, part.insensitive)) {
+                if (part.op == AttrOp.SUBSTRING) {
+                    return true;
+                }
+                bool starts = i == 0 || value.data[i - 1] == 32;
+                bool ends = i + wanted == length || value.data[i + wanted] == 32;
+                if (starts && ends) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    static unsafe bool focus_within(u32 id) {
+        if ((Dom.state(id) & NodeState.FOCUS) != 0) {
+            return true;
+        }
+        mut u32 child = Dom.first_child(id);
+        while (child != 0) {
+            if (SelectorMatcher.focus_within(child)) {
+                return true;
+            }
+            child = Dom.next_sibling(child);
+        }
+        return false;
+    }
+
+    static unsafe bool pseudo(u32 id, str name) {
+        u8 state = Dom.state(id);
+        if (CssNames.equal(name, "hover")) { return (state & NodeState.HOVER) != 0; }
+        if (CssNames.equal(name, "focus")) { return (state & NodeState.FOCUS) != 0; }
+        if (CssNames.equal(name, "active")) { return (state & NodeState.ACTIVE) != 0; }
+        if (CssNames.equal(name, "focus-visible")) { return (state & NodeState.FOCUS_VISIBLE) != 0; }
+        if (CssNames.equal(name, "focus-within")) { return SelectorMatcher.focus_within(id); }
+        if (CssNames.equal(name, "disabled")) { return Dom.has_attr(id, "disabled"); }
+        if (CssNames.equal(name, "enabled")) { return !Dom.has_attr(id, "disabled"); }
+        if (CssNames.equal(name, "checked")) { return Dom.has_attr(id, "checked"); }
+        if (CssNames.equal(name, "first-child")) { return SelectorMatcher.previous_element(id) == 0; }
+        if (CssNames.equal(name, "last-child")) { return SelectorMatcher.next_element(id) == 0; }
+        if (CssNames.equal(name, "only-child")) { return SelectorMatcher.previous_element(id) == 0 && SelectorMatcher.next_element(id) == 0; }
+        if (CssNames.equal(name, "root") || CssNames.equal(name, "host")) { return id == Dom.document(); }
+        if (CssNames.equal(name, "empty")) { return Dom.first_child(id) == 0; }
+        return false;
+    }
+
+    static unsafe bool any_of(SelectorTable* table, u32 first, u32 count, u32 id) {
+        for (mut u32 i = 0; i < count; i = i + 1) {
+            if (SelectorMatcher.matches(table, table.selectors.get(first + i), id)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Whether every simple selector in parts [first, end) holds for 'id'.
+    static unsafe bool compound(SelectorTable* table, u32 first, u32 end, u32 id) {
+        for (mut u32 i = first; i < end; i = i + 1) {
+            SelectorPart part = table.parts.get(i);
+            u8 kind = part.kind;
+            if (kind == PartKind.TYPE) {
+                if (!CssNames.equal(Dom.tag(id), part.name) && !CssNames.equal(part.name, Dom.tag(id))) {
+                    return false;
+                }
+            } else if (kind == PartKind.CLASS) {
+                if (!SelectorMatcher.has_class(id, part.name)) {
+                    return false;
+                }
+            } else if (kind == PartKind.ID) {
+                if (!Dom.has_attr(id, "id") || !Texts.same(Dom.attr(id, "id"), part.name)) {
+                    return false;
+                }
+            } else if (kind == PartKind.ATTRIBUTE) {
+                if (!SelectorMatcher.attribute(id, part)) {
+                    return false;
+                }
+            } else if (kind == PartKind.PSEUDO) {
+                if (!SelectorMatcher.pseudo(id, part.name)) {
+                    return false;
+                }
+            } else if (kind == PartKind.IS) {
+                if (!SelectorMatcher.any_of(table, part.list_first, part.list_count, id)) {
+                    return false;
+                }
+            } else if (kind == PartKind.NOT) {
+                if (SelectorMatcher.any_of(table, part.list_first, part.list_count, id)) {
+                    return false;
+                }
+            } else if (kind == PartKind.NEVER) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // Right-to-left matching with backtracking over descendant and sibling combinators.
+    static unsafe bool from(SelectorTable* table, u32 first, u32 end, u32 id) {
+        mut u32 start = end;
+        while (start > first && table.parts.get(start - 1).kind != PartKind.COMBINATOR) {
+            start = start - 1;
+        }
+        if (!SelectorMatcher.compound(table, start, end, id)) {
+            return false;
+        }
+        if (start == first) {
+            return true;
+        }
+        u8 combinator = table.parts.get(start - 1).op;
+        u32 rest = start - 1;
+        if (combinator == Combinator.CHILD) {
+            u32 parent = SelectorMatcher.parent_element(id);
+            return parent != 0 && SelectorMatcher.from(table, first, rest, parent);
+        }
+        if (combinator == Combinator.DESCENDANT) {
+            mut u32 ancestor = SelectorMatcher.parent_element(id);
+            while (ancestor != 0) {
+                if (SelectorMatcher.from(table, first, rest, ancestor)) {
+                    return true;
+                }
+                ancestor = SelectorMatcher.parent_element(ancestor);
+            }
+            return false;
+        }
+        if (combinator == Combinator.ADJACENT) {
+            u32 previous = SelectorMatcher.previous_element(id);
+            return previous != 0 && SelectorMatcher.from(table, first, rest, previous);
+        }
+        mut u32 sibling = SelectorMatcher.previous_element(id);
+        while (sibling != 0) {
+            if (SelectorMatcher.from(table, first, rest, sibling)) {
+                return true;
+            }
+            sibling = SelectorMatcher.previous_element(sibling);
+        }
+        return false;
+    }
+
+    public static unsafe bool matches(SelectorTable* table, Selector selector, u32 id) {
+        if (!SelectorMatcher.is_box(id)) {
+            return false;
+        }
+        return SelectorMatcher.from(table, selector.first, selector.first + selector.count, id);
+    }
+}

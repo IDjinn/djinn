@@ -1,0 +1,634 @@
+import std::types;
+import std::libc;
+
+namespace ui;
+
+unsafe static mut ptr css_registry = null;
+
+struct CssDeclaration {
+    mut str property;
+    mut str value;
+    mut bool important;
+}
+
+struct CssRule {
+    mut u32 selector_first;
+    mut u32 selector_count;
+    mut u32 decl_first;
+    mut u32 decl_count;
+    mut u32 layer;
+    mut u32 media;
+}
+
+struct MediaKind {
+    const u8 NEVER = 0;
+    const u8 ALWAYS = 1;
+    const u8 DARK = 2;
+    const u8 LIGHT = 3;
+    const u8 MIN_WIDTH = 4;
+    const u8 MAX_WIDTH = 5;
+    const u8 ABOVE_WIDTH = 6;
+    const u8 BELOW_WIDTH = 7;
+    const u8 HOVER = 8;
+    const u8 NO_HOVER = 9;
+    const u8 REDUCED_MOTION = 10;
+    const u8 MOTION_OK = 11;
+}
+
+// One test of a media query; features with the same 'alternative' are ANDed, alternatives are ORed.
+struct MediaFeature {
+    mut u8 kind;
+    mut f64 value;
+    mut u32 alternative;
+    mut bool negated;
+}
+
+// A media query and the one it is nested in ('parent', 0 for none); both must hold.
+struct MediaQuery {
+    mut u32 parent;
+    mut u32 first;
+    mut u32 count;
+    mut u32 alternatives;
+}
+
+struct RegisteredProperty {
+    mut str name;
+    mut str initial;
+    mut bool inherits;
+}
+
+// Cascade layers and @property registrations are document-wide, shared by every sheet.
+struct CssRegistry {
+    mut Growable<str> layers;
+    mut Growable<RegisteredProperty> properties;
+    mut u32 anonymous;
+}
+
+struct StyleOrigin {
+    const u8 BROWSER = 0;
+    const u8 THEME = 1;
+    const u8 AUTHOR = 2;
+}
+
+struct StyleSheet {
+    mut u8 origin;
+    mut u32 order;
+    mut str source;
+    mut CssTokens tokens;
+    mut SelectorTable selectors;
+    mut Growable<CssDeclaration> declarations;
+    mut Growable<CssRule> rules;
+    mut Growable<MediaQuery> media;
+    mut Growable<MediaFeature> features;
+}
+
+struct Layers {
+    const u32 UNLAYERED = 1000000;
+
+    public static unsafe CssRegistry* registry() {
+        if (css_registry == null) {
+            CssRegistry* registry = (CssRegistry*)__djinn_alloc_zeroed((size_long)sizeof(CssRegistry));
+            css_registry = (ptr)registry;
+        }
+        return (CssRegistry*)css_registry;
+    }
+
+    // The rank of a layer: the order its name was first seen in, across every sheet.
+    public static unsafe u32 declare(str name) {
+        CssRegistry* registry = Layers.registry();
+        for (mut u32 i = 0; i < registry.layers.count; i = i + 1) {
+            if (Texts.same(registry.layers.get(i), name)) {
+                return i;
+            }
+        }
+        return registry.layers.push(name);
+    }
+
+    public static unsafe u32 anonymous() {
+        CssRegistry* registry = Layers.registry();
+        registry.anonymous = registry.anonymous + 1;
+        mut TextBuffer name = TextBuffer.create();
+        name.append("@anonymous-");
+        name.append_number((i64)registry.anonymous);
+        return registry.layers.push(name.view());
+    }
+
+    public static unsafe void register(RegisteredProperty property) {
+        CssRegistry* registry = Layers.registry();
+        registry.properties.push(property);
+    }
+
+    public static unsafe RegisteredProperty* property(str name) {
+        CssRegistry* registry = Layers.registry();
+        for (mut u32 i = 0; i < registry.properties.count; i = i + 1) {
+            RegisteredProperty* found = registry.properties.at(i);
+            if (Texts.same(found.name, name)) {
+                return found;
+            }
+        }
+        return (RegisteredProperty*)0;
+    }
+}
+
+struct CssParser {
+    public static unsafe StyleSheet* parse(str source, u8 origin) {
+        StyleSheet* sheet = (StyleSheet*)__djinn_alloc_zeroed((size_long)sizeof(StyleSheet));
+        sheet.origin = origin;
+        sheet.source = source;
+        sheet.tokens = CssLexer.tokenize(source);
+        MediaQuery none = { .parent = 0, .first = 0, .count = 0, .alternatives = 0 };
+        sheet.media.push(none);
+        str empty = "";
+        CssParser.rules(sheet, 0, sheet.tokens.count, Layers.UNLAYERED, 0, empty);
+        return sheet;
+    }
+
+    static unsafe CssToken token(StyleSheet* sheet, u32 index) {
+        return sheet.tokens.get(index);
+    }
+
+    // The index of the token closing the block or group opened at 'open'.
+    static unsafe u32 matching(StyleSheet* sheet, u32 open, u32 end) {
+        mut i32 depth = 0;
+        for (mut u32 i = open; i < end; i = i + 1) {
+            u8 kind = sheet.tokens.get(i).kind;
+            if (kind == CssKind.OPEN_CURLY || kind == CssKind.OPEN_PAREN || kind == CssKind.OPEN_SQUARE || kind == CssKind.FUNCTION) {
+                depth = depth + 1;
+            } else if (kind == CssKind.CLOSE_CURLY || kind == CssKind.CLOSE_PAREN || kind == CssKind.CLOSE_SQUARE) {
+                depth = depth - 1;
+                if (depth == 0) {
+                    return i;
+                }
+            }
+        }
+        return end;
+    }
+
+    // The first ';' or '{' at depth 0 from 'start' (or 'end').
+    static unsafe u32 stop(StyleSheet* sheet, u32 start, u32 end) {
+        mut i32 depth = 0;
+        for (mut u32 i = start; i < end; i = i + 1) {
+            u8 kind = sheet.tokens.get(i).kind;
+            if (depth == 0 && (kind == CssKind.SEMICOLON || kind == CssKind.OPEN_CURLY)) {
+                return i;
+            }
+            if (kind == CssKind.OPEN_PAREN || kind == CssKind.OPEN_SQUARE || kind == CssKind.FUNCTION) {
+                depth = depth + 1;
+            } else if (kind == CssKind.CLOSE_PAREN || kind == CssKind.CLOSE_SQUARE) {
+                depth = depth - 1;
+            }
+        }
+        return end;
+    }
+
+    // The source text of tokens [start, end) without surrounding whitespace.
+    static unsafe str text(StyleSheet* sheet, str source, u32 start, u32 end) {
+        mut u32 first = start;
+        mut u32 last = end;
+        while (first < last && sheet.tokens.get(first).kind == CssKind.SPACE) {
+            first = first + 1;
+        }
+        while (last > first && sheet.tokens.get(last - 1).kind == CssKind.SPACE) {
+            last = last - 1;
+        }
+        if (first >= last) {
+            str empty = "";
+            return empty;
+        }
+        u32 from = sheet.tokens.get(first).start;
+        u32 to = sheet.tokens.get(last - 1).end;
+        str slice = { .data = source.data + from, .length = (size)(to - from) };
+        return slice;
+    }
+
+    static unsafe void rules(StyleSheet* sheet, u32 start, u32 end, u32 layer, u32 media, str parent) {
+        str source = CssParser.source(sheet);
+        mut u32 pos = start;
+        while (pos < end) {
+            CssToken token = CssParser.token(sheet, pos);
+            if (token.kind == CssKind.SPACE || token.kind == CssKind.SEMICOLON || token.kind == CssKind.CLOSE_CURLY) {
+                pos = pos + 1;
+                continue;
+            }
+            if (token.kind == CssKind.DELIM && (Texts.same(token.text, "<") || Texts.same(token.text, "-"))) {
+                pos = pos + 1;
+                continue;
+            }
+            if (token.kind == CssKind.AT) {
+                pos = CssParser.at_rule(sheet, pos, end, layer, media, parent);
+                continue;
+            }
+            u32 brace = CssParser.stop(sheet, pos, end);
+            if (brace >= end || CssParser.token(sheet, brace).kind != CssKind.OPEN_CURLY) {
+                pos = brace + 1;
+                continue;
+            }
+            u32 close = CssParser.matching(sheet, brace, end);
+            str selector = CssParser.text(sheet, source, pos, brace);
+            CssParser.block(sheet, brace + 1, close, selector, layer, media);
+            pos = close + 1;
+        }
+    }
+
+    static unsafe str source(StyleSheet* sheet) {
+        return sheet.source;
+    }
+
+    // A style rule: its declarations first, then the rules nested in it (resolved against its selector).
+    static unsafe void block(StyleSheet* sheet, u32 start, u32 end, str selector, u32 layer, u32 media) {
+        mut CssRule rule = { .selector_first = 0, .selector_count = 0, .decl_first = sheet.declarations.count, .decl_count = 0, .layer = layer, .media = media };
+        mut CssTokens selector_tokens = CssLexer.tokenize(selector);
+        mut u32 first = 0;
+        u32 count = SelectorParser.parse(&sheet.selectors, &selector_tokens, 0, selector_tokens.count, &first);
+        rule.selector_first = first;
+        rule.selector_count = count;
+        mut u32 pos = start;
+        while (pos < end) {
+            CssToken token = CssParser.token(sheet, pos);
+            if (token.kind == CssKind.SPACE || token.kind == CssKind.SEMICOLON) {
+                pos = pos + 1;
+                continue;
+            }
+            if (token.kind == CssKind.AT) {
+                u32 stop = CssParser.stop(sheet, pos, end);
+                if (stop < end && CssParser.token(sheet, stop).kind == CssKind.OPEN_CURLY) {
+                    pos = CssParser.matching(sheet, stop, end) + 1;
+                } else {
+                    pos = stop + 1;
+                }
+                continue;
+            }
+            u32 stop = CssParser.stop(sheet, pos, end);
+            if (stop < end && CssParser.token(sheet, stop).kind == CssKind.OPEN_CURLY) {
+                pos = CssParser.matching(sheet, stop, end) + 1;
+                continue;
+            }
+            CssParser.declaration(sheet, pos, stop);
+            pos = stop + 1;
+        }
+        rule.decl_count = sheet.declarations.count - rule.decl_first;
+        if (count > 0 && rule.decl_count > 0) {
+            sheet.rules.push(rule);
+        }
+        if (count == 0) {
+            return;
+        }
+        pos = start;
+        while (pos < end) {
+            CssToken token = CssParser.token(sheet, pos);
+            if (token.kind == CssKind.SPACE || token.kind == CssKind.SEMICOLON) {
+                pos = pos + 1;
+                continue;
+            }
+            if (token.kind == CssKind.AT) {
+                pos = CssParser.at_rule(sheet, pos, end, layer, media, selector);
+                continue;
+            }
+            u32 stop = CssParser.stop(sheet, pos, end);
+            if (stop < end && CssParser.token(sheet, stop).kind == CssKind.OPEN_CURLY) {
+                u32 close = CssParser.matching(sheet, stop, end);
+                str nested = CssParser.text(sheet, CssParser.source(sheet), pos, stop);
+                CssParser.block(sheet, stop + 1, close, CssParser.resolve(nested, selector), layer, media);
+                pos = close + 1;
+                continue;
+            }
+            pos = stop + 1;
+        }
+    }
+
+    // CSS nesting: '&' stands for the parent selector (as ':is(parent)' when it is a list); without '&' the
+    // nested selector is a descendant of the parent.
+    public static unsafe str resolve(str nested, str parent) {
+        mut bool list = false;
+        mut i32 depth = 0;
+        for (mut u32 i = 0; i < (u32)parent.length; i = i + 1) {
+            i8 c = parent.data[i];
+            if (c == 40 || c == 91) {
+                depth = depth + 1;
+            } else if (c == 41 || c == 93) {
+                depth = depth - 1;
+            } else if (c == 44 && depth == 0) {
+                list = true;
+            }
+        }
+        mut TextBuffer wrapped = TextBuffer.create();
+        if (list) {
+            wrapped.append(":is(");
+            wrapped.append(parent);
+            wrapped.append(")");
+        } else {
+            wrapped.append(parent);
+        }
+        str outer = wrapped.view();
+        mut TextBuffer out = TextBuffer.create();
+        mut u32 item = 0;
+        depth = 0;
+        u32 length = (u32)nested.length;
+        for (mut u32 i = 0; i <= length; i = i + 1) {
+            mut bool split = i == length;
+            if (!split) {
+                i8 c = nested.data[i];
+                if (c == 40 || c == 91) {
+                    depth = depth + 1;
+                } else if (c == 41 || c == 93) {
+                    depth = depth - 1;
+                } else if (c == 44 && depth == 0) {
+                    split = true;
+                }
+            }
+            if (!split) {
+                continue;
+            }
+            if (out.length > 0) {
+                out.append(", ");
+            }
+            mut bool ampersand = false;
+            for (mut u32 k = item; k < i; k = k + 1) {
+                if (nested.data[k] == 38) {
+                    ampersand = true;
+                }
+            }
+            if (!ampersand) {
+                out.append(outer);
+                out.append(" ");
+            }
+            for (mut u32 k = item; k < i; k = k + 1) {
+                if (nested.data[k] == 38) {
+                    out.append(outer);
+                } else {
+                    out.append_byte(nested.data[k]);
+                }
+            }
+            item = i + 1;
+        }
+        return out.view();
+    }
+
+    static unsafe void declaration(StyleSheet* sheet, u32 start, u32 end) {
+        mut u32 pos = start;
+        while (pos < end && CssParser.token(sheet, pos).kind == CssKind.SPACE) {
+            pos = pos + 1;
+        }
+        CssToken name = CssParser.token(sheet, pos);
+        if (name.kind != CssKind.IDENT) {
+            return;
+        }
+        pos = pos + 1;
+        while (pos < end && CssParser.token(sheet, pos).kind == CssKind.SPACE) {
+            pos = pos + 1;
+        }
+        if (CssParser.token(sheet, pos).kind != CssKind.COLON) {
+            return;
+        }
+        pos = pos + 1;
+        mut u32 last = end;
+        while (last > pos && CssParser.token(sheet, last - 1).kind == CssKind.SPACE) {
+            last = last - 1;
+        }
+        mut bool important = false;
+        if (last > pos + 1) {
+            CssToken word = CssParser.token(sheet, last - 1);
+            mut u32 bang = last - 2;
+            while (bang > pos && CssParser.token(sheet, bang).kind == CssKind.SPACE) {
+                bang = bang - 1;
+            }
+            CssToken mark = CssParser.token(sheet, bang);
+            if (word.kind == CssKind.IDENT && CssNames.equal(word.text, "important") && mark.kind == CssKind.DELIM && Texts.same(mark.text, "!")) {
+                important = true;
+                last = bang;
+            }
+        }
+        str value = CssParser.text(sheet, CssParser.source(sheet), pos, last);
+        CssDeclaration made = { .property = name.text, .value = value, .important = important };
+        sheet.declarations.push(made);
+    }
+
+    static unsafe u32 at_rule(StyleSheet* sheet, u32 at, u32 end, u32 layer, u32 media, str parent) {
+        CssToken token = CssParser.token(sheet, at);
+        u32 stop = CssParser.stop(sheet, at + 1, end);
+        bool has_block = stop < end && CssParser.token(sheet, stop).kind == CssKind.OPEN_CURLY;
+        mut u32 close = stop;
+        if (has_block) {
+            close = CssParser.matching(sheet, stop, end);
+        }
+        str name = token.text;
+        if (has_block && (CssNames.equal(name, "media") || CssNames.equal(name, "supports"))) {
+            mut u32 query = media;
+            if (CssNames.equal(name, "media")) {
+                query = CssParser.media_query(sheet, at + 1, stop, media);
+            }
+            CssParser.contents(sheet, stop + 1, close, layer, query, parent);
+            return close + 1;
+        }
+        if (CssNames.equal(name, "layer")) {
+            if (!has_block) {
+                mut u32 pos = at + 1;
+                while (pos < stop) {
+                    CssToken item = CssParser.token(sheet, pos);
+                    if (item.kind == CssKind.IDENT) {
+                        Layers.declare(CssParser.dotted(sheet, &pos, stop));
+                        continue;
+                    }
+                    pos = pos + 1;
+                }
+                return stop + 1;
+            }
+            mut u32 pos = at + 1;
+            while (pos < stop && CssParser.token(sheet, pos).kind == CssKind.SPACE) {
+                pos = pos + 1;
+            }
+            mut u32 rank = 0;
+            if (pos < stop && CssParser.token(sheet, pos).kind == CssKind.IDENT) {
+                rank = Layers.declare(CssParser.dotted(sheet, &pos, stop));
+            } else {
+                rank = Layers.anonymous();
+            }
+            CssParser.contents(sheet, stop + 1, close, rank, media, parent);
+            return close + 1;
+        }
+        if (CssNames.equal(name, "property") && has_block) {
+            CssParser.property(sheet, at + 1, stop, close);
+            return close + 1;
+        }
+        if (has_block) {
+            return close + 1;
+        }
+        return stop + 1;
+    }
+
+    // A layer name, with its dotted parts ('framework.base').
+    static unsafe str dotted(StyleSheet* sheet, u32* pos, u32 end) {
+        mut TextBuffer out = TextBuffer.create();
+        while (pos[0] < end) {
+            CssToken item = CssParser.token(sheet, pos[0]);
+            if (item.kind == CssKind.IDENT) {
+                out.append(item.text);
+            } else if (item.kind == CssKind.DELIM && Texts.same(item.text, ".")) {
+                out.append(".");
+            } else {
+                break;
+            }
+            pos[0] = pos[0] + 1;
+        }
+        return out.view();
+    }
+
+    static unsafe void contents(StyleSheet* sheet, u32 start, u32 end, u32 layer, u32 media, str parent) {
+        if (parent.length == 0) {
+            CssParser.rules(sheet, start, end, layer, media, parent);
+        } else {
+            CssParser.block(sheet, start, end, parent, layer, media);
+        }
+    }
+
+    static unsafe void property(StyleSheet* sheet, u32 start, u32 brace, u32 close) {
+        mut u32 pos = start;
+        while (pos < brace && CssParser.token(sheet, pos).kind == CssKind.SPACE) {
+            pos = pos + 1;
+        }
+        CssToken name = CssParser.token(sheet, pos);
+        if (name.kind != CssKind.IDENT) {
+            return;
+        }
+        u32 before = sheet.declarations.count;
+        mut u32 item = brace + 1;
+        while (item < close) {
+            u32 stop = CssParser.stop(sheet, item, close);
+            CssParser.declaration(sheet, item, stop);
+            item = stop + 1;
+        }
+        str empty = "";
+        mut RegisteredProperty registered = { .name = name.text, .initial = empty, .inherits = true };
+        for (mut u32 i = before; i < sheet.declarations.count; i = i + 1) {
+            CssDeclaration found = sheet.declarations.get(i);
+            if (CssNames.equal(found.property, "initial-value")) {
+                registered.initial = found.value;
+            } else if (CssNames.equal(found.property, "inherits")) {
+                registered.inherits = CssNames.equal(found.value, "true");
+            }
+        }
+        sheet.declarations.count = before;
+        Layers.register(registered);
+    }
+
+    // '@media' prelude in [start, end): alternatives split by ',' and features joined by 'and'.
+    static unsafe u32 media_query(StyleSheet* sheet, u32 start, u32 end, u32 parent) {
+        mut MediaQuery query = { .parent = parent, .first = sheet.features.count, .count = 0, .alternatives = 1 };
+        mut u32 alternative = 0;
+        mut bool negated = false;
+        mut u32 pos = start;
+        while (pos < end) {
+            CssToken token = CssParser.token(sheet, pos);
+            if (token.kind == CssKind.COMMA) {
+                alternative = alternative + 1;
+                query.alternatives = query.alternatives + 1;
+                negated = false;
+                pos = pos + 1;
+                continue;
+            }
+            if (token.kind == CssKind.IDENT) {
+                if (CssNames.equal(token.text, "not")) {
+                    negated = true;
+                } else if (CssNames.equal(token.text, "print") || CssNames.equal(token.text, "speech")) {
+                    CssParser.feature(sheet, MediaKind.NEVER, 0.0, alternative, negated);
+                } else if (!CssNames.equal(token.text, "and") && !CssNames.equal(token.text, "only") && !CssNames.equal(token.text, "screen") && !CssNames.equal(token.text, "all")) {
+                    CssParser.feature(sheet, MediaKind.NEVER, 0.0, alternative, negated);
+                }
+                pos = pos + 1;
+                continue;
+            }
+            if (token.kind == CssKind.OPEN_PAREN) {
+                u32 close = CssParser.matching(sheet, pos, end);
+                CssParser.media_feature(sheet, pos + 1, close, alternative, negated);
+                pos = close + 1;
+                continue;
+            }
+            pos = pos + 1;
+        }
+        query.count = sheet.features.count - query.first;
+        return sheet.media.push(query);
+    }
+
+    static unsafe void feature(StyleSheet* sheet, u8 kind, f64 value, u32 alternative, bool negated) {
+        MediaFeature made = { .kind = kind, .value = value, .alternative = alternative, .negated = negated };
+        sheet.features.push(made);
+    }
+
+    static unsafe f64 media_length(CssToken token) {
+        if (token.kind == CssKind.DIMENSION && (CssNames.equal(token.text, "rem") || CssNames.equal(token.text, "em"))) {
+            return token.number * 16.0;
+        }
+        return token.number;
+    }
+
+    static unsafe void media_feature(StyleSheet* sheet, u32 start, u32 end, u32 alternative, bool negated) {
+        mut ValueReader reader = ValueReader.over(&sheet.tokens, start, end);
+        CssToken name = reader.next();
+        CssToken next = reader.next();
+        if (name.kind != CssKind.IDENT) {
+            CssParser.feature(sheet, MediaKind.NEVER, 0.0, alternative, negated);
+            return;
+        }
+        if (next.kind == CssKind.COLON) {
+            CssToken value = reader.next();
+            if (CssNames.equal(name.text, "prefers-color-scheme")) {
+                if (CssNames.equal(value.text, "dark")) {
+                    CssParser.feature(sheet, MediaKind.DARK, 0.0, alternative, negated);
+                } else {
+                    CssParser.feature(sheet, MediaKind.LIGHT, 0.0, alternative, negated);
+                }
+            } else if (CssNames.equal(name.text, "min-width")) {
+                CssParser.feature(sheet, MediaKind.MIN_WIDTH, CssParser.media_length(value), alternative, negated);
+            } else if (CssNames.equal(name.text, "max-width")) {
+                CssParser.feature(sheet, MediaKind.MAX_WIDTH, CssParser.media_length(value), alternative, negated);
+            } else if (CssNames.equal(name.text, "hover") || CssNames.equal(name.text, "any-hover")) {
+                if (CssNames.equal(value.text, "hover")) {
+                    CssParser.feature(sheet, MediaKind.HOVER, 0.0, alternative, negated);
+                } else {
+                    CssParser.feature(sheet, MediaKind.NO_HOVER, 0.0, alternative, negated);
+                }
+            } else if (CssNames.equal(name.text, "prefers-reduced-motion")) {
+                if (CssNames.equal(value.text, "reduce")) {
+                    CssParser.feature(sheet, MediaKind.REDUCED_MOTION, 0.0, alternative, negated);
+                } else {
+                    CssParser.feature(sheet, MediaKind.MOTION_OK, 0.0, alternative, negated);
+                }
+            } else {
+                CssParser.feature(sheet, MediaKind.NEVER, 0.0, alternative, negated);
+            }
+            return;
+        }
+        if (CssNames.equal(name.text, "width") && next.kind == CssKind.DELIM) {
+            mut bool equal = false;
+            if (reader.is_delim("=")) {
+                reader.next();
+                equal = true;
+            }
+            CssToken value = reader.next();
+            f64 width = CssParser.media_length(value);
+            if (Texts.same(next.text, ">")) {
+                if (equal) {
+                    CssParser.feature(sheet, MediaKind.MIN_WIDTH, width, alternative, negated);
+                } else {
+                    CssParser.feature(sheet, MediaKind.ABOVE_WIDTH, width, alternative, negated);
+                }
+            } else if (Texts.same(next.text, "<")) {
+                if (equal) {
+                    CssParser.feature(sheet, MediaKind.MAX_WIDTH, width, alternative, negated);
+                } else {
+                    CssParser.feature(sheet, MediaKind.BELOW_WIDTH, width, alternative, negated);
+                }
+            } else {
+                CssParser.feature(sheet, MediaKind.NEVER, 0.0, alternative, negated);
+            }
+            return;
+        }
+        if (name.kind == CssKind.IDENT && next.kind == CssKind.EOF) {
+            if (CssNames.equal(name.text, "hover")) {
+                CssParser.feature(sheet, MediaKind.HOVER, 0.0, alternative, negated);
+                return;
+            }
+        }
+        CssParser.feature(sheet, MediaKind.NEVER, 0.0, alternative, negated);
+    }
+}

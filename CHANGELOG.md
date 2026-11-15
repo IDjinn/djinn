@@ -8,6 +8,7 @@
 
 - Procedural macros: `proc macro name => handler;` and `proc attribute Name => handler;` with the `std::meta` token API (`Token`, `TokenStream`); a program that imports the library runs them while it is parsed.
 - `libs/ui` and `libs/ui_macros`: the UI library (reactive core with signals, memos and effects, retained tree, `html!` markup with components, `if`/`for` regions and keyed lists, render modes declared with `[Application(render: ...)]`, `[Server]`, `[Client]` and `[Static]`, an HTML writer that escapes and sanitizes every value, and a test host that logs tree operations), with `examples/ui-showcase` and `tests/djinnc/ui.sh`.
+- UI CSS engine (`libs/ui/src/style`): tokenizer, nesting, `@layer`, `@media`, `@property`, selectors with `:is()`/`:where()`/`:not()` and states, cascade with layers and `!important`, custom properties, `calc()`, `oklch()`/`color-mix()` colors; and a default light/dark theme (`Theme.set`, `--ui-*` variables) applied out of the box. `App.run` writes a full themed page.
 - `std::text::Utf8`: strict UTF-8 validation (`sequence_length`, `is_valid`, `first_invalid`, `sanitize`) with an ASCII fast path.
 
 ### Fixed
