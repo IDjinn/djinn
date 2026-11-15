@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-11-14
+
 ### Added
 - Installers (`installer/install.sh`, `installer/install.ps1`) with optional VS Code extension, cron or scheduled-task auto update, and versioned installs; releases now ship `djinn-lsp` and `djinn-lang.vsix`.
 - Windows setup wizard (`installer/windows/djinn.iss`, Inno Setup) with extension, auto update and PATH checkboxes and an uninstaller entry.
