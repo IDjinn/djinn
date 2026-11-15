@@ -61,9 +61,11 @@ Immutable by default; `mut` requires the `unsafe` prefix. `mut const` is an erro
 ### Extern Block
 
 ```ebnf
-extern_block         = "extern" STRING_LITERAL "{" { extern_function } "}" ;
+extern_block         = [ "public" | "internal" ] "extern" [ STRING_LITERAL ] ( "{" { extern_function } "}" | extern_function ) ;
 extern_function      = [ attributes ] type IDENTIFIER "(" [ param_list ] [ "," "..." ] ")" ";" ;
 ```
+
+An extern is visible only in the file that declares it. `public extern` makes it visible to every file that sees its namespace (core, `std` and shared libc declarations use it). `internal extern` makes it visible to every file of the same namespace only.
 
 ### Attributes
 

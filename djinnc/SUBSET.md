@@ -11,7 +11,7 @@ that history.
 ## Declarations
 
 - `namespace djinnc;` in every file
-- free functions, `extern "C" { ... }` blocks (including variadic `...`)
+- free functions, `extern "C" { ... }` blocks (including variadic `...`); an extern is visible only in its own file, `internal extern` shares it with the files of the same namespace, `public extern` with everyone
 - `struct` with fields, `public` / private methods, `public static` methods
 - `static` factory methods returning `T*` (heap allocated with `Memory.zalloc`)
 
