@@ -19,6 +19,9 @@ detailed one), `djinnc/USAGE.md` (options), `djinnc/LIBRARY.md`, `examples/`.
 - **Declarations**: structs (methods, properties, static methods, brace init), `enum`/`union` as tagged unions with
   payloads, interfaces + `impl`, generics with `where` constraints (monomorphized), namespaces/`import`, type aliases,
   `extern "C"` blocks for FFI.
+- **Closures**: `fn(A, B) -> R` types and `(a, b) => expr` lambdas (captures copied or moved, read-only inside; a `fn`
+  value moves and frees its environment). See `semantic/checker/type_checker_closures.djinn` and
+  `codegen/code_generator_closures.djinn`.
 - **Expressions**: `$"interpolation {x:6}"`, `is` pattern matching (`obj is i32 v`), range-for (`for (i32 i in 0..10)`),
   `switch`, `auto { x, y } = expr;` destructuring, `likely`/`unlikely`/`sizeof`/`typeof`/`prefetch` intrinsics.
 - **Errors are values**: `result<T, E>`, `optional<T>` and error propagation; there are no real exceptions. Runtime panics

@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+- Closures: `fn(A, B) -> R` types, `(a, b) => expr` and `(i32 a) => { ... }` lambdas with captures (copied or moved, read-only inside), calls through locals, fields and expressions, function names as `fn` values, and `.djlib` support. New errors E3064 (assigning a captured variable), E3065 (moving a captured value) and E3066 (untyped lambda parameter without an expected type).
+
 ## [0.5.2] - 2026-11-14
 
 ### Fixed

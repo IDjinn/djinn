@@ -23,7 +23,7 @@ Lacunas do djinnc que condicionam o desenho (verificadas no código):
 - **Sem paralelismo real dentro do processo.** `spawn` enfileira em `ready_queue`, drenada pelo event loop; nada alimenta
   `pool.queue`, então as 4 threads do pool ficam ociosas. A shadow stack também é global, não por thread.
 - **Falha mata o processo.** `__djinn_panic` chama `abort()` e `Debug.assert` chama `debugtrap()`.
-- **Sem closures** (proibidas no subset). `typeof(function)` já devolve `MethodInfo*` com nome, tipos e ponteiro.
+- **Closures** existem (`fn(A) -> R`, `(x) => ...`), mas o código do compilador só pode usá-las depois de um seed que as suporte. `typeof(function)` já devolve `MethodInfo*` com nome, tipos e ponteiro.
 - **Sem descoberta global.** `Type#methods` lista um tipo, mas nada lista "todas as funções com `[Test]`".
 - **Biblioteca.** `.djlib` não declara dependências, e globais de header são só declarações (sem inicializador estático).
 

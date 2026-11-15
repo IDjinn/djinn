@@ -82,6 +82,7 @@ int64_t __djinn_unix_timestamp_ms(void);
 void* __djinn_realloc(void* pointer, size_t new_size);
 
 void __djinn_free(void* pointer);
+void __djinn_closure_drop(void* env);
 
 void* __djinn_alloc(size_t size);
 void* __djinn_alloc_zeroed(size_t size);

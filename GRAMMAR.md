@@ -240,7 +240,8 @@ the arguments or the expected type when omitted. `impl Box<T> { ... }` names its
 
 ```ebnf
 type                 = [ "mut" ] base_type { "*" | "?" | "[" [ expression ] "]" } ;
-base_type            = primitive_type | qualified_name [ generic_args ] | "void" | "auto" | "var" | "ptr" [ "<" type ">" ] ;
+base_type            = primitive_type | qualified_name [ generic_args ] | "void" | "auto" | "var" | "ptr" [ "<" type ">" ] | fn_type ;
+fn_type              = "fn" "(" [ type { "," type } ] ")" [ "->" type ] ;    (* "fn" is a type only before "(" *)
 
 primitive_type       = integer_type | float_type | native_type | "bool" | "char" | "str" | "string" | "isize" | "usize" ;
 integer_type         = ( "i" | "u" ) DIGITS { integer_suffix } ;    (* i8..i128, u8..u128, i32w, u32n, i32nt, ... *)
@@ -254,6 +255,8 @@ overflow_suffix      = "w" | "t" | "c" | "s" ;
   `unsafe`), `T?` is `optional<T>` (`T*?` uses the pointer niche), `T[]` is `arr<T>`, `i8[n]` is a stack array.
 - Overflow suffix: `w` wrapped (default, C-style), `t` trapped (panic), `c` checked (throws `Overflow`), `s` saturating.
   `n` marks a non-zero type (`i32n` cannot hold 0), combinable in either order (`i32nw`).
+- `fn(A, B) -> R` is a closure type (no `->` means `void`, at most 8 parameters): a `{ code, environment }` value that
+  moves, never copies, and frees its environment when disposed. A function name converts to it without allocating.
 - `isize` / `usize` are always 32 bits; `nint` has the target pointer width. `char` is a 32-bit Unicode scalar value.
   `str` is a trivial view `{ data, length }`, `string` an owned heap text.
 
@@ -320,7 +323,7 @@ postfix              = primary { "." IDENTIFIER [ generic_args ] | "?." IDENTIFI
 
 primary              = INTEGER_LITERAL | FLOAT_LITERAL | STRING_LITERAL | INTERP_STRING | CHAR_LITERAL | "true" | "false" | "null"
                      | IDENTIFIER | "this" | "(" expression ")" | array_literal | brace_initializer | new_expression
-                     | type_expression | switch_expression | intrinsic_call | local_decl_expr ;
+                     | type_expression | switch_expression | intrinsic_call | local_decl_expr | lambda ;
 
 array_literal        = "[" [ expression { "," expression } ] "]" ;
 brace_initializer    = [ type ] "{" [ init_element { "," init_element } ] "}" ;
@@ -329,12 +332,19 @@ new_expression       = "new" type [ "(" [ arg_list ] ")" | brace_initializer ] ;
 type_expression      = IDENTIFIER [ generic_args ] "::" IDENTIFIER [ "(" [ arg_list ] ")" ] ;
 intrinsic_call       = ( "sizeof" | "alignof" | "typeof" | "likely" | "unlikely" | "expect" | "prefetch" | "bounds_check" ) "(" arg_list ")" ;
 arg_list             = argument { "," argument } ;
+lambda               = "(" [ lambda_param { "," lambda_param } ] ")" "=>" ( expression | block ) ;
+lambda_param         = [ "mut" ] [ type ] IDENTIFIER ;
 argument             = [ IDENTIFIER ":" ] expression ;
 ```
 
 - `p?.m` yields a nullable pointer (null when `p` is null); `p!.m` unwraps (error on a value that is not nullable); `a ?? b`
   falls back when `a` is null; `a ??= b` assigns when null.
 - `&function` is the address of a plain, non-generic function as `ptr`.
+- `(a, b) => a + b` and `(i32 v) => { ... }` are lambdas. Untyped parameters take their types from the expected `fn`
+  type; the return type comes from it or from the body. Locals used inside are captured: copied when trivial, moved when
+  they are values (the variable is then moved), and read-only inside the lambda (E3064). A captured value cannot be moved
+  out of the lambda (E3065), and an untyped parameter with no expected type is E3066. `await` inside a lambda is not
+  supported yet. A value of a `fn` type is called like a function: `f(x)`, `this.on_click(id)`.
 - `expr is T` / `expr is T name` tests a boxed `object` and optionally binds the unboxed value; `expr is Enum::Variant a b`
   tests a union value and binds the payload.
 - `sync` is a contextual modifier (a method may still be called `sync`); `await` is an error inside a `sync` function. `task.sync` blocks the calling thread until the task completes (C# `GetAwaiter().GetResult()`) and warns (E6005) inside async functions. `await task` suspends in async functions and runs the event loop in the others; `spawn task;` schedules a task.

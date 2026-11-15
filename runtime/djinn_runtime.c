@@ -16,6 +16,19 @@ void __djinn_free(void* pointer)
     free(pointer);
 }
 
+// A closure environment starts with its drop function: it disposes the captured values, then the block is freed.
+void __djinn_closure_drop(void* env)
+{
+    if (env == NULL) {
+        return;
+    }
+    void (*drop)(void*) = *(void (**)(void*))env;
+    if (drop != NULL) {
+        drop(env);
+    }
+    free(env);
+}
+
 DJINN_ATTR_REALLOC
 void* __djinn_realloc(void* pointer, size_t new_size)
 {

@@ -1,0 +1,303 @@
+namespace djinnc;
+
+// A lambda is checked where it is written, with the enclosing scopes visible. Every local that resolves from outside
+// its barrier becomes a capture; the body is emitted later as its own function whose first parameter is the
+// environment.
+impl TypeChecker {
+    unsafe void capture_crossing(i32 index, LocalVariable* variable) {
+        mut LambdaScope* scope = this.lambda;
+        while (scope != null && index < scope.barrier) {
+            FunctionInfo* info = scope.info;
+            PointerList* captures = info.captures;
+            if (!captures.contains((ptr)variable)) {
+                captures.push((ptr)variable);
+            }
+            scope = scope.parent;
+        }
+    }
+
+    unsafe bool is_captured(LocalVariable* variable) {
+        FunctionInfo* current = this.function;
+        if (current == null || !current.is_lambda) {
+            return false;
+        }
+        PointerList* captures = current.captures;
+        return captures.contains((ptr)variable);
+    }
+
+    FunctionInfo* member_context() {
+        FunctionInfo* current = this.function;
+        if (current != null && current.is_lambda) {
+            return current.lambda_root;
+        }
+        return current;
+    }
+
+    void capture_receiver() {
+        if (this.lambda != null) {
+            this.find_variable(Atoms.THIS_ATOM);
+        }
+    }
+
+    unsafe u32 closure_type_of(IdList* signature, Node* at) {
+        SymbolTable* symbols = this.symbols;
+        ByteBuffer* name = ByteBuffer.create();
+        name.append("__closure");
+        name.append_int((i64)(signature.length - 1));
+        AtomTable* atoms = Atoms.get();
+        u32 atom = atoms.intern_copy(name.cstr(), (u32)strlen(name.cstr()));
+        StructInfo* template = symbols.find_struct(atom, atom, this.scope);
+        if (template == null || !template.is_template) {
+            this.error_code(at, DiagnosticErrors.NOT_SUPPORTED_YET, "this lambda has more parameters than a 'fn' type supports");
+            return Types.i32_type();
+        }
+        symbols.blame = at;
+        SemanticAnalyzer* analyzer = symbols.analyzer;
+        return analyzer.instantiate(template, signature);
+    }
+
+    unsafe u32 check_lambda(Node* node, u32 expected) {
+        SymbolTable* symbols = this.symbols;
+        mut IdList* wanted = symbols.closure_signature(this.value_inside_nullable_context(expected));
+        if (wanted != null && wanted.length - 1 != node.count()) {
+            this.error_code(node, DiagnosticErrors.WRONG_ARGUMENT_COUNT, "the lambda does not take as many parameters as the expected 'fn' type");
+            wanted = (IdList*)0;
+        }
+        if (node.flag()) {
+            this.error_code(node, DiagnosticErrors.NOT_SUPPORTED_YET, "'await' inside a lambda is not supported yet");
+        }
+        FunctionInfo* outer = this.function;
+        if (outer == null) {
+            this.error_code(node, DiagnosticErrors.NOT_SUPPORTED_YET, "a lambda must be written inside a function");
+            return Types.i32_type();
+        }
+        mut FunctionInfo* root = outer;
+        if (outer.is_lambda) {
+            root = outer.lambda_root;
+        }
+        ByteBuffer* name = ByteBuffer.create();
+        name.append(outer.name);
+        name.append("$lambda");
+        name.append_int((i64)root.lambda_count);
+        root.lambda_count = root.lambda_count + 1;
+
+        FunctionInfo* info = (FunctionInfo*)Memory.zalloc(sizeof(FunctionInfo));
+        AtomTable* atoms = Atoms.get();
+        info.name = name.cstr();
+        info.name_atom = atoms.intern_copy(info.name, (u32)strlen(info.name));
+        info.namespace_id = outer.namespace_id;
+        info.home_scope = outer.home_scope;
+        info.is_lambda = true;
+        info.lambda_root = root;
+        info.owner = root.owner;
+        info.this_variable = root.this_variable;
+        info.is_unsafe = outer.is_unsafe;
+        info.bindings = symbols.bindings;
+        info.mode_bindings = outer.mode_bindings;
+        info.node = node;
+        info.captures = PointerList.create();
+        info.check_state = 1;
+        if (wanted != null) {
+            info.return_type = wanted.get(0);
+        } else {
+            info.return_type = Types.auto_type();
+        }
+
+        IdList* params = IdList.create();
+        params.push(Types.raw_pointer_to(Types.void_type()));
+        PointerList* variables = PointerList.create();
+        for (mut i32 i = 0; i < node.count(); i = i + 1) {
+            Node* parameter = node.child(i);
+            TypeRef* reference = parameter.type();
+            mut u32 type = 0;
+            if (reference.kind == TypeKind.AUTO) {
+                if (wanted != null) {
+                    type = wanted.get(i + 1);
+                } else {
+                    this.error_code(parameter, DiagnosticErrors.LAMBDA_PARAMETER_TYPE, "cannot infer the type of this lambda parameter: write its type or pass the lambda where a 'fn' type is expected");
+                    type = Types.i32_type();
+                }
+            } else {
+                type = this.resolve_type(reference, parameter);
+            }
+            params.push(type);
+            LocalVariable* variable = (LocalVariable*)Memory.zalloc(sizeof(LocalVariable));
+            variable.name = parameter.text();
+            variable.name_atom = parameter.name();
+            variable.type = type;
+            variable.is_mutable = parameter.flag();
+            variable.node = parameter;
+            parameter.set_symbol(SymbolKind.LOCAL, (ptr)variable);
+            parameter.set_value_type(type);
+            variables.push((ptr)variable);
+        }
+        info.param_types = params;
+        symbols.add_function_instance(info);
+
+        LocalScopes* scopes = this.scopes;
+        i32 barrier = scopes.mark();
+        LambdaScope* scope = (LambdaScope*)Memory.zalloc(sizeof(LambdaScope));
+        scope.info = info;
+        scope.barrier = barrier;
+        scope.parent = this.lambda;
+        i32 saved_loops = this.loop_depth;
+        i32 saved_switches = this.switch_depth;
+        Node* saved_try = this.try_target;
+        this.function = info;
+        this.loop_depth = 0;
+        this.switch_depth = 0;
+        this.try_target = (Node*)0;
+        this.lambda = scope;
+        for (mut i32 i = 0; i < variables.length; i = i + 1) {
+            LocalVariable* variable = (LocalVariable*)variables.get(i);
+            scopes.define(variable.name_atom, variable);
+        }
+
+        Node* body = node.first();
+        if (node.op() == 1 && Types.is_void(info.return_type)) {
+            Node* only = body.child(0);
+            only.set_kind(NodeKind::EXPR_STMT);
+        }
+        this.check_statement(body);
+        if (info.return_type == Types.auto_type()) {
+            info.return_type = Types.void_type();
+        }
+
+        this.lambda = scope.parent;
+        this.function = outer;
+        this.loop_depth = saved_loops;
+        this.switch_depth = saved_switches;
+        this.try_target = saved_try;
+        scopes.reset_to(barrier);
+        info.check_state = 2;
+
+        PointerList* captures = info.captures;
+        for (mut i32 i = 0; i < captures.length; i = i + 1) {
+            LocalVariable* captured = (LocalVariable*)captures.get(i);
+            if (this.is_copy_type(captured.type)) {
+                continue;
+            }
+            if (this.is_captured(captured)) {
+                this.error_code(node, DiagnosticErrors.CAPTURED_MOVE, "a lambda cannot move a value captured by its enclosing lambda");
+                continue;
+            }
+            if (captured.moved) {
+                Diagnostics.add_argument(captured.name);
+                this.error_code(node, DiagnosticErrors.USE_AFTER_MOVE, "use of moved value");
+            }
+            captured.moved = true;
+            captured.was_moved = true;
+        }
+
+        IdList* signature = IdList.create();
+        signature.push(info.return_type);
+        for (mut i32 i = 1; i < params.length; i = i + 1) {
+            signature.push(params.get(i));
+        }
+        node.set_symbol(SymbolKind.LAMBDA, (ptr)info);
+        return this.closure_type_of(signature, node);
+    }
+
+    unsafe void infer_lambda_return(Node* node, FunctionInfo* info) {
+        if (node.first() == null) {
+            info.return_type = Types.void_type();
+            return;
+        }
+        u32 returned = this.check_expression(node.first(), 0);
+        if (Types.is_void(returned)) {
+            info.return_type = Types.void_type();
+            node.set_kind(NodeKind::EXPR_STMT);
+            return;
+        }
+        info.return_type = returned;
+        this.check_returned_borrow(node.first());
+        this.move_out(node.first());
+    }
+
+    unsafe bool reject_captured_move(Node* source) {
+        if (source.kind() != NodeKind::IDENTIFIER || source.symbol_kind() != SymbolKind.LOCAL) {
+            return false;
+        }
+        LocalVariable* variable = (LocalVariable*)source.symbol();
+        if (!this.is_copy_type(variable.type) && this.is_captured(variable)) {
+            this.error_code(source, DiagnosticErrors.CAPTURED_MOVE, "cannot move a captured value out of a lambda: it may run again");
+            return true;
+        }
+        return false;
+    }
+
+    unsafe void reject_captured_assign(Node* target, LocalVariable* variable) {
+        if (this.is_captured(variable)) {
+            this.error_code(target, DiagnosticErrors.CAPTURED_ASSIGN, "a captured variable is read-only inside the lambda");
+        }
+    }
+
+    unsafe u32 check_closure_call(Node* node, u32 callee_type) {
+        SymbolTable* symbols = this.symbols;
+        IdList* signature = symbols.closure_signature(callee_type);
+        i32 count = signature.length - 1;
+        if (node.count() != count) {
+            this.error_code(node, DiagnosticErrors.WRONG_ARGUMENT_COUNT, "wrong number of arguments for this 'fn' value");
+        }
+        for (mut i32 i = 0; i < node.count(); i = i + 1) {
+            Node* argument = node.child(i);
+            if (i >= count) {
+                this.check_expression(argument, 0);
+                continue;
+            }
+            u32 wanted = signature.get(i + 1);
+            u32 given = this.check_expression(argument, wanted);
+            this.require_value_type(argument, given, wanted);
+            this.move_from(argument, (Node*)0);
+        }
+        node.set_symbol(SymbolKind.CLOSURE_CALL, (ptr)0);
+        return signature.get(0);
+    }
+
+    // f(x) where f is a local, a global or an implicit field of a 'fn' type. Returns 0 when the callee is not one.
+    unsafe u32 check_named_closure_call(Node* node, Node* callee) {
+        SymbolTable* symbols = this.symbols;
+        LocalVariable* variable = this.find_variable(callee.name());
+        if (variable != null) {
+            if (symbols.closure_signature(variable.type) == null) {
+                return 0;
+            }
+            u32 local_type = this.check_expression(callee, 0);
+            return this.check_closure_call(node, local_type);
+        }
+        FieldInfo* field = this.implicit_field(callee);
+        if (field != null && symbols.closure_signature(field.type) != null) {
+            u32 field_type = this.check_expression(callee, 0);
+            return this.check_closure_call(node, field_type);
+        }
+        return 0;
+    }
+
+    // A function name where a 'fn' type is expected becomes a closure without an environment. Returns 0 when the
+    // identifier does not name such a function.
+    unsafe u32 check_function_as_closure(Node* node, u32 expected) {
+        SymbolTable* symbols = this.symbols;
+        IdList* signature = symbols.closure_signature(this.value_inside_nullable_context(expected));
+        if (signature == null || this.find_variable(node.name()) != null || this.implicit_field(node) != null) {
+            return 0;
+        }
+        FunctionInfo* named = symbols.find_function(node.text_atom(), node.name(), this.scope);
+        if (named == null || named.is_template || named.overload != null) {
+            return 0;
+        }
+        IdList* params = named.param_types;
+        mut bool matches = !named.is_async && !named.has_throws && !named.is_variadic && !named.is_instance
+            && params.length == signature.length - 1 && named.return_type == signature.get(0);
+        for (mut i32 i = 0; matches && i < params.length; i = i + 1) {
+            matches = params.get(i) == signature.get(i + 1);
+        }
+        if (!matches) {
+            this.error_code(node, DiagnosticErrors.VALUE_TYPE_MISMATCH, "the function's signature does not match the expected 'fn' type");
+        }
+        if (!this.can_access(named)) {
+            this.error_code(node, DiagnosticErrors.PRIVATE_ACCESS, "reference to a private function from outside its type or namespace");
+        }
+        node.set_symbol(SymbolKind.FUNCTION, (ptr)named);
+        return this.value_inside_nullable_context(expected);
+    }
+}

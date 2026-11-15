@@ -52,7 +52,7 @@ that history.
 
 ## Forbidden
 
-`ensure`/`require` contracts and closures.
+`ensure`/`require` contracts.
 
 ## Errors
 
@@ -270,6 +270,14 @@ keeps the block for diagnostics but injects nothing. A target that is not declar
 - `$"..."` interpolates `{x}` (`{{` and `}}` are literal braces). With `n` dollar signs, `n` braces delimit the interpolation and fewer braces are literal:
   `$$"{x} is {{x}}"`. `$"""..."""` and `$$"""..."""` are multi-line forms without escapes.
 - `&function` (a plain, non-generic, non-overloaded function) is its address as `ptr`.
+- Closures: `fn(A, B) -> R` types and `(a, b) => expr` / `(i32 a) => { ... }` lambdas. A `fn` type is an instance of a core
+  template (`runtime/core/closures.djinn`, `__closure0` to `__closure8`) holding `{ code, env }`; it is a Value (moves) and
+  frees the environment with `__djinn_closure_drop`. The lambda is checked in place (a scope barrier records the locals it
+  captures, `semantic/checker/type_checker_closures.djinn`) and emitted as its own function `<outer>$lambda<N>` whose first
+  parameter is the environment `{ drop, captures... }` (`codegen/code_generator_closures.djinn`). Captures are copied
+  (trivial) or moved (values), read-only inside (E3064), cannot be moved out (E3065); untyped parameters need an expected
+  `fn` type (E3066). A lambda without captures allocates nothing; a function name converts through a `$fn` thunk. Not
+  supported yet: `await` or `throws` inside a lambda, generic lambdas, and copying a `fn` value.
 - Hooks (`std::system`): `System.hook(HookKind.PANIC, &handler)` installs `void handler(i8* message, i8* file, u32 line)`, which runs instead of the
   default panic report and then the process aborts; it returns the previous handler. `System.unhook(kind)` removes it, and
   `System.print_default_panic_report` prints the standard report from inside a handler. The macro `hook(panic, handler)` is the short form.

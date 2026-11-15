@@ -1,0 +1,331 @@
+namespace conformance;
+
+import testing;
+import djinnc::testing;
+import djinnc;
+
+struct ClosureTests {
+    [Test]
+    void lambda_with_typed_and_inferred_parameters() {
+        str source = """
+i32 main() {
+    fn(i32, i32) -> i32 mul = (a, b) => a * b;
+    fn(i32) -> i32 inc = (i32 v) => v + 1;
+    return mul(4, 5) + inc(1);
+}
+""";
+        Verify.source(source).runs(Expected.exit(22));
+    }
+
+    [Test]
+    void captures_are_copied_into_the_environment() {
+        str source = """
+i32 main() {
+    i32 base = 10;
+    fn(i32) -> i32 add = (v) => v + base;
+    return add(1) + add(2);
+}
+""";
+        Verify.source(source).runs(Expected.exit(23));
+    }
+
+    [Test]
+    void lambda_passed_to_a_function() {
+        str source = """
+i32 apply(fn(i32) -> i32 f, i32 x) {
+    return f(x);
+}
+
+i32 main() {
+    i32 k = 3;
+    return apply((x) => x * k, 5);
+}
+""";
+        Verify.source(source).runs(Expected.exit(15));
+    }
+
+    [Test]
+    void block_body_and_void_lambda() {
+        str source = """
+unsafe static mut i32 total = 0;
+
+unsafe i32 main() {
+    fn(i32) record = (i32 v) => { total = total + v; };
+    record(4);
+    record(6);
+    fn(i32) -> i32 pick = (i32 v) => {
+        if (v > 5) {
+            return 1;
+        }
+        return 2;
+    };
+    return total + pick(9) + pick(1);
+}
+""";
+        Verify.source(source).runs(Expected.exit(13));
+    }
+
+    [Test]
+    void return_type_is_inferred_without_an_expected_type() {
+        str source = """
+i32 main() {
+    auto square = (i32 v) => v * v;
+    return square(6);
+}
+""";
+        Verify.source(source).runs(Expected.exit(36));
+    }
+
+    [Test]
+    void methods_capture_this_and_implicit_fields() {
+        str source = """
+struct Counter {
+    mut i32 count;
+
+    void bump() {
+        fn() on = () => this.count = this.count + 1;
+        on();
+        on();
+    }
+
+    fn() -> i32 reader() {
+        return () => count * 10;
+    }
+}
+
+i32 main() {
+    mut Counter c = { .count = 1 };
+    c.bump();
+    fn() -> i32 read = c.reader();
+    return read();
+}
+""";
+        Verify.source(source).runs(Expected.exit(30));
+    }
+
+    [Test]
+    void fn_field_is_callable() {
+        str source = """
+struct Button {
+    i32 id;
+    fn(i32) -> i32 on_click;
+
+    i32 press() {
+        return this.on_click(this.id);
+    }
+}
+
+i32 main() {
+    Button b = { .id = 4, .on_click = (i32 id) => id * 3 };
+    return b.press() + b.on_click(1);
+}
+""";
+        Verify.source(source).runs(Expected.exit(15));
+    }
+
+    [Test]
+    void generic_function_takes_a_closure() {
+        str source = """
+T twice<T>(fn(T) -> T f, T x) {
+    return f(f(x));
+}
+
+i32 main() {
+    return twice<i32>((i32 v) => v * 2, 3);
+}
+""";
+        Verify.source(source).runs(Expected.exit(12));
+    }
+
+    [Test]
+    void nested_lambdas_capture_through_the_outer_one() {
+        str source = """
+i32 main() {
+    i32 k = 4;
+    fn() -> i32 outer = () => {
+        fn() -> i32 inner = () => k + 1;
+        return inner() * 2;
+    };
+    return outer();
+}
+""";
+        Verify.source(source).runs(Expected.exit(10));
+    }
+
+    [Test]
+    void loop_variable_is_captured_per_iteration() {
+        str source = """
+i32 main() {
+    mut i32 total = 0;
+    for (i32 i in 0..4) {
+        fn() -> i32 step = () => i * 10;
+        total = total + step();
+    }
+    return total;
+}
+""";
+        Verify.source(source).runs(Expected.exit(60));
+    }
+
+    [Test]
+    void function_name_converts_to_fn() {
+        str source = """
+i32 triple(i32 x) {
+    return x * 3;
+}
+
+i32 apply(fn(i32) -> i32 f, i32 x) {
+    return f(x);
+}
+
+i32 main() {
+    fn(i32) -> i32 f = triple;
+    return apply(f, 2) + apply(triple, 1);
+}
+""";
+        Verify.source(source).runs(Expected.exit(9));
+    }
+
+    [Test]
+    void function_returns_a_closure() {
+        str source = """
+fn(i32) -> i32 adder(i32 n) {
+    return (i32 x) => x + n;
+}
+
+i32 main() {
+    fn(i32) -> i32 add5 = adder(5);
+    return add5(2);
+}
+""";
+        Verify.source(source).runs(Expected.exit(7));
+    }
+
+    [Test]
+    void moved_capture_is_disposed_once_by_the_closure() {
+        str source = """
+unsafe static mut i32 disposed = 0;
+
+struct Token : Disposable {
+    i32 id;
+
+    unsafe void disposable() {
+        disposed = disposed + this.id;
+    }
+}
+
+unsafe i32 main() {
+    {
+        Token t = { .id = 5 };
+        fn() -> i32 holder = () => t.id;
+        if (holder() != 5) {
+            return 1;
+        }
+    }
+    return disposed;
+}
+""";
+        Verify.source(source).runs(Expected.exit(5));
+    }
+
+    [Test]
+    void closure_without_captures_allocates_nothing() {
+        str source = """
+i32 main() {
+    fn() -> i32 seven = () => 7;
+    return seven();
+}
+""";
+        Verify.source(source).emits_ir(Expected.ir_contains("closure.code").and_ir_lacks("call ptr @__djinn_alloc_zeroed"));
+    }
+
+    [Test]
+    void assigning_a_captured_variable_is_an_error() {
+        str source = """
+i32 main() {
+    mut i32 n = 1;
+    fn() bad = () => n = 2;
+    return n;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.CAPTURED_ASSIGN).at(3, 22));
+    }
+
+    [Test]
+    void moving_a_captured_value_is_an_error() {
+        str source = """
+struct Box : Disposable {
+    i32 v;
+
+    void disposable() {
+    }
+}
+
+void take(Box b) {
+}
+
+i32 main() {
+    Box b = { .v = 1 };
+    fn() mover = () => take(b);
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.CAPTURED_MOVE).at(13, 29));
+    }
+
+    [Test]
+    void using_a_value_after_it_was_captured_is_an_error() {
+        str source = """
+struct Box : Disposable {
+    i32 v;
+
+    void disposable() {
+    }
+}
+
+i32 main() {
+    Box b = { .v = 1 };
+    fn() -> i32 reader = () => b.v;
+    return b.v;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.USE_AFTER_MOVE).at(11, 12));
+    }
+
+    [Test]
+    void untyped_parameter_without_context_is_an_error() {
+        str source = """
+i32 main() {
+    auto loose = (y) => y;
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.LAMBDA_PARAMETER_TYPE).at(2, 19));
+    }
+
+    [Test]
+    void wrong_argument_count_for_a_fn_value() {
+        str source = """
+i32 main() {
+    fn(i32) -> i32 f = (x) => x;
+    return f(1, 2);
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.WRONG_ARGUMENT_COUNT).at(3, 13));
+    }
+
+    [Test]
+    void function_with_another_signature_does_not_convert() {
+        str source = """
+i64 wide(i64 x) {
+    return x;
+}
+
+i32 main() {
+    fn(i32) -> i32 f = wide;
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.VALUE_TYPE_MISMATCH).at(6, 24));
+    }
+}
