@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-11-14
+
 ### Fixed
 
 - `djinnc --version` printed a hardcoded `0.1`; it now prints the release version, which the release workflow stamps from the tag (the VS Code extension version too).
