@@ -82,6 +82,24 @@ impl TypeChecker {
         return head;
     }
 
+    unsafe bool extern_hidden(FunctionInfo* candidate, Node* at) {
+        SymbolTable* symbols = this.symbols;
+        if (!symbols.strict_externs || !candidate.is_extern || candidate.is_public) {
+            return false;
+        }
+        Node* declaration = candidate.node;
+        if (declaration == null || declaration.kind() != NodeKind::EXTERN_FUNCTION) {
+            return false;
+        }
+        if (CoreLibrary.contains(declaration.file_name())) {
+            return false;
+        }
+        if (candidate.is_internal) {
+            return candidate.home_scope != this.scope;
+        }
+        return !Strings.same(declaration.file_name(), at.file_name());
+    }
+
     unsafe i32 visibility(u32 home) {
         if (home == this.scope) {
             return 2;
@@ -174,6 +192,7 @@ impl TypeChecker {
     }
 
     unsafe FunctionInfo* pick_overload(FunctionInfo* head, Node* call, i32 offset) {
+        SymbolTable* symbols = this.symbols;
         IdList* types = IdList.create();
         for (mut i32 i = 0; i < call.count(); i = i + 1) {
             Node* argument = call.child(i);
@@ -194,7 +213,7 @@ impl TypeChecker {
             IdList* params = candidate.param_types;
             i32 fixed = params.length - offset;
             bool arity_ok = call.count() == fixed || (candidate.is_variadic && call.count() >= fixed) || (call.count() + 1 == fixed && this.takes_location(candidate));
-            if (!candidate.is_template && arity_ok) {
+            if (!candidate.is_template && arity_ok && !this.extern_hidden(candidate, call)) {
                 mut i32 score = 0;
                 mut bool fits = true;
                 for (mut i32 i = 0; i < call.count() && i < fixed; i = i + 1) {
@@ -249,7 +268,9 @@ impl TypeChecker {
                         best_score = score;
                         ambiguous = false;
                     } else if (score == best_score) {
-                        ambiguous = true;
+                        if (!(candidate.is_extern && best.is_extern && symbols.same_extern_declaration(best, candidate))) {
+                            ambiguous = true;
+                        }
                     }
                 }
             }
@@ -453,6 +474,9 @@ impl TypeChecker {
                 return this.check_constructor(node, callee, constructed);
             }
             info = symbols.find_function(callee.text_atom(), callee.name(), this.scope);
+            if (info != null && info.overload == null && this.extern_hidden(info, node)) {
+                info = (FunctionInfo*)0;
+            }
             info = this.apply_named_arguments(node, info);
             if (info == null) {
                 StructInfo* named = symbols.find_struct(callee.text_atom(), callee.name(), this.scope);
