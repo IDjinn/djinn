@@ -43,11 +43,11 @@ public extern "C" {
 SOURCE
 cat > "$out/public/main.djinn" <<'SOURCE'
 extern "C" {
-    i32 labs(i32 value);
+    i32 toupper(i32 value);
 }
 
 i32 main() {
-    return abs(0 - 7) + labs(0 - 1) - 1;
+    return abs(0 - 7) + toupper(97) - 65;
 }
 SOURCE
 "$compiler" "$out/public/declares.djinn" "$out/public/main.djinn" -o "$out/public/app$exe" "${flags[@]}" > "$out/public.log" 2>&1 || { cat "$out/public.log"; fail "public extern and a local extern must compile"; }
