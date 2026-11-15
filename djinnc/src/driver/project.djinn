@@ -18,6 +18,80 @@ struct Project {
         return length > 11 && Strings.equals(path + length - 11, 11, "_test.djinn");
     }
 
+    // For 'dir/name.<word>.djinn' with a platform word (windows, linux, macos, android, ios, web, desktop, mobile,
+    // native): the length of 'dir/name' and where the word starts, or -1 when the file has no such suffix.
+    static unsafe i32 platform_stem(ptr<i8> path, ptr<i32> word_start) {
+        i32 length = strlen(path);
+        if (!Project.is_source_file(path)) {
+            return 0 - 1;
+        }
+        i32 stem_end = length - 6;
+        mut i32 dot = stem_end - 1;
+        while (dot >= 0 && path[dot] != 46 && path[dot] != 47 && path[dot] != 92) {
+            dot = dot - 1;
+        }
+        if (dot <= 0 || path[dot] != 46 || path[dot - 1] == 47 || path[dot - 1] == 92) {
+            return 0 - 1;
+        }
+        if (!Target.is_platform_word(path + dot + 1, stem_end - dot - 1)) {
+            return 0 - 1;
+        }
+        word_start[0] = dot + 1;
+        return dot;
+    }
+
+    static unsafe bool same_stem(ptr<i8> path, i32 stem, ptr<i8> other, i32 other_stem) {
+        if (stem != other_stem) {
+            return false;
+        }
+        for (mut i32 i = 0; i < stem; i = i + 1) {
+            if (path[i] != other[i]) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // Keeps, for every 'name', the most specific 'name.<platform>.djinn' that matches the target (the platform, then
+    // its group, then 'native') in place of 'name.djinn', and drops the variants of other platforms.
+    public static unsafe PointerList* select_platform_files(PointerList* paths) {
+        PointerList* kept = PointerList.create();
+        for (mut i32 i = 0; i < paths.length; i = i + 1) {
+            ptr<i8> path = (ptr<i8>)paths.get(i);
+            mut i32 word = 0;
+            i32 stem = Project.platform_stem(path, &word);
+            mut i32 rank = 0;
+            mut i32 key_length = 0;
+            if (stem >= 0) {
+                rank = Target.platform_rank(path + word, strlen(path) - 6 - word);
+                if (rank == 0) {
+                    continue;
+                }
+                key_length = stem;
+            } else {
+                key_length = strlen(path) - 6;
+            }
+            mut bool beaten = false;
+            for (mut i32 j = 0; j < paths.length && !beaten; j = j + 1) {
+                if (j == i) {
+                    continue;
+                }
+                ptr<i8> other = (ptr<i8>)paths.get(j);
+                mut i32 other_word = 0;
+                i32 other_stem = Project.platform_stem(other, &other_word);
+                if (other_stem < 0 || !Project.same_stem(path, key_length, other, other_stem)) {
+                    continue;
+                }
+                i32 other_rank = Target.platform_rank(other + other_word, strlen(other) - 6 - other_word);
+                beaten = other_rank > rank;
+            }
+            if (!beaten) {
+                kept.push((ptr)path);
+            }
+        }
+        return kept;
+    }
+
     public static ptr<i8> generated_entry() {
         return "<generated test entry>";
     }

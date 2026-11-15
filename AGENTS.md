@@ -27,6 +27,8 @@ detailed one), `djinnc/USAGE.md` (options), `djinnc/LIBRARY.md`, `examples/`.
 - **Errors are values**: `result<T, E>`, `optional<T>` and error propagation; there are no real exceptions. Runtime panics
   are `R<code>` errors from `djinnc/src/support/source/runtime_errors.djinn`.
 - **Mutability**: immutable by default, `mut` opts in. Pointer ops need `unsafe`.
+- **Platform code**: `[Platform(windows, web, desktop, mobile, native, ...)]` drops a declaration on other targets, and
+  `name.<platform>.djinn` files replace `name.djinn` (`driver/project.djinn`, `Target.platform_rank`).
 - **Attributes**: `[Name(args)]`, mapped to LLVM function/parameter attributes (`ForceInline`, `Hot`, `Cold`, `Pure`,
   `Restrict`, `Align`, `Unroll`, `Vectorize`, `Export`, ...). Unknown name is an error. `attribute X(targets);` declares new ones.
 - **Macros**: token templates expanded and re-parsed (`parser/parser_macros.djinn`), multi-rule, pattern matched

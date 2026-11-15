@@ -100,4 +100,48 @@ impl Parser {
             }
         }
     }
+
+    // [Platform(windows, web)] keeps a declaration only on those platforms (or groups: desktop, mobile, native). The
+    // attribute is removed from the list; returns true when the declaration must be dropped.
+    unsafe bool platform_excluded(PointerList* found) {
+        mut bool excluded = false;
+        mut i32 write = 0;
+        for (mut i32 i = 0; i < found.length; i = i + 1) {
+            AttributeUse* use = (AttributeUse*)found.get(i);
+            if (!Strings.same(use.name, "Platform")) {
+                found.data[write] = (ptr)use;
+                write = write + 1;
+                continue;
+            }
+            Node* payload = use.payload;
+            mut bool matches = false;
+            if (payload == null || payload.count() == 0) {
+                Diagnostics* diagnostics = this.diagnostics;
+                diagnostics.error(DiagnosticErrors.SEMANTIC, use.line, use.column, "[Platform] needs at least one platform: windows, linux, macos, android, ios, web, desktop, mobile or native");
+                continue;
+            }
+            for (mut i32 p = 0; p < payload.count(); p = p + 1) {
+                Node* field = payload.child(p);
+                Node* value = field.first();
+                if (value == null || value.kind() != NodeKind::IDENTIFIER) {
+                    continue;
+                }
+                ptr<i8> word = value.text();
+                i32 length = strlen(word);
+                if (!Target.is_platform_word(word, length)) {
+                    Diagnostics* diagnostics = this.diagnostics;
+                    diagnostics.error(DiagnosticErrors.SEMANTIC, use.line, use.column, "unknown platform in [Platform]: use windows, linux, macos, android, ios, web, desktop, mobile or native");
+                    continue;
+                }
+                if (Target.platform_rank(word, length) > 0) {
+                    matches = true;
+                }
+            }
+            if (!matches) {
+                excluded = true;
+            }
+        }
+        found.length = write;
+        return excluded;
+    }
 }

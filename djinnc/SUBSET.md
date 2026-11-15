@@ -157,6 +157,8 @@ An unknown name is an error; a wrong target is a warning.
 attributes are valid everywhere); the form with fields also defines a struct `Name`. `[attribute(...)] struct XAttribute {...}` declares `X`
 and `XAttribute`. `[intrinsic]` and `[no_mangle]` structs are parsed and dropped (the core provides `task<T>` and the coroutine primitives).
 
+`[Platform(windows, web)]` (also the groups `desktop`, `mobile`, `native`) keeps a top-level declaration or a struct member only on those targets; the parser drops it otherwise (`Parser.platform_excluded`, `Target.platform_rank`). Files named `name.<platform>.djinn` replace `name.djinn` for the target, most specific first (`Project.select_platform_files`, applied to the inputs, the std sources and the core). An unknown platform word is an error.
+
 A parameter marked `[Location]` whose type is a struct with `fileName`, `line` and `column` is filled by the compiler with the call site
 when the call omits it (only the last parameter, no overloads).
 

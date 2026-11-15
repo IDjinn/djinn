@@ -78,6 +78,13 @@ Valid on functions, parameters, fields, structs, enums, unions, interfaces and, 
 `[NoUnroll]`, `[Vectorize]`, `[NoVectorize]`), the statement before a loop. `[Reflect]` drives reflection. An unknown
 attribute name is an error.
 
+`[Platform(p, ...)]` keeps a declaration (a top-level declaration or a struct member) only when the target is one of the
+platforms `windows`, `linux`, `macos`, `android`, `ios`, `web`, or a group: `desktop` (windows, linux, macos), `mobile`
+(android, ios), `native` (everything but web); otherwise it is dropped while parsing. In a project, a file
+`name.<platform>.djinn` (same words) replaces `name.djinn` on that platform: the exact platform wins over its group, the
+group over `native`, and variants for other platforms are left out. `Platform.Android`, `.Ios`, `.Web`, `.Desktop` and
+`.Mobile` join `Platform.Windows`, `.Linux` and `.MacOs` as compile-time constants.
+
 ### Enum and Union (tagged unions / ADT)
 
 ```ebnf

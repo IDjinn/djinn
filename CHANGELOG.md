@@ -12,6 +12,8 @@
 - A library built against the source std (`--std --std-dir`) no longer defines the std globals again, which made linking it with a program fail with duplicate symbols.
 - Declarations produced by a macro belong to the file of the call (imports, library interface, dependency stripping), not to the file of the macro template.
 
+- Platform-specific code: `[Platform(windows, web, desktop, ...)]` on declarations and struct members, and `name.<platform>.djinn` files that replace `name.djinn` for the target; `Platform.Android`, `Platform.Ios`, `Platform.Web`, `Platform.Desktop` and `Platform.Mobile` constants.
+
 ### Changed
 - Macros are token templates expanded and re-parsed (they were AST substitutions): every macro is collected before parsing, so a macro can be used before it is declared or from another file. Macros belong to their namespace and are visible only from it and from files that import it, so a user `log` macro no longer rewrites `log(...)` calls inside `std`. Parse errors inside an expansion are reported at the call.
 
