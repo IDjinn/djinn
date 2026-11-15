@@ -212,6 +212,8 @@ int64_t __djinn_now_us(void);
 // Recursively lists files under `directory` whose name ends with `extension`.
 // Returns a malloc'd, path-sorted, newline-separated list (NULL when the directory cannot be read).
 char* __djinn_list_files(const char* directory, const char* extension);
+char* __djinn_executable_dir(void);
+int __djinn_path_exists(const char* path);
 
 // Calls a JIT-compiled entry point `int main(void)` at `address` and returns its exit code.
 int __djinn_call_entry(void* address);
