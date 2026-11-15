@@ -8,7 +8,7 @@ out="$root/build/unit/extern_scope"
 rm -rf "$out"
 mkdir -p "$out/private" "$out/public"
 cd "$root"
-flags=(--runtime-dir "$runtime" --runtime-lib "$runtime_lib")
+flags=(--runtime-dir "$runtime" --runtime-lib "$runtime_lib" --strict-externs)
 if [ -n "${DJINN_USE_LLD:-}" ]; then
     flags+=(--lld)
 fi
