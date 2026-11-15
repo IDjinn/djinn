@@ -1,0 +1,171 @@
+namespace ui;
+
+import testing;
+import std::types;
+
+unsafe static mut i32 effect_runs = 0;
+unsafe static mut i32 memo_runs = 0;
+unsafe static mut i32 seen = 0;
+unsafe static mut i32 cleanups_run = 0;
+
+struct ReactiveTests {
+    [Test]
+    unsafe void effect_runs_once_then_on_each_change() {
+        effect_runs = 0;
+        signal<i32> count = state(1);
+        u32 root = Reactive.root(() => {
+            effect(() => {
+                seen = count.get();
+                effect_runs = effect_runs + 1;
+            });
+        });
+        Expect.equal(1, effect_runs);
+        count.set(5);
+        Expect.equal(2, effect_runs);
+        Expect.equal(5, seen);
+        count.set(5);
+        Expect.equal(2, effect_runs, "writing the same value wakes nobody");
+        Reactive.dispose(root);
+        count.set(9);
+        Expect.equal(2, effect_runs, "a disposed effect stays quiet");
+    }
+
+    [Test]
+    unsafe void memo_stops_unchanged_results() {
+        effect_runs = 0;
+        memo_runs = 0;
+        signal<i32> count = state(1);
+        u32 root = Reactive.root(() => {
+            memo<bool> even = derived<bool>(() => {
+                memo_runs = memo_runs + 1;
+                return count.get() % 2 == 0;
+            });
+            effect(() => {
+                bool value = even.get();
+                effect_runs = effect_runs + 1;
+            });
+        });
+        count.set(3);
+        Expect.equal(2, memo_runs);
+        Expect.equal(1, effect_runs, "the memo result did not change, so the effect does not run");
+        count.set(4);
+        Expect.equal(2, effect_runs);
+        Reactive.dispose(root);
+    }
+
+    [Test]
+    unsafe void diamond_runs_the_effect_once() {
+        effect_runs = 0;
+        signal<i32> base = state(1);
+        u32 root = Reactive.root(() => {
+            memo<i32> left = derived<i32>(() => base.get() + 1);
+            memo<i32> right = derived<i32>(() => base.get() * 2);
+            effect(() => {
+                seen = left.get() + right.get();
+                effect_runs = effect_runs + 1;
+            });
+        });
+        base.set(10);
+        Expect.equal(2, effect_runs, "no glitch: one run for one write");
+        Expect.equal(31, seen);
+        Reactive.dispose(root);
+    }
+
+    [Test]
+    unsafe void batch_coalesces_writes() {
+        effect_runs = 0;
+        signal<i32> a = state(1);
+        signal<i32> b = state(2);
+        u32 root = Reactive.root(() => {
+            effect(() => {
+                seen = a.get() + b.get();
+                effect_runs = effect_runs + 1;
+            });
+        });
+        Reactive.batch(() => {
+            a.set(10);
+            b.set(20);
+        });
+        Expect.equal(2, effect_runs);
+        Expect.equal(30, seen);
+        Reactive.dispose(root);
+    }
+
+    [Test]
+    unsafe void untracked_reads_do_not_subscribe() {
+        effect_runs = 0;
+        signal<i32> a = state(1);
+        signal<i32> b = state(2);
+        u32 root = Reactive.root(() => {
+            effect(() => {
+                seen = a.get() + b.peek();
+                effect_runs = effect_runs + 1;
+            });
+        });
+        b.set(7);
+        Expect.equal(1, effect_runs);
+        a.set(3);
+        Expect.equal(10, seen);
+        Reactive.dispose(root);
+    }
+
+    [Test]
+    unsafe void rerun_disposes_inner_computations_and_cleanups() {
+        cleanups_run = 0;
+        effect_runs = 0;
+        signal<i32> outer = state(0);
+        signal<i32> inner = state(0);
+        u32 root = Reactive.root(() => {
+            effect(() => {
+                i32 round = outer.get();
+                Reactive.on_cleanup(() => {
+                    cleanups_run = cleanups_run + 1;
+                });
+                effect(() => {
+                    i32 value = inner.get();
+                    effect_runs = effect_runs + 1;
+                });
+            });
+        });
+        Expect.equal(1, effect_runs);
+        outer.set(1);
+        Expect.equal(1, cleanups_run);
+        Expect.equal(2, effect_runs);
+        inner.set(1);
+        Expect.equal(3, effect_runs, "only the current inner effect runs");
+        Reactive.dispose(root);
+        Expect.equal(2, cleanups_run);
+    }
+
+    [Test]
+    unsafe void dispose_releases_every_node() {
+        u32 before = Reactive.live();
+        signal<i32> count = state(1);
+        u32 root = Reactive.root(() => {
+            memo<i32> twice = derived<i32>(() => count.get() * 2);
+            effect(() => {
+                seen = twice.get();
+            });
+        });
+        Reactive.dispose(root);
+        Expect.equal((i64)before + 1, (i64)Reactive.live(), "only the free-standing signal is left");
+    }
+
+    [Test]
+    unsafe void static_mode_keeps_no_subscriptions() {
+        effect_runs = 0;
+        signal<i32> count = state(4);
+        Reactive.set_static(true);
+        u32 root = Reactive.root(() => {
+            effect(() => {
+                seen = count.get();
+                effect_runs = effect_runs + 1;
+            });
+        });
+        Reactive.set_static(false);
+        count.set(8);
+        Expect.equal(1, effect_runs, "a server render reads once and never re-runs");
+        Expect.equal(4, seen);
+        Reactive.dispose(root);
+    }
+}

@@ -1,0 +1,47 @@
+import ui;
+import testing;
+import std::types;
+import std::collections;
+
+namespace showcase;
+
+struct ShowcaseTests {
+    [Test]
+    unsafe void counter_clicks_touch_only_what_changed() {
+        Counter counter = { .start = 1 };
+        Mounted app = App.mount<Counter>(counter);
+        Dom.record();
+        Dom.dispatch(Dom.find(app.node.id, "inc"), "click");
+        Expect.equal(4, (i64)Dom.operation_count(), "the number, then the even/odd branch: build the new one, remove the old, insert the new");
+        Dom.record();
+        Dom.dispatch(Dom.find(app.node.id, "reset"), "click");
+        Dom.dispatch(Dom.find(app.node.id, "inc"), "click");
+        mut TextBuffer html = Html.render(app.node, false);
+        Expect.contains(html.data, "<output id=\"count\">1</output>");
+        Expect.contains(html.data, "<small>odd</small>");
+        app.unmount();
+    }
+
+    [Test]
+    unsafe void hydration_markers_only_in_hydrate_mode() {
+        Counter counter = { .start = 0 };
+        mut TextBuffer server = App.render_to_string<Counter>(counter, RenderMode.SERVER);
+        mut TextBuffer hydrate = App.render_to_string<Counter>(counter, RenderMode.HYDRATE);
+        Expect.is_false(Text.contains(server.data, "data-dj"));
+        Expect.contains(hydrate.data, "data-dj=");
+        Expect.contains(hydrate.data, "<!--[-->");
+    }
+
+    [Test]
+    unsafe void server_render_leaves_nothing_behind() {
+        u32 nodes = Reactive.live();
+        u32 elements = Dom.live();
+        Showcase page = Showcase();
+        mut TextBuffer first = App.render_to_string<Showcase>(page, RenderMode.SERVER);
+        mut TextBuffer second = App.render_to_string<Showcase>(page, RenderMode.SERVER);
+        Expect.equal_text(first.data, second.data);
+        Expect.equal((i64)nodes, (i64)Reactive.live());
+        Expect.equal((i64)elements, (i64)Dom.live());
+        Expect.equal(1, (i64)StaticPages.renders(), "the [Static] footer rendered once for both requests");
+    }
+}

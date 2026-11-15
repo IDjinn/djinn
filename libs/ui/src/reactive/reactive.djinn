@@ -1,0 +1,467 @@
+import std::types;
+import std::libc;
+
+namespace ui;
+
+unsafe static mut ptr reactive_graph = null;
+
+struct Computation {
+    fn() -> bool run;
+}
+
+struct Cleanup {
+    fn() -> void run;
+}
+
+struct ReactiveKind {
+    const u8 FREE = 0;
+    const u8 ROOT = 1;
+    const u8 SIGNAL = 2;
+    const u8 MEMO = 3;
+    const u8 EFFECT = 4;
+}
+
+struct Freshness {
+    const u8 CLEAN = 0;
+    const u8 CHECK = 1;
+    const u8 DIRTY = 2;
+}
+
+// What a computation saw as the current owner and observer before it ran, restored afterwards.
+struct Scope {
+    u32 owner;
+    u32 observer;
+}
+
+// Every signal, memo, effect and root is a handle into these flat arrays (index 0 is "none").
+struct ReactiveGraph {
+    mut u8* kinds;
+    mut u8* states;
+    mut u8* queued;
+    mut void** values;
+    mut u32* sizes;
+    mut u32* owners;
+    mut IdList* sources;
+    mut IdList* observers;
+    mut IdList* children;
+    mut IdList* cleanups;
+    mut Computation* computations;
+    mut u32 capacity;
+    mut u32 count;
+    mut u32 live;
+    mut IdList free_nodes;
+
+    mut Cleanup* cleanup_pool;
+    mut u32 cleanup_capacity;
+    mut u32 cleanup_count;
+    mut IdList free_cleanups;
+
+    mut u32 owner;
+    mut u32 observer;
+    mut u32 batching;
+    mut bool flushing;
+    mut bool static_mode;
+    mut IdList queue;
+}
+
+// Fine-grained reactivity with push-pull propagation: a write marks observers DIRTY and their dependents CHECK,
+// then effects pull fresh values, so a memo whose result did not change stops the update (no glitches, no extra runs).
+struct Reactive {
+    public static unsafe ReactiveGraph* graph() {
+        if (reactive_graph == null) {
+            ReactiveGraph* g = (ReactiveGraph*)__djinn_alloc_zeroed((size_long)sizeof(ReactiveGraph));
+            g.count = 1;
+            reactive_graph = (ptr)g;
+            Reactive.grow(g, 64);
+        }
+        return (ReactiveGraph*)reactive_graph;
+    }
+
+    static unsafe void* resize(void* data, u32 old_count, u32 new_count, u64 item) {
+        void* grown = realloc(data, (size_long)((u64)new_count * item));
+        memset((void*)((u8*)grown + (u64)old_count * item), 0, (size_long)((u64)(new_count - old_count) * item));
+        return grown;
+    }
+
+    static unsafe void grow(ReactiveGraph* g, u32 wanted) {
+        u32 old = g.capacity;
+        g.kinds = (u8*)Reactive.resize((void*)g.kinds, old, wanted, 1);
+        g.states = (u8*)Reactive.resize((void*)g.states, old, wanted, 1);
+        g.queued = (u8*)Reactive.resize((void*)g.queued, old, wanted, 1);
+        g.values = (void**)Reactive.resize((void*)g.values, old, wanted, 8);
+        g.sizes = (u32*)Reactive.resize((void*)g.sizes, old, wanted, 4);
+        g.owners = (u32*)Reactive.resize((void*)g.owners, old, wanted, 4);
+        g.sources = (IdList*)Reactive.resize((void*)g.sources, old, wanted, sizeof(IdList));
+        g.observers = (IdList*)Reactive.resize((void*)g.observers, old, wanted, sizeof(IdList));
+        g.children = (IdList*)Reactive.resize((void*)g.children, old, wanted, sizeof(IdList));
+        g.cleanups = (IdList*)Reactive.resize((void*)g.cleanups, old, wanted, sizeof(IdList));
+        g.computations = (Computation*)Reactive.resize((void*)g.computations, old, wanted, sizeof(Computation));
+        g.capacity = wanted;
+    }
+
+    public static unsafe u32 allocate(u8 kind, u32 size) {
+        ReactiveGraph* g = Reactive.graph();
+        mut u32 id = 0;
+        if (g.free_nodes.count > 0) {
+            id = g.free_nodes.pop();
+        } else {
+            if (g.count == g.capacity) {
+                Reactive.grow(g, g.capacity * 2);
+            }
+            id = g.count;
+            g.count = g.count + 1;
+        }
+        g.kinds[id] = kind;
+        g.states[id] = Freshness.CLEAN;
+        g.queued[id] = 0;
+        g.sizes[id] = size;
+        g.values[id] = (void*)0;
+        if (size > 0) {
+            g.values[id] = __djinn_alloc_zeroed((size_long)size);
+        }
+        g.owners[id] = g.owner;
+        if (g.owner != 0) {
+            IdList* siblings = &g.children[g.owner];
+            siblings.push(id);
+        }
+        g.live = g.live + 1;
+        return id;
+    }
+
+    public static unsafe void attach(u32 id, Computation computation) {
+        ReactiveGraph* g = Reactive.graph();
+        g.computations[id] = computation;
+    }
+
+    public static unsafe u32 create_signal(void* initial, u32 size) {
+        u32 id = Reactive.allocate(ReactiveKind.SIGNAL, size);
+        ReactiveGraph* g = Reactive.graph();
+        memcpy(g.values[id], initial, (size_long)size);
+        return id;
+    }
+
+    public static unsafe void track(u32 id) {
+        ReactiveGraph* g = Reactive.graph();
+        u32 observer = g.observer;
+        if (observer == 0 || g.static_mode) {
+            return;
+        }
+        IdList* sources = &g.sources[observer];
+        if (sources.contains(id)) {
+            return;
+        }
+        sources.push(id);
+        IdList* observers = &g.observers[id];
+        observers.push(observer);
+    }
+
+    // The current value of a signal or memo, recorded as a dependency of the running computation.
+    public static unsafe void* read(u32 id) {
+        Reactive.track(id);
+        ReactiveGraph* g = Reactive.graph();
+        if (g.kinds[id] == ReactiveKind.MEMO) {
+            Reactive.update(id);
+        }
+        return g.values[id];
+    }
+
+    public static unsafe void* peek(u32 id) {
+        ReactiveGraph* g = Reactive.graph();
+        if (g.kinds[id] == ReactiveKind.MEMO) {
+            Reactive.update(id);
+        }
+        return g.values[id];
+    }
+
+    // Copies the new value in and returns whether it differs from the old one (byte comparison).
+    public static unsafe bool store(u32 id, void* value) {
+        ReactiveGraph* g = Reactive.graph();
+        u32 size = g.sizes[id];
+        if (memcmp(g.values[id], value, (size_long)size) == 0) {
+            return false;
+        }
+        memcpy(g.values[id], value, (size_long)size);
+        return true;
+    }
+
+    public static unsafe void write(u32 id, void* value) {
+        if (Reactive.store(id, value)) {
+            Reactive.notify(id);
+        }
+    }
+
+    // Marks everything that read 'id' as stale and runs the effects that depend on it (unless inside a batch).
+    public static unsafe void notify(u32 id) {
+        ReactiveGraph* g = Reactive.graph();
+        IdList* observers = &g.observers[id];
+        for (mut u32 i = 0; i < observers.count; i = i + 1) {
+            Reactive.mark(observers.get(i), Freshness.DIRTY);
+        }
+        if (g.batching == 0) {
+            Reactive.flush();
+        }
+    }
+
+    static unsafe void mark(u32 id, u8 state) {
+        ReactiveGraph* g = Reactive.graph();
+        if (g.states[id] >= state) {
+            return;
+        }
+        g.states[id] = state;
+        if (g.kinds[id] == ReactiveKind.EFFECT && g.queued[id] == 0) {
+            g.queued[id] = 1;
+            IdList* queue = &g.queue;
+            queue.push(id);
+        }
+        IdList* observers = &g.observers[id];
+        for (mut u32 i = 0; i < observers.count; i = i + 1) {
+            Reactive.mark(observers.get(i), Freshness.CHECK);
+        }
+    }
+
+    static unsafe void update(u32 id) {
+        ReactiveGraph* g = Reactive.graph();
+        if (g.states[id] == Freshness.CHECK) {
+            for (mut u32 i = 0; i < g.sources[id].count; i = i + 1) {
+                IdList* sources = &g.sources[id];
+                u32 source = sources.get(i);
+                if (g.kinds[source] == ReactiveKind.MEMO) {
+                    Reactive.update(source);
+                }
+                if (g.states[id] == Freshness.DIRTY) {
+                    break;
+                }
+            }
+        }
+        if (g.states[id] == Freshness.DIRTY) {
+            Reactive.run(id);
+        }
+        g.states[id] = Freshness.CLEAN;
+    }
+
+    static unsafe void unlink(u32 id) {
+        ReactiveGraph* g = Reactive.graph();
+        IdList* sources = &g.sources[id];
+        for (mut u32 i = 0; i < sources.count; i = i + 1) {
+            IdList* observers = &g.observers[sources.get(i)];
+            observers.remove(id);
+        }
+        sources.clear();
+    }
+
+    static unsafe void release_owned(u32 id) {
+        ReactiveGraph* g = Reactive.graph();
+        while (g.children[id].count > 0) {
+            IdList* children = &g.children[id];
+            Reactive.destroy(children.pop());
+        }
+        while (g.cleanups[id].count > 0) {
+            IdList* cleanups = &g.cleanups[id];
+            u32 index = cleanups.pop();
+            g.cleanup_pool[index].run();
+            Cleanup finished = g.cleanup_pool[index];
+            memset((void*)&g.cleanup_pool[index], 0, (size_long)sizeof(Cleanup));
+            IdList* free_cleanups = &g.free_cleanups;
+            free_cleanups.push(index);
+        }
+    }
+
+    static unsafe void run(u32 id) {
+        ReactiveGraph* g = Reactive.graph();
+        Reactive.release_owned(id);
+        Reactive.unlink(id);
+        u32 saved_owner = g.owner;
+        u32 saved_observer = g.observer;
+        g.owner = id;
+        g.observer = id;
+        bool changed = g.computations[id].run();
+        g.owner = saved_owner;
+        g.observer = saved_observer;
+        g.states[id] = Freshness.CLEAN;
+        if (changed && g.kinds[id] == ReactiveKind.MEMO) {
+            IdList* observers = &g.observers[id];
+            for (mut u32 i = 0; i < observers.count; i = i + 1) {
+                g.states[observers.get(i)] = Freshness.DIRTY;
+            }
+        }
+        if (g.static_mode && g.kinds[id] == ReactiveKind.EFFECT) {
+            Reactive.drop_computation(id);
+        }
+    }
+
+    public static unsafe void start(u32 id) {
+        ReactiveGraph* g = Reactive.graph();
+        g.states[id] = Freshness.DIRTY;
+        Reactive.update(id);
+    }
+
+    public static unsafe void flush() {
+        ReactiveGraph* g = Reactive.graph();
+        if (g.flushing) {
+            return;
+        }
+        g.flushing = true;
+        IdList* queue = &g.queue;
+        for (mut u32 i = 0; i < queue.count; i = i + 1) {
+            u32 id = queue.get(i);
+            g.queued[id] = 0;
+            if (g.kinds[id] == ReactiveKind.EFFECT) {
+                Reactive.update(id);
+            }
+        }
+        queue.clear();
+        g.flushing = false;
+    }
+
+    static unsafe void drop_computation(u32 id) {
+        ReactiveGraph* g = Reactive.graph();
+        Computation finished = g.computations[id];
+        memset((void*)&g.computations[id], 0, (size_long)sizeof(Computation));
+    }
+
+    static unsafe void destroy(u32 id) {
+        ReactiveGraph* g = Reactive.graph();
+        if (g.kinds[id] == ReactiveKind.FREE) {
+            return;
+        }
+        Reactive.release_owned(id);
+        Reactive.unlink(id);
+        IdList* observers = &g.observers[id];
+        observers.clear();
+        u8 kind = g.kinds[id];
+        if (kind == ReactiveKind.MEMO || kind == ReactiveKind.EFFECT) {
+            Reactive.drop_computation(id);
+        }
+        if (g.values[id] != (void*)0) {
+            free(g.values[id]);
+            g.values[id] = (void*)0;
+        }
+        g.kinds[id] = ReactiveKind.FREE;
+        g.live = g.live - 1;
+        IdList* free_nodes = &g.free_nodes;
+        free_nodes.push(id);
+    }
+
+    // Disposes a root (or any computation) with everything it owns, and detaches it from its owner.
+    public static unsafe void dispose(u32 id) {
+        ReactiveGraph* g = Reactive.graph();
+        u32 owner = g.owners[id];
+        if (owner != 0 && g.kinds[owner] != ReactiveKind.FREE) {
+            IdList* siblings = &g.children[owner];
+            siblings.remove(id);
+        }
+        Reactive.destroy(id);
+    }
+
+    public static unsafe u32 effect(fn() -> void body) {
+        u32 id = Reactive.allocate(ReactiveKind.EFFECT, 0);
+        Computation computation = { .run = () => {
+            body();
+            return false;
+        } };
+        Reactive.attach(id, computation);
+        Reactive.start(id);
+        ReactiveGraph* g = Reactive.graph();
+        if (g.sources[id].count == 0 && g.children[id].count == 0 && g.cleanups[id].count == 0) {
+            Reactive.dispose(id);
+            return 0;
+        }
+        return id;
+    }
+
+    // A root owns the computations created inside 'body'; they live until the root is disposed.
+    public static unsafe u32 root(fn() -> void body) {
+        u32 id = Reactive.create_root(Reactive.graph().owner);
+        Scope saved = Reactive.enter(id);
+        body();
+        Reactive.leave(saved);
+        return id;
+    }
+
+    public static unsafe u32 create_root(u32 owner) {
+        ReactiveGraph* g = Reactive.graph();
+        u32 saved = g.owner;
+        g.owner = owner;
+        u32 id = Reactive.allocate(ReactiveKind.ROOT, 0);
+        g.owner = saved;
+        return id;
+    }
+
+    // Makes 'owner' the current owner with no observer, so what runs next is owned but not tracked.
+    public static unsafe Scope enter(u32 owner) {
+        ReactiveGraph* g = Reactive.graph();
+        Scope saved = { .owner = g.owner, .observer = g.observer };
+        g.owner = owner;
+        g.observer = 0;
+        return saved;
+    }
+
+    public static unsafe void leave(Scope saved) {
+        ReactiveGraph* g = Reactive.graph();
+        g.owner = saved.owner;
+        g.observer = saved.observer;
+    }
+
+    public static unsafe void batch(fn() -> void body) {
+        ReactiveGraph* g = Reactive.graph();
+        g.batching = g.batching + 1;
+        body();
+        g.batching = g.batching - 1;
+        if (g.batching == 0) {
+            Reactive.flush();
+        }
+    }
+
+    public static unsafe void untrack(fn() -> void body) {
+        ReactiveGraph* g = Reactive.graph();
+        u32 saved = g.observer;
+        g.observer = 0;
+        body();
+        g.observer = saved;
+    }
+
+    public static unsafe void on_cleanup(fn() -> void body) {
+        ReactiveGraph* g = Reactive.graph();
+        if (g.owner == 0) {
+            return;
+        }
+        mut u32 index = 0;
+        if (g.free_cleanups.count > 0) {
+            IdList* free_cleanups = &g.free_cleanups;
+            index = free_cleanups.pop();
+        } else {
+            if (g.cleanup_count == g.cleanup_capacity) {
+                mut u32 grown = g.cleanup_capacity * 2;
+                if (grown < 16) {
+                    grown = 16;
+                }
+                g.cleanup_pool = (Cleanup*)Reactive.resize((void*)g.cleanup_pool, g.cleanup_capacity, grown, sizeof(Cleanup));
+                g.cleanup_capacity = grown;
+            }
+            index = g.cleanup_count;
+            g.cleanup_count = g.cleanup_count + 1;
+        }
+        Cleanup cleanup = { .run = body };
+        g.cleanup_pool[index] = cleanup;
+        IdList* cleanups = &g.cleanups[g.owner];
+        cleanups.push(index);
+    }
+
+    public static unsafe u32 owner() {
+        return Reactive.graph().owner;
+    }
+
+    // Live signals, memos, effects and roots: a test or a server render checks this to prove nothing leaked.
+    public static unsafe u32 live() {
+        return Reactive.graph().live;
+    }
+
+    // In static mode (server rendering) computations run once and nothing subscribes, so no graph is kept.
+    public static unsafe void set_static(bool enabled) {
+        Reactive.graph().static_mode = enabled;
+    }
+
+    public static unsafe bool is_static() {
+        return Reactive.graph().static_mode;
+    }
+}

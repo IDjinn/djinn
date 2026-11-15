@@ -1,0 +1,265 @@
+import std::meta;
+import std::types;
+import std::libc;
+
+namespace ui::markup;
+
+// Token surgery on the struct an attribute is written on.
+struct Items {
+    public static unsafe u32 name_at(TokenStream item) {
+        for (mut u32 i = 0; i + 1 < item.length(); i = i + 1) {
+            Token token = item.get(i);
+            if (token.kind == TokenClass.KEYWORD && token.matches("struct")) {
+                return i + 1;
+            }
+        }
+        return item.length();
+    }
+
+    public static unsafe u32 body_open(TokenStream item, u32 name) {
+        for (mut u32 i = name; i < item.length(); i = i + 1) {
+            if (Tokens.is_symbol(item.get(i), "{")) {
+                return i;
+            }
+        }
+        return item.length();
+    }
+
+    // The value of 'key: value' in the attribute arguments, or "" when it is not there.
+    public static unsafe str argument(TokenStream args, str key) {
+        for (mut u32 i = 0; i + 2 < args.length(); i = i + 1) {
+            if (args.get(i).matches(key) && Tokens.is_symbol(args.get(i + 1), ":")) {
+                return args.get(i + 2).text;
+            }
+        }
+        str empty = "";
+        return empty;
+    }
+
+    public static unsafe void quoted_name(TokenStream* out, Token name) {
+        Tokens.quoted(out, name.text, name.span);
+    }
+
+    // The struct with only its fields (members ending in ';' without '=>'), for the web stub of a server component.
+    public static unsafe void fields(TokenStream* out, TokenStream item, u32 open, u32 close) {
+        mut u32 start = open + 1;
+        while (start < close) {
+            mut u32 i = start;
+            mut bool method = false;
+            while (i < close) {
+                Token token = item.get(i);
+                if (token.kind == TokenClass.OPEN) {
+                    u32 matched = item.matching(i);
+                    if (token.matches("{")) {
+                        method = true;
+                        i = matched + 1;
+                        break;
+                    }
+                    i = matched + 1;
+                    continue;
+                }
+                if (Tokens.is_symbol(token, "=>")) {
+                    method = true;
+                }
+                i = i + 1;
+                if (Tokens.is_symbol(token, ";")) {
+                    break;
+                }
+            }
+            if (!method) {
+                Tokens.copy(out, item, start, i);
+            }
+            start = i;
+        }
+    }
+
+    // The item with its 'render' method renamed, so a generated 'render' can wrap it.
+    public static unsafe void renamed(TokenStream* out, TokenStream item, u32 open, u32 close, str replacement) {
+        mut bool done = false;
+        mut i32 depth = 0;
+        for (mut u32 i = 0; i < close; i = i + 1) {
+            Token token = item.get(i);
+            if (token.kind == TokenClass.OPEN) {
+                depth = depth + 1;
+            } else if (token.kind == TokenClass.CLOSE) {
+                depth = depth - 1;
+            }
+            if (!done && depth == 1 && i > open && token.is_ident() && token.matches("render") && i + 1 < close
+                && Tokens.is_symbol(item.get(i + 1), "(")) {
+                Tokens.ident(out, replacement, token.span);
+                done = true;
+                continue;
+            }
+            out.push(token);
+        }
+    }
+
+    // 'public unsafe Node render() { return ' ... '; }' around the tokens the caller writes in between.
+    public static unsafe void render_open(TokenStream* out, i32 span) {
+        Tokens.ident(out, "public", span);
+        Tokens.keyword(out, "unsafe", span);
+        Tokens.ident(out, "Node", span);
+        Tokens.ident(out, "render", span);
+        Tokens.open(out, "(", span);
+        Tokens.close(out, ")", span);
+        Tokens.open(out, "{", span);
+        Tokens.keyword(out, "return", span);
+    }
+
+    public static unsafe void render_close(TokenStream* out, i32 span) {
+        Tokens.punct(out, ";", span);
+        Tokens.close(out, "}", span);
+    }
+
+    public static unsafe void platform(TokenStream* out, str name, i32 span) {
+        Tokens.open(out, "[", span);
+        Tokens.ident(out, "Platform", span);
+        Tokens.open(out, "(", span);
+        Tokens.ident(out, name, span);
+        Tokens.close(out, ")", span);
+        Tokens.close(out, "]", span);
+    }
+
+    // The web build of a component that never runs on the client: its fields and a render() returning 'stub'.
+    public static unsafe void web_stub(TokenStream* out, TokenStream item, u32 name, u32 open, str kind) {
+        Token title = item.get(name);
+        u32 close = item.matching(open);
+        Items.platform(out, "web", title.span);
+        Tokens.copy(out, item, 0, open + 1);
+        Items.fields(out, item, open, close);
+        Items.render_open(out, title.span);
+        Tokens.path(out, "View", kind, title.span);
+        Tokens.open(out, "(", title.span);
+        Items.quoted_name(out, title);
+        Tokens.close(out, ")", title.span);
+        Items.render_close(out, title.span);
+        Tokens.close(out, "}", title.span);
+    }
+}
+
+struct Attributes {
+    // [Application(render: client | hydrate | server | static)] adds the entry point that runs the app.
+    public static unsafe TokenStream application(TokenStream args, TokenStream item) {
+        mut TokenStream out = TokenStream.create();
+        out.append(item);
+        u32 name = Items.name_at(item);
+        if (name >= item.length()) {
+            out.push(Token.error(0 - 1, "[Application] goes on a struct"));
+            return out;
+        }
+        Token title = item.get(name);
+        str mode = Items.argument(args, "render");
+        mut str constant = "CLIENT";
+        if (mode.length > 0) {
+            if (MacroTexts.same(mode, "client")) {
+                constant = "CLIENT";
+            } else if (MacroTexts.same(mode, "hydrate")) {
+                constant = "HYDRATE";
+            } else if (MacroTexts.same(mode, "server")) {
+                constant = "SERVER";
+            } else if (MacroTexts.same(mode, "static")) {
+                constant = "STATIC";
+            } else {
+                out.push(Token.error(0 - 1, "[Application]: render is client, hydrate, server or static"));
+                return out;
+            }
+        }
+        i32 span = title.span;
+        Tokens.ident(&out, "i32", span);
+        Tokens.ident(&out, "main", span);
+        Tokens.open(&out, "(", span);
+        Tokens.close(&out, ")", span);
+        Tokens.open(&out, "{", span);
+        Tokens.keyword(&out, "return", span);
+        Tokens.path(&out, "App", "run", span);
+        Tokens.punct(&out, "<", span);
+        out.push(title);
+        Tokens.punct(&out, ">", span);
+        Tokens.open(&out, "(", span);
+        out.push(title);
+        Tokens.open(&out, "(", span);
+        Tokens.close(&out, ")", span);
+        Tokens.punct(&out, ",", span);
+        Tokens.path(&out, "RenderMode", constant, span);
+        Tokens.close(&out, ")", span);
+        Tokens.punct(&out, ";", span);
+        Tokens.close(&out, "}", span);
+        return out;
+    }
+
+    // [Server]: rendered where the server (or the native app) runs; the web build keeps only a placeholder that
+    // adopts the HTML the server sent, so the component's code never reaches the client.
+    public static unsafe TokenStream server(TokenStream args, TokenStream item) {
+        mut TokenStream out = TokenStream.create();
+        u32 name = Items.name_at(item);
+        u32 open = Items.body_open(item, name);
+        if (open >= item.length()) {
+            out.push(Token.error(0 - 1, "[Server] goes on a struct"));
+            return out;
+        }
+        Items.platform(&out, "native", item.get(name).span);
+        out.append(item);
+        Items.web_stub(&out, item, name, open, "server_island");
+        return out;
+    }
+
+    // [Client]: an island inside a server-rendered page; the client hydrates only these.
+    public static unsafe TokenStream client(TokenStream args, TokenStream item) {
+        mut TokenStream out = TokenStream.create();
+        u32 name = Items.name_at(item);
+        u32 open = Items.body_open(item, name);
+        if (open >= item.length()) {
+            out.push(Token.error(0 - 1, "[Client] goes on a struct"));
+            return out;
+        }
+        Token title = item.get(name);
+        u32 close = item.matching(open);
+        Items.renamed(&out, item, open, close, "render_island_content");
+        Items.render_open(&out, title.span);
+        Tokens.path(&out, "View", "island", title.span);
+        Tokens.open(&out, "(", title.span);
+        Items.quoted_name(&out, title);
+        Tokens.punct(&out, ",", title.span);
+        Tokens.keyword(&out, "this", title.span);
+        Tokens.punct(&out, ".", title.span);
+        Tokens.ident(&out, "render_island_content", title.span);
+        Tokens.open(&out, "(", title.span);
+        Tokens.close(&out, ")", title.span);
+        Tokens.close(&out, ")", title.span);
+        Items.render_close(&out, title.span);
+        Tokens.close(&out, "}", title.span);
+        return out;
+    }
+
+    // [Static]: rendered once (no listeners, no graph), and the same HTML is shared by every request that shows it.
+    public static unsafe TokenStream prerendered(TokenStream args, TokenStream item) {
+        mut TokenStream out = TokenStream.create();
+        u32 name = Items.name_at(item);
+        u32 open = Items.body_open(item, name);
+        if (open >= item.length()) {
+            out.push(Token.error(0 - 1, "[Static] goes on a struct"));
+            return out;
+        }
+        Token title = item.get(name);
+        u32 close = item.matching(open);
+        Items.platform(&out, "native", title.span);
+        Items.renamed(&out, item, open, close, "render_static_content");
+        Items.render_open(&out, title.span);
+        Tokens.path(&out, "View", "prerendered", title.span);
+        Tokens.open(&out, "(", title.span);
+        Tokens.path(&out, "StaticPages", "html", title.span);
+        Tokens.punct(&out, "<", title.span);
+        out.push(title);
+        Tokens.punct(&out, ">", title.span);
+        Tokens.open(&out, "(", title.span);
+        Items.quoted_name(&out, title);
+        Tokens.punct(&out, ",", title.span);
+        Tokens.keyword(&out, "this", title.span);
+        Tokens.close(&out, ")", title.span);
+        Tokens.close(&out, ")", title.span);
+        Items.render_close(&out, title.span);
+        Tokens.close(&out, "}", title.span);
+        Items.web_stub(&out, item, name, open, "server_island");
+        return out;
+    }
+}

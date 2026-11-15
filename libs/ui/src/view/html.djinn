@@ -1,0 +1,122 @@
+import std::types;
+import std::libc;
+
+namespace ui;
+
+// Writes the retained tree as HTML. With markers (hydration), fragments are wrapped in '<!--[-->' / '<!--]-->' and
+// elements with listeners carry 'data-dj', so the client can adopt the nodes; without them the HTML is plain.
+struct Html {
+    public static unsafe TextBuffer render(Node root, bool markers) {
+        mut TextBuffer out = TextBuffer.create();
+        Html.write(&out, root.id, markers);
+        return out;
+    }
+
+    public static unsafe bool is_void(str tag) {
+        return Texts.same(tag, "br") || Texts.same(tag, "hr") || Texts.same(tag, "img") || Texts.same(tag, "input")
+            || Texts.same(tag, "meta") || Texts.same(tag, "link") || Texts.same(tag, "area") || Texts.same(tag, "base")
+            || Texts.same(tag, "col") || Texts.same(tag, "source") || Texts.same(tag, "wbr");
+    }
+
+    static unsafe void children(TextBuffer* out, u32 id, bool markers) {
+        mut u32 child = Dom.first_child(id);
+        while (child != 0) {
+            Html.write(out, child, markers);
+            child = Dom.next_sibling(child);
+        }
+    }
+
+    static unsafe void write(TextBuffer* out, u32 id, bool markers) {
+        u8 kind = Dom.kind(id);
+        if (kind == DomKind.TEXT) {
+            str text = Dom.text_of(id);
+            out.append_escaped(text.data, (u32)text.length, false);
+            return;
+        }
+        if (kind == DomKind.RAW) {
+            str html = Dom.text_of(id);
+            out.append(html);
+            return;
+        }
+        if (kind == DomKind.FRAGMENT) {
+            if (markers) {
+                out.append("<!--[-->");
+            }
+            Html.children(out, id, markers);
+            if (markers) {
+                out.append("<!--]-->");
+            }
+            return;
+        }
+        if (kind == DomKind.ISLAND || kind == DomKind.SERVER_SLOT) {
+            if (kind == DomKind.ISLAND) {
+                out.append("<dj-island data-component=\"");
+            } else {
+                out.append("<dj-server data-component=\"");
+            }
+            str name = Dom.tag(id);
+            out.append_escaped(name.data, (u32)name.length, true);
+            out.append("\">");
+            Html.children(out, id, markers);
+            if (kind == DomKind.ISLAND) {
+                out.append("</dj-island>");
+            } else {
+                out.append("</dj-server>");
+            }
+            return;
+        }
+        mut str tag = Dom.tag(id);
+        if (!HtmlSafety.is_tag_name(tag)) {
+            tag = "dj-invalid";
+        }
+        out.append("<");
+        out.append(tag);
+        Html.attributes(out, id);
+        if (markers && Dom.has_listeners(id)) {
+            out.append(" data-dj=\"");
+            out.append_number((i64)id);
+            out.append("\"");
+        }
+        out.append(">");
+        if (Html.is_void(tag)) {
+            return;
+        }
+        Html.children(out, id, markers);
+        out.append("</");
+        out.append(tag);
+        out.append(">");
+    }
+
+    // Attributes are kept newest first, so they are written back to front to keep the source order.
+    static unsafe void attributes(TextBuffer* out, u32 id) {
+        DomTree* t = Dom.tree();
+        mut u32 count = 0;
+        mut u32 index = t.nodes[id].attrs;
+        while (index != 0) {
+            count = count + 1;
+            index = t.attrs[index].next;
+        }
+        while (count > 0) {
+            count = count - 1;
+            mut u32 at = t.nodes[id].attrs;
+            for (mut u32 skip = 0; skip < count; skip = skip + 1) {
+                at = t.attrs[at].next;
+            }
+            str name = t.attrs[at].name;
+            if (!HtmlSafety.is_attribute_name(name) || HtmlSafety.is_forbidden(name)) {
+                continue;
+            }
+            out.append(" ");
+            out.append(name);
+            if (HtmlSafety.is_url_attribute(name) && !HtmlSafety.is_safe_url(t.attrs[at].value, t.attrs[at].length)) {
+                out.append("=\"");
+                out.append(HtmlSafety.BLOCKED_URL);
+                out.append("\"");
+            } else if (t.attrs[at].length > 0) {
+                out.append("=\"");
+                out.append_escaped(t.attrs[at].value, t.attrs[at].length, true);
+                out.append("\"");
+            }
+        }
+    }
+}

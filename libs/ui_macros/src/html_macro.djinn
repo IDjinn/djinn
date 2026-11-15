@@ -1,0 +1,629 @@
+import std::meta;
+import std::types;
+import std::libc;
+
+namespace ui::markup;
+
+// html!{ ... }: JSX-like markup lowered to the ui builder calls at compile time.
+//   <div class="a" on_click={handler}>text {expr}</div>   lowercase tag: a native element
+//   <Button label="x" on_click={...}/>                     Capitalized tag: a component, View.mount<Button>({ ... })
+//   {if (cond) { ... } else if (other) { ... } else { ... }} View.show
+//   {for (Item item in items) key(item.id) { ... }}        View.each (keyed), without key(...) View.each_value
+//   {for (i32 i in 0..count) { ... }}                      View.range
+//   <li for={Item item in items} key={item.id}>, <b if={cond}> shortcuts for a single element
+// '{expr}' is reactive: it becomes one effect bound to its own text node (or region, when expr is a Node).
+// Whitespace around text is dropped at tag boundaries; write {" "} to keep a space there.
+struct HtmlMacro {
+    public static unsafe TokenStream expand(TokenStream input) {
+        mut Markup markup = { .input = input, .pos = 0, .failed = false };
+        mut TokenStream out = TokenStream.create();
+        HtmlMacro.markup(&markup, &out, input.length());
+        return out;
+    }
+
+    static unsafe bool more(Markup* m, u32 end) {
+        return m.pos < end && !m.failed;
+    }
+
+    static unsafe Token current(Markup* m) {
+        return m.input.get(m.pos);
+    }
+
+    static unsafe bool at(Markup* m, u32 end, str text) {
+        return m.pos < end && Tokens.is_symbol(m.input.get(m.pos), text);
+    }
+
+    static unsafe i32 span(Markup* m) {
+        if (m.pos < m.input.length()) {
+            return m.input.get(m.pos).span;
+        }
+        if (m.input.length() > 0) {
+            return m.input.get(m.input.length() - 1).span;
+        }
+        return 0 - 1;
+    }
+
+    static unsafe void fail(Markup* m, TokenStream* out, str message) {
+        if (!m.failed) {
+            out.push(Token.error(HtmlMacro.span(m), message));
+        }
+        m.failed = true;
+    }
+
+    static unsafe void expect(Markup* m, TokenStream* out, u32 end, str text, str message) {
+        if (!HtmlMacro.at(m, end, text)) {
+            HtmlMacro.fail(m, out, message);
+            return;
+        }
+        m.pos = m.pos + 1;
+    }
+
+    // A sequence of nodes up to 'end' as one Node expression (a fragment when there are several).
+    static unsafe void markup(Markup* m, TokenStream* out, u32 end) {
+        mut TokenStream nodes = TokenStream.create();
+        mut u32 count = 0;
+        while (HtmlMacro.more(m, end)) {
+            Tokens.punct(&nodes, ".", 0 - 1);
+            Tokens.ident(&nodes, "child", 0 - 1);
+            Tokens.open(&nodes, "(", 0 - 1);
+            HtmlMacro.node(m, &nodes, end);
+            Tokens.close(&nodes, ")", 0 - 1);
+            count = count + 1;
+        }
+        if (count == 1) {
+            out.append(nodes.slice(3, nodes.length() - 1));
+            return;
+        }
+        Tokens.path(out, "Node", "fragment", 0 - 1);
+        Tokens.open(out, "(", 0 - 1);
+        Tokens.close(out, ")", 0 - 1);
+        out.append(nodes);
+    }
+
+    // One node as a Node expression.
+    static unsafe void node(Markup* m, TokenStream* out, u32 end) {
+        if (HtmlMacro.at(m, end, "<")) {
+            HtmlMacro.element(m, out, end);
+            return;
+        }
+        if (HtmlMacro.at(m, end, "{")) {
+            u32 close = m.input.matching(m.pos);
+            if (HtmlMacro.is_control(m, close)) {
+                m.pos = m.pos + 1;
+                HtmlMacro.control(m, out, close);
+                m.pos = close + 1;
+                return;
+            }
+            i32 span = HtmlMacro.span(m);
+            Tokens.path(out, "Node", "fragment", span);
+            Tokens.open(out, "(", span);
+            Tokens.close(out, ")", span);
+            HtmlMacro.insert(m, out, close);
+            return;
+        }
+        i32 span = HtmlMacro.span(m);
+        str text = HtmlMacro.text(m, end);
+        Tokens.path(out, "Node", "text", span);
+        Tokens.open(out, "(", span);
+        Tokens.quoted(out, text, span);
+        Tokens.close(out, ")", span);
+    }
+
+    static unsafe bool is_control(Markup* m, u32 close) {
+        u32 first = m.pos + 1;
+        if (first >= close) {
+            return false;
+        }
+        Token token = m.input.get(first);
+        return token.kind == TokenClass.KEYWORD && (token.matches("if") || token.matches("for"));
+    }
+
+    // '.insert(() => expr)' for the '{expr}' at the cursor, whose closing brace is 'close'.
+    static unsafe void insert(Markup* m, TokenStream* out, u32 close) {
+        i32 span = HtmlMacro.span(m);
+        if (m.pos + 1 >= close) {
+            HtmlMacro.fail(m, out, "html!: '{}' needs an expression");
+            return;
+        }
+        Tokens.punct(out, ".", span);
+        Tokens.ident(out, "insert", span);
+        Tokens.open(out, "(", span);
+        Tokens.thunk(out, m.input, m.pos + 1, close, span);
+        Tokens.close(out, ")", span);
+        m.pos = close + 1;
+    }
+
+    // Static text up to the next tag or brace, words joined by one space unless they were written together. Next to
+    // an '{expr}' the space written in between is kept ('Count: {n} items'); next to a tag it is dropped.
+    static unsafe str text(Markup* m, u32 end) {
+        u32 first = m.pos;
+        mut Chars chars = Chars.create();
+        mut bool glued = true;
+        if (first > 0 && Tokens.is_symbol(m.input.get(first - 1), "}") && !m.input.get(first - 1).joint) {
+            chars.append_byte(32);
+        }
+        while (m.pos < end && !HtmlMacro.at(m, end, "<") && !HtmlMacro.at(m, end, "{") && !HtmlMacro.at(m, end, "}")) {
+            Token token = HtmlMacro.current(m);
+            if (!glued) {
+                chars.append_byte(32);
+            }
+            chars.append(token.text);
+            glued = token.joint;
+            m.pos = m.pos + 1;
+        }
+        if (m.pos == first) {
+            m.pos = m.pos + 1;
+        }
+        if (m.pos > first && !glued && HtmlMacro.at(m, end, "{")) {
+            chars.append_byte(32);
+        }
+        return chars.view();
+    }
+
+    // A tag name: words joined by '-', ':' or '.' written without spaces ('data-id', 'aria-label').
+    static unsafe str name(Markup* m, TokenStream* out, u32 end) {
+        if (m.pos >= end || !Tokens.is_word(HtmlMacro.current(m))) {
+            HtmlMacro.fail(m, out, "html!: expected a name");
+            str empty = "";
+            return empty;
+        }
+        mut Chars chars = Chars.create();
+        while (m.pos < end) {
+            Token word = HtmlMacro.current(m);
+            chars.append(word.text);
+            m.pos = m.pos + 1;
+            if (!word.joint || m.pos + 1 >= end) {
+                break;
+            }
+            Token joiner = HtmlMacro.current(m);
+            if (!(Tokens.is_symbol(joiner, "-") || Tokens.is_symbol(joiner, ":")) || !joiner.joint) {
+                break;
+            }
+            if (!Tokens.is_word(m.input.get(m.pos + 1))) {
+                break;
+            }
+            chars.append(joiner.text);
+            m.pos = m.pos + 1;
+        }
+        return chars.view();
+    }
+
+    static unsafe void element(Markup* m, TokenStream* out, u32 end) {
+        m.pos = m.pos + 1;
+        i32 span = HtmlMacro.span(m);
+        u32 name_start = m.pos;
+        str tag = HtmlMacro.name(m, out, end);
+        mut u32 name_end = m.pos;
+        bool component = Tokens.is_upper(tag);
+        if (component) {
+            while (m.pos + 1 < end && Tokens.is_symbol(HtmlMacro.current(m), "::")) {
+                m.pos = m.pos + 2;
+            }
+            name_end = m.pos;
+        }
+        MarkupAttr* attrs = (MarkupAttr*)malloc((size_long)(64 * sizeof(MarkupAttr)));
+        mut u32 count = 0;
+        mut i32 condition = 0 - 1;
+        mut i32 loop = 0 - 1;
+        mut i32 key = 0 - 1;
+        while (HtmlMacro.more(m, end) && !HtmlMacro.at(m, end, ">") && !HtmlMacro.at(m, end, "/")) {
+            if (count == 64) {
+                HtmlMacro.fail(m, out, "html!: too many attributes");
+                return;
+            }
+            MarkupAttr attr = HtmlMacro.attribute(m, out, end);
+            if (MacroTexts.same(attr.name, "if") && attr.kind == AttrKind.EXPRESSION) {
+                condition = (i32)count;
+            } else if (MacroTexts.same(attr.name, "for") && attr.kind == AttrKind.EXPRESSION) {
+                loop = (i32)count;
+            } else if (MacroTexts.same(attr.name, "key") && attr.kind == AttrKind.EXPRESSION) {
+                key = (i32)count;
+            }
+            attrs[count] = attr;
+            count = count + 1;
+        }
+        if (m.failed) {
+            return;
+        }
+        mut bool closed = false;
+        if (HtmlMacro.at(m, end, "/")) {
+            m.pos = m.pos + 1;
+            HtmlMacro.expect(m, out, end, ">", "html!: expected '>' after '/'");
+            closed = true;
+        } else {
+            HtmlMacro.expect(m, out, end, ">", "html!: expected '>'");
+        }
+        mut TokenStream body = TokenStream.create();
+        if (component) {
+            HtmlMacro.component(m, &body, end, attrs, count, name_start, name_end, closed, span);
+        } else {
+            Tokens.path(&body, "Node", "element", span);
+            Tokens.open(&body, "(", span);
+            Tokens.quoted(&body, tag, span);
+            Tokens.close(&body, ")", span);
+            for (mut u32 i = 0; i < count; i = i + 1) {
+                if ((i32)i != condition && (i32)i != loop && (i32)i != key) {
+                    HtmlMacro.emit_attr(m, &body, attrs[i]);
+                }
+            }
+            if (!closed) {
+                HtmlMacro.children(m, &body, end);
+                HtmlMacro.closing(m, &body, end, tag);
+            }
+        }
+        if (condition >= 0) {
+            MarkupAttr when = attrs[condition];
+            mut TokenStream shown = TokenStream.create();
+            HtmlMacro.show_open(&shown, m.input, when.start, when.end, when.span);
+            Tokens.thunk(&shown, body, 0, body.length(), when.span);
+            Tokens.close(&shown, ")", when.span);
+            body = shown;
+        }
+        if (loop >= 0) {
+            MarkupAttr each = attrs[loop];
+            mut i32 key_start = 0 - 1;
+            mut i32 key_end = 0 - 1;
+            if (key >= 0) {
+                key_start = (i32)attrs[key].start;
+                key_end = (i32)attrs[key].end;
+            }
+            HtmlMacro.each(m, out, each.start, each.end, key_start, key_end, body, each.span);
+        } else {
+            out.append(body);
+        }
+    }
+
+    static unsafe MarkupAttr attribute(Markup* m, TokenStream* out, u32 end) {
+        i32 span = HtmlMacro.span(m);
+        str name = HtmlMacro.name(m, out, end);
+        mut MarkupAttr attr = { .name = name, .span = span, .kind = AttrKind.FLAG, .start = 0, .end = 0 };
+        if (!HtmlMacro.at(m, end, "=")) {
+            return attr;
+        }
+        m.pos = m.pos + 1;
+        if (m.pos < end && HtmlMacro.current(m).kind == TokenClass.STRING) {
+            attr.kind = AttrKind.TEXT;
+            attr.start = m.pos;
+            attr.end = m.pos + 1;
+            m.pos = m.pos + 1;
+            return attr;
+        }
+        if (!HtmlMacro.at(m, end, "{")) {
+            HtmlMacro.fail(m, out, "html!: an attribute value is \"text\" or {expression}");
+            return attr;
+        }
+        u32 close = m.input.matching(m.pos);
+        attr.kind = AttrKind.EXPRESSION;
+        attr.start = m.pos + 1;
+        attr.end = close;
+        m.pos = close + 1;
+        return attr;
+    }
+
+    // 'onClick', 'on_click' and 'on:click' are listeners for "click".
+    static unsafe bool is_event(str name) {
+        if (name.length < 3 || name.data[0] != 111 || name.data[1] != 110) {
+            return false;
+        }
+        i8 third = name.data[2];
+        return third == 95 || third == 58 || third == 45 || (third >= 65 && third <= 90);
+    }
+
+    static unsafe str event_name(str name) {
+        mut Chars chars = Chars.create();
+        for (mut u32 i = 2; i < (u32)name.length; i = i + 1) {
+            i8 c = name.data[i];
+            if (c == 95 || c == 58 || c == 45) {
+                continue;
+            }
+            if (c >= 65 && c <= 90) {
+                chars.append_byte(c + 32);
+            } else {
+                chars.append_byte(c);
+            }
+        }
+        return chars.view();
+    }
+
+    static unsafe void emit_attr(Markup* m, TokenStream* out, MarkupAttr attr) {
+        i32 span = attr.span;
+        Tokens.punct(out, ".", span);
+        if (attr.kind == AttrKind.EXPRESSION && HtmlMacro.is_event(attr.name)) {
+            Tokens.ident(out, "on", span);
+            Tokens.open(out, "(", span);
+            Tokens.quoted(out, HtmlMacro.event_name(attr.name), span);
+            Tokens.punct(out, ",", span);
+            Tokens.copy(out, m.input, attr.start, attr.end);
+            Tokens.close(out, ")", span);
+            return;
+        }
+        Tokens.ident(out, "attr", span);
+        Tokens.open(out, "(", span);
+        Tokens.quoted(out, attr.name, span);
+        Tokens.punct(out, ",", span);
+        if (attr.kind == AttrKind.FLAG) {
+            Tokens.quoted(out, "", span);
+        } else if (attr.kind == AttrKind.TEXT) {
+            Tokens.copy(out, m.input, attr.start, attr.end);
+        } else {
+            Tokens.thunk(out, m.input, attr.start, attr.end, span);
+        }
+        Tokens.close(out, ")", span);
+    }
+
+    // The children of an element, as calls chained on it, up to its closing tag.
+    static unsafe void children(Markup* m, TokenStream* out, u32 end) {
+        while (HtmlMacro.more(m, end)) {
+            if (HtmlMacro.at(m, end, "<") && m.pos + 1 < end && Tokens.is_symbol(m.input.get(m.pos + 1), "/")) {
+                return;
+            }
+            if (HtmlMacro.at(m, end, "<")) {
+                i32 span = HtmlMacro.span(m);
+                Tokens.punct(out, ".", span);
+                Tokens.ident(out, "child", span);
+                Tokens.open(out, "(", span);
+                HtmlMacro.element(m, out, end);
+                Tokens.close(out, ")", span);
+            } else if (HtmlMacro.at(m, end, "{")) {
+                u32 close = m.input.matching(m.pos);
+                if (HtmlMacro.is_control(m, close)) {
+                    i32 span = HtmlMacro.span(m);
+                    Tokens.punct(out, ".", span);
+                    Tokens.ident(out, "child", span);
+                    Tokens.open(out, "(", span);
+                    m.pos = m.pos + 1;
+                    HtmlMacro.control(m, out, close);
+                    m.pos = close + 1;
+                    Tokens.close(out, ")", span);
+                } else {
+                    HtmlMacro.insert(m, out, close);
+                }
+            } else {
+                i32 span = HtmlMacro.span(m);
+                str text = HtmlMacro.text(m, end);
+                Tokens.punct(out, ".", span);
+                Tokens.ident(out, "add", span);
+                Tokens.open(out, "(", span);
+                Tokens.quoted(out, text, span);
+                Tokens.close(out, ")", span);
+            }
+        }
+        HtmlMacro.fail(m, out, "html!: this element is never closed");
+    }
+
+    static unsafe void closing(Markup* m, TokenStream* out, u32 end, str tag) {
+        if (m.failed) {
+            return;
+        }
+        m.pos = m.pos + 2;
+        str name = HtmlMacro.name(m, out, end);
+        if (Tokens.is_upper(tag)) {
+            while (m.pos + 1 < end && Tokens.is_symbol(HtmlMacro.current(m), "::")) {
+                m.pos = m.pos + 2;
+            }
+        }
+        if (!m.failed && !MacroTexts.same(name, tag)) {
+            HtmlMacro.fail(m, out, "html!: the closing tag does not match the open one");
+            return;
+        }
+        HtmlMacro.expect(m, out, end, ">", "html!: expected '>' to end the closing tag");
+    }
+
+    // View.mount<Name>({ .field = value, ..., .children = <markup> }), or View.mount<Name>(Name()) without props.
+    static unsafe void component(Markup* m, TokenStream* out, u32 end, MarkupAttr* attrs, u32 count, u32 name_start, u32 name_end, bool closed, i32 span) {
+        mut TokenStream content = TokenStream.create();
+        mut bool has_children = false;
+        if (!closed) {
+            Tokens.path(&content, "Node", "fragment", span);
+            Tokens.open(&content, "(", span);
+            Tokens.close(&content, ")", span);
+            u32 before = content.length();
+            HtmlMacro.children(m, &content, end);
+            has_children = content.length() > before;
+            HtmlMacro.closing(m, &content, end, m.input.get(name_start).text);
+        }
+        Tokens.path(out, "View", "mount", span);
+        Tokens.punct(out, "<", span);
+        Tokens.copy(out, m.input, name_start, name_end);
+        Tokens.punct(out, ">", span);
+        Tokens.open(out, "(", span);
+        if (count == 0 && !has_children) {
+            Tokens.copy(out, m.input, name_start, name_end);
+            Tokens.open(out, "(", span);
+            Tokens.close(out, ")", span);
+            Tokens.close(out, ")", span);
+            return;
+        }
+        Tokens.open(out, "{", span);
+        for (mut u32 i = 0; i < count; i = i + 1) {
+            MarkupAttr attr = attrs[i];
+            if (i > 0) {
+                Tokens.punct(out, ",", attr.span);
+            }
+            Tokens.punct(out, ".", attr.span);
+            Tokens.ident(out, attr.name, attr.span);
+            Tokens.punct(out, "=", attr.span);
+            if (attr.kind == AttrKind.FLAG) {
+                Tokens.keyword(out, "true", attr.span);
+            } else {
+                Tokens.copy(out, m.input, attr.start, attr.end);
+            }
+        }
+        if (has_children) {
+            if (count > 0) {
+                Tokens.punct(out, ",", span);
+            }
+            Tokens.punct(out, ".", span);
+            Tokens.ident(out, "children", span);
+            Tokens.punct(out, "=", span);
+            out.append(content);
+        }
+        Tokens.close(out, "}", span);
+        Tokens.close(out, ")", span);
+    }
+
+    // 'View.show(() => cond, ' — the caller writes the branch thunk(s) and the ')'.
+    static unsafe void show_open(TokenStream* out, TokenStream input, u32 start, u32 end, i32 span) {
+        Tokens.path(out, "View", "show", span);
+        Tokens.open(out, "(", span);
+        Tokens.thunk(out, input, start, end, span);
+        Tokens.punct(out, ",", span);
+    }
+
+    // '{if ...}' or '{for ...}' with the cursor on the keyword; 'end' is the closing brace.
+    static unsafe void control(Markup* m, TokenStream* out, u32 end) {
+        Token keyword = HtmlMacro.current(m);
+        if (keyword.matches("if")) {
+            HtmlMacro.conditional(m, out, end);
+        } else {
+            HtmlMacro.loop(m, out, end);
+        }
+        if (!m.failed && m.pos != end) {
+            HtmlMacro.fail(m, out, "html!: unexpected tokens after the block");
+        }
+    }
+
+    // The markup inside '{ ... }' at the cursor, as a Node thunk.
+    static unsafe void block(Markup* m, TokenStream* out, u32 end) {
+        i32 span = HtmlMacro.span(m);
+        if (!HtmlMacro.at(m, end, "{")) {
+            HtmlMacro.fail(m, out, "html!: expected '{' with the markup of the block");
+            return;
+        }
+        u32 close = m.input.matching(m.pos);
+        m.pos = m.pos + 1;
+        mut TokenStream inner = TokenStream.create();
+        HtmlMacro.markup(m, &inner, close);
+        if (inner.length() == 0) {
+            Tokens.path(&inner, "Node", "none", span);
+            Tokens.open(&inner, "(", span);
+            Tokens.close(&inner, ")", span);
+        }
+        m.pos = close + 1;
+        Tokens.open(out, "(", span);
+        Tokens.close(out, ")", span);
+        Tokens.punct(out, "=>", span);
+        out.append(inner);
+    }
+
+    static unsafe void conditional(Markup* m, TokenStream* out, u32 end) {
+        i32 span = HtmlMacro.span(m);
+        m.pos = m.pos + 1;
+        if (!HtmlMacro.at(m, end, "(")) {
+            HtmlMacro.fail(m, out, "html!: expected '(' after 'if'");
+            return;
+        }
+        u32 close = m.input.matching(m.pos);
+        HtmlMacro.show_open(out, m.input, m.pos + 1, close, span);
+        m.pos = close + 1;
+        HtmlMacro.block(m, out, end);
+        if (m.pos < end && HtmlMacro.current(m).kind == TokenClass.KEYWORD && HtmlMacro.current(m).matches("else")) {
+            m.pos = m.pos + 1;
+            Tokens.punct(out, ",", span);
+            if (m.pos < end && HtmlMacro.current(m).matches("if")) {
+                Tokens.open(out, "(", span);
+                Tokens.close(out, ")", span);
+                Tokens.punct(out, "=>", span);
+                HtmlMacro.conditional(m, out, end);
+            } else {
+                HtmlMacro.block(m, out, end);
+            }
+        }
+        Tokens.close(out, ")", span);
+    }
+
+    // '(Type name in items)' and an optional 'key(expr)' after it.
+    static unsafe void loop(Markup* m, TokenStream* out, u32 end) {
+        i32 span = HtmlMacro.span(m);
+        m.pos = m.pos + 1;
+        if (!HtmlMacro.at(m, end, "(")) {
+            HtmlMacro.fail(m, out, "html!: expected '(' after 'for'");
+            return;
+        }
+        u32 close = m.input.matching(m.pos);
+        u32 header = m.pos + 1;
+        m.pos = close + 1;
+        mut i32 key_start = 0 - 1;
+        mut i32 key_end = 0 - 1;
+        if (m.pos < end && HtmlMacro.current(m).matches("key") && m.pos + 1 < end && Tokens.is_symbol(m.input.get(m.pos + 1), "(")) {
+            u32 key_close = m.input.matching(m.pos + 1);
+            key_start = (i32)(m.pos + 2);
+            key_end = (i32)key_close;
+            m.pos = key_close + 1;
+        }
+        mut TokenStream body = TokenStream.create();
+        HtmlMacro.block(m, &body, end);
+        if (m.failed) {
+            return;
+        }
+        HtmlMacro.each(m, out, header, close, key_start, key_end, body.slice(3, body.length()), span);
+    }
+
+    // Lowers 'Type name in items' + body to View.each / View.each_value / View.range.
+    static unsafe void each(Markup* m, TokenStream* out, u32 start, u32 end, i32 key_start, i32 key_end, TokenStream body, i32 span) {
+        mut u32 in_at = start;
+        while (in_at < end && !(m.input.get(in_at).kind == TokenClass.KEYWORD && m.input.get(in_at).matches("in"))) {
+            in_at = in_at + 1;
+        }
+        if (in_at == end || in_at < start + 2) {
+            out.push(Token.error(span, "html!: a loop is written 'Type name in items'"));
+            m.failed = true;
+            return;
+        }
+        u32 name_at = in_at - 1;
+        mut u32 range_at = in_at + 1;
+        while (range_at < end && !Tokens.is_symbol(m.input.get(range_at), "..")) {
+            range_at = range_at + 1;
+        }
+        if (range_at < end) {
+            Tokens.path(out, "View", "range", span);
+            Tokens.open(out, "(", span);
+            Tokens.thunk(out, m.input, in_at + 1, range_at, span);
+            Tokens.punct(out, ",", span);
+            Tokens.thunk(out, m.input, range_at + 1, end, span);
+        } else {
+            if (key_start >= 0) {
+                Tokens.path(out, "View", "each", span);
+            } else {
+                Tokens.path(out, "View", "each_value", span);
+            }
+            Tokens.punct(out, "<", span);
+            Tokens.copy(out, m.input, start, name_at);
+            Tokens.punct(out, ">", span);
+            Tokens.open(out, "(", span);
+            Tokens.thunk(out, m.input, in_at + 1, end, span);
+            if (key_start >= 0) {
+                Tokens.punct(out, ",", span);
+                HtmlMacro.parameter(out, m.input, start, in_at, span);
+                Tokens.copy(out, m.input, (u32)key_start, (u32)key_end);
+            }
+        }
+        Tokens.punct(out, ",", span);
+        HtmlMacro.parameter(out, m.input, start, in_at, span);
+        out.append(body);
+        Tokens.close(out, ")", span);
+    }
+
+    // '(Type name) => '
+    static unsafe void parameter(TokenStream* out, TokenStream input, u32 start, u32 end, i32 span) {
+        Tokens.open(out, "(", span);
+        Tokens.copy(out, input, start, end);
+        Tokens.close(out, ")", span);
+        Tokens.punct(out, "=>", span);
+    }
+}
+
+struct MacroTexts {
+    public static unsafe bool same(str left, str right) {
+        if (left.length != right.length) {
+            return false;
+        }
+        for (mut u32 i = 0; i < (u32)left.length; i = i + 1) {
+            if (left.data[i] != right.data[i]) {
+                return false;
+            }
+        }
+        return true;
+    }
+}
+

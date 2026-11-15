@@ -7,8 +7,16 @@
 - Macros: `name!{...}` and `name![...]` delimiters, statement and declaration macros, `block`, `statement`, `tokens` and variadic (`expression... xs` with `$for`) fragments, bound `type` parameters, hygienic template locals, generic arguments with commas, trailing commas, `ns::name!(...)` calls, and warning W6006 when a function shares the name of a visible `name(...)` macro.
 
 - Procedural macros: `proc macro name => handler;` and `proc attribute Name => handler;` with the `std::meta` token API (`Token`, `TokenStream`); a program that imports the library runs them while it is parsed.
+- `libs/ui` and `libs/ui_macros`: the UI library (reactive core with signals, memos and effects, retained tree, `html!` markup with components, `if`/`for` regions and keyed lists, render modes declared with `[Application(render: ...)]`, `[Server]`, `[Client]` and `[Static]`, an HTML writer that escapes and sanitizes every value, and a test host that logs tree operations), with `examples/ui-showcase` and `tests/djinnc/ui.sh`.
+- `std::text::Utf8`: strict UTF-8 validation (`sequence_length`, `is_valid`, `first_invalid`, `sanitize`) with an ASCII fast path.
 
 ### Fixed
+- A function from a `.djlib` owned its `Value` parameters but callers treated it as borrowing them (like an `extern` function) and disposed them again after the call: closures and strings passed to library functions were freed twice.
+- Instances of the closure templates (`__closureN<...>`) used by a library were left out of its object, so a program that did not use the same `fn` types failed to link.
+- A `[Platform]` declaration that was left out dropped every declaration a macro expansion had queued before it, so a procedural attribute that emitted one item per platform lost them all.
+- A lambda passed to an overloaded call is checked once per candidate; only the instance the code creates is emitted now (the others referenced locals of other functions), and lambdas are no longer listed as methods by reflection.
+- A string literal passed to a generic parameter infers `str` instead of `i8*`.
+- `str.isValidUtf8()` accepted overlong forms, UTF-16 surrogates and bytes past U+10FFFF.
 - A library built against the source std (`--std --std-dir`) no longer defines the std globals again, which made linking it with a program fail with duplicate symbols.
 - Declarations produced by a macro belong to the file of the call (imports, library interface, dependency stripping), not to the file of the macro template.
 

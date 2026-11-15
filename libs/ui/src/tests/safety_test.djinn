@@ -1,0 +1,342 @@
+namespace ui;
+
+import testing;
+import std::types;
+
+// Builds inputs byte by byte (no escape sequences needed) and renders them through the real HTML writer.
+struct Probe {
+    public static unsafe str bytes(i32 a, i32 b, i32 c, i32 d, i32 e, i32 f, u32 count) {
+        mut TextBuffer out = TextBuffer.create();
+        i32* all = (i32*)__djinn_alloc_zeroed(24);
+        all[0] = a;
+        all[1] = b;
+        all[2] = c;
+        all[3] = d;
+        all[4] = e;
+        all[5] = f;
+        for (mut u32 i = 0; i < count; i = i + 1) {
+            mut i32 value = all[i];
+            if (value > 127) {
+                value = value - 256;
+            }
+            out.append_byte((i8)value);
+        }
+        return out.view();
+    }
+
+    public static unsafe str join(str left, str middle, str right) {
+        mut TextBuffer out = TextBuffer.create();
+        out.append(left);
+        out.append(middle);
+        out.append(right);
+        return out.view();
+    }
+
+    public static unsafe i8* text(str value) {
+        TextBuffer out = Html.render(Node.element("p").add(value), false);
+        return out.data;
+    }
+
+    public static unsafe i8* attr(str name, str value) {
+        TextBuffer out = Html.render(Node.element("a").attr(name, value), false);
+        return out.data;
+    }
+
+    public static unsafe i8* element(str tag) {
+        TextBuffer out = Html.render(Node.element(tag), false);
+        return out.data;
+    }
+
+    public static unsafe i8* number(i64 value) {
+        mut TextBuffer out = TextBuffer.create();
+        out.append_number(value);
+        return out.data;
+    }
+}
+
+struct EscapingTests {
+    [Test]
+    unsafe void text_escapes_markup_characters() {
+        Expect.equal_text("<p>a&amp;b&lt;c&gt;d\"e'f</p>", Probe.text("a&b<c>d\"e'f"));
+    }
+
+    [Test]
+    unsafe void script_in_text_stays_text() {
+        Expect.equal_text("<p>&lt;script&gt;alert(1)&lt;/script&gt;</p>", Probe.text("<script>alert(1)</script>"));
+        Expect.equal_text("<p>&lt;img src=x onerror=alert(1)&gt;</p>", Probe.text("<img src=x onerror=alert(1)>"));
+        Expect.equal_text("<p>&lt;!--x--&gt;</p>", Probe.text("<!--x-->"));
+    }
+
+    [Test]
+    unsafe void entities_are_not_decoded_twice() {
+        Expect.equal_text("<p>&amp;lt;b&amp;gt;</p>", Probe.text("&lt;b&gt;"));
+        Expect.equal_text("<p>&amp;#60;</p>", Probe.text("&#60;"));
+    }
+
+    [Test]
+    unsafe void dynamic_text_is_escaped_on_every_update() {
+        signal<str> value = state("safe");
+        u32 root = Reactive.root(() => {
+            Node page = Node.element("p").insert(() => value);
+            value.set("</p><script>steal()</script>");
+            mut TextBuffer out = Html.render(page, false);
+            Expect.equal_text("<p>&lt;/p&gt;&lt;script&gt;steal()&lt;/script&gt;</p>", out.data);
+        });
+        Reactive.dispose(root);
+    }
+
+    [Test]
+    unsafe void attribute_values_cannot_break_out() {
+        Expect.equal_text("<a title=\"&quot; onmouseover=&quot;alert(1)\"></a>", Probe.attr("title", "\" onmouseover=\"alert(1)"));
+        Expect.equal_text("<a title=\"&#39; onmouseover=&#39;alert(1)\"></a>", Probe.attr("title", "' onmouseover='alert(1)"));
+        Expect.equal_text("<a title=\"&#96;x&#96;\"></a>", Probe.attr("title", "`x`"));
+        Expect.equal_text("<a title=\"&gt;&lt;script&gt;\"></a>", Probe.attr("title", "><script>"));
+        Expect.equal_text("<a title=\"a&amp;b\"></a>", Probe.attr("title", "a&b"));
+    }
+
+    [Test]
+    unsafe void dynamic_attributes_are_escaped() {
+        signal<str> css = state("ok");
+        u32 root = Reactive.root(() => {
+            Node page = Node.element("div").attr("class", () => css);
+            css.set("x\" onclick=\"evil()");
+            mut TextBuffer out = Html.render(page, false);
+            Expect.equal_text("<div class=\"x&quot; onclick=&quot;evil()\"></div>", out.data);
+        });
+        Reactive.dispose(root);
+    }
+
+    [Test]
+    unsafe void numbers_print_at_the_limits() {
+        Expect.equal_text("0", Probe.number(0));
+        Expect.equal_text("-1", Probe.number(0 - 1));
+        Expect.equal_text("9223372036854775807", Probe.number(9223372036854775807));
+        Expect.equal_text("-9223372036854775808", Probe.number(0 - 9223372036854775807 - 1));
+    }
+}
+
+struct EncodingTests {
+    [Test]
+    unsafe void well_formed_utf8_is_kept() {
+        Expect.equal_text("<p>é € 😀 日本</p>", Probe.text("é € 😀 日本"));
+        str whitespace = Probe.bytes(97, 9, 98, 10, 99, 13, 6);
+        Expect.equal_text(Probe.join("<p>", whitespace, "</p>").data, Probe.text(whitespace), "tab, line feed and carriage return are text");
+    }
+
+    [Test]
+    unsafe void lone_and_truncated_bytes_become_replacements() {
+        Expect.equal_text("<p>a�b</p>", Probe.text(Probe.bytes(97, 128, 98, 0, 0, 0, 3)), "a lone continuation byte");
+        Expect.equal_text("<p>a��</p>", Probe.text(Probe.bytes(97, 226, 130, 0, 0, 0, 3)), "a sequence cut at the end");
+        Expect.equal_text("<p>�a</p>", Probe.text(Probe.bytes(226, 97, 0, 0, 0, 0, 2)), "a lead byte without its continuation");
+        Expect.equal_text("<p>��</p>", Probe.text(Probe.bytes(255, 254, 0, 0, 0, 0, 2)), "bytes that never appear in UTF-8");
+        Expect.equal_text("<p>�</p>", Probe.text(Probe.bytes(245, 0, 0, 0, 0, 0, 1)), "a lead byte past U+10FFFF");
+    }
+
+    [Test]
+    unsafe void overlong_forms_never_become_markup() {
+        Expect.equal_text("<p>��</p>", Probe.text(Probe.bytes(192, 188, 0, 0, 0, 0, 2)), "overlong '<' in two bytes");
+        Expect.equal_text("<p>���</p>", Probe.text(Probe.bytes(224, 128, 188, 0, 0, 0, 3)), "overlong '<' in three bytes");
+        Expect.equal_text("<p>����</p>", Probe.text(Probe.bytes(240, 128, 128, 188, 0, 0, 4)), "overlong '<' in four bytes");
+        Expect.equal_text("<p>��</p>", Probe.text(Probe.bytes(193, 162, 0, 0, 0, 0, 2)), "overlong '\"'");
+    }
+
+    [Test]
+    unsafe void utf16_surrogates_are_rejected() {
+        Expect.equal_text("<p>���</p>", Probe.text(Probe.bytes(237, 160, 128, 0, 0, 0, 3)), "a high surrogate written as UTF-8 (CESU-8)");
+        Expect.equal_text("<p>���</p>", Probe.text(Probe.bytes(237, 191, 191, 0, 0, 0, 3)), "a low surrogate");
+        Expect.equal_text("<p>������</p>", Probe.text(Probe.bytes(237, 160, 189, 237, 184, 128, 6)), "a surrogate pair instead of one 4-byte sequence");
+        Expect.equal_text("<p>����</p>", Probe.text(Probe.bytes(244, 144, 128, 128, 0, 0, 4)), "past U+10FFFF");
+    }
+
+    [Test]
+    unsafe void utf16_bytes_cannot_smuggle_markup() {
+        Expect.equal_text("<p>&lt;�s�</p>", Probe.text(Probe.bytes(60, 0, 115, 0, 0, 0, 4)), "UTF-16LE '<s' : the NULs are replaced, '<' is still escaped");
+        Expect.equal_text("<p>�&lt;</p>", Probe.text(Probe.bytes(0, 60, 0, 0, 0, 0, 2)), "UTF-16BE '<'");
+    }
+
+    [Test]
+    unsafe void nul_and_control_characters_become_replacements() {
+        Expect.equal_text("<p>a�b</p>", Probe.text(Probe.bytes(97, 0, 98, 0, 0, 0, 3)), "NUL");
+        Expect.equal_text("<p>����</p>", Probe.text(Probe.bytes(1, 8, 27, 127, 0, 0, 4)), "C0 controls and DEL");
+        Expect.equal_text("<p>��</p>", Probe.text(Probe.bytes(194, 133, 194, 159, 0, 0, 4)), "C1 controls (NEL, U+009F)");
+        str nbsp = Probe.bytes(194, 160, 0, 0, 0, 0, 2);
+        Expect.equal_text(Probe.join("<p>", nbsp, "</p>").data, Probe.text(nbsp), "no-break space is text");
+        Expect.equal_text("<a title=\"a�b\"></a>", Probe.attr("title", Probe.bytes(97, 0, 98, 0, 0, 0, 3)), "inside attributes too");
+    }
+}
+
+struct UrlTests {
+    [Test]
+    unsafe void script_schemes_are_blocked() {
+        str blocked = "<a href=\"about:invalid#blocked\"></a>";
+        Expect.equal_text(blocked.data, Probe.attr("href", "javascript:alert(1)"));
+        Expect.equal_text(blocked.data, Probe.attr("href", "JaVaScRiPt:alert(1)"));
+        Expect.equal_text(blocked.data, Probe.attr("href", "  javascript:alert(1)"));
+        Expect.equal_text(blocked.data, Probe.attr("href", "vbscript:msgbox(1)"));
+        Expect.equal_text(blocked.data, Probe.attr("href", "data:text/html,<script>alert(1)</script>"));
+        Expect.equal_text(blocked.data, Probe.attr("href", "data:image/svg+xml,<svg onload=alert(1)>"));
+    }
+
+    [Test]
+    unsafe void obfuscated_schemes_are_blocked() {
+        str blocked = "<a href=\"about:invalid#blocked\"></a>";
+        Expect.equal_text(blocked.data, Probe.attr("href", Probe.join("java", Probe.bytes(9, 0, 0, 0, 0, 0, 1), "script:x")), "tab inside the scheme");
+        Expect.equal_text(blocked.data, Probe.attr("href", Probe.join("jav", Probe.bytes(10, 0, 0, 0, 0, 0, 1), "ascript:x")), "line feed inside");
+        Expect.equal_text(blocked.data, Probe.attr("href", Probe.join("", Probe.bytes(1, 2, 31, 0, 0, 0, 3), "javascript:x")), "leading control characters");
+        Expect.equal_text(blocked.data, Probe.attr("href", Probe.join("java", Probe.bytes(0, 0, 0, 0, 0, 0, 1), "script:x")), "NUL inside");
+        str utf16 = Probe.join(Probe.bytes(106, 0, 97, 0, 118, 0, 6), Probe.bytes(97, 0, 115, 0, 99, 0, 6), Probe.join(Probe.bytes(114, 0, 105, 0, 112, 0, 6), Probe.bytes(116, 0, 58, 0, 0, 0, 4), ""));
+        Expect.equal_text(blocked.data, Probe.attr("href", utf16), "UTF-16LE 'javascript:'");
+    }
+
+    [Test]
+    unsafe void entity_tricks_stay_inert() {
+        Expect.equal_text("<a href=\"javascript&amp;colon;alert(1)\"></a>", Probe.attr("href", "javascript&colon;alert(1)"), "no ':' before '/', so it is relative, and '&' is escaped");
+        Expect.equal_text("<a href=\"&amp;#106;avascript:alert(1)\"></a>", Probe.attr("href", "&#106;avascript:alert(1)"), "'&#106;' is not decoded to 'j'");
+    }
+
+    [Test]
+    unsafe void every_url_attribute_is_checked() {
+        Expect.equal_text("<a src=\"about:invalid#blocked\"></a>", Probe.attr("src", "javascript:x"));
+        Expect.equal_text("<a action=\"about:invalid#blocked\"></a>", Probe.attr("action", "javascript:x"));
+        Expect.equal_text("<a formaction=\"about:invalid#blocked\"></a>", Probe.attr("formaction", "javascript:x"));
+        Expect.equal_text("<a xlink:href=\"about:invalid#blocked\"></a>", Probe.attr("xlink:href", "javascript:x"));
+        Expect.equal_text("<a HREF=\"about:invalid#blocked\"></a>", Probe.attr("HREF", "javascript:x"));
+        Expect.equal_text("<a poster=\"about:invalid#blocked\"></a>", Probe.attr("poster", "javascript:x"));
+        Expect.equal_text("<a title=\"javascript:x\"></a>", Probe.attr("title", "javascript:x"), "not a URL attribute");
+    }
+
+    [Test]
+    unsafe void ordinary_urls_pass() {
+        Expect.equal_text("<a href=\"https://example.com/a?b=c#d\"></a>", Probe.attr("href", "https://example.com/a?b=c#d"));
+        Expect.equal_text("<a href=\"/path/with:colon\"></a>", Probe.attr("href", "/path/with:colon"));
+        Expect.equal_text("<a href=\"?q=javascript:x\"></a>", Probe.attr("href", "?q=javascript:x"));
+        Expect.equal_text("<a href=\"#a:b\"></a>", Probe.attr("href", "#a:b"));
+        Expect.equal_text("<a href=\"mailto:a@b.c\"></a>", Probe.attr("href", "mailto:a@b.c"));
+        Expect.equal_text("<a href=\"relative/page\"></a>", Probe.attr("href", "relative/page"));
+        Expect.equal_text("<a src=\"data:image/png;base64,AAAA\"></a>", Probe.attr("src", "data:image/png;base64,AAAA"));
+        Expect.equal_text("<a src=\"DATA:image/webp;base64,AAAA\"></a>", Probe.attr("src", "DATA:image/webp;base64,AAAA"));
+    }
+}
+
+struct AttributeTests {
+    [Test]
+    unsafe void event_handler_attributes_are_never_written() {
+        Expect.equal_text("<a></a>", Probe.attr("onclick", "alert(1)"));
+        Expect.equal_text("<a></a>", Probe.attr("ONCLICK", "alert(1)"));
+        Expect.equal_text("<a></a>", Probe.attr("onMouseOver", "alert(1)"));
+        Expect.equal_text("<a></a>", Probe.attr("onerror", "alert(1)"));
+        Expect.equal_text("<a></a>", Probe.attr("srcdoc", "<script>alert(1)</script>"));
+        Expect.equal_text("<a></a>", Probe.attr("SrcDoc", "<script>alert(1)</script>"));
+    }
+
+    [Test]
+    unsafe void invalid_attribute_names_are_dropped() {
+        Expect.equal_text("<a></a>", Probe.attr("a\"b", "x"));
+        Expect.equal_text("<a></a>", Probe.attr("a b", "x"));
+        Expect.equal_text("<a></a>", Probe.attr("a=b", "x"));
+        Expect.equal_text("<a></a>", Probe.attr("a>b", "x"));
+        Expect.equal_text("<a></a>", Probe.attr("1abc", "x"));
+        Expect.equal_text("<a></a>", Probe.attr("", "x"));
+        Expect.equal_text("<a></a>", Probe.attr("x/y", "x"));
+        Expect.equal_text("<a></a>", Probe.attr(Probe.bytes(97, 0, 98, 0, 0, 0, 3), "x"), "NUL in the name");
+        Expect.equal_text("<a></a>", Probe.attr(Probe.bytes(97, 9, 98, 0, 0, 0, 3), "x"), "control character in the name");
+        Expect.equal_text("<a></a>", Probe.attr(Probe.bytes(195, 169, 0, 0, 0, 0, 2), "x"), "non-ASCII name");
+        Expect.equal_text("<a data-id=\"1\" aria-label=\"x\" xml:lang=\"pt\"></a>",
+            (i8*)Html.render(Node.element("a").attr("data-id", "1").attr("aria-label", "x").attr("xml:lang", "pt"), false).data);
+    }
+
+    [Test]
+    unsafe void invalid_tag_names_are_neutralized() {
+        Expect.equal_text("<dj-invalid></dj-invalid>", Probe.element("img src=x onerror=alert(1)"));
+        Expect.equal_text("<dj-invalid></dj-invalid>", Probe.element("scr<ipt"));
+        Expect.equal_text("<dj-invalid></dj-invalid>", Probe.element(""));
+        Expect.equal_text("<dj-invalid></dj-invalid>", Probe.element("1a"));
+        Expect.equal_text("<my-widget></my-widget>", Probe.element("my-widget"));
+    }
+
+    [Test]
+    unsafe void listeners_never_reach_the_markup() {
+        Node button = html!{ <button on_click={() => Bind.flag(0, true)}>go</button> };
+        mut TextBuffer plain = Html.render(button, false);
+        Expect.equal_text("<button>go</button>", plain.data);
+        mut TextBuffer hydrated = Html.render(button, true);
+        Expect.is_false(Text.contains(hydrated.data, "click"), "only a data-dj marker, never the handler");
+    }
+}
+
+struct ControlAttributeTests {
+    [Test]
+    unsafe void if_attribute_mounts_and_unmounts_one_element() {
+        signal<bool> visible = state(false);
+        u32 root = Reactive.root(() => {
+            Node page = html!{ <div><b if={visible.get()}>shown</b><i>always</i></div> };
+            mut TextBuffer hidden = Html.render(page, false);
+            Expect.equal_text("<div><i>always</i></div>", hidden.data);
+            visible.set(true);
+            mut TextBuffer shown = Html.render(page, false);
+            Expect.equal_text("<div><b>shown</b><i>always</i></div>", shown.data);
+            visible.set(false);
+            mut TextBuffer again = Html.render(page, false);
+            Expect.equal_text("<div><i>always</i></div>", again.data);
+        });
+        Reactive.dispose(root);
+    }
+
+    [Test]
+    unsafe void control_attributes_are_not_written() {
+        Node page = html!{ <p key={7} if={true}>x</p> };
+        mut TextBuffer out = Html.render(page, false);
+        Expect.equal_text("<p>x</p>", out.data, "'if', 'for' and 'key' steer html!, they are not HTML attributes");
+    }
+
+    [Test]
+    unsafe void for_attribute_with_key_reorders_by_moving() {
+        Todo* todos = (Todo*)__djinn_alloc_zeroed((size_long)(3 * sizeof(Todo)));
+        Todo a = { .id = 1, .title = "a", .done = false };
+        Todo b = { .id = 2, .title = "b", .done = false };
+        Todo c = { .id = 3, .title = "c", .done = false };
+        todos[0] = a;
+        todos[1] = b;
+        todos[2] = c;
+        slice<Todo> first = { .data = todos, .length = 3 };
+        signal<slice<Todo>> items = state(first);
+        u32 root = Reactive.root(() => {
+            Node page = html!{ <ol><li for={Todo todo in items.get()} key={todo.id}>{todo.title}</li></ol> };
+            Todo* reversed = (Todo*)__djinn_alloc_zeroed((size_long)(3 * sizeof(Todo)));
+            reversed[0] = c;
+            reversed[1] = b;
+            reversed[2] = a;
+            slice<Todo> second = { .data = reversed, .length = 3 };
+            Dom.record();
+            items.set(second);
+            Expect.equal(2, (i64)Dom.operation_count(), "reversing three items moves two of them");
+            mut TextBuffer out = Html.render(page, false);
+            Expect.equal_text("<ol><li>c</li><li>b</li><li>a</li></ol>", out.data);
+        });
+        Reactive.dispose(root);
+    }
+
+    [Test]
+    unsafe void unkeyed_for_rebuilds_only_changed_items() {
+        i32* numbers = (i32*)__djinn_alloc_zeroed(16);
+        numbers[0] = 1;
+        numbers[1] = 2;
+        numbers[2] = 3;
+        slice<i32> first = { .data = numbers, .length = 3 };
+        signal<slice<i32>> items = state(first);
+        u32 root = Reactive.root(() => {
+            Node page = html!{ <ul>{for (i32 n in items.get()) { <li>{n}</li> }}</ul> };
+            i32* changed = (i32*)__djinn_alloc_zeroed(16);
+            changed[0] = 1;
+            changed[1] = 20;
+            changed[2] = 3;
+            slice<i32> second = { .data = changed, .length = 3 };
+            Dom.record();
+            items.set(second);
+            Expect.contains(Dom.operations(), "remove");
+            mut TextBuffer out = Html.render(page, false);
+            Expect.equal_text("<ul><li>1</li><li>20</li><li>3</li></ul>", out.data);
+        });
+        Reactive.dispose(root);
+    }
+}

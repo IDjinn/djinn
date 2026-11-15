@@ -163,7 +163,7 @@ reflection, no registration. Source is inline (`Verify.source(src).runs(Expected
 - `driver/` holds options, project (`djinn.proj`), library (`.djlib`), linker, JIT, tiering, watch mode.
 - `runtime/`: C runtime (scheduler, threads, coroutines, io, sockets, filesystem, diagnostics, int128). `--runtime-lib`
   links the prebuilt one instead of compiling the sources each time.
-- `libs/testing`: the Djinn test framework (`[Test]`, producers, `--bench`, `--junit`, workflows). `djinn-lsp/`: language
+- `libs/testing`: the Djinn test framework (`[Test]`, producers, `--bench`, `--junit`, workflows). `libs/ui` + `libs/ui_macros`: the UI library (signals, `html!`, render modes, HTML writer; see `libs/ui/README.md`, tested by `tests/djinnc/ui.sh` with `examples/ui-showcase`). `djinn-lsp/`: language
   server. `tools/`: bootstrap, runtime/std builders, Compiler Explorer, VS Code extension.
 - `docs/`: git submodule (Fumadocs site).
 - CI (`.github/workflows/ci.yml`) runs bootstrap, conformance and unit tests on Linux and Windows with `DJINN_USE_LLD=1`.
@@ -184,7 +184,7 @@ Files in `std/` (namespaces `std::<folder>`; consumed as `std.djlib`, built by `
   `map` take an optional `allocator`
 - `memory/` — `arena` (bump allocator with `mark`/`reset_to`/`reset`, blocks from `__djinn_alloc`), `pool`, `allocator`
   (heap, arena or pool handle), `owner<T>`, `shared<T>` (atomic refcount)
-- `text/` — `string_builder`, `Text` (join, number to text, utf-8), `Numbers`, `Chars`, `str`/`string` methods (`split`,
+- `text/` — `string_builder`, `Text` (join, number to text, utf-8), `Utf8` (strict RFC 3629 validation and sanitizing: no overlong forms, surrogates or bytes past U+10FFFF), `Numbers`, `Chars`, `str`/`string` methods (`split`,
   `replace`, `repeat`, `toUpper`, `parseI64`, `utf8At`, ...), `interner`/`symbol` (scoped or `interner.shared`)
 - `encoding/` — `byte_buffer`, `Hex`, `Base64`; `hashing/` — `Hash` (FNV-1a, xxHash64, SHA-256)
 - `format/` — `csv_reader`/`csv_writer`, `toml_reader` (streaming)

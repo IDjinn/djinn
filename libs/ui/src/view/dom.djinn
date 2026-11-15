@@ -1,0 +1,605 @@
+import std::types;
+import std::libc;
+
+namespace ui;
+
+unsafe static mut ptr dom_tree = null;
+
+struct DomKind {
+    const u8 FREE = 0;
+    const u8 ELEMENT = 1;
+    const u8 TEXT = 2;
+    const u8 FRAGMENT = 3;
+    const u8 ISLAND = 4;
+    const u8 SERVER_SLOT = 5;
+    const u8 RAW = 6;
+}
+
+// One node of the retained tree every host renders from. A fragment groups children without a box of its own
+// (regions of 'if' and 'for' are fragments); an island marks a client component inside a server-rendered page.
+struct DomNode {
+    mut u8 kind;
+    mut str tag;
+    mut u32 parent;
+    mut u32 first;
+    mut u32 last;
+    mut u32 prev;
+    mut u32 next;
+    mut u32 attrs;
+    mut u32 listeners;
+    mut i8* text;
+    mut u32 text_length;
+}
+
+struct DomAttr {
+    mut str name;
+    mut i8* value;
+    mut u32 length;
+    mut u32 next;
+}
+
+struct Listener {
+    fn() -> void run;
+}
+
+struct ListenerInfo {
+    mut str event;
+    mut u32 next;
+}
+
+struct DomTree {
+    mut DomNode* nodes;
+    mut u32 count;
+    mut u32 capacity;
+    mut IdList free_nodes;
+    mut u32 live;
+
+    mut DomAttr* attrs;
+    mut u32 attr_count;
+    mut u32 attr_capacity;
+    mut IdList free_attrs;
+
+    mut Listener* listeners;
+    mut ListenerInfo* listener_info;
+    mut u32 listener_count;
+    mut u32 listener_capacity;
+    mut IdList free_listeners;
+
+    mut bool static_mode;
+    mut bool recording;
+    mut u32 operations;
+    mut TextBuffer log;
+}
+
+struct Texts {
+    public static unsafe bool same(str left, str right) {
+        if (left.length != right.length) {
+            return false;
+        }
+        return memcmp((void*)left.data, (void*)right.data, (size_long)left.length) == 0;
+    }
+
+    public static unsafe bool same_bytes(i8* left, u32 left_length, i8* right, u32 right_length) {
+        if (left_length != right_length) {
+            return false;
+        }
+        if (left_length == 0) {
+            return true;
+        }
+        return memcmp((void*)left, (void*)right, (size_long)left_length) == 0;
+    }
+
+    public static unsafe i8* copy(i8* data, u32 length) {
+        i8* copied = (i8*)malloc((size_long)(length + 1));
+        if (length > 0) {
+            memcpy((void*)copied, (void*)data, (size_long)length);
+        }
+        copied[length] = 0;
+        return copied;
+    }
+}
+
+// The retained UI tree. Every change goes through here, so the host that draws it (HostTest's operation log,
+// the HTML writer, later the native renderer and the web DOM bridge) sees exactly what changed.
+struct Dom {
+    public static unsafe DomTree* tree() {
+        if (dom_tree == null) {
+            DomTree* t = (DomTree*)__djinn_alloc_zeroed((size_long)sizeof(DomTree));
+            t.count = 1;
+            t.attr_count = 1;
+            t.listener_count = 1;
+            t.log = TextBuffer.create();
+            dom_tree = (ptr)t;
+        }
+        return (DomTree*)dom_tree;
+    }
+
+    static unsafe void* resize(void* data, u32 old_count, u32 new_count, u64 item) {
+        void* grown = realloc(data, (size_long)((u64)new_count * item));
+        memset((void*)((u8*)grown + (u64)old_count * item), 0, (size_long)((u64)(new_count - old_count) * item));
+        return grown;
+    }
+
+    static unsafe u32 allocate(u8 kind, str tag) {
+        DomTree* t = Dom.tree();
+        mut u32 id = 0;
+        if (t.free_nodes.count > 0) {
+            IdList* free_nodes = &t.free_nodes;
+            id = free_nodes.pop();
+        } else {
+            if (t.count >= t.capacity) {
+                mut u32 grown = t.capacity * 2;
+                if (grown < 64) {
+                    grown = 64;
+                }
+                t.nodes = (DomNode*)Dom.resize((void*)t.nodes, t.capacity, grown, sizeof(DomNode));
+                t.capacity = grown;
+            }
+            id = t.count;
+            t.count = t.count + 1;
+        }
+        memset((void*)&t.nodes[id], 0, (size_long)sizeof(DomNode));
+        t.nodes[id].kind = kind;
+        t.nodes[id].tag = tag;
+        t.live = t.live + 1;
+        return id;
+    }
+
+    public static unsafe u32 element(str tag) {
+        return Dom.allocate(DomKind.ELEMENT, tag);
+    }
+
+    public static unsafe u32 text(str value) {
+        u32 id = Dom.allocate(DomKind.TEXT, "");
+        DomTree* t = Dom.tree();
+        t.nodes[id].text = Texts.copy(value.data, (u32)value.length);
+        t.nodes[id].text_length = (u32)value.length;
+        return id;
+    }
+
+    // Markup that was rendered before (a [Static] page): written as it is, never escaped.
+    public static unsafe u32 raw(str html) {
+        u32 id = Dom.allocate(DomKind.RAW, "");
+        DomTree* t = Dom.tree();
+        t.nodes[id].text = Texts.copy(html.data, (u32)html.length);
+        t.nodes[id].text_length = (u32)html.length;
+        return id;
+    }
+
+    public static unsafe u32 fragment() {
+        return Dom.allocate(DomKind.FRAGMENT, "");
+    }
+
+    public static unsafe u32 island(str name) {
+        return Dom.allocate(DomKind.ISLAND, name);
+    }
+
+    public static unsafe u32 server_slot(str name) {
+        return Dom.allocate(DomKind.SERVER_SLOT, name);
+    }
+
+    public static unsafe DomNode* at(u32 id) {
+        return &Dom.tree().nodes[id];
+    }
+
+    public static unsafe u8 kind(u32 id) {
+        return Dom.at(id).kind;
+    }
+
+    public static unsafe str tag(u32 id) {
+        return Dom.at(id).tag;
+    }
+
+    public static unsafe u32 parent(u32 id) {
+        return Dom.at(id).parent;
+    }
+
+    public static unsafe u32 first_child(u32 id) {
+        return Dom.at(id).first;
+    }
+
+    public static unsafe u32 next_sibling(u32 id) {
+        return Dom.at(id).next;
+    }
+
+    public static unsafe str text_of(u32 id) {
+        DomNode* node = Dom.at(id);
+        str value = { .data = node.text, .length = (size)node.text_length };
+        return value;
+    }
+
+    public static unsafe u32 child_count(u32 id) {
+        mut u32 count = 0;
+        mut u32 child = Dom.at(id).first;
+        while (child != 0) {
+            count = count + 1;
+            child = Dom.at(child).next;
+        }
+        return count;
+    }
+
+    public static unsafe u32 live() {
+        return Dom.tree().live;
+    }
+
+    public static unsafe void set_static(bool enabled) {
+        Dom.tree().static_mode = enabled;
+    }
+
+    public static unsafe bool is_static() {
+        return Dom.tree().static_mode;
+    }
+
+    public static unsafe void set_text(u32 id, i8* data, u32 length) {
+        DomNode* node = Dom.at(id);
+        if (Texts.same_bytes(node.text, node.text_length, data, length)) {
+            return;
+        }
+        if (node.text != (i8*)0) {
+            free((void*)node.text);
+        }
+        node.text = Texts.copy(data, length);
+        node.text_length = length;
+        if (Dom.logging()) {
+            Dom.begin("set_text", id);
+            Dom.quote(data, length);
+            Dom.end();
+        }
+    }
+
+    public static unsafe void set_number(u32 id, i64 value) {
+        mut TextBuffer digits = TextBuffer.create();
+        digits.append_number(value);
+        Dom.set_text(id, digits.data, digits.length);
+        digits.release();
+    }
+
+    public static unsafe u32 find_attr(u32 id, str name) {
+        DomTree* t = Dom.tree();
+        mut u32 index = t.nodes[id].attrs;
+        while (index != 0) {
+            if (Texts.same(t.attrs[index].name, name)) {
+                return index;
+            }
+            index = t.attrs[index].next;
+        }
+        return 0;
+    }
+
+    public static unsafe void set_attr(u32 id, str name, i8* data, u32 length) {
+        DomTree* t = Dom.tree();
+        mut u32 index = Dom.find_attr(id, name);
+        if (index != 0) {
+            if (Texts.same_bytes(t.attrs[index].value, t.attrs[index].length, data, length)) {
+                return;
+            }
+            free((void*)t.attrs[index].value);
+        } else {
+            if (t.free_attrs.count > 0) {
+                IdList* free_attrs = &t.free_attrs;
+                index = free_attrs.pop();
+            } else {
+                if (t.attr_count >= t.attr_capacity) {
+                    mut u32 grown = t.attr_capacity * 2;
+                    if (grown < 64) {
+                        grown = 64;
+                    }
+                    t.attrs = (DomAttr*)Dom.resize((void*)t.attrs, t.attr_capacity, grown, sizeof(DomAttr));
+                    t.attr_capacity = grown;
+                }
+                index = t.attr_count;
+                t.attr_count = t.attr_count + 1;
+            }
+            t.attrs[index].name = name;
+            t.attrs[index].next = t.nodes[id].attrs;
+            t.nodes[id].attrs = index;
+        }
+        t.attrs[index].value = Texts.copy(data, length);
+        t.attrs[index].length = length;
+        if (Dom.logging()) {
+            Dom.begin("set_attr", id);
+            Dom.log_text(" ");
+            Dom.log_text(name);
+            Dom.log_text("=");
+            Dom.quote(data, length);
+            Dom.end();
+        }
+    }
+
+    public static unsafe void remove_attr(u32 id, str name) {
+        DomTree* t = Dom.tree();
+        mut u32 previous = 0;
+        mut u32 index = t.nodes[id].attrs;
+        while (index != 0) {
+            u32 next = t.attrs[index].next;
+            if (Texts.same(t.attrs[index].name, name)) {
+                if (previous == 0) {
+                    t.nodes[id].attrs = next;
+                } else {
+                    t.attrs[previous].next = next;
+                }
+                free((void*)t.attrs[index].value);
+                memset((void*)&t.attrs[index], 0, (size_long)sizeof(DomAttr));
+                IdList* free_attrs = &t.free_attrs;
+                free_attrs.push(index);
+                if (Dom.logging()) {
+                    Dom.begin("remove_attr", id);
+                    Dom.log_text(" ");
+                    Dom.log_text(name);
+                    Dom.end();
+                }
+                return;
+            }
+            previous = index;
+            index = next;
+        }
+    }
+
+    public static unsafe str attr(u32 id, str name) {
+        u32 index = Dom.find_attr(id, name);
+        if (index == 0) {
+            str empty = "";
+            return empty;
+        }
+        DomTree* t = Dom.tree();
+        str value = { .data = t.attrs[index].value, .length = (size)t.attrs[index].length };
+        return value;
+    }
+
+    public static unsafe bool has_attr(u32 id, str name) {
+        return Dom.find_attr(id, name) != 0;
+    }
+
+    static unsafe void detach(u32 child) {
+        DomNode* node = Dom.at(child);
+        u32 parent = node.parent;
+        if (parent == 0) {
+            return;
+        }
+        DomNode* owner = Dom.at(parent);
+        if (node.prev != 0) {
+            Dom.at(node.prev).next = node.next;
+        } else {
+            owner.first = node.next;
+        }
+        if (node.next != 0) {
+            Dom.at(node.next).prev = node.prev;
+        } else {
+            owner.last = node.prev;
+        }
+        node.parent = 0;
+        node.prev = 0;
+        node.next = 0;
+    }
+
+    // Puts 'child' into 'parent' before 'before' (0 appends). A child that already had a parent is moved.
+    public static unsafe void insert(u32 parent, u32 child, u32 before) {
+        bool moving = Dom.at(child).parent != 0;
+        Dom.detach(child);
+        DomNode* node = Dom.at(child);
+        DomNode* owner = Dom.at(parent);
+        node.parent = parent;
+        if (before == 0) {
+            node.prev = owner.last;
+            if (owner.last != 0) {
+                Dom.at(owner.last).next = child;
+            } else {
+                owner.first = child;
+            }
+            owner.last = child;
+        } else {
+            DomNode* after = Dom.at(before);
+            node.next = before;
+            node.prev = after.prev;
+            if (after.prev != 0) {
+                Dom.at(after.prev).next = child;
+            } else {
+                owner.first = child;
+            }
+            after.prev = child;
+        }
+        if (Dom.logging()) {
+            if (moving) {
+                Dom.begin("move", child);
+            } else {
+                Dom.begin("insert", child);
+            }
+            Dom.log_text(" into #");
+            Dom.log_number(parent);
+            if (before != 0) {
+                Dom.log_text(" before #");
+                Dom.log_number(before);
+            }
+            Dom.end();
+        }
+    }
+
+    public static unsafe void append(u32 parent, u32 child) {
+        Dom.insert(parent, child, 0);
+    }
+
+    // Detaches 'id' and frees it with its whole subtree.
+    public static unsafe void remove(u32 id) {
+        if (Dom.logging()) {
+            Dom.begin("remove", id);
+            Dom.end();
+        }
+        Dom.detach(id);
+        Dom.release(id);
+    }
+
+    public static unsafe void clear_children(u32 id) {
+        while (Dom.at(id).first != 0) {
+            Dom.remove(Dom.at(id).first);
+        }
+    }
+
+    static unsafe void release(u32 id) {
+        DomTree* t = Dom.tree();
+        mut u32 child = t.nodes[id].first;
+        while (child != 0) {
+            u32 next = t.nodes[child].next;
+            Dom.release(child);
+            child = next;
+        }
+        mut u32 attr = t.nodes[id].attrs;
+        while (attr != 0) {
+            u32 next = t.attrs[attr].next;
+            free((void*)t.attrs[attr].value);
+            memset((void*)&t.attrs[attr], 0, (size_long)sizeof(DomAttr));
+            IdList* free_attrs = &t.free_attrs;
+            free_attrs.push(attr);
+            attr = next;
+        }
+        mut u32 listener = t.nodes[id].listeners;
+        while (listener != 0) {
+            u32 next = t.listener_info[listener].next;
+            Listener finished = t.listeners[listener];
+            memset((void*)&t.listeners[listener], 0, (size_long)sizeof(Listener));
+            IdList* free_listeners = &t.free_listeners;
+            free_listeners.push(listener);
+            listener = next;
+        }
+        if (t.nodes[id].text != (i8*)0) {
+            free((void*)t.nodes[id].text);
+        }
+        memset((void*)&t.nodes[id], 0, (size_long)sizeof(DomNode));
+        t.live = t.live - 1;
+        IdList* free_nodes = &t.free_nodes;
+        free_nodes.push(id);
+    }
+
+    public static unsafe void listen(u32 id, str event, fn() -> void handler) {
+        DomTree* t = Dom.tree();
+        if (t.static_mode) {
+            return;
+        }
+        mut u32 index = 0;
+        if (t.free_listeners.count > 0) {
+            IdList* free_listeners = &t.free_listeners;
+            index = free_listeners.pop();
+        } else {
+            if (t.listener_count >= t.listener_capacity) {
+                mut u32 grown = t.listener_capacity * 2;
+                if (grown < 16) {
+                    grown = 16;
+                }
+                t.listeners = (Listener*)Dom.resize((void*)t.listeners, t.listener_capacity, grown, sizeof(Listener));
+                t.listener_info = (ListenerInfo*)Dom.resize((void*)t.listener_info, t.listener_capacity, grown, sizeof(ListenerInfo));
+                t.listener_capacity = grown;
+            }
+            index = t.listener_count;
+            t.listener_count = t.listener_count + 1;
+        }
+        Listener listener = { .run = handler };
+        t.listeners[index] = listener;
+        t.listener_info[index].event = event;
+        t.listener_info[index].next = t.nodes[id].listeners;
+        t.nodes[id].listeners = index;
+    }
+
+    public static unsafe bool has_listeners(u32 id) {
+        return Dom.at(id).listeners != 0;
+    }
+
+    // Runs the handlers for 'event' on 'id' and then on its ancestors (bubbling), as one batch of updates.
+    public static unsafe i32 dispatch(u32 id, str event) {
+        DomTree* t = Dom.tree();
+        ReactiveGraph* g = Reactive.graph();
+        g.batching = g.batching + 1;
+        mut i32 handled = 0;
+        mut u32 node = id;
+        while (node != 0) {
+            mut u32 listener = t.nodes[node].listeners;
+            while (listener != 0) {
+                u32 next = t.listener_info[listener].next;
+                if (Texts.same(t.listener_info[listener].event, event)) {
+                    t.listeners[listener].run();
+                    handled = handled + 1;
+                }
+                listener = next;
+            }
+            node = t.nodes[node].parent;
+        }
+        g.batching = g.batching - 1;
+        if (g.batching == 0) {
+            Reactive.flush();
+        }
+        return handled;
+    }
+
+    // The first live element under 'root' whose attribute 'id' is 'name' (0 when there is none).
+    public static unsafe u32 find(u32 root, str name) {
+        if (Dom.kind(root) == DomKind.ELEMENT) {
+            str value = Dom.attr(root, "id");
+            if (Dom.has_attr(root, "id") && Texts.same(value, name)) {
+                return root;
+            }
+        }
+        mut u32 child = Dom.first_child(root);
+        while (child != 0) {
+            u32 found = Dom.find(child, name);
+            if (found != 0) {
+                return found;
+            }
+            child = Dom.next_sibling(child);
+        }
+        return 0;
+    }
+
+    // HostTest: from here on every change is written to the operation log, one line per operation.
+    public static unsafe void record() {
+        DomTree* t = Dom.tree();
+        t.recording = true;
+        t.operations = 0;
+        TextBuffer* log = &t.log;
+        log.clear();
+    }
+
+    public static unsafe void stop_recording() {
+        Dom.tree().recording = false;
+    }
+
+    public static unsafe i8* operations() {
+        return Dom.tree().log.data;
+    }
+
+    public static unsafe u32 operation_count() {
+        return Dom.tree().operations;
+    }
+
+    static unsafe bool logging() {
+        return Dom.tree().recording;
+    }
+
+    static unsafe void begin(str operation, u32 id) {
+        DomTree* t = Dom.tree();
+        t.operations = t.operations + 1;
+        TextBuffer* log = &t.log;
+        log.append(operation);
+        log.append(" #");
+        log.append_number((i64)id);
+    }
+
+    static unsafe void log_text(str text) {
+        TextBuffer* log = &Dom.tree().log;
+        log.append(text);
+    }
+
+    static unsafe void log_number(u32 value) {
+        TextBuffer* log = &Dom.tree().log;
+        log.append_number((i64)value);
+    }
+
+    static unsafe void quote(i8* data, u32 length) {
+        TextBuffer* log = &Dom.tree().log;
+        log.append(" \"");
+        log.append_bytes(data, length);
+        log.append("\"");
+    }
+
+    static unsafe void end() {
+        TextBuffer* log = &Dom.tree().log;
+        log.append("\n");
+    }
+}
