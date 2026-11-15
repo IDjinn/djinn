@@ -70,7 +70,7 @@ A tagged enum with exactly two variants, one without payload and one with a sing
 - `where T : A, B; where U : C` constrains type parameters; a struct or enum type argument must satisfy the interfaces, checked at instantiation. A generic type can also list interfaces (`struct X<T> where T : I : J`).
 - `optional<i32>::Value(1)` builds a generic enum value; the type arguments can be left out when the expected type (`return result::Err(e)` in a `result<i32, E>` function) or the payload arguments (`optional::Some(7)`) determine them; struct initializers and `switch` work on instances.
 - Generic interfaces: `interface Comparable<T> { i32 compare(T other); }`, used as `struct P : Comparable<P>` or in bounds (`where T : Comparable<T>`); interfaces can declare `operator` members.
-- Generic functions: `T larger<T>(T a, T b) where T : Comparable<T> { ... }`; type arguments are inferred from the arguments (including `Pair<K, V>` and `T*` parameters) or given explicitly, as in `first<i64>(1, 2)`.
+- Generic functions: `T larger<T>(T a, T b) where T : Comparable<T> { ... }`; type arguments are inferred from the arguments (including `Pair<K, V>` and `T*` parameters) or given explicitly, as in `first<i64>(1, 2)`; a string literal passed where a bare type parameter is expected infers `str`.
 - `impl Box<T> { ... }` and `impl Iface for Box<T> { ... }` add methods and interfaces to every instance; the impl names the type parameters itself.
 - Generic methods: `T pick<U>(U marker, T other)` in a struct or impl, and `public static T twice<T>(T item)`; inferred from the arguments or explicit (`holder.convert<i64>(30)`).
 - A generic constraint made only of operator members (`Equatable<T>`, `Addition<T>`) is satisfied by numbers and pointers, which have those operators natively.
@@ -275,7 +275,7 @@ keeps the block for diagnostics but injects nothing. A target that is not declar
   parameter is the environment `{ drop, captures... }` (`codegen/code_generator_closures.djinn`). Captures are copied
   (trivial) or moved (values), read-only inside (E3064), cannot be moved out (E3065); untyped parameters need an expected
   `fn` type (E3066). A lambda without captures allocates nothing; a function name converts through a `$fn` thunk. Not
-  supported yet: `await` or `throws` inside a lambda, generic lambdas, and copying a `fn` value.
+  supported yet: `await` or `throws` inside a lambda, generic lambdas, and copying a `fn` value. A lambda passed to an overloaded call is checked once per candidate; only the instance the generated code creates is emitted (`define_pending_lambdas`), and lambdas are not listed as methods by reflection. A function from a `.djlib` owns its `Value` parameters like any Djinn function (only `extern "C"` functions borrow them).
 - Hooks (`std::system`): `System.hook(HookKind.PANIC, &handler)` installs `void handler(i8* message, i8* file, u32 line)`, which runs instead of the
   default panic report and then the process aborts; it returns the previous handler. `System.unhook(kind)` removes it, and
   `System.print_default_panic_report` prints the standard report from inside a handler. The macro `hook(panic, handler)` is the short form.
