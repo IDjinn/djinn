@@ -1,0 +1,103 @@
+import std::types;
+import std::libc;
+
+namespace ui;
+
+// What a VirtualList remembers between scrolls: the rows it keeps, and the window they cover.
+struct WindowState {
+    mut ListState* rows;
+    mut i32 first;
+    mut i32 last;
+    mut bool built;
+}
+
+// A scrolling list of 'count' rows 'item_height' CSS pixels tall in a box 'height' pixels tall that mounts only the
+// rows in view (and a few above and below), however long the list is. 'row' builds the row for an index; a row keeps
+// its state while it stays in the window and is disposed when it leaves. The box scrolls like any other container
+// (wheel, keys, draggable thumb), and a "virtual-row" is positioned by its index with the style attribute.
+struct VirtualList {
+    i32 count;
+    i32 item_height;
+    i32 height;
+    fn(i32) -> Node row;
+
+    const i32 OVERSCAN = 3;
+
+    // Builds the row 'index' inside its slot.
+    static unsafe Node slot(VirtualList* list, i32 index) {
+        mut TextBuffer style = TextBuffer.create();
+        style.append("position:absolute;left:0;right:0;top:");
+        style.append_number((i64)(index * list.item_height));
+        style.append("px;height:");
+        style.append_number((i64)list.item_height);
+        style.append("px");
+        Node wrapper = Node.element("div").attr("class", "virtual-row").attr("role", "listitem");
+        Dom.set_attr(wrapper.id, "style", style.data, style.length);
+        __djinn_free((void*)style.data);
+        wrapper.child(list.row(index));
+        return wrapper;
+    }
+
+    // Mounts what the scroll position of 'box' puts in view and drops what left it.
+    static unsafe void sync(VirtualList* list, WindowState* window, u32 box) {
+        f32 scale = (f32)Styles.device_scale();
+        i32 top = (i32)(Scroll.top(box) / scale);
+        mut i32 first = top / list.item_height - VirtualList.OVERSCAN;
+        if (first < 0) {
+            first = 0;
+        }
+        mut i32 last = (top + list.height) / list.item_height + 1 + VirtualList.OVERSCAN;
+        if (last > list.count) {
+            last = list.count;
+        }
+        if (window.built && window.first == first && window.last == last) {
+            return;
+        }
+        window.built = true;
+        window.first = first;
+        window.last = last;
+        mut i32 shown = last - first;
+        if (shown < 0) {
+            shown = 0;
+        }
+        Lists.begin(window.rows, (u32)shown);
+        for (mut i32 k = 0; k < shown; k = k + 1) {
+            i32 index = first + k;
+            if (!Lists.adopt(window.rows, (u32)k, (i64)index)) {
+                Scope saved = Lists.open(window.rows, (u32)k);
+                Node node = VirtualList.slot(list, index);
+                Lists.close(window.rows, (u32)k, node, saved);
+            }
+        }
+        Lists.finish(window.rows);
+    }
+
+    static unsafe void free(WindowState* window) {
+        Lists.release(window.rows);
+        __djinn_free((void*)window);
+    }
+
+    public unsafe Node render() {
+        mut TextBuffer size = TextBuffer.create();
+        size.append("height:");
+        size.append_number((i64)this.height);
+        size.append("px");
+        Node box = Node.element("div").attr("class", "virtual").attr("role", "list");
+        Dom.set_attr(box.id, "style", size.data, size.length);
+        size.length = 0;
+        size.append("position:relative;height:");
+        size.append_number((i64)(this.count * this.item_height));
+        size.append("px");
+        Node space = Node.element("div").attr("class", "virtual-space");
+        Dom.set_attr(space.id, "style", size.data, size.length);
+        __djinn_free((void*)size.data);
+        box.child(space);
+        WindowState* window = (WindowState*)__djinn_alloc_zeroed((size_long)sizeof(WindowState));
+        window.rows = Lists.create(space.id);
+        u32 id = box.id;
+        Dom.listen(id, "scroll", () => VirtualList.sync(this, window, id));
+        Reactive.on_cleanup(() => VirtualList.free(window));
+        VirtualList.sync(this, window, id);
+        return box;
+    }
+}

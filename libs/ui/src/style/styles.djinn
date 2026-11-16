@@ -528,6 +528,52 @@ struct Styles {
         return CssNames.equal(property, "font-size") || CssNames.equal(property, "color-scheme");
     }
 
+    // The style attribute: "name: value; name: value" declarations that win over the sheets. Custom properties are
+    // not read from it. The values are slices of the attribute text, so nothing is allocated.
+    static unsafe void inline(u32 id, Style* style, Style* parent, ValueContext* context) {
+        if (!Dom.has_attr(id, "style")) {
+            return;
+        }
+        str text = Dom.attr(id, "style");
+        u32 end = (u32)text.length;
+        mut u32 at = 0;
+        while (at < end) {
+            mut u32 stop = at;
+            while (stop < end && text.data[stop] != 59) {
+                stop = stop + 1;
+            }
+            mut u32 colon = at;
+            while (colon < stop && text.data[colon] != 58) {
+                colon = colon + 1;
+            }
+            if (colon < stop) {
+                mut u32 name_start = at;
+                mut u32 name_end = colon;
+                mut u32 value_start = colon + 1;
+                mut u32 value_end = stop;
+                while (name_start < name_end && text.data[name_start] <= 32) {
+                    name_start = name_start + 1;
+                }
+                while (name_end > name_start && text.data[name_end - 1] <= 32) {
+                    name_end = name_end - 1;
+                }
+                while (value_start < value_end && text.data[value_start] <= 32) {
+                    value_start = value_start + 1;
+                }
+                while (value_end > value_start && text.data[value_end - 1] <= 32) {
+                    value_end = value_end - 1;
+                }
+                str property = { .data = &text.data[name_start], .length = (size)(name_end - name_start) };
+                str value = { .data = &text.data[value_start], .length = (size)(value_end - value_start) };
+                if (property.length > 0 && value.length > 0 && !Styles.is_custom(property)) {
+                    CssDeclaration declaration = { .property = property, .value = value, .important = false };
+                    Styles.apply(style, declaration, parent, context);
+                }
+            }
+            at = stop + 1;
+        }
+    }
+
     static unsafe Style compute(u32 id, Style* parent) {
         StyleEngine* engine = (StyleEngine*)style_engine;
         mut Style style = Style.inheriting(parent);
@@ -572,6 +618,7 @@ struct Styles {
             }
             Styles.apply(&style, declaration, parent, &context);
         }
+        Styles.inline(id, &style, parent, &context);
         if (entries.data != (CascadeEntry*)0) {
             __djinn_free((void*)entries.data);
         }

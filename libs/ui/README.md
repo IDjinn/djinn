@@ -274,6 +274,8 @@ display: none); `Transition` (a `signal<bool>` shows it) wraps content with that
 (about 5% overshoot, interruptible) over its own time: `transition: transform 360ms` (the theme's `--ui-spring`). It is applied to
 the geometry the element drew, so it never relayouts (and hit testing still uses the untransformed box). The theme uses it for
 the press feedback on buttons (scale .97) and the sliding switch thumb; dialogs and popups also pop in from 96% with a spring.
+`VirtualList` (`count`, `item_height`, `height` in CSS px, `row` builds the row for an index) mounts only the rows in view plus three of overscan above and below, so a list of 100 000 rows costs a dozen nodes; rows are positioned with the `style` attribute, which the style engine now reads ("name: value; ..." declarations that win over the sheets; no custom properties). A container tells its listeners when it scrolls (the `scroll` event).
+
 Scroll thumbs can be dragged with the pointer (a thumb gets a little margin to grab and darkens while held).
 
 Not yet: rotate / skew, `transform-origin`, shared-element page transitions, `@keyframes`.
