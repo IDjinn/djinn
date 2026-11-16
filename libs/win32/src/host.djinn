@@ -5,13 +5,26 @@ import vulkan;
 
 namespace win32;
 
+// What the system calls for every message of the window: 2 is WM_DESTROY, 20 is WM_ERASEBKGND.
+[Abi(C)]
+unsafe i64 djinn_window_proc(void* window, u32 message, u64 param, i64 extra) {
+    if (message == 2) {
+        PostQuitMessage(0);
+        return 0;
+    }
+    if (message == 20) {
+        return 1;
+    }
+    return DefWindowProcA(window, message, param, extra);
+}
+
 // The native Windows host: a window, the message pump, the GDI fonts and a software present of the frame. Mouse
 // and key messages become DOM events (click, mousedown, mouseup, mousemove, keydown), found by hit-testing the
 // layout boxes, so the same handlers run here as in any other host.
 //
-// The window class uses the system window procedure (DefWindowProc, taken with GetProcAddress): Djinn has no way yet
-// to hand a C-callable function to the system, so messages are read from the queue (PeekMessage) instead of being
-// pushed into a callback.
+// The window class has a window procedure of its own, a [Abi(C)] function the system calls: it ends the message loop
+// when the window is destroyed and keeps the system from erasing the background (the frame covers the whole client
+// area). Everything else goes to DefWindowProc. Input is still read from the queue (PeekMessage) in the loop below.
 struct WinHost {
     const u32 WM_QUIT = 18;
     const u32 WM_PAINT = 15;
@@ -24,11 +37,10 @@ struct WinHost {
 
     static unsafe void* open(str title, u32 width, u32 height) {
         void* module = GetModuleHandleA((i8*)0);
-        void* user32 = GetModuleHandleA("user32.dll");
         void* class_info = Raw.make(80);
         Raw.put_u32(class_info, 0, 80);
         Raw.put_u32(class_info, 4, 3);
-        Raw.put_ptr(class_info, 8, GetProcAddress(user32, "DefWindowProcA"));
+        Raw.put_ptr(class_info, 8, (void*)&djinn_window_proc);
         Raw.put_ptr(class_info, 24, module);
         Raw.put_ptr(class_info, 40, LoadCursorA((void*)0, (void*)32512));
         Raw.put_ptr(class_info, 64, (void*)"DjinnUiWindow");
