@@ -139,7 +139,34 @@ i32 main() {
         return path[length - base - 1] == 47 || path[length - base - 1] == 92;
     }
 
-    public static bool apply(Options* options, ptr<i8> directory) {
+    // Accepts a project directory or the path of its djinn.proj; always returns a directory with '/' separators and
+    // no trailing separator ('.' for a bare 'djinn.proj').
+    static unsafe ptr<i8> normalize_directory(ptr<i8> path) {
+        mut i32 length = strlen(path);
+        ByteBuffer* result = ByteBuffer.create();
+        for (mut i32 i = 0; i < length; i = i + 1) {
+            if (path[i] == 92) {
+                result.append_char('/');
+            } else {
+                result.append_char((char)path[i]);
+            }
+        }
+        ptr<i8> text = result.cstr();
+        length = strlen(text);
+        if (length >= 10 && Strings.same(text + length - 10, "djinn.proj") && (length == 10 || text[length - 11] == 47)) {
+            length = length - 10;
+            if (length == 0) {
+                return Strings.duplicate(".", 1);
+            }
+        }
+        while (length > 1 && text[length - 1] == 47) {
+            length = length - 1;
+        }
+        return Strings.duplicate(text, length);
+    }
+
+    public static bool apply(Options* options, ptr<i8> given_directory) {
+        ptr<i8> directory = Project.normalize_directory(given_directory);
         ByteBuffer* manifest_path = ByteBuffer.create();
         manifest_path.append(directory);
         manifest_path.append("/djinn.proj");
@@ -153,7 +180,11 @@ i32 main() {
         ByteBuffer* source_root = ByteBuffer.create();
         source_root.append(directory);
         source_root.append("/src");
-        ptr<i8> listing = __djinn_list_files(source_root.cstr(), ".djinn");
+        mut ptr<i8> listing = __djinn_list_files(source_root.cstr(), ".djinn");
+        if (listing == null) {
+            // No 'src' folder (the std library keeps its sources next to djinn.proj): use the project folder itself.
+            listing = __djinn_list_files(directory, ".djinn");
+        }
         if (listing == null) {
             logger_error(Log.get(), "djinnc: cannot list '%s'", source_root.cstr());
             return false;

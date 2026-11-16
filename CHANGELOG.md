@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-11-16
+
+### Changed
+- `djinnc <dir>` also accepts the path of a `djinn.proj`, normalizes `\` and `/` in the project path, and, with no `src` folder, compiles the `.djinn` files next to the manifest (the `std` library).
+
 ## [0.6.1] - 2026-11-16
 
 ### Added
