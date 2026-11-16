@@ -1,0 +1,102 @@
+import std::types;
+
+namespace ui;
+
+unsafe static mut i32 input_key = 0;
+unsafe static mut u32 input_mods = 0;
+unsafe static mut bool input_prevented = false;
+
+// Key codes are the Windows virtual-key values; the other hosts translate their own codes to these.
+struct Key {
+    const i32 BACKSPACE = 8;
+    const i32 TAB = 9;
+    const i32 ENTER = 13;
+    const i32 ESCAPE = 27;
+    const i32 SPACE = 32;
+    const i32 END = 35;
+    const i32 HOME = 36;
+    const i32 LEFT = 37;
+    const i32 UP = 38;
+    const i32 RIGHT = 39;
+    const i32 DOWN = 40;
+    const i32 DELETE = 46;
+}
+
+struct Mod {
+    const u32 SHIFT = 1;
+    const u32 CTRL = 2;
+    const u32 ALT = 4;
+}
+
+// Keyboard input. A host calls Input.press for each key; the "keydown" event goes to the focused element (or the
+// document), bubbles, and a listener reads what was pressed with Input.key() / Input.shift() / ...
+// Calling Input.prevent() in a listener cancels the default action:
+//   Tab / Shift+Tab   move focus to the next / previous element
+//   Enter, Space      click the focused button or link (Space only on a button, Enter also on a link)
+//   Escape            blur the focused element
+struct Input {
+    public static unsafe i32 key() {
+        return input_key;
+    }
+
+    public static unsafe bool shift() {
+        return (input_mods & Mod.SHIFT) != 0;
+    }
+
+    public static unsafe bool ctrl() {
+        return (input_mods & Mod.CTRL) != 0;
+    }
+
+    public static unsafe bool alt() {
+        return (input_mods & Mod.ALT) != 0;
+    }
+
+    // Cancels the default action of the key being delivered.
+    public static unsafe void prevent() {
+        input_prevented = true;
+    }
+
+    static unsafe bool button_like(u32 id) {
+        return Texts.same(Dom.tag(id), "button") || Texts.same(Dom.attr(id, "role"), "button");
+    }
+
+    // Delivers a key press. Returns true when the press was handled (a listener ran or a default action happened).
+    public static unsafe bool press(i32 key, u32 mods) {
+        input_key = key;
+        input_mods = mods;
+        input_prevented = false;
+        mut u32 target = Focus.current();
+        if (target == 0) {
+            target = Dom.document();
+        }
+        mut bool handled = Dom.dispatch(target, "keydown") > 0;
+        if (input_prevented) {
+            input_key = 0;
+            input_mods = 0;
+            return true;
+        }
+        if (key == Key.TAB && (mods & Mod.CTRL) == 0 && (mods & Mod.ALT) == 0) {
+            if (Focus.move((mods & Mod.SHIFT) != 0)) {
+                handled = true;
+            }
+        } else if (key == Key.ESCAPE) {
+            if (Focus.current() != 0) {
+                Focus.clear();
+                handled = true;
+            }
+        } else if (key == Key.ENTER || key == Key.SPACE) {
+            u32 focused = Focus.current();
+            if (focused != 0) {
+                bool button = Input.button_like(focused);
+                bool link = Texts.same(Dom.tag(focused), "a") && Dom.has_attr(focused, "href");
+                if ((button && !Dom.has_attr(focused, "disabled")) || (link && key == Key.ENTER)) {
+                    Dom.dispatch(focused, "click");
+                    handled = true;
+                }
+            }
+        }
+        input_key = 0;
+        input_mods = 0;
+        return handled;
+    }
+}

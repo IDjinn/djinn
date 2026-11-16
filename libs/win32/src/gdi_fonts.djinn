@@ -12,9 +12,12 @@ unsafe static mut ptr gdi_bitmap = null;
 unsafe static mut u32 gdi_bitmap_capacity = 0;
 unsafe static mut ptr gdi_last = null;
 
-// The FontProvider of the Windows host: GDI draws the glyphs (hinted, grayscale anti-aliased) and measures them, so the
-// text of a page looks like the text of the system. Fonts are created once per size and weight.
+// The FontProvider of the Windows host: GDI draws and measures the glyphs of the system font. Every glyph is drawn
+// SCALE (8) times larger and averaged down to the pixel grid, which gives smooth, unhinted edges and advances that are not
+// rounded to whole pixels (GDI's own hinted bitmaps are crisp but jagged and unevenly spaced at small sizes).
+// Fonts are created once per size and weight.
 struct GdiFonts {
+    const i32 SCALE = 8;
     const u32 SLOTS = 32;
     const u32 CHARSET = 1;
     const u32 TT_PRECISION = 4;
@@ -55,7 +58,7 @@ struct GdiFonts {
         if (bold) {
             weight = 700;
         }
-        i32 pixels = (i32)(size + (f32)0.5);
+        i32 pixels = (i32)(size * (f32)8.0 + (f32)0.5);
         void* font = CreateFontA(-pixels, 0, 0, 0, (i32)weight, 0, 0, 0, GdiFonts.CHARSET, GdiFonts.TT_PRECISION, 0,
             GdiFonts.ANTIALIASED, 0, "Segoe UI");
         if (free_slot < GdiFonts.SLOTS) {
@@ -65,15 +68,23 @@ struct GdiFonts {
         SelectObject(dc, font);
     }
 
+    // Division by SCALE (8) rounding toward negative infinity.
+    static i32 floor_div(i32 value) {
+        if (value >= 0) {
+            return value / 8;
+        }
+        return 0 - ((0 - value + 7) / 8);
+    }
+
     static unsafe f32 advance(u32 code, f32 size, bool bold) {
         GdiFonts.select(size, bold);
         if (GetGlyphOutlineW(GdiFonts.dc(), code, 2, (void*)gdi_metrics, 0, (void*)0, (void*)gdi_matrix) == 4294967295) {
             return size * (f32)0.5;
         }
-        return (f32)Raw.get_i16((void*)gdi_metrics, 16);
+        return (f32)Raw.get_i16((void*)gdi_metrics, 16) / (f32)8.0;
     }
 
-    static unsafe bool rasterize(u32 code, f32 size, bool bold, GlyphBitmap* out) {
+    static unsafe bool rasterize(u32 code, f32 size, bool bold, u32 phase, GlyphBitmap* out) {
         GdiFonts.select(size, bold);
         void* dc = GdiFonts.dc();
         u32 bytes = GetGlyphOutlineW(dc, code, 6, (void*)gdi_metrics, 0, (void*)0, (void*)gdi_matrix);
@@ -95,23 +106,54 @@ struct GdiFonts {
         if (width == 0 || height == 0) {
             return false;
         }
-        // GDI rows are padded to 4 bytes and hold 0..64; the atlas takes 0..255
+        // GDI rows are padded to 4 bytes and hold 0..64 at SCALE times the size; average SCALE x SCALE samples per pixel
         u32 pitch = (width + 3) & 0xFFFFFFFC;
         u8* source = (u8*)gdi_bitmap;
-        u8* pixels = (u8*)__djinn_alloc((size_long)(width * height));
-        for (mut u32 y = 0; y < height; y = y + 1) {
-            for (mut u32 x = 0; x < width; x = x + 1) {
-                mut u32 level = (u32)source[y * pitch + x] * 4;
+        i32 origin_x = Raw.get_i32((void*)gdi_metrics, 8);
+        i32 origin_y = Raw.get_i32((void*)gdi_metrics, 12);
+        // the sub-pixel phase moves the glyph right by phase/4 of a pixel: 2 samples per quarter at 8 samples a pixel
+        i32 shift = (i32)phase * 2;
+        i32 left = GdiFonts.floor_div(origin_x + shift);
+        i32 right = GdiFonts.floor_div(origin_x + shift + (i32)width + 7);
+        i32 top = GdiFonts.floor_div(origin_y + 7);
+        i32 bottom = GdiFonts.floor_div(origin_y - (i32)height);
+        u32 out_width = (u32)(right - left);
+        u32 out_height = (u32)(top - bottom);
+        if (out_width == 0 || out_height == 0) {
+            return false;
+        }
+        u8* pixels = (u8*)__djinn_alloc_zeroed((size_long)(out_width * out_height));
+        for (mut u32 py = 0; py < out_height; py = py + 1) {
+            for (mut u32 px = 0; px < out_width; px = px + 1) {
+                mut u32 sum = 0;
+                for (mut i32 dy = 0; dy < 8; dy = dy + 1) {
+                    i32 row = origin_y - ((top - (i32)py) * 8 - dy);
+                    if (row < 0 || row >= (i32)height) {
+                        continue;
+                    }
+                    for (mut i32 dx = 0; dx < 8; dx = dx + 1) {
+                        i32 column = (left + (i32)px) * 8 + dx - origin_x - shift;
+                        if (column >= 0 && column < (i32)width) {
+                            sum = sum + (u32)source[(u32)row * pitch + (u32)column];
+                        }
+                    }
+                }
+                // 64 samples of at most 64: 4096 is full coverage; a little contrast keeps dark text from looking thin
+                mut u32 level = sum * 255 / 4096;
                 if (level > 255) {
                     level = 255;
                 }
-                pixels[y * width + x] = (u8)level;
+                level = level + 35 * level * (255 - level) / 25500;
+                if (level > 255) {
+                    level = 255;
+                }
+                pixels[py * out_width + px] = (u8)level;
             }
         }
-        out.width = (i32)width;
-        out.height = (i32)height;
-        out.bearing_x = Raw.get_i32((void*)gdi_metrics, 8);
-        out.bearing_y = Raw.get_i32((void*)gdi_metrics, 12);
+        out.width = (i32)out_width;
+        out.height = (i32)out_height;
+        out.bearing_x = left;
+        out.bearing_y = top;
         // the provider hands the pixels over until its next call: keep this buffer for the next glyph to free
         if (gdi_last != null) {
             __djinn_free((void*)gdi_last);
@@ -124,14 +166,14 @@ struct GdiFonts {
     static unsafe void metrics(f32 size, bool bold, f32* ascent, f32* descent) {
         GdiFonts.select(size, bold);
         GetTextMetricsW(GdiFonts.dc(), (void*)gdi_metrics);
-        *ascent = (f32)Raw.get_i32((void*)gdi_metrics, 4);
-        *descent = (f32)Raw.get_i32((void*)gdi_metrics, 8);
+        *ascent = (f32)Raw.get_i32((void*)gdi_metrics, 4) / (f32)8.0;
+        *descent = (f32)Raw.get_i32((void*)gdi_metrics, 8) / (f32)8.0;
     }
 
     public static unsafe void install() {
         FontProvider provider = {
             .advance = (u32 code, f32 size, bool bold) => GdiFonts.advance(code, size, bold),
-            .rasterize = (u32 code, f32 size, bool bold, GlyphBitmap* out) => GdiFonts.rasterize(code, size, bold, out),
+            .rasterize = (u32 code, f32 size, bool bold, u32 phase, GlyphBitmap* out) => GdiFonts.rasterize(code, size, bold, phase, out),
             .metrics = (f32 size, bool bold, f32* ascent, f32* descent) => GdiFonts.metrics(size, bold, ascent, descent)
         };
         Fonts.set_provider(provider);

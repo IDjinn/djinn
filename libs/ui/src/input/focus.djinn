@@ -1,0 +1,208 @@
+import std::types;
+import std::libc;
+
+namespace ui;
+
+unsafe static mut u32 focused_node = 0;
+
+// Keyboard focus: which element receives key events, which elements Tab visits, and the :focus / :focus-visible state
+// the style engine reads. It is host independent: a host calls Focus.set when the pointer presses a control and
+// Input.press for every key, and everything else follows from the tree.
+//
+// Focusable: button, select, textarea, input (not hidden), a with href, and anything with tabindex; never a disabled
+// control or a box under display: none. tabindex="-1" can take focus by pointer or by Focus.set but Tab skips it.
+// Tab order is tree order (positive tabindex values are not reordered).
+struct Focus {
+    static unsafe bool native_control(u32 id) {
+        str tag = Dom.tag(id);
+        if (Texts.same(tag, "button") || Texts.same(tag, "select") || Texts.same(tag, "textarea")) {
+            return true;
+        }
+        if (Texts.same(tag, "input")) {
+            return !Texts.same(Dom.attr(id, "type"), "hidden");
+        }
+        if (Texts.same(tag, "a")) {
+            return Dom.has_attr(id, "href");
+        }
+        return false;
+    }
+
+    // tabindex as a number; -2 when the attribute is absent or not a number.
+    static unsafe i32 tab_index(u32 id) {
+        if (!Dom.has_attr(id, "tabindex")) {
+            return 0 - 2;
+        }
+        str text = Dom.attr(id, "tabindex");
+        u32 length = (u32)text.length;
+        mut i32 sign = 1;
+        mut u32 i = 0;
+        if (length > 0 && text.data[0] == 45) {
+            sign = 0 - 1;
+            i = 1;
+        }
+        if (i >= length) {
+            return 0 - 2;
+        }
+        mut i32 value = 0;
+        while (i < length) {
+            i32 digit = (i32)text.data[i] - 48;
+            if (digit < 0 || digit > 9) {
+                return 0 - 2;
+            }
+            value = value * 10 + digit;
+            i = i + 1;
+        }
+        return value * sign;
+    }
+
+    // True when the element can hold focus (by pointer or script), whether or not Tab reaches it.
+    public static unsafe bool focusable(u32 id) {
+        if (id == 0 || Dom.kind(id) != DomKind.ELEMENT) {
+            return false;
+        }
+        if (Dom.has_attr(id, "disabled")) {
+            return false;
+        }
+        if (Styles.of(id).display == Display.NONE) {
+            return false;
+        }
+        if (Focus.tab_index(id) != 0 - 2) {
+            return true;
+        }
+        return Focus.native_control(id);
+    }
+
+    // True when Tab visits the element.
+    public static unsafe bool tabbable(u32 id) {
+        if (!Focus.focusable(id)) {
+            return false;
+        }
+        return Focus.tab_index(id) != 0 - 1;
+    }
+
+    static unsafe void collect(u32 id, u32* out, u32* count) {
+        u8 kind = Dom.kind(id);
+        if (kind != DomKind.ELEMENT && kind != DomKind.FRAGMENT) {
+            return;
+        }
+        if (kind == DomKind.ELEMENT && Styles.of(id).display == Display.NONE) {
+            return;
+        }
+        if (Focus.tabbable(id)) {
+            out[count[0]] = id;
+            count[0] = count[0] + 1;
+        }
+        mut u32 child = Dom.first_child(id);
+        while (child != 0) {
+            Focus.collect(child, out, count);
+            child = Dom.next_sibling(child);
+        }
+    }
+
+    static unsafe bool connected(u32 id) {
+        mut u32 node = id;
+        while (node != 0) {
+            if (node == Dom.document()) {
+                return true;
+            }
+            node = Dom.parent(node);
+        }
+        return false;
+    }
+
+    // The focused element, or 0. An element that left the tree loses focus.
+    public static unsafe u32 current() {
+        if (focused_node != 0 && (Dom.kind(focused_node) != DomKind.ELEMENT || !Focus.connected(focused_node))) {
+            focused_node = 0;
+        }
+        return focused_node;
+    }
+
+    static unsafe bool shows_ring(u32 id, bool by_keyboard) {
+        if (by_keyboard) {
+            return true;
+        }
+        str tag = Dom.tag(id);
+        return Texts.same(tag, "input") || Texts.same(tag, "textarea") || Texts.same(tag, "select");
+    }
+
+    // Moves focus to the element ('by_keyboard' shows the focus ring on buttons and links too). Fires blur on the old
+    // element and focus on the new one. Returns false when the element cannot take focus.
+    public static unsafe bool set(u32 id, bool by_keyboard) {
+        if (!Focus.focusable(id)) {
+            return false;
+        }
+        u32 old = Focus.current();
+        if (old == id) {
+            Dom.set_state(id, NodeState.FOCUS_VISIBLE, Focus.shows_ring(id, by_keyboard));
+            return true;
+        }
+        if (old != 0) {
+            Dom.set_state(old, NodeState.FOCUS, false);
+            Dom.set_state(old, NodeState.FOCUS_VISIBLE, false);
+            Dom.dispatch(old, "blur");
+        }
+        focused_node = id;
+        Dom.set_state(id, NodeState.FOCUS, true);
+        Dom.set_state(id, NodeState.FOCUS_VISIBLE, Focus.shows_ring(id, by_keyboard));
+        Dom.dispatch(id, "focus");
+        return true;
+    }
+
+    // Takes focus away from whatever has it.
+    public static unsafe void clear() {
+        u32 old = Focus.current();
+        if (old != 0) {
+            Dom.set_state(old, NodeState.FOCUS, false);
+            Dom.set_state(old, NodeState.FOCUS_VISIBLE, false);
+            focused_node = 0;
+            Dom.dispatch(old, "blur");
+        }
+    }
+
+    // The nearest element at or above 'id' that can take focus (0 when none): what a pointer press focuses.
+    public static unsafe u32 owner(u32 id) {
+        mut u32 node = id;
+        while (node != 0) {
+            if (Focus.focusable(node)) {
+                return node;
+            }
+            node = Dom.parent(node);
+        }
+        return 0;
+    }
+
+    // Tab and Shift+Tab: the next (or previous) tabbable element in tree order, wrapping around at the ends.
+    // Returns false when nothing in the tree can be reached.
+    public static unsafe bool move(bool backward) {
+        DomTree* t = Dom.tree();
+        u32* order = (u32*)__djinn_alloc_zeroed((size_long)((t.count + 1) * 4));
+        mut u32 count = 0;
+        Focus.collect(Dom.document(), order, &count);
+        if (count == 0) {
+            __djinn_free((void*)order);
+            return false;
+        }
+        u32 now = Focus.current();
+        mut u32 target = order[0];
+        if (backward) {
+            target = order[count - 1];
+        }
+        for (mut u32 i = 0; i < count; i = i + 1) {
+            if (order[i] == now) {
+                if (backward) {
+                    target = order[(i + count - 1) % count];
+                } else {
+                    target = order[(i + 1) % count];
+                }
+            }
+        }
+        __djinn_free((void*)order);
+        return Focus.set(target, true);
+    }
+
+    // Forgets the focus without events: for a host tearing the tree down, and for tests.
+    public static unsafe void reset() {
+        focused_node = 0;
+    }
+}

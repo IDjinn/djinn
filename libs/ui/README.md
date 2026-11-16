@@ -213,6 +213,20 @@ Not covered yet: text flowing across inline boxes (an inline box wraps inside it
 collapsing between a parent and its first or last child, floats, tables, named grid lines and areas, subgrid,
 `position: sticky` offsets, vertical and right-to-left writing, and container queries.
 
+## Focus and keyboard (`src/input`)
+
+Host independent: a host calls `Focus.set(Focus.owner(hit), false)` when the pointer presses and `Input.press(key, mods)`
+for each key (key codes are the Windows virtual-key values, `Key.*`; modifiers are `Mod.SHIFT | CTRL | ALT`).
+
+- Focusable: `button`, `select`, `textarea`, `input` (not hidden), `a[href]` and anything with `tabindex`; never a
+  `disabled` control or a box under `display: none`. `tabindex="-1"` takes focus by pointer or `Focus.set` but Tab
+  skips it. Tab order is tree order and wraps.
+- `Focus.set(node, by_keyboard)` sets `:focus` and `:focus-visible` (a pointer press on a button shows no ring; Tab
+  does; text fields always do) and fires `blur` / `focus`. A focused element that leaves the tree loses focus.
+- `Input.press` fires `keydown` at the focused element (or the document), bubbling; a listener reads `Input.key()`,
+  `Input.shift()`, ... and may call `Input.prevent()`. Defaults: Tab / Shift+Tab move focus, Enter and Space click a
+  focused button, Enter follows a focused link, Escape blurs.
+
 ## Output safety
 
 The HTML writer (`view/html.djinn`, `view/html_safety.djinn`) treats every value as untrusted:
@@ -239,6 +253,7 @@ libs/ui/src
   layout/            layout (boxes, cache, flow, positioning, text metrics), flex, grid
   view/              dom (retained tree + HostTest log, change stamps), node (builder),
                      view (show/each/range/mount/islands), html (writer), html_safety, text_buffer
+  input/             focus (Tab order, :focus state), input (keydown, key codes, default actions)
   app/               app (RenderMode, App.mount/render_to_string/run), static_pages
   tests/             reactive, view, html, safety, style, theme and layout tests (djinnc test libs/ui)
 ```
