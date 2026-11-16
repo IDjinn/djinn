@@ -12,6 +12,7 @@ struct Tween {
     mut u32 start;
     mut u32 duration;
     mut bool started;
+    mut bool hide;
 }
 
 struct AnimationSystem {
@@ -39,9 +40,25 @@ struct Animation {
         Animation.fade(id, (f32)0.0, (f32)1.0, duration);
     }
 
+    // Fades an element out over 'duration' milliseconds and then hides it (data-gone="true", which the theme turns
+    // into display: none); fade_in shows it again. With reduced motion it is hidden at once.
+    public static unsafe void fade_out(u32 id, u32 duration) {
+        Animation.fade_with(id, (f32)1.0, (f32)0.0, duration, true);
+    }
+
     public static unsafe void fade(u32 id, f32 from, f32 to, u32 duration) {
+        Animation.fade_with(id, from, to, duration, false);
+    }
+
+    static unsafe void fade_with(u32 id, f32 from, f32 to, u32 duration, bool hide) {
         Animation.cancel(id);
+        if (!hide && Dom.has_attr(id, "data-gone")) {
+            Dom.set_attr(id, "data-gone", "false", 5);
+        }
         if (Styles.prefers_reduced_motion() || duration == 0) {
+            if (hide) {
+                Dom.set_attr(id, "data-gone", "true", 4);
+            }
             return;
         }
         AnimationSystem* system = Animation.system();
@@ -64,6 +81,7 @@ struct Animation {
         tween.duration = duration;
         tween.start = 0;
         tween.started = false;
+        tween.hide = hide;
         system.count = system.count + 1;
         system.version = system.version + 1;
     }
@@ -138,6 +156,9 @@ struct Animation {
                 tween.start = now;
             }
             if (now - tween.start >= tween.duration) {
+                if (tween.hide) {
+                    Dom.set_attr(tween.id, "data-gone", "true", 4);
+                }
                 system.items[i] = system.items[system.count - 1];
                 system.count = system.count - 1;
             } else {

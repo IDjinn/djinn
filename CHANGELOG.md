@@ -5,6 +5,7 @@
 ## [0.6.1] - 2026-11-16
 
 ### Added
+- ui: `Animation.fade_out` and the `Transition` kit component: content fades out and then disappears when its signal turns false, and fades in when it turns true (immediately with reduced motion).
 - `(i16s)x`: a saturating integer cast clamps to the range of the target (the `w` suffix already truncated), at run time and in constant evaluation.
 - `--windowed` (and `windowed: true` in `djinn.proj`): links a Windows GUI program with no console window. `-l<name>` and `-L<dir>` on the command line, with the same mapping as the manifest.
 - `std::libc`: `atoi`, `atoll`, `strtoll`, `strtoull`. `Math` has `f32` versions of the error and gamma functions.

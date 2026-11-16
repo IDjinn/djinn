@@ -265,8 +265,8 @@ close when you choose and on Escape; `List` and `Table` scroll past 16rem (the `
 `Animation` (`libs/ui/src/anim/animation.djinn`) is a small tween clock: `Animation.fade_in(id, ms)` /
 `fade(id, from, to, ms)` animate the opacity of an element (cubic ease-out, no relayout); the host calls
 `Animation.advance(ms)` each loop iteration and draws while it returns true (the Windows host does). With
-`prefers-reduced-motion` they are skipped. The `Outlet` fades each new page in over 220 ms. Not yet: exit
-animations, slide / shared-element transitions (there is no transform support), CSS `transition` / `@keyframes`.
+`prefers-reduced-motion` they are skipped. The `Outlet` fades each new page in over 220 ms. `Animation.fade_out(id, ms)` fades an element out and then sets `data-gone="true"` (the theme hides it with
+display: none); `Transition` (a `signal<bool>` shows it) wraps content with that. Not yet: slide / shared-element transitions (there is no transform support), CSS `transition` / `@keyframes`.
 
 ## Hotkeys
 
