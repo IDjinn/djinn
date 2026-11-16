@@ -241,7 +241,7 @@ for each key (key codes are the Windows virtual-key values, `Key.*`; modifiers a
 
 `libs/ui/src/kit/kit.djinn` holds ready-made components, styled by the default theme (same look on every platform):
 `Button` (`variant` "primary" / "danger"), `Switch` and `Checkbox` (bound to a `signal<bool>`), `Tab` + `TabPanel` (a
-`signal<i32>` holds the selected index), `Dialog` (a `signal<bool>` shows it) and `Field` (label, hint, placeholder,
+`signal<i32>` holds the selected index), `Dialog` (a `signal<bool>` shows it) and `Field` (binds a `signal<str>` both ways with `value={sig}`; label, hint, placeholder,
 `type`). They are plain structs with props as fields, used from `html!{}` like any component, and their state is
 exposed through `aria-checked`, `aria-selected`, `data-active` and `data-open`, which the theme styles. Not yet: a
 select / menu, tooltip, tables, and two-way binding of a field's value to a signal.
