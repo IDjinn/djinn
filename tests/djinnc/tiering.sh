@@ -43,6 +43,7 @@ SOURCE
 "$compiler" "$out/hot.djinn" --run --tiered --tier-threshold=200 --tier-settle=0 "${flags[@]}" > "$out/tiered.log" 2>&1 || { cat "$out/tiered.log"; fail "the tiered run must succeed"; }
 
 expected="$(grep -E '^[0-9]+$' "$out/plain.log" | tail -1)"
+expected_hot="$expected"
 actual="$(grep -E '^[0-9]+$' "$out/tiered.log" | tail -1)"
 [ -n "$expected" ] || fail "the plain run must print a result"
 [ "$expected" = "$actual" ] || fail "the tiered run printed '$actual', the plain run printed '$expected'"
@@ -112,5 +113,11 @@ expected="$(grep -E '^[0-9]+$' "$out/wide_plain.log" | tail -1)"
 actual="$(grep -E '^[0-9]+$' "$out/wide_tiered.log" | tail -1)"
 [ -n "$expected" ] || fail "the plain run with wide results must print a result"
 [ "$expected" = "$actual" ] || fail "the tiered wide run printed '$actual', the plain run printed '$expected'"
+
+sed 's/^i32 classify/[Inline] i32 classify/' "$out/hot.djinn" > "$out/inline.djinn"
+grep -q '^\[Inline\]' "$out/inline.djinn" || fail "the inline source must carry the attribute"
+"$compiler" "$out/inline.djinn" --run --tiered --tier-threshold=200 --tier-settle=0 "${flags[@]}" > "$out/inline_tiered.log" 2>&1 || { cat "$out/inline_tiered.log"; fail "a tiered run with an [Inline] function must succeed"; }
+actual="$(grep -E '^[0-9]+$' "$out/inline_tiered.log" | tail -1)"
+[ "$expected_hot" = "$actual" ] || fail "the [Inline] tiered run printed '$actual', the plain run printed '$expected_hot'"
 
 echo "PASS tiering"
