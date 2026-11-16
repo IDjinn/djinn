@@ -57,6 +57,7 @@ struct WinHost {
     const u32 WM_QUIT = 18;
     const u32 WM_PAINT = 15;
     const u32 WM_KEYDOWN = 256;
+    const u32 WM_CHAR = 258;
     const u32 WM_MOUSEMOVE = 512;
     const u32 WM_LBUTTONDOWN = 513;
     const u32 WM_LBUTTONUP = 514;
@@ -245,6 +246,7 @@ struct WinHost {
         host_state_address = (u64)state;
         void* message = Raw.make(64);
         mut u32 pressed = 0;
+        mut u32 high = 0;
         mut bool running = true;
         while (running) {
             mut bool busy = false;
@@ -277,6 +279,20 @@ struct WinHost {
                     WinHost.announce(WinHost.hit(Dom.document(), x, y), "mousemove");
                 } else if (kind == WinHost.WM_KEYDOWN) {
                     Input.press((i32)(key & 0xFFFF), WinHost.modifiers());
+                } else if (kind == WinHost.WM_CHAR) {
+                    // UTF-16 units: a high surrogate waits for its low half
+                    u32 unit = (u32)(key & 0xFFFF);
+                    if (unit >= 55296 && unit < 56320) {
+                        high = unit;
+                    } else if (unit >= 56320 && unit < 57344) {
+                        if (high != 0) {
+                            Input.typed(65536 + ((high - 55296) << 10) + (unit - 56320));
+                        }
+                        high = 0;
+                    } else {
+                        high = 0;
+                        Input.typed(unit);
+                    }
                 } else if (kind == WinHost.WM_PAINT) {
                     state.dirty = true;
                 }

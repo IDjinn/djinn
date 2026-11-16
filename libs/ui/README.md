@@ -226,6 +226,11 @@ for each key (key codes are the Windows virtual-key values, `Key.*`; modifiers a
 - `Input.press` fires `keydown` at the focused element (or the document), bubbling; a listener reads `Input.key()`,
   `Input.shift()`, ... and may call `Input.prevent()`. Defaults: Tab / Shift+Tab move focus, Enter and Space click a
   focused button, Enter follows a focused link, Escape blurs.
+- Text fields: a host calls `Input.typed(code_point)` for every character the keyboard produces (Windows: `WM_CHAR`).
+  The focused `input` / `textarea` (not disabled or readonly, not a checkbox, radio, button, ...) appends it to its
+  `value` attribute and fires `input`; Backspace removes the last character. The painter draws the value (bullets for
+  `type="password"`), the `placeholder` when empty, and a caret while focused. Editing is append-only for now: no
+  caret movement, selection or clipboard.
 
 ## Output safety
 

@@ -81,6 +81,9 @@ struct Painter {
             clipped = true;
         }
         Painter.children(list, id, faded);
+        if (visible && style.visibility != Keyword.HIDDEN && faded > (f32)0.0) {
+            Painter.field(list, id, box, style, faded);
+        }
         if (clipped) {
             list.restore_clip();
         }
@@ -143,6 +146,98 @@ struct Painter {
         return (TextLine*)painter_lines;
     }
 
+    // One glyph at a pen position: the whole pixels place the bitmap, the quarter pixels pick the sub-pixel variant.
+    static unsafe void glyph(DisplayList* list, u32 code, f32 pen, f32 baseline, f32 size, bool bold, u32 color) {
+        f32 atlas = (f32)Fonts.ATLAS;
+        mut i32 quarters = 0;
+        if (pen > (f32)0.0) {
+            quarters = (i32)(pen * (f32)4.0 + (f32)0.5);
+        }
+        u32 phase = (u32)(quarters & 3);
+        Glyph* found = Fonts.glyph(code, size, bold, phase);
+        if (found != (Glyph*)0) {
+            f32 x = (f32)(quarters >> 2) + (f32)found.bearing_x;
+            f32 y = Math.round(baseline - (f32)found.bearing_y);
+            list.quad(x, y, x + (f32)found.width, y + (f32)found.height, (f32)found.atlas_x / atlas,
+                (f32)found.atlas_y / atlas, (f32)(found.atlas_x + found.width) / atlas,
+                (f32)(found.atlas_y + found.height) / atlas, color);
+        }
+    }
+
+    // What a text field shows: its value (bullets for a password), or the placeholder in a fainter color when it is
+    // empty, kept inside the content box and scrolled so the end (where the caret is) stays visible.
+    static unsafe void field(DisplayList* list, u32 id, LayoutBox* box, Style* style, f32 opacity) {
+        if (!Fonts.active() || !Input.editable(id)) {
+            return;
+        }
+        bool focused = (Dom.state(id) & NodeState.FOCUS) != 0;
+        str value = Dom.attr(id, "value");
+        mut str shown = value;
+        mut bool placeholder = false;
+        if (value.length == 0) {
+            shown = Dom.attr(id, "placeholder");
+            placeholder = true;
+        }
+        if (shown.length == 0 && !focused) {
+            return;
+        }
+        bool secret = !placeholder && Texts.same(Dom.attr(id, "type"), "password");
+        f32 left = box.left + box.border.left + box.padding.left;
+        f32 right = box.left + box.width - box.border.right - box.padding.right;
+        f32 inner_top = box.top + box.border.top;
+        f32 inner_bottom = box.top + box.height - box.border.bottom;
+        f32 size = style.font_size;
+        bool bold = style.font_weight >= 600;
+        mut f32 ascent = (f32)0.0;
+        mut f32 descent = (f32)0.0;
+        Fonts.line_metrics(size, bold, &ascent, &descent);
+        f32 baseline = (inner_top + inner_bottom) / (f32)2.0 - (ascent + descent) / (f32)2.0 + ascent;
+        u32 length = (u32)shown.length;
+        mut f32 total = (f32)0.0;
+        mut u32 i = 0;
+        while (i < length) {
+            mut u32 step = 1;
+            mut u32 code = Codepoints.decode(shown.data, length, i, &step);
+            i = i + step;
+            if (secret) {
+                code = 8226;
+            }
+            total = total + TextLines.advance(code, style, true, bold);
+        }
+        mut f32 shift = (f32)0.0;
+        if (total > right - left - (f32)2.0) {
+            shift = total - (right - left - (f32)2.0);
+        }
+        mut f32 alpha = opacity;
+        if (placeholder) {
+            alpha = opacity * (f32)0.55;
+        }
+        u32 color = DisplayList.gpu_color(style.color, alpha);
+        list.clip_to(left, inner_top, right, inner_bottom);
+        mut f32 pen = Math.round(left - shift);
+        i = 0;
+        while (i < length) {
+            mut u32 step = 1;
+            mut u32 code = Codepoints.decode(shown.data, length, i, &step);
+            i = i + step;
+            if (secret) {
+                code = 8226;
+            }
+            if (!TextLines.is_blank(code)) {
+                Painter.glyph(list, code, pen, baseline, size, bold, color);
+            }
+            pen = pen + TextLines.advance(code, style, true, bold);
+        }
+        if (focused) {
+            mut f32 caret = left - shift;
+            if (!placeholder) {
+                caret = pen;
+            }
+            list.fill(Math.round(caret), baseline - ascent, (f32)1.0, ascent + descent, DisplayList.gpu_color(style.color, opacity));
+        }
+        list.restore_clip();
+    }
+
     static unsafe void text(DisplayList* list, u32 id, f32 opacity) {
         if (!Fonts.active() || opacity <= (f32)0.0) {
             return;
@@ -201,20 +296,7 @@ struct Painter {
                     pen = pen + space;
                     gap = false;
                 }
-                // the pen in quarter pixels: the whole part places the bitmap, the rest picks the sub-pixel variant
-                mut i32 quarters = 0;
-                if (pen > (f32)0.0) {
-                    quarters = (i32)(pen * (f32)4.0 + (f32)0.5);
-                }
-                u32 phase = (u32)(quarters & 3);
-                Glyph* glyph = Fonts.glyph(code, size, bold, phase);
-                if (glyph != (Glyph*)0) {
-                    f32 x = (f32)(quarters >> 2) + (f32)glyph.bearing_x;
-                    f32 y = Math.round(baseline - (f32)glyph.bearing_y);
-                    list.quad(x, y, x + (f32)glyph.width, y + (f32)glyph.height, (f32)glyph.atlas_x / atlas,
-                        (f32)glyph.atlas_y / atlas, (f32)(glyph.atlas_x + glyph.width) / atlas,
-                        (f32)(glyph.atlas_y + glyph.height) / atlas, color);
-                }
+                Painter.glyph(list, code, pen, baseline, size, bold, color);
                 pen = pen + TextLines.advance(code, style, true, bold);
             }
             f32 thickness = Px.max((f32)1.0, size / (f32)14.0);

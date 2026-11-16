@@ -1,4 +1,5 @@
 import std::types;
+import std::libc;
 
 namespace ui;
 
@@ -56,6 +57,86 @@ struct Input {
         input_prevented = true;
     }
 
+    // A text field: a textarea or an input of a type that takes text, not disabled and not readonly.
+    public static unsafe bool editable(u32 id) {
+        if (id == 0 || Dom.kind(id) != DomKind.ELEMENT) {
+            return false;
+        }
+        str tag = Dom.tag(id);
+        mut bool field = Texts.same(tag, "textarea");
+        if (Texts.same(tag, "input")) {
+            str kind = Dom.attr(id, "type");
+            field = !(Texts.same(kind, "checkbox") || Texts.same(kind, "radio") || Texts.same(kind, "hidden")
+                || Texts.same(kind, "button") || Texts.same(kind, "submit") || Texts.same(kind, "reset")
+                || Texts.same(kind, "range") || Texts.same(kind, "color") || Texts.same(kind, "file")
+                || Texts.same(kind, "image"));
+        }
+        return field && !Dom.has_attr(id, "disabled") && !Dom.has_attr(id, "readonly");
+    }
+
+    // Appends a code point to the value of the focused text field and fires "input". The caret is always at the end.
+    // A host calls this for every character the keyboard produces (not for control keys). Returns true when it typed.
+    public static unsafe bool typed(u32 code) {
+        u32 target = Focus.current();
+        if (code < 32 || code == 127 || !Input.editable(target)) {
+            return false;
+        }
+        str value = Dom.attr(target, "value");
+        u32 length = (u32)value.length;
+        if (length > 4000) {
+            return false;
+        }
+        u8* grown = (u8*)__djinn_alloc_zeroed((size_long)(length + 5));
+        if (length > 0) {
+            memcpy((void*)grown, (void*)value.data, (size_long)length);
+        }
+        mut u32 added = 0;
+        if (code < 128) {
+            grown[length] = (u8)code;
+            added = 1;
+        } else if (code < 2048) {
+            grown[length] = (u8)(192 | (code >> 6));
+            grown[length + 1] = (u8)(128 | (code & 63));
+            added = 2;
+        } else if (code < 65536) {
+            grown[length] = (u8)(224 | (code >> 12));
+            grown[length + 1] = (u8)(128 | ((code >> 6) & 63));
+            grown[length + 2] = (u8)(128 | (code & 63));
+            added = 3;
+        } else {
+            grown[length] = (u8)(240 | (code >> 18));
+            grown[length + 1] = (u8)(128 | ((code >> 12) & 63));
+            grown[length + 2] = (u8)(128 | ((code >> 6) & 63));
+            grown[length + 3] = (u8)(128 | (code & 63));
+            added = 4;
+        }
+        Dom.set_attr(target, "value", (i8*)grown, length + added);
+        __djinn_free((void*)grown);
+        Dom.dispatch(target, "input");
+        return true;
+    }
+
+    // Removes the last character of the focused text field (Backspace) and fires "input".
+    static unsafe bool erase(u32 target) {
+        str value = Dom.attr(target, "value");
+        u32 length = (u32)value.length;
+        if (length == 0) {
+            return false;
+        }
+        mut u32 keep = length - 1;
+        while (keep > 0 && (((i32)value.data[keep]) & 192) == 128) {
+            keep = keep - 1;
+        }
+        i8* head = (i8*)__djinn_alloc_zeroed((size_long)(keep + 1));
+        if (keep > 0) {
+            memcpy((void*)head, (void*)value.data, (size_long)keep);
+        }
+        Dom.set_attr(target, "value", head, keep);
+        __djinn_free((void*)head);
+        Dom.dispatch(target, "input");
+        return true;
+    }
+
     static unsafe bool button_like(u32 id) {
         return Texts.same(Dom.tag(id), "button") || Texts.same(Dom.attr(id, "role"), "button");
     }
@@ -77,6 +158,11 @@ struct Input {
         }
         if (key == Key.TAB && (mods & Mod.CTRL) == 0 && (mods & Mod.ALT) == 0) {
             if (Focus.move((mods & Mod.SHIFT) != 0)) {
+                handled = true;
+            }
+        } else if (key == Key.BACKSPACE) {
+            u32 field = Focus.current();
+            if (Input.editable(field) && Input.erase(field)) {
                 handled = true;
             }
         } else if (key == Key.ESCAPE) {
