@@ -87,8 +87,14 @@ struct Tiering {
         return false;
     }
 
+    // [Inline] functions are not tiered on their own: tier 0 forces them into their callers (alwaysinline works at O0)
+    // and every later tier keeps their body visible so the hot callers inline them as well.
+    static unsafe bool marked_inline(ptr function) {
+        return LLVMGetStringAttributeAtIndex(function, LlvmConst.ATTRIBUTE_FUNCTION_INDEX, "djinn-inline", 12) != null;
+    }
+
     static unsafe bool tierable(ptr function) {
-        if (LLVMIsDeclaration(function) != 0) {
+        if (LLVMIsDeclaration(function) != 0 || Tiering.marked_inline(function)) {
             return false;
         }
         i32 linkage = LLVMGetLinkage(function);
@@ -330,6 +336,13 @@ struct Tiering {
         if (!Strings.same(options.opt_level, "O0")) {
             state.level_name = options.opt_level;
         }
+        mut ptr inlined = LLVMGetFirstFunction(module);
+        while (inlined != null) {
+            if (LLVMIsDeclaration(inlined) == 0 && Tiering.marked_inline(inlined) && !Tiering.uses_coroutine(inlined)) {
+                LLVMAddAttributeAtIndex(inlined, LlvmConst.ATTRIBUTE_FUNCTION_INDEX, LLVMCreateEnumAttribute(context, LLVMGetEnumAttributeKindForName("alwaysinline", 12), 0));
+            }
+            inlined = LLVMGetNextFunction(inlined);
+        }
         state.pristine = LLVMCloneModule(module);
 
         ptr wide = LLVMIntTypeInContext(context, 64);
@@ -526,7 +539,7 @@ struct Tiering {
         for (mut i32 i = 0; i < others.length; i = i + 1) {
             ptr other = others.get(i);
             LLVMSetComdat(other, (ptr)0);
-            if (Tiering.instruction_count(other) <= Tiering.SMALL_FUNCTION && !Tiering.uses_coroutine(other)) {
+            if ((Tiering.marked_inline(other) || Tiering.instruction_count(other) <= Tiering.SMALL_FUNCTION) && !Tiering.uses_coroutine(other)) {
                 LLVMSetLinkage(other, LlvmConst.LINKAGE_AVAILABLE_EXTERNALLY);
             } else {
                 Tiering.hollow(other);

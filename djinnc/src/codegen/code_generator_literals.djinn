@@ -72,6 +72,32 @@ impl CodeGenerator {
         return Value.create(LLVMBuildLoad2(this.builder, llvm, slot, "array.loaded"), type);
     }
 
+    unsafe ptr constant_array(u32 type, Node* literal) {
+        StructInfo* info = this.struct_of(type);
+        IdList* arguments = info.type_args;
+        u32 element = arguments.get(0);
+        ptr element_llvm = this.llvm_type(element);
+        PointerList* fields = info.fields;
+        FieldInfo* length_field = (FieldInfo*)fields.get(1);
+        i32 count = literal.count();
+        ptr<ptr> values = CodeGenerator.array_of(count + 1);
+        for (mut i32 i = 0; i < count; i = i + 1) {
+            values[i] = this.coerce(this.gen_expression(literal.child(i)), element);
+        }
+        ptr table = LLVMConstArray2(element_llvm, values, (u64)count);
+        ptr data = LLVMAddGlobal(this.module, LLVMTypeOf(table), ".table");
+        LLVMSetInitializer(data, table);
+        LLVMSetGlobalConstant(data, 1);
+        LLVMSetLinkage(data, LlvmConst.LINKAGE_INTERNAL);
+        LLVMSetUnnamedAddr(data, 1);
+        LLVMSetAlignment(data, 16);
+        ptr i64_type = LLVMIntTypeInContext(this.context, 64);
+        ptr<ptr> parts = CodeGenerator.array_of(2);
+        parts[0] = data;
+        parts[1] = this.coerce(Value.create(LLVMConstInt(i64_type, (u64)count, 0), Types.i64_type()), length_field.type);
+        return LLVMConstNamedStruct(this.llvm_type(type), parts, 2);
+    }
+
     unsafe Value* gen_struct_init(Node* node) {
         u32 type = node.value_type();
         ptr llvm = this.llvm_type(type);

@@ -78,6 +78,10 @@ impl TypeChecker {
             variable.const_state = 3;
             return;
         }
+        if (this.array_element(variable.type) != 0) {
+            this.evaluate_array_variable(variable, initial);
+            return;
+        }
         ConstEval* evaluator = this.const_eval;
         if (evaluator.evaluate(initial, initial.value_type(), variable.type)) {
             variable.const_int = evaluator.ri;
@@ -92,6 +96,32 @@ impl TypeChecker {
             at = initial;
         }
         this.error_reason(at, "not a compile-time constant: ", evaluator.failure);
+    }
+
+    // A constexpr arr<number> global becomes read-only static data (const_state 4): no allocation per use.
+    void evaluate_array_variable(LocalVariable* variable, Node* initial) {
+        u32 element = this.array_element(variable.type);
+        bool numeric = Types.is_integer(element) || Types.is_float(element) || Types.is_char(element);
+        if (initial.kind() != NodeKind::ARRAY_LITERAL || !numeric) {
+            variable.const_state = 3;
+            this.error_code(initial, DiagnosticErrors.INVALID_CONSTANT_EXPRESSION, "a constexpr array must be an array literal of numbers, booleans or chars");
+            return;
+        }
+        ConstEval* evaluator = this.const_eval;
+        for (mut i32 i = 0; i < initial.count(); i = i + 1) {
+            Node* item = initial.child(i);
+            if (!evaluator.evaluate(item, item.value_type(), element)) {
+                variable.const_state = 3;
+                mut Node* at = evaluator.failure_node;
+                if (at == null) {
+                    at = item;
+                }
+                this.error_reason(at, "not a compile-time constant: ", evaluator.failure);
+                return;
+            }
+            evaluator.fold(item, element);
+        }
+        variable.const_state = 4;
     }
 
     void check_compile_time_if(Node* node) {
