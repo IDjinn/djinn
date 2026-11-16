@@ -1,0 +1,164 @@
+import std::types;
+
+namespace ui;
+
+// Escape closes a popup; choosing or picking closes it too.
+struct Popup {
+    public static str caret() {
+        return "▾";
+    }
+
+    public static unsafe void close_on_escape(signal<bool> open) {
+        if (Input.key() == Key.ESCAPE) {
+            open.set(false);
+        }
+    }
+
+    public static unsafe void choose(signal<i32> index, signal<bool> open, i32 value) {
+        index.set(value);
+        open.set(false);
+    }
+
+    public static unsafe void pick(fn(i32) -> void on_pick, signal<bool> open, i32 value) {
+        open.set(false);
+        on_pick(value);
+    }
+}
+
+// A drop-down list: a button showing the chosen option that opens a list under it. The options are written
+// "One|Two|Three" and index is the chosen one. Choosing closes it; so does Escape.
+struct Select {
+    str label;
+    str options;
+    signal<i32> index;
+
+    public unsafe Node render() {
+        signal<bool> open = state(false);
+        return html!{
+            <div class="select" on_keydown={() => Popup.close_on_escape(open)}>
+                <button class="select-button" aria-haspopup="listbox" aria-expanded={Kit.flag(open.get())}
+                        aria-label={this.label} on_click={() => open.set(!open.get())}>
+                    <span>{Choices.nth(this.options, this.index.get())}</span>
+                    <span class="select-caret">{Popup.caret()}</span>
+                </button>
+                <div class="popup" role="listbox" data-open={Kit.flag(open.get())}>
+                    {for (i32 i in 0..(i32)Choices.count(this.options)) {
+                        <button class="popup-item" role="option" aria-selected={Kit.flag(this.index.get() == i)}
+                                on_click={() => Popup.choose(this.index, open, i)}>{Choices.nth(this.options, i)}</button>
+                    }}
+                </div>
+            </div>
+        };
+    }
+}
+
+// A button that opens a menu of commands; picking one calls on_pick with its position. The items are written
+// "Open|Save|Quit".
+struct Menu {
+    str label;
+    str items;
+    fn(i32) -> void on_pick;
+
+    public unsafe Node render() {
+        signal<bool> open = state(false);
+        return html!{
+            <div class="select" on_keydown={() => Popup.close_on_escape(open)}>
+                <button class="select-button" aria-haspopup="menu" aria-expanded={Kit.flag(open.get())}
+                        on_click={() => open.set(!open.get())}>
+                    <span>{this.label}</span>
+                    <span class="select-caret">{Popup.caret()}</span>
+                </button>
+                <div class="popup" role="menu" data-open={Kit.flag(open.get())}>
+                    {for (i32 i in 0..(i32)Choices.count(this.items)) {
+                        <button class="popup-item" role="menuitem"
+                                on_click={() => Popup.pick(this.on_pick, open, i)}>{Choices.nth(this.items, i)}</button>
+                    }}
+                </div>
+            </div>
+        };
+    }
+}
+
+// A hint bubble that shows while the pointer is over the content or it has keyboard focus.
+struct Tooltip {
+    str text;
+    Node children;
+
+    public unsafe Node render() {
+        return html!{
+            <span class="tooltip">
+                {this.children}
+                <span class="tooltip-text" role="tooltip">{this.text}</span>
+            </span>
+        };
+    }
+}
+
+// A scrollable box of rows.
+struct List {
+    Node children;
+
+    public unsafe Node render() {
+        return html!{ <div class="list scroll" role="list">{this.children}</div> };
+    }
+}
+
+// One row of a List.
+struct Item {
+    Node children;
+
+    public unsafe Node render() {
+        return html!{ <div class="list-item" role="listitem">{this.children}</div> };
+    }
+}
+
+// A table of rows; the cells of a row share its width evenly.
+struct Table {
+    Node children;
+
+    public unsafe Node render() {
+        return html!{ <div class="table scroll" role="table">{this.children}</div> };
+    }
+}
+
+// A row of cells; header makes it the heading row.
+struct Row {
+    bool header;
+    Node children;
+
+    public unsafe Node render() {
+        return html!{ <div class="table-row" role="row" data-header={Kit.flag(this.header)}>{this.children}</div> };
+    }
+}
+
+// A navigation bar of links: the routes are written "/=Home|/settings=Settings" and the current page is marked.
+struct Navigator {
+    str routes;
+
+    public static unsafe str target(str routes, i32 index) {
+        return Choices.side(Choices.nth(routes, index), true);
+    }
+
+    public static unsafe str label(str routes, i32 index) {
+        return Choices.side(Choices.nth(routes, index), false);
+    }
+
+    public static unsafe str current(str routes, i32 index) {
+        str path = Router.path();
+        if (Router.matches(Navigator.target(routes, index), path)) {
+            return "page";
+        }
+        return "false";
+    }
+
+    public unsafe Node render() {
+        return html!{
+            <nav class="navigator" role="navigation">
+                {for (i32 i in 0..(i32)Choices.count(this.routes)) {
+                    <a href={Navigator.target(this.routes, i)} aria-current={Navigator.current(this.routes, i)}
+                       on_click={() => Router.navigate(Navigator.target(this.routes, i))}>{Navigator.label(this.routes, i)}</a>
+                }}
+            </nav>
+        };
+    }
+}

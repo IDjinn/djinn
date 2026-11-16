@@ -246,6 +246,15 @@ for each key (key codes are the Windows virtual-key values, `Key.*`; modifiers a
 exposed through `aria-checked`, `aria-selected`, `data-active` and `data-open`, which the theme styles. Not yet: a
 select / menu, tooltip, tables, and two-way binding of a field's value to a signal.
 
+## More kit components
+
+`Select` (`label`, `options="One|Two|Three"`, `index` signal), `Menu` (`label`, `items="Open|Save"`, `on_pick(i32)`),
+`Tooltip` (`text`, children; shows on hover or focus), `List` / `Item`, `Table` / `Row` (`header`; cells share the
+width) and `Navigator` (`routes="/=Home|/settings=Settings"`, marks the current page with `aria-current`). The popups
+close when you choose and on Escape; `List` and `Table` scroll past 16rem (the `.scroll` class). `Pointer`
+(`libs/ui/src/input/hit.djinn`) keeps `:hover` and `:active` on the tree: the host calls `Pointer.move(id)`,
+`press(id)` and `release()` as the mouse does, which is also what the tooltip and the hover colors use.
+
 ## Router and animation
 
 `Router` (`libs/ui/src/router/router.djinn`) keeps a history of paths: `Router.start(path)`, `navigate`, `back`,

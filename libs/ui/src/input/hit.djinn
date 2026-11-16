@@ -9,13 +9,17 @@ struct Hit {
         return Hit.search(Dom.document(), x, y + Scroll.page_top());
     }
 
-    static unsafe u32 search(u32 id, f32 x, f32 y) {
+    static unsafe u32 search(u32 id, f32 x, f32 line) {
         if (Dom.kind(id) != DomKind.ELEMENT) {
             return 0;
         }
         Style* style = Styles.of(id);
         if (style.display == Display.NONE) {
             return 0;
+        }
+        mut f32 y = line;
+        if (style.position == Keyword.FIXED) {
+            y = line - Scroll.page_top();
         }
         LayoutBox* box = Layout.box(id);
         bool inside = x >= box.left && x < box.left + box.width && y >= box.top && y < box.top + box.height;
@@ -42,5 +46,52 @@ struct Hit {
             child = Dom.next_sibling(child);
         }
         return found;
+    }
+}
+
+unsafe static mut u32 hovered_node = 0;
+unsafe static mut u32 pressed_node = 0;
+
+// The pointer state of the tree: :hover on the element under the pointer and every ancestor, :active while the
+// primary button is down on one. The host calls move / press / release as the pointer does.
+struct Pointer {
+    static unsafe void mark(u32 id, u8 flag, bool on) {
+        mut u32 node = id;
+        while (node != 0) {
+            if (Dom.kind(node) == DomKind.ELEMENT) {
+                Dom.set_state(node, flag, on);
+            }
+            node = Dom.parent(node);
+        }
+    }
+
+    public static unsafe void move(u32 id) {
+        if (id == hovered_node) {
+            return;
+        }
+        Pointer.mark(hovered_node, NodeState.HOVER, false);
+        hovered_node = id;
+        Pointer.mark(id, NodeState.HOVER, true);
+    }
+
+    public static unsafe void press(u32 id) {
+        Pointer.mark(pressed_node, NodeState.ACTIVE, false);
+        pressed_node = id;
+        Pointer.mark(id, NodeState.ACTIVE, true);
+    }
+
+    public static unsafe void release() {
+        Pointer.mark(pressed_node, NodeState.ACTIVE, false);
+        pressed_node = 0;
+    }
+
+    // The pointer left the window.
+    public static unsafe void leave() {
+        Pointer.move(0);
+        Pointer.release();
+    }
+
+    public static unsafe u32 hovered() {
+        return hovered_node;
     }
 }

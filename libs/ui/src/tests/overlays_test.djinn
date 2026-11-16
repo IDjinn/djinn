@@ -1,0 +1,139 @@
+namespace ui;
+
+import testing;
+import std::types;
+
+unsafe static mut i32 picked = -1;
+
+struct OverlayPage {
+    i32 unused;
+
+    public unsafe Node render() {
+        signal<i32> size = state(1);
+        return html!{
+            <main>
+                <Select label="Size" options="Small|Medium|Large" index={size}/>
+                <output id="chosen">{Choices.nth("Small|Medium|Large", size.get())}</output>
+                <Menu label="File" items="Open|Save|Quit" on_pick={(i32 i) => picked = i}/>
+                <Tooltip text="Saves the file"><button id="saver">Save</button></Tooltip>
+                <Table>
+                    <Row header={true}><span>Name</span><span>Size</span></Row>
+                    <Row header={false}><span>a.txt</span><span>1 KB</span></Row>
+                </Table>
+                <Navigator routes="/=Home|/settings=Settings"/>
+            </main>
+        };
+    }
+}
+
+struct OverlayTests {
+    static OverlayPage page() {
+        OverlayPage value = { .unused = 0 };
+        return value;
+    }
+
+    static unsafe u32 search(u32 root, str tag, str attr, str value) {
+        if (Dom.kind(root) == DomKind.ELEMENT && Texts.same(Dom.tag(root), tag)
+            && (attr.length == 0 || (Dom.has_attr(root, attr) && Texts.same(Dom.attr(root, attr), value)))) {
+            return root;
+        }
+        mut u32 child = Dom.first_child(root);
+        while (child != 0) {
+            u32 found = OverlayTests.search(child, tag, attr, value);
+            if (found != 0) {
+                return found;
+            }
+            child = Dom.next_sibling(child);
+        }
+        return 0;
+    }
+
+    // The n-th (from 0, in tree order) element under root with this tag whose attribute has this value.
+    static unsafe u32 nth_child(u32 root, str tag, str attr, str value, u32 n) {
+        mut u32 seen = 0;
+        return OverlayTests.walk(root, tag, attr, value, n, &seen);
+    }
+
+    static unsafe u32 walk(u32 id, str tag, str attr, str value, u32 n, u32* seen) {
+        if (Dom.kind(id) == DomKind.ELEMENT && Texts.same(Dom.tag(id), tag) && Dom.has_attr(id, attr) && Texts.same(Dom.attr(id, attr), value)) {
+            if (*seen == n) {
+                return id;
+            }
+            *seen = *seen + 1;
+        }
+        mut u32 child = Dom.first_child(id);
+        while (child != 0) {
+            u32 found = OverlayTests.walk(child, tag, attr, value, n, seen);
+            if (found != 0) {
+                return found;
+            }
+            child = Dom.next_sibling(child);
+        }
+        return 0;
+    }
+
+    [Test]
+    unsafe void choices_split_on_bars() {
+        Expect.equal(3, (i64)Choices.count("a|b|c"));
+        Expect.equal(0, (i64)Choices.count(""));
+        Expect.is_true(Texts.same(Choices.nth("a|bb|c", 1), "bb"));
+        Expect.is_true(Texts.same(Choices.nth("a|bb|c", 2), "c"));
+        Expect.equal(0, (i64)Choices.nth("a|bb|c", 3).length);
+        Expect.is_true(Texts.same(Choices.side("/x=Label", true), "/x"));
+        Expect.is_true(Texts.same(Choices.side("/x=Label", false), "Label"));
+    }
+
+    [Test]
+    unsafe void a_select_opens_chooses_and_closes() {
+        Router.start("/");
+        Mounted app = App.mount<OverlayPage>(OverlayTests.page());
+        u32 popup = OverlayTests.search(app.node.id, "div", "role", "listbox");
+        Expect.is_true(Texts.same(Dom.attr(popup, "data-open"), "false"));
+        u32 button = OverlayTests.search(app.node.id, "button", "aria-haspopup", "listbox");
+        Dom.dispatch(button, "click");
+        Expect.is_true(Texts.same(Dom.attr(popup, "data-open"), "true"));
+        u32 last = OverlayTests.search(popup, "button", "aria-selected", "false");
+        Expect.is_true(last != 0);
+        Dom.dispatch(OverlayTests.nth_child(popup, "button", "role", "option", 2), "click");
+        Expect.is_true(Texts.same(Dom.attr(popup, "data-open"), "false"), "choosing closes the list");
+        Expect.is_true(Texts.same(Dom.text_of(Dom.first_child(Dom.find(app.node.id, "chosen"))), "Large"));
+        app.unmount();
+    }
+
+    [Test]
+    unsafe void a_menu_reports_the_picked_item() {
+        picked = -1;
+        Mounted app = App.mount<OverlayPage>(OverlayTests.page());
+        u32 popup = OverlayTests.search(app.node.id, "div", "role", "menu");
+        Dom.dispatch(OverlayTests.nth_child(popup, "button", "role", "menuitem", 1), "click");
+        Expect.equal(1, (i64)picked);
+        app.unmount();
+    }
+
+    [Test]
+    unsafe void the_navigator_marks_the_current_page() {
+        Router.start("/settings");
+        Mounted app = App.mount<OverlayPage>(OverlayTests.page());
+        u32 current = OverlayTests.search(app.node.id, "a", "aria-current", "page");
+        Expect.is_true(current != 0);
+        Expect.is_true(Texts.same(Dom.attr(current, "href"), "/settings"));
+        Dom.dispatch(OverlayTests.search(app.node.id, "a", "href", "/"), "click");
+        Expect.is_true(Texts.same(Router.peek(), "/"));
+        app.unmount();
+        Router.start("/");
+    }
+
+    [Test]
+    unsafe void a_tooltip_shows_only_while_hovered() {
+        Router.start("/");
+        Mounted app = App.mount<OverlayPage>(OverlayTests.page());
+        Layout.compute(app.node.id, (f32)400.0, (f32)300.0);
+        u32 tip = OverlayTests.search(app.node.id, "span", "role", "tooltip");
+        Expect.equal((i64)Display.NONE, (i64)Styles.of(tip).display);
+        Pointer.move(Dom.find(app.node.id, "saver"));
+        Layout.compute(app.node.id, (f32)400.0, (f32)300.0);
+        Expect.is_true(Styles.of(tip).display != Display.NONE, "hovering the button shows the bubble");
+        Pointer.leave();
+        app.unmount();
+    }
+}
