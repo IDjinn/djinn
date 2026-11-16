@@ -38,7 +38,7 @@ unsafe i32 run_compiler() {
     ObjectWriter.set_target(options.cpu, options.features);
 
     if (options.inspect_path != null) {
-        return Library.inspect(options.inspect_path, null);
+        return Library.inspect(options.inspect_path, null, options.sections_only);
     }
 
     PerformanceMonitor* monitor = PerformanceMonitor.create("djinnc", options.stats);
@@ -106,6 +106,10 @@ unsafe i32 run_compiler() {
     for (mut i32 i = 0; i < total_sources; i = i + 1) {
         SourceFile* file = Sources.get(i);
         Diagnostics* file_diagnostics = (Diagnostics*)diagnostics_list.get(i);
+        if (file.packed != null) {
+            Library.unpack(file);
+            continue;
+        }
         Lexer* lexer = Lexer.create(file, tokens, file_diagnostics);
         lexer.tokenize();
         if (file_diagnostics.failed()) {
@@ -204,11 +208,9 @@ unsafe i32 run_compiler() {
 
     if (options.library) {
         gen.exclude_dependencies(options.dependencies, true);
-        if (options.opt_level != null && !Strings.same(options.opt_level, "O0") && !options.debug) {
-            u64 bitcode_size = 0;
-            ptr<i8> bitcode = Bitcode.capture(gen.module, &bitcode_size);
-            Library.set_bitcode(bitcode, bitcode_size);
-        }
+        u64 bitcode_size = 0;
+        ptr<i8> bitcode = Bitcode.capture(gen.module, &bitcode_size);
+        Library.set_bitcode(bitcode, bitcode_size);
         ByteBuffer* library_object = ByteBuffer.create();
         library_object.append(options.output);
         library_object.append(".obj");
@@ -229,7 +231,7 @@ unsafe i32 run_compiler() {
             return 1;
         }
         if (options.library_view) {
-            i32 status = Library.inspect(options.output, library_path);
+            i32 status = Library.inspect(options.output, library_path, false);
             remove(options.output);
             return status;
         }

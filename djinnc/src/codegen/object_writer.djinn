@@ -46,13 +46,37 @@ struct ObjectWriter {
         return !Strings.same(level, "O0");
     }
 
+    static ptr<i8> pipeline_level(ptr<i8> level) {
+        if (Strings.same(level, "Os") || Strings.same(level, "Oz")) {
+            return "O2";
+        }
+        return level;
+    }
+
+    static unsafe void size_attributes(ptr module, ptr<i8> level) {
+        if (!Strings.same(level, "Os") && !Strings.same(level, "Oz")) {
+            return;
+        }
+        mut ptr<i8> name = "optsize";
+        if (Strings.same(level, "Oz")) {
+            name = "minsize";
+        }
+        u32 kind = LLVMGetEnumAttributeKindForName(name, (u64)strlen(name));
+        ptr attribute = LLVMCreateEnumAttribute(LLVMGetModuleContext(module), kind, 0);
+        for (mut ptr function = LLVMGetFirstFunction(module); function != null; function = LLVMGetNextFunction(function)) {
+            if (LLVMIsDeclaration(function) == 0) {
+                LLVMAddAttributeAtIndex(function, 4294967295, attribute);
+            }
+        }
+    }
+
     static ptr<i8> pipeline(ptr<i8> level, bool drop_dependencies, bool lower) {
         ByteBuffer* text = ByteBuffer.create();
         bool optimized = ObjectWriter.is_optimized(level);
         bool has_base = optimized || lower;
         if (optimized) {
             text.append("default<");
-            text.append(level);
+            text.append(ObjectWriter.pipeline_level(level));
             text.append(">");
         } else if (lower) {
             text.append("default<O0>");
@@ -80,6 +104,7 @@ struct ObjectWriter {
     }
 
     public static unsafe bool optimize_module(ptr module, ptr<i8> level, bool drop_dependencies) {
+        ObjectWriter.size_attributes(module, level);
         return ObjectWriter.run_passes(module, (ptr)0, ObjectWriter.pipeline(level, drop_dependencies, false));
     }
 
@@ -133,6 +158,7 @@ struct ObjectWriter {
             return false;
         }
 
+        ObjectWriter.size_attributes(module, level);
         ptr<i8> pipeline = ObjectWriter.pipeline(level, drop_dependencies, true);
         if (!ObjectWriter.run_passes(module, machine, pipeline)) {
             LLVMDisposeTargetMachine(machine);

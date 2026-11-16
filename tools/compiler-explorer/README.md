@@ -40,4 +40,4 @@ The compiler-generated async infrastructure (the entry `main` that starts the ru
 
 ## Library view
 
-The `djinnc (library view)` compiler builds the source as a `.djlib` (`--emit-lib-view`) and shows the library inspection in the output pane: header, section sizes, integrity and the interface that consumers see (declarations without bodies, macros and generics kept).
+The `djinnc (library view)` compiler builds the source as a `.djlib` (`--emit-lib-view`) and shows the library inspection in the output pane: header, section sizes, integrity and the interface that consumers see (declarations without bodies, macros and generics kept; the file stores it as tokens and the view renders it back as text).

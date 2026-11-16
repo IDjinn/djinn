@@ -66,6 +66,29 @@ struct Bitcode {
         return true;
     }
 
+    // -g adds stack-trace frame bookkeeping to every function; the copy is the same with and without it.
+    static unsafe void drop_frames(ptr function) {
+        mut ptr block = LLVMGetFirstBasicBlock(function);
+        while (block != null) {
+            mut ptr instruction = LLVMGetFirstInstruction(block);
+            while (instruction != null) {
+                ptr next = LLVMGetNextInstruction(instruction);
+                if (LLVMIsACallInst(instruction) != null) {
+                    ptr callee = LLVMGetCalledValue(instruction);
+                    if (callee != null && LLVMIsAFunction(callee) != null) {
+                        u64 length = 0;
+                        ptr<i8> name = LLVMGetValueName2(callee, &length);
+                        if (Strings.same(name, "__djinn_frame_push") || Strings.same(name, "__djinn_frame_pop")) {
+                            LLVMInstructionEraseFromParent(instruction);
+                        }
+                    }
+                }
+                instruction = next;
+            }
+            block = LLVMGetNextBasicBlock(block);
+        }
+    }
+
     static unsafe void strip(ptr module) {
         PointerList* keep = PointerList.create();
         PointerList* drop = PointerList.create();
@@ -91,6 +114,7 @@ struct Bitcode {
         }
         for (mut i32 i = 0; i < keep.length; i = i + 1) {
             LLVMSetComdat(keep.get(i), (ptr)0);
+            Bitcode.drop_frames(keep.get(i));
         }
         mut ptr global = LLVMGetFirstGlobal(module);
         while (global != null) {
@@ -116,10 +140,13 @@ struct Bitcode {
                 leftover = next;
             }
         }
+        // what nothing in the kept bodies refers to (string constants, prototypes of hollowed functions) is not stored
+        ObjectWriter.run_passes(module, (ptr)0, "globaldce,strip-dead-prototypes");
     }
 
     public static unsafe ptr<i8> capture(ptr module, u64* size) {
         ptr clone = LLVMCloneModule(module);
+        LLVMStripModuleDebugInfo(clone);
         Bitcode.strip(clone);
         ptr buffer = LLVMWriteBitcodeToMemoryBuffer(clone);
         u64 length = LLVMGetBufferSize(buffer);
@@ -155,7 +182,7 @@ struct Bitcode {
     }
 
     public static unsafe void merge(CodeGenerator* gen, Options* options) {
-        if (options.opt_level == null || Strings.same(options.opt_level, "O0") || options.tiered || options.debug) {
+        if (options.opt_level == null || Strings.same(options.opt_level, "O0") || options.tiered) {
             return;
         }
         PointerList* blobs = Library.bitcode();

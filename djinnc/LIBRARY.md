@@ -1,6 +1,6 @@
 # Djinn libraries (`.djlib`)
 
-A `.djlib` is a single file with the compiled object **and** the Djinn interface of the library, so consumers keep the
+A `.djlib` is a single file with the compiled object, the Djinn interface of the library (a compact token stream, never source text) and the optimizable bitcode of its small functions, so consumers keep the
 full language semantics (macros, attributes, generics, constexpr, reflection) instead of only seeing symbols.
 
 ## CLI
@@ -9,6 +9,7 @@ full language semantics (macros, attributes, generics, constexpr, reflection) in
 djinnc lib.djinn --library -o lib.djlib          # build a library (no entry point is generated)
 djinnc app.djinn --lib lib.djlib -o app.exe      # consume it (repeat --lib for several)
 djinnc --inspect-lib lib.djlib                   # header, sections, integrity and the interface
+djinnc --inspect-lib lib.djlib --sections-only   # header and sections only
 djinnc lib.djinn --emit-lib-view -o view.txt     # build + inspection text (used by Compiler Explorer)
 ```
 
@@ -58,19 +59,24 @@ Section table: one 32 byte entry per section: `u32 kind, u32 pad, u64 offset, u6
 | Kind | Section | Content |
 |---|---|---|
 | 1 | manifest | `u32 len + name`, `u32 len + target triple`, file count, then `u32` link count and that many `u32 len + text` link arguments |
-| 2 | interface | per file: `u32 len + path`, `u32 len + minified Djinn text` |
+| 2 | interface | binary token stream, see below |
 | 3 | object | native object file |
-| 4 | bitcode | optional LLVM bitcode of the small, self-contained exported functions (see below). Readers that do not know the kind ignore it |
+| 4 | bitcode | LLVM bitcode of the small, self-contained exported functions (see below), always written in library mode. Readers that do not know the kind ignore it |
 
-The interface is the original source minified (comments and whitespace removed) with the bodies of non generic,
-non constexpr functions, constructors, operators and property accessors replaced by `{}`. Generics, macros,
-constexpr and struct layouts stay complete. Modifiers (`private`, `async`, `sync`, `unsafe`) are kept in the text, so a consumer enforces `private` (E3062) and sees `sync`/`async` signatures the same way as for source.
+The format version stays 1. A library whose interface is the older minified text (no `DJI1` magic) is rejected with a message to build it again; a file with a greater version is rejected as unsupported. The interface is the token stream of the declarations, not text. It starts with the magic `DJI1` and holds, as varints:
+the atom table (every distinct identifier and literal once, most frequent first so common ones take one byte), the phrase
+table (qualified names `a::b::c` and attributes `[Name]` that repeat, referenced by index instead of spelled out), then
+per file its path (common directory stripped) and the tokens: one kind byte (bit 7 = whitespace before the token)
+followed by an atom or phrase index for the kinds that carry text. The bodies of non generic, non constexpr functions,
+constructors, operators and property accessors are replaced by `{}`. Generics, macros, constexpr and struct layouts stay
+complete, and comments never reach the file. The consumer does not run the lexer on it: it pushes the tokens directly.
+Modifiers (`private`, `async`, `sync`, `unsafe`) are kept in the text, so a consumer enforces `private` (E3062) and sees `sync`/`async` signatures the same way as for source.
 
 ## How it works
 
 - Build: bodies are recorded by the parser (`Library.record_body`); the object is produced with no entry point and
   with core/std definitions demoted to declarations; sections are packed and checksummed.
-- Consume: interface files are parsed as header sources (`SourceFile.is_header`); their macros are collected with every
+- Consume: interface files are unpacked into tokens and parsed as header sources (`SourceFile.is_header`); their macros are collected with every
   other macro before parsing and are visible to files that import the library namespace. Tokens a macro expands keep the
   call site, so declarations it produces in the consumer are not treated as header declarations. Header
   functions become `extern`, header globals become declarations; the object is extracted next to the output and
@@ -87,16 +93,17 @@ A library project lists the system libraries it needs as quoted lines in its `dj
 
 ## Bitcode and cross-library inlining
 
-A library built with optimization (`-O1` and up, without `-g`) also stores a bitcode section: a copy of the module
-before optimization where only the small exported functions keep their bodies (at most 60 instructions, no
+Every library stores a bitcode section, whatever its optimization level and with or without `-g`: a copy of the module
+before optimization, with debug info and the `-g` stack-trace instrumentation removed, where only the small exported functions keep their bodies (at most 60 instructions, no
 coroutines, no `main` or `__djinn_*`, and nothing that touches non constant library-private data or private functions).
-Everything else is a declaration, so the section stays small.
+Everything else is a declaration, and what no kept body uses (string constants, prototypes) is dropped, so the section stays
+small and is the same with or without `-g`.
 
-When a consumer compiles with `-O1` or higher (not `-g`, not `--tiered`), it parses each bitcode section into its own
+When a consumer compiles with `-O1` or higher (not `--tiered`; `-g` is fine), it parses each bitcode section into its own
 LLVM context, marks the function bodies `available_externally` and links them into the program module. The
 optimizer inlines them and drops the unused ones, while calls that stay are resolved against the library object.
-A body the consumer already defines wins. If a section cannot be parsed (for instance it was written by another
-LLVM), a warning is printed and the library is used without inlining. `--inspect-lib` lists the section size.
+A `-g` consumer inlines too: inlined library calls then have no debug frame of their own, which is the usual trade-off of inlining. A body the consumer already defines wins. If a section cannot be parsed (for instance it was written by another
+LLVM), a warning is printed and the library is used without inlining. `--inspect-lib` always lists the bitcode line (`none` when the file has no section).
 
 ## Std as a library
 
@@ -112,15 +119,15 @@ LLVM), a warning is printed and the library is used without inlining. `--inspect
 ## Roadmap / not yet supported
 
 - Debug synergy: store the original sources (or a source map) in the library so debuggers and Compiler Explorer can
-  show library code when the original path is gone; interface text is minified, so its line numbers do not match
-  the original files and consumer diagnostics point at `<lib>!<path>`.
+  show library code when the original path is gone; the interface has no original line numbers, so consumer
+  diagnostics point at `<lib>!<path>` at line 1 with the column as the position in the token stream.
 - Reflection synergy: a reflection section with the type/attribute tables so `--inspect-lib` lists reflected types,
   fields and attributes, and registry-style lookups across several libraries.
 
 - Library depending on other libraries (manifest has no dependency list; header bytes 96..127 are reserved for it).
 - Version policy: reject libraries from an incompatible compiler version, and check the interface hash.
 - Per-function dead stripping of the std object (it is linked whole).
-- Binary AST interface instead of minified source (faster load, smaller files); `.djni` interface-only files.
+- `.djni` interface-only files.
 - Static variable initializers and global constructors across libraries (header globals are declarations only).
 - Reflection method pointers (`funcPtr`) and `[Reflect]` tables of library types when mixed with `--reflect-all`.
 - Cross-target libraries (one interface, several objects per triple).
