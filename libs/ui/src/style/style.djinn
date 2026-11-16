@@ -83,6 +83,12 @@ struct Style {
     mut f32 translate_x;
     mut f32 translate_y;
     mut f32 transform_rotate;
+    mut str anim_name;
+    mut u32 anim_ms;
+    mut u32 anim_count;
+    mut bool anim_alternate;
+    mut bool anim_forwards;
+    mut bool anim_linear;
     mut f32 origin_x;
     mut f32 origin_y;
     mut f32 origin_x_px;
@@ -166,6 +172,7 @@ struct Style {
         style.background = 0;
         style.opacity = (f32)1.0;
         style.transform_scale = (f32)1.0;
+        style.anim_count = 1;
         style.origin_x = (f32)0.5;
         style.origin_y = (f32)0.5;
         style.font_size = (f32)16.0;
@@ -378,6 +385,16 @@ struct Props {
         else if (CssNames.equal(name, "color")) { style.color = from.color; }
         else if (CssNames.equal(name, "background-color") || CssNames.equal(name, "background")) { style.background = from.background; }
         else if (CssNames.equal(name, "opacity")) { style.opacity = from.opacity; }
+        else if (CssNames.equal(name, "animation") || CssNames.equal(name, "animation-name")
+            || CssNames.equal(name, "animation-duration") || CssNames.equal(name, "animation-iteration-count")
+            || CssNames.equal(name, "animation-timing-function")) {
+            style.anim_name = from.anim_name;
+            style.anim_ms = from.anim_ms;
+            style.anim_count = from.anim_count;
+            style.anim_alternate = from.anim_alternate;
+            style.anim_forwards = from.anim_forwards;
+            style.anim_linear = from.anim_linear;
+        }
         else if (CssNames.equal(name, "font-size")) { style.font_size = from.font_size; }
         else if (CssNames.equal(name, "font-weight")) { style.font_weight = from.font_weight; }
         else if (CssNames.equal(name, "font-style")) { style.font_style = from.font_style; }
@@ -788,6 +805,89 @@ struct Props {
             style.translate_x = across;
             style.translate_y = down;
             style.transform_rotate = turn;
+            return true;
+        }
+        if (CssNames.equal(name, "animation-name")) {
+            if (first.kind != CssKind.IDENT) {
+                return false;
+            }
+            str empty = "";
+            style.anim_name = first.text;
+            if (CssNames.equal(first.text, "none")) {
+                style.anim_name = empty;
+            }
+            return true;
+        }
+        if (CssNames.equal(name, "animation-duration")) {
+            Numeric amount = CssNumbers.read(reader, context);
+            if (amount.unit == Unit.NUMBER && amount.value >= 0.0) {
+                style.anim_ms = (u32)amount.value;
+                return true;
+            }
+            return false;
+        }
+        if (CssNames.equal(name, "animation-iteration-count")) {
+            if (first.kind == CssKind.IDENT && CssNames.equal(first.text, "infinite")) {
+                style.anim_count = 0;
+                return true;
+            }
+            if (first.kind == CssKind.NUMBER && first.number >= 1.0) {
+                style.anim_count = (u32)first.number;
+                return true;
+            }
+            return false;
+        }
+        if (CssNames.equal(name, "animation-timing-function")) {
+            style.anim_linear = first.kind == CssKind.IDENT && CssNames.equal(first.text, "linear");
+            return true;
+        }
+        if (CssNames.equal(name, "animation")) {
+            // name, duration, 'infinite' or a count, 'alternate', 'linear', 'forwards' (the rest is accepted and ignored)
+            str empty = "";
+            mut str label = empty;
+            mut u32 ms = 0;
+            mut u32 count = 1;
+            mut bool alternate = false;
+            mut bool forwards = false;
+            mut bool linear = false;
+            while (!reader.done()) {
+                u32 before = reader.pos;
+                CssToken word = reader.peek();
+                if (word.kind == CssKind.IDENT) {
+                    reader.next();
+                    if (CssNames.equal(word.text, "infinite")) { count = 0; }
+                    else if (CssNames.equal(word.text, "alternate") || CssNames.equal(word.text, "alternate-reverse")) { alternate = true; }
+                    else if (CssNames.equal(word.text, "forwards") || CssNames.equal(word.text, "both")) { forwards = true; }
+                    else if (CssNames.equal(word.text, "linear")) { linear = true; }
+                    else if (CssNames.equal(word.text, "none")) { label = empty; }
+                    else if (!(CssNames.equal(word.text, "ease") || CssNames.equal(word.text, "ease-in")
+                        || CssNames.equal(word.text, "ease-out") || CssNames.equal(word.text, "ease-in-out")
+                        || CssNames.equal(word.text, "normal") || CssNames.equal(word.text, "reverse")
+                        || CssNames.equal(word.text, "backwards") || CssNames.equal(word.text, "running")
+                        || CssNames.equal(word.text, "paused"))) {
+                        label = word.text;
+                    }
+                } else if (word.kind == CssKind.NUMBER) {
+                    reader.next();
+                    if (word.number >= 1.0) {
+                        count = (u32)word.number;
+                    }
+                } else {
+                    Numeric amount = CssNumbers.read(reader, context);
+                    if (amount.unit == Unit.NUMBER && amount.value > 0.0 && ms == 0) {
+                        ms = (u32)amount.value;
+                    }
+                }
+                if (reader.pos == before) {
+                    reader.next();
+                }
+            }
+            style.anim_name = label;
+            style.anim_ms = ms;
+            style.anim_count = count;
+            style.anim_alternate = alternate;
+            style.anim_forwards = forwards;
+            style.anim_linear = linear;
             return true;
         }
         if (CssNames.equal(name, "transform-origin")) {
