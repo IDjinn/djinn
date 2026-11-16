@@ -165,6 +165,31 @@ struct WinHost {
         }
     }
 
+    // How far a wheel movement scrolls, following the system settings: the lines per notch the user chose in the mouse
+    // settings (3 by default; "one screen at a time" scrolls a page), 16 pixels a line, scaled by the display. 'raw' is
+    // the signed wheel delta (120 per notch, less on precision wheels and touchpads).
+    static unsafe f32 wheel_amount(i32 raw, bool sideways) {
+        mut u32 action = 104;
+        mut u32 fallback = 3;
+        if (sideways) {
+            action = 108;
+        }
+        u32* setting = (u32*)__djinn_alloc_zeroed((size_long)8);
+        setting[0] = fallback;
+        SystemParametersInfoA(action, 0, (void*)setting, 0);
+        u32 lines = setting[0];
+        __djinn_free((void*)setting);
+        f32 notches = (f32)raw / (f32)120.0;
+        if (lines == 4294967295) {
+            mut f32 page = Scroll.page_size() * (f32)0.9;
+            if (page < (f32)100.0) {
+                page = (f32)100.0;
+            }
+            return notches * page;
+        }
+        return notches * (f32)lines * (f32)16.0 * (f32)Styles.device_scale();
+    }
+
     // Microseconds from the performance counter (it ticks at 10 MHz on current Windows).
     static unsafe u64 ticks(HostState* s) {
         QueryPerformanceCounter((void*)((u8*)s.rect + 16));
@@ -281,6 +306,9 @@ struct WinHost {
                     if (Hit.bar() != 0) {
                         Bars.begin(Hit.bar(), Hit.bar_vertical(), x, y);
                         pressed = 0;
+                    } else if (Hit.track() != 0) {
+                        Bars.page(Hit.track(), Hit.bar_vertical(), Hit.track_before());
+                        pressed = 0;
                     }
                     u32 control = Focus.owner(pressed);
                     editing = 0;
@@ -327,16 +355,16 @@ struct WinHost {
                         notches = notches - 65536;
                     }
                     if ((WinHost.modifiers() & Mod.SHIFT) != 0) {
-                        Scroll.wheel_x(pointer_x, pointer_y, (f32)0.0 - (f32)notches * (f32)0.4);
+                        Scroll.wheel_x(pointer_x, pointer_y, (f32)0.0 - WinHost.wheel_amount(notches, true));
                     } else {
-                        Scroll.wheel(pointer_x, pointer_y, (f32)0.0 - (f32)notches * (f32)0.4);
+                        Scroll.wheel(pointer_x, pointer_y, (f32)0.0 - WinHost.wheel_amount(notches, false));
                     }
                 } else if (kind == WinHost.WM_MOUSEHWHEEL) {
                     mut i32 side = (i32)((key >> 16) & 0xFFFF);
                     if (side >= 32768) {
                         side = side - 65536;
                     }
-                    Scroll.wheel_x(pointer_x, pointer_y, (f32)side * (f32)0.4);
+                    Scroll.wheel_x(pointer_x, pointer_y, WinHost.wheel_amount(side, true));
                 } else if (kind == WinHost.WM_XBUTTONUP) {
                     // the extra mouse buttons go back (1) and forward (2) through the pages, like a browser
                     u32 button = (u32)((key >> 16) & 0xFFFF);

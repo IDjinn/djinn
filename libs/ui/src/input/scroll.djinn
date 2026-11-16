@@ -12,6 +12,7 @@ struct ScrollEntry {
     mut f32 goal_x;
     mut f32 goal_y;
     mut f32 stretch;
+    mut f32 stretch_x;
 }
 
 struct ScrollSystem {
@@ -26,6 +27,7 @@ struct ScrollSystem {
     mut f32 page_goal_x;
     mut f32 page_goal_y;
     mut f32 page_stretch;
+    mut f32 page_stretch_x;
     mut f32 page_limit_x;
     mut f32 viewport_x;
     mut bool smooth;
@@ -64,6 +66,7 @@ struct Scroll {
         system.page_goal_x = (f32)0.0;
         system.page_goal_y = (f32)0.0;
         system.page_stretch = (f32)0.0;
+        system.page_stretch_x = (f32)0.0;
         system.version = system.version + 1;
     }
 
@@ -122,12 +125,18 @@ struct Scroll {
             if (Scroll.approach(&entry.stretch, (f32)0.0, factor * (f32)0.7, &changed)) {
                 moving = true;
             }
+            if (Scroll.approach(&entry.stretch_x, (f32)0.0, factor * (f32)0.7, &changed)) {
+                moving = true;
+            }
             if (entry.x != was_x || entry.y != was_y) {
                 Dom.dispatch(entry.id, "scroll");
             }
             i = i + 1;
         }
         if (Scroll.approach(&system.page_stretch, (f32)0.0, factor * (f32)0.7, &changed)) {
+            moving = true;
+        }
+        if (Scroll.approach(&system.page_stretch_x, (f32)0.0, factor * (f32)0.7, &changed)) {
             moving = true;
         }
         if (Scroll.approach(&system.page_x, system.page_goal_x, factor, &changed)) {
@@ -217,7 +226,7 @@ struct Scroll {
         if (entry == (ScrollEntry*)0) {
             return (f32)0.0;
         }
-        return Scroll.whole(Px.min(entry.x, Scroll.max_x(id)));
+        return Scroll.whole(Px.min(entry.x, Scroll.max_x(id)) + entry.stretch_x);
     }
 
     // Offsets are drawn on whole device pixels: a fractional one (a glide in progress) would blur the text and thin lines.
@@ -343,7 +352,7 @@ struct Scroll {
 
     public static unsafe f32 page_left() {
         ScrollSystem* system = Scroll.system();
-        return Scroll.whole(Px.min(system.page_x, system.page_limit_x));
+        return Scroll.whole(Px.min(system.page_x, system.page_limit_x) + system.page_stretch_x);
     }
 
     public static unsafe f32 page_max_y() {
@@ -352,6 +361,11 @@ struct Scroll {
 
     public static unsafe f32 page_max_x() {
         return Scroll.system().page_limit_x;
+    }
+
+    // The height of the window as the painter last saw it (device pixels).
+    public static unsafe f32 page_size() {
+        return Scroll.system().viewport;
     }
 
     // Called by the painter each frame with how far the document can scroll.
@@ -453,6 +467,16 @@ struct Scroll {
         return true;
     }
 
+    public static unsafe bool stretch_x_by(u32 id, f32 dx) {
+        if (!Scroll.gliding()) {
+            return false;
+        }
+        ScrollEntry* entry = Scroll.find(id, true);
+        entry.stretch_x = Scroll.pull(entry.stretch_x, dx);
+        Scroll.touch();
+        return true;
+    }
+
     // The mouse wheel at a point of the window (client pixels): the innermost scroll container under it that can
     // still move takes the delta, then the ones around it, then the page. Positive is down.
     public static unsafe bool wheel(f32 x, f32 y, f32 dy) {
@@ -495,9 +519,13 @@ struct Scroll {
     public static unsafe bool wheel_x(f32 x, f32 y, f32 dx) {
         u32 target = Hit.at(x, y);
         mut u32 holder = target;
+        mut u32 edge = 0;
         while (holder != 0) {
             if (Scroll.container(holder)) {
                 bool right = dx > (f32)0.0;
+                if (edge == 0 && Scroll.max_x(holder) > (f32)0.0) {
+                    edge = holder;
+                }
                 bool room = (right && Scroll.goal_left(holder) < Scroll.max_x(holder)) || (!right && Scroll.goal_left(holder) > (f32)0.0);
                 if (room && Scroll.glide_by(holder, dx, (f32)0.0)) {
                     return true;
@@ -505,7 +533,23 @@ struct Scroll {
             }
             holder = Dom.parent(holder);
         }
-        return Scroll.page_by_x(dx);
+        if (Scroll.page_by_x(dx)) {
+            return true;
+        }
+        if (Scroll.gliding()) {
+            ScrollSystem* system = Scroll.system();
+            if (edge != 0) {
+                ScrollEntry* entry = Scroll.find(edge, true);
+                entry.stretch_x = Scroll.pull(entry.stretch_x, dx);
+            } else if (system.page_limit_x > (f32)0.0) {
+                system.page_stretch_x = Scroll.pull(system.page_stretch_x, dx);
+            } else {
+                return false;
+            }
+            system.version = system.version + 1;
+            return true;
+        }
+        return false;
     }
 
     // A key that scrolls: the nearest scroll container above the focused element (or the page). The viewport
