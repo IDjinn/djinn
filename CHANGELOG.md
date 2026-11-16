@@ -8,12 +8,15 @@
 - `(i16s)x`: a saturating integer cast clamps to the range of the target (the `w` suffix already truncated), at run time and in constant evaluation.
 - `--windowed` (and `windowed: true` in `djinn.proj`): links a Windows GUI program with no console window. `-l<name>` and `-L<dir>` on the command line, with the same mapping as the manifest.
 - `std::libc`: `atoi`, `atoll`, `strtoll`, `strtoull`. `Math` has `f32` versions of the error and gamma functions.
+- `Point[n]` allocates `n` structs on the stack (like `i8[n]`) and gives a `Point*`.
+- A library records the system libraries its manifest names (`'-luser32'`) in the `.djlib`; a program that imports it links them once and is told when an import library cannot be found (it looks next to the library, in `../native`, in the `-L` directories and in `LIB`). `ui`, `win32` and `vulkan` declare theirs, so `--link-arg` is no longer needed.
 
 ### Changed
 - Pointer arithmetic (`p + n`, `p - n`, `p++`) steps by the size of the element, as in C. A `ptr` (void pointer) still steps by bytes.
 - `__djinn_free(null)` is accepted and does nothing.
 
 ### Fixed
+- `Task.delay` could finish a few milliseconds early on Windows (the timer clock ticked every 15 ms): it now uses the performance counter and never fires before its deadline.
 - Linking without `--lld` on Windows failed with `undefined symbol: printf`: the clang link now adds `legacy_stdio_definitions`.
 
 ## [0.6.0] - 2026-11-15

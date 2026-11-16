@@ -287,7 +287,7 @@ overflow_suffix      = "w" | "t" | "c" | "s" ;
 ```
 
 - `T*` is a safe pointer, `ptr` / `ptr<T>` are raw pointers (dereference, indexing, arithmetic and int-to-pointer casts need
-  `unsafe`), `T?` is `optional<T>` (`T*?` uses the pointer niche), `T[]` is `arr<T>`, `i8[n]` is a stack array.
+  `unsafe`), `T?` is `optional<T>` (`T*?` uses the pointer niche), `T[]` is `arr<T>`, `i8[n]` is a stack array (any primitive or struct type: `Point[n]` gives a `Point*`).
 - Overflow suffix: `w` wrapped (default, C-style), `t` trapped (panic), `c` checked (throws `Overflow`), `s` saturating.
   On a cast the suffix picks the conversion: `(i16w)x` truncates like C, `(i16s)x` clamps to the range of `i16`, and a plain
   `(i16)x` panics when the value does not fit (R10005).

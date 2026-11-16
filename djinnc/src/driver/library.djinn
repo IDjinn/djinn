@@ -258,6 +258,13 @@ struct Library {
         Library.put_text(manifest, name, strlen(name));
         Library.put_text(manifest, Target.triple(), strlen(Target.triple()));
         Library.put_u32(manifest, file_count);
+        // the system libraries this library needs (user32, vulkan-1, ...): consumers link and verify them
+        PointerList* declared = options.declared_links;
+        Library.put_u32(manifest, (u32)declared.length);
+        for (mut i32 d = 0; d < declared.length; d = d + 1) {
+            ptr<i8> link = (ptr<i8>)declared.get(d);
+            Library.put_text(manifest, link, strlen(link));
+        }
 
         mut u32 flags = 0;
         if (options.use_std) {
@@ -341,6 +348,154 @@ struct Library {
         return false;
     }
 
+    static unsafe bool file_exists(ptr<i8> path) {
+        ptr file = fopen(path, "rb");
+        if (file == null) {
+            return false;
+        }
+        fclose(file);
+        return true;
+    }
+
+    static unsafe bool known_system_library(ptr<i8> name) {
+        ByteBuffer* lower = ByteBuffer.create();
+        for (mut i32 i = 0; name[i] != 0; i = i + 1) {
+            mut i8 c = name[i];
+            if (c >= 65 && c <= 90) {
+                c = (i8)(c + 32);
+            }
+            lower.append_byte(c);
+        }
+        ptr<i8> text = lower.cstr();
+        return Strings.same(text, "kernel32") || Strings.same(text, "user32") || Strings.same(text, "gdi32")
+            || Strings.same(text, "shell32") || Strings.same(text, "ole32") || Strings.same(text, "oleaut32")
+            || Strings.same(text, "advapi32") || Strings.same(text, "comdlg32") || Strings.same(text, "comctl32")
+            || Strings.same(text, "winmm") || Strings.same(text, "ws2_32") || Strings.same(text, "ntdll")
+            || Strings.same(text, "opengl32") || Strings.same(text, "dwmapi") || Strings.same(text, "uxtheme");
+    }
+
+    static unsafe bool probe_import_library(Options* options, ptr<i8> dir, ptr<i8> file, bool add_path) {
+        ByteBuffer* candidate = ByteBuffer.create();
+        candidate.append(dir);
+        candidate.append_char('/');
+        candidate.append(file);
+        if (!Library.file_exists(candidate.cstr())) {
+            return false;
+        }
+        if (add_path) {
+            ByteBuffer* argument = ByteBuffer.create();
+            argument.append("-L");
+            argument.append(dir);
+            ByteBuffer* link_args = options.link_args;
+            Linker.append_link_arg(options, link_args, argument.cstr());
+        }
+        return true;
+    }
+
+    // Looks for NAME.lib next to the library, in its native/ folder, in the -L directories and in LIB; a directory that
+    // is not already searched is added to the linker's search path.
+    static unsafe bool find_import_library(Options* options, ptr<i8> library_path, ptr<i8> name) {
+        ByteBuffer* file = ByteBuffer.create();
+        file.append(name);
+        file.append(".lib");
+        ByteBuffer* here = ByteBuffer.create();
+        here.append(library_path);
+        mut i32 cut = here.length;
+        while (cut > 0 && here.data[cut - 1] != 47 && here.data[cut - 1] != 92) {
+            cut = cut - 1;
+        }
+        here.length = cut;
+        if (cut == 0) {
+            here.append("./");
+        }
+        ByteBuffer* beside = ByteBuffer.create();
+        beside.append(here.cstr());
+        if (Library.probe_import_library(options, beside.cstr(), file.cstr(), true)) {
+            return true;
+        }
+        ByteBuffer* native = ByteBuffer.create();
+        native.append(here.cstr());
+        native.append("native");
+        if (Library.probe_import_library(options, native.cstr(), file.cstr(), true)) {
+            return true;
+        }
+        ByteBuffer* sibling = ByteBuffer.create();
+        sibling.append(here.cstr());
+        sibling.append("../native");
+        if (Library.probe_import_library(options, sibling.cstr(), file.cstr(), true)) {
+            return true;
+        }
+        PointerList* system_libs = options.system_libs;
+        for (mut i32 k = 0; k < system_libs.length; k = k + 1) {
+            ptr<i8> given = (ptr<i8>)system_libs.get(k);
+            if (given[0] == 45 && given[1] == 76 && Library.probe_import_library(options, given + 2, file.cstr(), false)) {
+                return true;
+            }
+        }
+        ptr<i8> search = getenv("LIB");
+        if (search != null) {
+            i32 total = strlen(search);
+            mut i32 start = 0;
+            for (mut i32 i = 0; i <= total; i = i + 1) {
+                if (i == total || search[i] == 59) {
+                    if (i > start) {
+                        ptr<i8> directory = Strings.duplicate(search + start, i - start);
+                        if (Library.probe_import_library(options, directory, file.cstr(), false)) {
+                            return true;
+                        }
+                    }
+                    start = i + 1;
+                }
+            }
+        }
+        return false;
+    }
+
+    // Links what an imported library declared it needs, once however many libraries ask, and checks that it can be found:
+    // a missing file path is an error, a missing import library is reported before the linker fails with undefined symbols.
+    static unsafe bool link_dependencies(Options* options, ptr<i8> path, ptr<i8> data, i32 manifest_offset, i32 manifest_size, i32 after_triple) {
+        i32 count_at = after_triple + 4;
+        if (count_at + 4 > manifest_offset + manifest_size) {
+            return true;
+        }
+        i32 count = (i32)Library.get_u32(data, count_at);
+        mut i32 cursor = count_at + 4;
+        for (mut i32 k = 0; k < count; k = k + 1) {
+            if (cursor + 4 > manifest_offset + manifest_size) {
+                logger_error(Log.get(), "djinnc: '%s' is corrupted", path);
+                return false;
+            }
+            i32 size = (i32)Library.get_u32(data, cursor);
+            ptr<i8> dependency = Strings.duplicate(data + cursor + 4, size);
+            cursor = cursor + 4 + size;
+            PointerList* linked = options.linked;
+            if (linked.contains_string(dependency)) {
+                continue;
+            }
+            linked.push((ptr)dependency);
+            if (dependency[0] == 45 && dependency[1] == 108 && Linker.is_windows()) {
+                ptr<i8> name = dependency + 2;
+                if (!Library.find_import_library(options, path, name) && !Library.known_system_library(name)) {
+                    logger_warn(Log.get(), "djinnc: '%s' needs the library '%s', which was not found next to it, in the -L directories or in LIB", path, name);
+                }
+            } else if (dependency[0] != 45) {
+                mut bool has_directory = false;
+                for (mut i32 i = 0; dependency[i] != 0; i = i + 1) {
+                    if (dependency[i] == 47 || dependency[i] == 92) {
+                        has_directory = true;
+                    }
+                }
+                if (has_directory && !Library.file_exists(dependency)) {
+                    logger_error(Log.get(), "djinnc: '%s' needs '%s', which does not exist", path, dependency);
+                    return false;
+                }
+            }
+            ByteBuffer* link_args = options.link_args;
+            Linker.append_link_arg(options, link_args, dependency);
+        }
+        return true;
+    }
+
     public static unsafe i32 load(Options* options, ptr<i8> path, PointerList* diagnostics_list) {
         i32 length = 0;
         ptr<i8> data = Files.read_bytes(path, &length);
@@ -375,6 +530,10 @@ struct Library {
         i32 triple_size = (i32)Library.get_u32(data, triple_at);
         if (!Strings.equals(data + triple_at + 4, triple_size, Target.triple())) {
             logger_error(Log.get(), "djinnc: '%s' targets a different triple than '%s'", path, Target.triple());
+            return -1;
+        }
+
+        if (!Library.link_dependencies(options, path, data, manifest_offset, manifest_size, triple_at + 4 + triple_size)) {
             return -1;
         }
 
@@ -496,6 +655,17 @@ struct Library {
             needs_std = "yes";
         }
         Library.field(out, "needs std:  ", needs_std, strlen(needs_std));
+        i32 links_at = triple_at + 4 + triple_size + 4;
+        if (links_at + 4 <= manifest_offset + manifest_size) {
+            mut i32 pending = (i32)Library.get_u32(data, links_at);
+            mut i32 link_cursor = links_at + 4;
+            while (pending > 0 && link_cursor + 4 <= manifest_offset + manifest_size) {
+                i32 link_size = (i32)Library.get_u32(data, link_cursor);
+                Library.field(out, "links:      ", data + link_cursor + 4, link_size);
+                link_cursor = link_cursor + 4 + link_size;
+                pending = pending - 1;
+            }
+        }
         out.append("  integrity:  ok\n");
         Library.number_field(out, "file size:  ", length, " bytes");
         Library.number_field(out, "manifest:   ", manifest_size, " bytes");
