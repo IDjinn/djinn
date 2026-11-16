@@ -5,7 +5,6 @@
 ## [0.6.1] - 2026-11-16
 
 ### Added
-- ui: `Animation.fade_out` and the `Transition` kit component: content fades out and then disappears when its signal turns false, and fades in when it turns true (immediately with reduced motion).
 - `(i16s)x`: a saturating integer cast clamps to the range of the target (the `w` suffix already truncated), at run time and in constant evaluation.
 - `--windowed` (and `windowed: true` in `djinn.proj`): links a Windows GUI program with no console window. `-l<name>` and `-L<dir>` on the command line, with the same mapping as the manifest.
 - `std::libc`: `atoi`, `atoll`, `strtoll`, `strtoull`. `Math` has `f32` versions of the error and gamma functions.
@@ -32,6 +31,7 @@
 - UI CSS engine (`libs/ui/src/style`): tokenizer, nesting, `@layer`, `@media`, `@property`, selectors with `:is()`/`:where()`/`:not()` and states, cascade with layers and `!important`, custom properties, `calc()`, `oklch()`/`color-mix()` colors; and a default light/dark theme (`Theme.set`, `--ui-*` variables) applied out of the box. `App.run` writes a full themed page.
 - UI layout engine (`libs/ui/src/layout`): block and inline flow, flexbox (grow, shrink, wrap, gaps, alignment, auto margins, automatic minimum), grid (`fr`, `minmax()`, `repeat(auto-fit, ...)`, spans, auto-placement, track sizing), absolute, fixed and relative positioning. `Layout.compute(root, width, height)` caches per box and input, so a change lays out again only the boxes around it.
 - UI screen scale: `Styles.set_device_scale` multiplies px, pt and the root font size (media queries stay in CSS pixels); the win32 host reads the system DPI (`DJINN_UI_SCALE=150` forces a percentage) and sizes the window and Vulkan surface by it.
+- ui: `Animation.fade_out` and the `Transition` kit component: content fades out and then disappears when its signal turns false, and fades in when it turns true (immediately with reduced motion).
 - UI fixes: a click reaches elements inside `{for}` regions (navigator links did nothing), positioned elements with a positive `z-index` (drop-downs, menus, tooltips) are drawn above the page and hit first, and `ClipboardBackend` is the one interface every platform clipboard implements (`Clipboard.use<T>`; win32 implements it). `DJINN_UI_H` sets the headless shot height.
 - UI paint, text and native host: display list and software rasterizer (`libs/ui/src/paint`), glyph atlas with GDI fonts (`libs/ui/src/text`), `libs/win32` (window, message pump, mouse and key events to DOM events), `libs/vulkan` (Vulkan renderer, the default; the software rasterizer only when no Vulkan device exists or `DJINN_UI_CPU=1`) and `libs/spirv` (`spirv!{...}` compile-time SPIR-V assembler macro used for the shaders). `examples/ui-native` is the client-mode showcase and `examples/ui-bench` the speed, memory and CPU benchmark.
 - Installers: optional components (UI libraries, Vulkan renderer) in the Windows wizard, `install.ps1` (`-Ui`, `-Vulkan`) and `install.sh` (`--ui`, `--vulkan`); the picks are kept in `.components` so updates repeat them.
