@@ -227,10 +227,15 @@ for each key (key codes are the Windows virtual-key values, `Key.*`; modifiers a
   `Input.shift()`, ... and may call `Input.prevent()`. Defaults: Tab / Shift+Tab move focus, Enter and Space click a
   focused button, Enter follows a focused link, Escape blurs.
 - Text fields: a host calls `Input.typed(code_point)` for every character the keyboard produces (Windows: `WM_CHAR`).
-  The focused `input` / `textarea` (not disabled or readonly, not a checkbox, radio, button, ...) appends it to its
-  `value` attribute and fires `input`; Backspace removes the last character. The painter draws the value (bullets for
-  `type="password"`), the `placeholder` when empty, and a caret while focused. Editing is append-only for now: no
-  caret movement, selection or clipboard.
+  The focused `input` / `textarea` (not disabled or readonly, not a checkbox, radio, button, ...) inserts it into its
+  `value` attribute at the caret, replacing the selection, and fires `input`. `Edit` (`libs/ui/src/input/edit.djinn`)
+  keeps a caret and a selection (byte offsets on character boundaries): Left / Right / Home / End move it (Shift
+  extends the selection), Backspace and Delete remove, Ctrl+A selects all, Ctrl+C / X / V use the clipboard (a newline
+  in pasted text becomes a space; fields are single line). A host places the caret from a pointer press with
+  `Edit.click(id, x, extend)` and extends it while dragging with `Edit.drag(id, x)`. The painter draws the value
+  (bullets for `type="password"`), the selection, the `placeholder` when empty, and the caret while focused.
+- Clipboard: `Clipboard.install(provider)` connects the system clipboard (`win32` does it in `WinClipboard.install`,
+  UTF-16 text converted to UTF-8). Without a provider the text lives in the process only.
 
 ## Output safety
 

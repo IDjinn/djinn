@@ -221,6 +221,7 @@ struct WinHost {
     public static unsafe i32 run<T>(T app, str title, u32 width, u32 height) {
         SetProcessDPIAware();
         GdiFonts.install();
+        WinClipboard.install();
         Mounted mounted = App.mount<T>(app);
         void* window = WinHost.open(title, width, height);
         if (window == (void*)0) {
@@ -246,6 +247,7 @@ struct WinHost {
         host_state_address = (u64)state;
         void* message = Raw.make(64);
         mut u32 pressed = 0;
+        mut u32 editing = 0;
         mut u32 high = 0;
         mut bool running = true;
         while (running) {
@@ -262,8 +264,13 @@ struct WinHost {
                 } else if (kind == WinHost.WM_LBUTTONDOWN) {
                     pressed = WinHost.hit(Dom.document(), x, y);
                     u32 control = Focus.owner(pressed);
+                    editing = 0;
                     if (control != 0) {
                         Focus.set(control, false);
+                        if (Input.editable(control)) {
+                            editing = control;
+                            Edit.click(control, x, (WinHost.modifiers() & Mod.SHIFT) != 0);
+                        }
                     } else {
                         Focus.clear();
                     }
@@ -275,7 +282,11 @@ struct WinHost {
                         WinHost.announce(target, "click");
                     }
                     pressed = 0;
+                    editing = 0;
                 } else if (kind == WinHost.WM_MOUSEMOVE) {
+                    if (editing != 0) {
+                        Edit.drag(editing, x);
+                    }
                     WinHost.announce(WinHost.hit(Dom.document(), x, y), "mousemove");
                 } else if (kind == WinHost.WM_KEYDOWN) {
                     Input.press((i32)(key & 0xFFFF), WinHost.modifiers());
@@ -327,6 +338,7 @@ struct WinHost {
     // One frame to a PPM file, no window: what a test or a screenshot of the showcase uses.
     public static unsafe i32 shot<T>(T app, u32 width, u32 height, i8* path, f32 click_x, f32 click_y) {
         GdiFonts.install();
+        WinClipboard.install();
         Mounted mounted = App.mount<T>(app);
         mut DisplayList list = DisplayList.create();
         Painter.frame(&list, (f32)width, (f32)height);

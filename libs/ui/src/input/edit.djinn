@@ -1,0 +1,378 @@
+import std::types;
+import std::libc;
+
+namespace ui;
+
+unsafe static mut u32 edit_node = 0;
+unsafe static mut u32 edit_caret = 0;
+unsafe static mut u32 edit_anchor = 0;
+
+// Editing the value of a text field: a caret and a selection (byte offsets into the UTF-8 value, always on character
+// boundaries), typing, deleting, moving with the arrow keys, Home and End (Shift extends the selection), select all and
+// cut / copy / paste. State belongs to the focused field; a field that takes focus starts with the caret at the end.
+// The field is a single line: a newline in pasted text becomes a space.
+struct Edit {
+    const u32 LIMIT = 4000;
+
+    static unsafe u32 length_of(u32 id) {
+        return (u32)Dom.attr(id, "value").length;
+    }
+
+    // Binds the state to a field and keeps the offsets inside the value.
+    static unsafe void sync(u32 id) {
+        u32 length = Edit.length_of(id);
+        if (edit_node != id) {
+            edit_node = id;
+            edit_caret = length;
+            edit_anchor = length;
+        }
+        if (edit_caret > length) {
+            edit_caret = length;
+        }
+        if (edit_anchor > length) {
+            edit_anchor = length;
+        }
+    }
+
+    public static unsafe u32 caret(u32 id) {
+        Edit.sync(id);
+        return edit_caret;
+    }
+
+    public static unsafe u32 low(u32 id) {
+        Edit.sync(id);
+        if (edit_caret < edit_anchor) {
+            return edit_caret;
+        }
+        return edit_anchor;
+    }
+
+    public static unsafe u32 high(u32 id) {
+        Edit.sync(id);
+        if (edit_caret > edit_anchor) {
+            return edit_caret;
+        }
+        return edit_anchor;
+    }
+
+    public static unsafe bool has_selection(u32 id) {
+        Edit.sync(id);
+        return edit_caret != edit_anchor;
+    }
+
+    static unsafe bool continuation(str value, u32 at) {
+        return (((i32)value.data[at]) & 192) == 128;
+    }
+
+    // The offset of the character before / after an offset.
+    public static unsafe u32 previous(u32 id, u32 offset) {
+        str value = Dom.attr(id, "value");
+        if (offset == 0) {
+            return 0;
+        }
+        mut u32 at = offset - 1;
+        while (at > 0 && Edit.continuation(value, at)) {
+            at = at - 1;
+        }
+        return at;
+    }
+
+    public static unsafe u32 next(u32 id, u32 offset) {
+        str value = Dom.attr(id, "value");
+        u32 length = (u32)value.length;
+        if (offset >= length) {
+            return length;
+        }
+        mut u32 at = offset + 1;
+        while (at < length && Edit.continuation(value, at)) {
+            at = at + 1;
+        }
+        return at;
+    }
+
+    // Replaces the bytes [from, to) of the value with 'count' bytes, puts the caret after them and fires "input".
+    static unsafe bool replace(u32 id, u32 from, u32 to, u8* data, u32 count) {
+        str value = Dom.attr(id, "value");
+        u32 length = (u32)value.length;
+        if (from > to || to > length) {
+            return false;
+        }
+        u32 total = length - (to - from) + count;
+        if (total > Edit.LIMIT) {
+            return false;
+        }
+        u8* made = (u8*)__djinn_alloc_zeroed((size_long)(total + 1));
+        if (from > 0) {
+            memcpy((void*)made, (void*)value.data, (size_long)from);
+        }
+        if (count > 0) {
+            memcpy((void*)(made + (size_long)from), (void*)data, (size_long)count);
+        }
+        if (length > to) {
+            memcpy((void*)(made + (size_long)(from + count)), (void*)(value.data + (size_long)to), (size_long)(length - to));
+        }
+        Dom.set_attr(id, "value", (i8*)made, total);
+        __djinn_free((void*)made);
+        edit_node = id;
+        edit_caret = from + count;
+        edit_anchor = from + count;
+        Dom.content_changed(id);
+        Dom.dispatch(id, "input");
+        return true;
+    }
+
+    // UTF-8 bytes of a code point; returns how many.
+    static unsafe u32 encode(u32 code, u8* out) {
+        if (code < 128) {
+            out[0] = (u8)code;
+            return 1;
+        }
+        if (code < 2048) {
+            out[0] = (u8)(192 | (code >> 6));
+            out[1] = (u8)(128 | (code & 63));
+            return 2;
+        }
+        if (code < 65536) {
+            out[0] = (u8)(224 | (code >> 12));
+            out[1] = (u8)(128 | ((code >> 6) & 63));
+            out[2] = (u8)(128 | (code & 63));
+            return 3;
+        }
+        out[0] = (u8)(240 | (code >> 18));
+        out[1] = (u8)(128 | ((code >> 12) & 63));
+        out[2] = (u8)(128 | ((code >> 6) & 63));
+        out[3] = (u8)(128 | (code & 63));
+        return 4;
+    }
+
+    // Types a character at the caret, replacing the selection.
+    public static unsafe bool insert_code(u32 id, u32 code) {
+        Edit.sync(id);
+        u8* bytes = (u8*)__djinn_alloc_zeroed(8);
+        u32 count = Edit.encode(code, bytes);
+        bool done = Edit.replace(id, Edit.low(id), Edit.high(id), bytes, count);
+        __djinn_free((void*)bytes);
+        return done;
+    }
+
+    public static unsafe bool backspace(u32 id) {
+        Edit.sync(id);
+        if (Edit.has_selection(id)) {
+            return Edit.replace(id, Edit.low(id), Edit.high(id), (u8*)0, 0);
+        }
+        if (edit_caret == 0) {
+            return false;
+        }
+        return Edit.replace(id, Edit.previous(id, edit_caret), edit_caret, (u8*)0, 0);
+    }
+
+    public static unsafe bool delete_forward(u32 id) {
+        Edit.sync(id);
+        if (Edit.has_selection(id)) {
+            return Edit.replace(id, Edit.low(id), Edit.high(id), (u8*)0, 0);
+        }
+        u32 after = Edit.next(id, edit_caret);
+        if (after == edit_caret) {
+            return false;
+        }
+        return Edit.replace(id, edit_caret, after, (u8*)0, 0);
+    }
+
+    // Moves the caret; 'extend' keeps the selection anchor where it was.
+    public static unsafe void move_to(u32 id, u32 offset, bool extend) {
+        Edit.sync(id);
+        edit_caret = offset;
+        if (!extend) {
+            edit_anchor = offset;
+        }
+        Dom.content_changed(id);
+    }
+
+    public static unsafe void select_all(u32 id) {
+        Edit.sync(id);
+        edit_anchor = 0;
+        edit_caret = Edit.length_of(id);
+        Dom.content_changed(id);
+    }
+
+    public static unsafe bool copy(u32 id) {
+        if (!Edit.has_selection(id)) {
+            return false;
+        }
+        str value = Dom.attr(id, "value");
+        u32 from = Edit.low(id);
+        Clipboard.write(value.data + (size_long)from, Edit.high(id) - from);
+        return true;
+    }
+
+    public static unsafe bool cut(u32 id) {
+        if (!Edit.copy(id)) {
+            return false;
+        }
+        return Edit.replace(id, Edit.low(id), Edit.high(id), (u8*)0, 0);
+    }
+
+    public static unsafe bool paste(u32 id) {
+        mut u32 length = 0;
+        i8* text = Clipboard.read(&length);
+        if (length == 0) {
+            return false;
+        }
+        u8* clean = (u8*)__djinn_alloc_zeroed((size_long)(length + 1));
+        mut u32 count = 0;
+        for (mut u32 i = 0; i < length; i = i + 1) {
+            i32 byte = (i32)text[i] & 255;
+            if (byte == 10 || byte == 13 || byte == 9) {
+                clean[count] = (u8)32;
+                count = count + 1;
+            } else if (byte >= 32 && byte != 127) {
+                clean[count] = (u8)byte;
+                count = count + 1;
+            }
+        }
+        Edit.sync(id);
+        bool done = Edit.replace(id, Edit.low(id), Edit.high(id), clean, count);
+        __djinn_free((void*)clean);
+        return done;
+    }
+
+    // An editing key for the focused field. Returns true when it did something.
+    public static unsafe bool key(u32 id, i32 key, u32 mods) {
+        Edit.sync(id);
+        bool shift = (mods & Mod.SHIFT) != 0;
+        if ((mods & Mod.ALT) != 0) {
+            return false;
+        }
+        if ((mods & Mod.CTRL) != 0) {
+            if (key == 65) {
+                Edit.select_all(id);
+                return true;
+            }
+            if (key == 67) {
+                return Edit.copy(id);
+            }
+            if (key == 88) {
+                return Edit.cut(id);
+            }
+            if (key == 86) {
+                return Edit.paste(id);
+            }
+            return false;
+        }
+        if (key == Key.BACKSPACE) {
+            return Edit.backspace(id);
+        }
+        if (key == Key.DELETE) {
+            return Edit.delete_forward(id);
+        }
+        if (key == Key.LEFT) {
+            if (!shift && Edit.has_selection(id)) {
+                Edit.move_to(id, Edit.low(id), false);
+            } else {
+                Edit.move_to(id, Edit.previous(id, edit_caret), shift);
+            }
+            return true;
+        }
+        if (key == Key.RIGHT) {
+            if (!shift && Edit.has_selection(id)) {
+                Edit.move_to(id, Edit.high(id), false);
+            } else {
+                Edit.move_to(id, Edit.next(id, edit_caret), shift);
+            }
+            return true;
+        }
+        if (key == Key.HOME) {
+            Edit.move_to(id, 0, shift);
+            return true;
+        }
+        if (key == Key.END) {
+            Edit.move_to(id, Edit.length_of(id), shift);
+            return true;
+        }
+        return false;
+    }
+
+    // ---- geometry, shared by the painter and the pointer ----
+
+    static unsafe bool secret(u32 id) {
+        return Texts.same(Dom.attr(id, "type"), "password");
+    }
+
+    // The width of the value's first 'offset' bytes in px.
+    public static unsafe f32 width_to(u32 id, u32 offset) {
+        Style* style = Styles.of(id);
+        bool bold = style.font_weight >= 600;
+        bool hidden = Edit.secret(id);
+        str value = Dom.attr(id, "value");
+        mut f32 total = (f32)0.0;
+        mut u32 i = 0;
+        while (i < offset && i < (u32)value.length) {
+            mut u32 step = 1;
+            mut u32 code = Codepoints.decode(value.data, (u32)value.length, i, &step);
+            i = i + step;
+            if (hidden) {
+                code = 8226;
+            }
+            total = total + TextLines.advance(code, style, true, bold);
+        }
+        return total;
+    }
+
+    public static unsafe f32 content_left(u32 id) {
+        LayoutBox* box = Layout.box(id);
+        return box.left + box.border.left + box.padding.left;
+    }
+
+    public static unsafe f32 content_right(u32 id) {
+        LayoutBox* box = Layout.box(id);
+        return box.left + box.width - box.border.right - box.padding.right;
+    }
+
+    // How far the text is scrolled left so that the caret stays inside the field.
+    public static unsafe f32 shift(u32 id) {
+        f32 room = Edit.content_right(id) - Edit.content_left(id) - (f32)2.0;
+        f32 at = Edit.width_to(id, Edit.caret(id));
+        if (at > room) {
+            return at - room;
+        }
+        return (f32)0.0;
+    }
+
+    // The byte offset nearest to a horizontal position (window coordinates).
+    public static unsafe u32 offset_at(u32 id, f32 x) {
+        Style* style = Styles.of(id);
+        bool bold = style.font_weight >= 600;
+        bool hidden = Edit.secret(id);
+        str value = Dom.attr(id, "value");
+        u32 length = (u32)value.length;
+        f32 target = x - (Edit.content_left(id) - Edit.shift(id));
+        mut f32 pen = (f32)0.0;
+        mut u32 i = 0;
+        while (i < length) {
+            mut u32 step = 1;
+            mut u32 code = Codepoints.decode(value.data, length, i, &step);
+            if (hidden) {
+                code = 8226;
+            }
+            f32 width = TextLines.advance(code, style, true, bold);
+            if (target < pen + width / (f32)2.0) {
+                return i;
+            }
+            pen = pen + width;
+            i = i + step;
+        }
+        return length;
+    }
+
+    // A pointer press inside the field puts the caret there (Shift extends the selection).
+    public static unsafe void click(u32 id, f32 x, bool extend) {
+        Edit.sync(id);
+        Edit.move_to(id, Edit.offset_at(id, x), extend);
+    }
+
+    // The pointer moving with the button held selects from where the press started.
+    public static unsafe void drag(u32 id, f32 x) {
+        Edit.sync(id);
+        Edit.move_to(id, Edit.offset_at(id, x), true);
+    }
+}
