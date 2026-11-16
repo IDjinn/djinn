@@ -3,6 +3,8 @@ namespace ui;
 import testing;
 import std::types;
 
+unsafe static mut i32 scroll_ticks = 0;
+
 struct ScrollTests {
     static unsafe Node tall() {
         Styles.add(".sc1 { width: 20px; height: 20px; overflow: auto; }");
@@ -57,5 +59,61 @@ struct ScrollTests {
         Expect.is_true(Scroll.key(box.id, Key.HOME));
         Expect.equal(0, (i64)Scroll.top(box.id));
         Scroll.reset();
+    }
+
+    [Test]
+    unsafe void smooth_scrolling_glides_to_its_goal() {
+        Scroll.reset();
+        Styles.set_reduced_motion(false);
+        Node box = ScrollTests.tall();
+        Layout.compute(box.id, (f32)100.0, (f32)100.0);
+        Scroll.set_smooth(true);
+        Expect.is_true(Scroll.glide_by(box.id, (f32)0.0, (f32)60.0));
+        Expect.equal(0, (i64)Scroll.top(box.id), "nothing moves until the clock runs");
+        Expect.is_true(Scroll.advance(1000));
+        Scroll.advance(1016);
+        f32 part = Scroll.top(box.id);
+        Expect.is_true(part > (f32)0.0 && part < (f32)60.0, "on its way");
+        mut u32 now = 1016;
+        mut u32 guard = 0;
+        while (Scroll.advance(now) && guard < 200) {
+            now = now + 16;
+            guard = guard + 1;
+        }
+        Expect.equal(60, (i64)Scroll.top(box.id), "it lands on the goal");
+        Scroll.set_smooth(false);
+        Expect.is_true(Scroll.glide_by(box.id, (f32)0.0, (f32)-20.0));
+        Expect.equal(40, (i64)Scroll.top(box.id), "without smooth scrolling it lands at once");
+    }
+
+    [Test]
+    unsafe void a_page_wider_than_the_window_scrolls_sideways() {
+        Scroll.reset();
+        Scroll.set_smooth(false);
+        Scroll.page_limit_x((f32)200.0, (f32)100.0);
+        Expect.is_true(Scroll.page_by_x((f32)50.0));
+        Expect.equal(50, (i64)Scroll.page_left());
+        Scroll.page_by_x((f32)900.0);
+        Expect.equal(200, (i64)Scroll.page_left(), "clamped at the end");
+        Scroll.page_limit_x((f32)0.0, (f32)100.0);
+        Expect.equal(0, (i64)Scroll.page_left(), "it fits again");
+        Expect.is_true(!Scroll.page_by_x((f32)10.0));
+    }
+
+    [Test]
+    unsafe void timers_fire_on_the_clock_until_cancelled() {
+        scroll_ticks = 0;
+        u32 id = Timers.every(100, () => scroll_ticks = scroll_ticks + 1);
+        Animation.advance(5000);
+        Expect.equal(0, (i64)scroll_ticks, "armed on the first turn");
+        Animation.advance(5050);
+        Expect.equal(0, (i64)scroll_ticks);
+        Animation.advance(5100);
+        Expect.equal(1, (i64)scroll_ticks);
+        Animation.advance(5200);
+        Expect.equal(2, (i64)scroll_ticks);
+        Timers.cancel(id);
+        Animation.advance(5400);
+        Expect.equal(2, (i64)scroll_ticks, "cancelled");
     }
 }

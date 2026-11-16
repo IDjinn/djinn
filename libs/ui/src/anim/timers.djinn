@@ -1,0 +1,84 @@
+import std::types;
+import std::libc;
+
+namespace ui;
+
+unsafe static mut ptr timer_items = null;
+unsafe static mut u32 timer_count = 0;
+unsafe static mut u32 timer_capacity = 0;
+unsafe static mut u32 timer_next_id = 1;
+
+struct Timer {
+    mut u32 id;
+    mut u32 interval;
+    mut u32 due;
+    mut bool armed;
+    mut fn() -> void handler;
+}
+
+// Repeating timers driven by the host clock (Animation.advance): 'every' runs a handler each interval, for as long as
+// the app lives or until it is cancelled. A handler usually sets a signal, and the transitions of the theme animate
+// the change. A timer fires at most once per loop turn, so a stalled frame does not make it run a burst.
+struct Timers {
+    // Returns an id for 'cancel'.
+    public static unsafe u32 every(u32 interval, fn() -> void handler) {
+        if (timer_count == timer_capacity) {
+            u32 grown = timer_capacity * 2 + 4;
+            ptr items = (ptr)__djinn_alloc_zeroed((size_long)(grown * (u32)sizeof(Timer)));
+            if (timer_count > 0) {
+                memcpy((void*)items, (void*)timer_items, (size_long)(timer_count * (u32)sizeof(Timer)));
+            }
+            if (timer_items != null) {
+                __djinn_free((void*)timer_items);
+            }
+            timer_items = items;
+            timer_capacity = grown;
+        }
+        Timer* slot = &((Timer*)timer_items)[timer_count];
+        slot.id = timer_next_id;
+        slot.interval = interval;
+        slot.armed = false;
+        slot.handler = handler;
+        timer_next_id = timer_next_id + 1;
+        timer_count = timer_count + 1;
+        return slot.id;
+    }
+
+    // The same, tied to the component that is rendering: the timer stops when that component is removed.
+    public static unsafe u32 every_mounted(u32 interval, fn() -> void handler) {
+        u32 id = Timers.every(interval, handler);
+        Reactive.on_cleanup(() => Timers.cancel(id));
+        return id;
+    }
+
+    public static unsafe void cancel(u32 id) {
+        mut u32 i = 0;
+        while (i < timer_count) {
+            Timer* slot = &((Timer*)timer_items)[i];
+            if (slot.id == id) {
+                timer_count = timer_count - 1;
+                if (i != timer_count) {
+                    memcpy((void*)slot, (void*)&((Timer*)timer_items)[timer_count], (size_long)sizeof(Timer));
+                }
+                return;
+            }
+            i = i + 1;
+        }
+    }
+
+    // Runs what is due at 'now' (milliseconds).
+    public static unsafe void advance(u32 now) {
+        mut u32 i = 0;
+        while (i < timer_count) {
+            Timer* slot = &((Timer*)timer_items)[i];
+            if (!slot.armed) {
+                slot.armed = true;
+                slot.due = now + slot.interval;
+            } else if (now >= slot.due) {
+                slot.due = now + slot.interval;
+                slot.handler();
+            }
+            i = i + 1;
+        }
+    }
+}

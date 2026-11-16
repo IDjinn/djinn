@@ -9,6 +9,8 @@ struct ScrollEntry {
     mut u32 id;
     mut f32 x;
     mut f32 y;
+    mut f32 goal_x;
+    mut f32 goal_y;
 }
 
 struct ScrollSystem {
@@ -20,6 +22,13 @@ struct ScrollSystem {
     mut f32 page_y;
     mut f32 page_limit;
     mut f32 viewport;
+    mut f32 page_goal_x;
+    mut f32 page_goal_y;
+    mut f32 page_limit_x;
+    mut f32 viewport_x;
+    mut bool smooth;
+    mut bool has_last;
+    mut u32 last;
 }
 
 // Scrolling. An element whose overflow is auto or scroll scrolls its content when it is taller (or wider) than
@@ -46,7 +55,73 @@ struct Scroll {
         system.count = 0;
         system.page_x = (f32)0.0;
         system.page_y = (f32)0.0;
+        system.page_goal_x = (f32)0.0;
+        system.page_goal_y = (f32)0.0;
         system.version = system.version + 1;
+    }
+
+    // Smooth scrolling: the wheel, the keys and focus changes move a goal and the offset glides to it (exponential
+    // easing, about 90 ms), the way the system scrolls. A host turns it on (it calls Animation.advance every loop);
+    // without it, and under prefers-reduced-motion, every scroll lands at once.
+    public static unsafe void set_smooth(bool on) {
+        Scroll.system().smooth = on;
+    }
+
+    static unsafe bool gliding() {
+        return Scroll.system().smooth && !Styles.prefers_reduced_motion();
+    }
+
+    // Moves 'value' a step towards 'goal'; true while it still has a way to go.
+    static unsafe bool approach(f32* value, f32 goal, f32 factor, bool* changed) {
+        f32 gap = goal - value[0];
+        if (gap < (f32)0.5 && gap > (f32)-0.5) {
+            if (value[0] != goal) {
+                value[0] = goal;
+                changed[0] = true;
+            }
+            return false;
+        }
+        value[0] = value[0] + gap * factor;
+        changed[0] = true;
+        return true;
+    }
+
+    // Advances the glide to 'now' (milliseconds, the same clock as Animation.advance). True while anything still moves.
+    public static unsafe bool advance(u32 now) {
+        ScrollSystem* system = Scroll.system();
+        mut u32 step = 16;
+        if (system.has_last) {
+            step = now - system.last;
+            if (step > 64) {
+                step = 64;
+            }
+        }
+        system.last = now;
+        system.has_last = true;
+        f32 factor = (f32)1.0 - Math.exp((f32)0.0 - (f32)step / (f32)90.0);
+        mut bool moving = false;
+        mut bool changed = false;
+        mut u32 i = 0;
+        while (i < system.count) {
+            ScrollEntry* entry = &system.items[i];
+            if (Scroll.approach(&entry.x, entry.goal_x, factor, &changed)) {
+                moving = true;
+            }
+            if (Scroll.approach(&entry.y, entry.goal_y, factor, &changed)) {
+                moving = true;
+            }
+            i = i + 1;
+        }
+        if (Scroll.approach(&system.page_x, system.page_goal_x, factor, &changed)) {
+            moving = true;
+        }
+        if (Scroll.approach(&system.page_y, system.page_goal_y, factor, &changed)) {
+            moving = true;
+        }
+        if (changed) {
+            system.version = system.version + 1;
+        }
+        return moving;
     }
 
     static unsafe ScrollEntry* find(u32 id, bool create) {
@@ -150,8 +225,61 @@ struct Scroll {
         }
         entry.x = nx;
         entry.y = ny;
+        entry.goal_x = nx;
+        entry.goal_y = ny;
         Scroll.system().version = Scroll.system().version + 1;
         return true;
+    }
+
+    // Like 'by', but glides when smooth scrolling is on. True when the goal moved.
+    public static unsafe bool glide_by(u32 id, f32 dx, f32 dy) {
+        if (!Scroll.gliding()) {
+            return Scroll.by(id, dx, dy);
+        }
+        if (!Scroll.container(id)) {
+            return false;
+        }
+        ScrollEntry* entry = Scroll.find(id, true);
+        f32 nx = Scroll.clamp(entry.goal_x + dx, Scroll.max_x(id));
+        f32 ny = Scroll.clamp(entry.goal_y + dy, Scroll.max_y(id));
+        if (nx == entry.goal_x && ny == entry.goal_y) {
+            return false;
+        }
+        entry.goal_x = nx;
+        entry.goal_y = ny;
+        Scroll.system().version = Scroll.system().version + 1;
+        return true;
+    }
+
+    // Like 'set', but glides when smooth scrolling is on.
+    public static unsafe bool glide_to(u32 id, f32 x, f32 y) {
+        if (!Scroll.gliding()) {
+            return Scroll.set(id, x, y);
+        }
+        if (!Scroll.container(id)) {
+            return false;
+        }
+        ScrollEntry* entry = Scroll.find(id, true);
+        entry.goal_x = Scroll.clamp(x, Scroll.max_x(id));
+        entry.goal_y = Scroll.clamp(y, Scroll.max_y(id));
+        Scroll.system().version = Scroll.system().version + 1;
+        return true;
+    }
+
+    static unsafe f32 goal_top(u32 id) {
+        ScrollEntry* entry = Scroll.find(id, false);
+        if (entry == (ScrollEntry*)0) {
+            return (f32)0.0;
+        }
+        return entry.goal_y;
+    }
+
+    static unsafe f32 goal_left(u32 id) {
+        ScrollEntry* entry = Scroll.find(id, false);
+        if (entry == (ScrollEntry*)0) {
+            return (f32)0.0;
+        }
+        return entry.goal_x;
     }
 
     // Moves an element content by a delta. True when it moved.
@@ -176,17 +304,30 @@ struct Scroll {
                     dy = shown_top + box.height - view_bottom;
                 }
                 if (dy != (f32)0.0) {
-                    Scroll.by(holder, (f32)0.0, dy);
+                    Scroll.glide_by(holder, (f32)0.0, dy);
                 }
             }
             holder = Dom.parent(holder);
         }
     }
 
-    // The viewport own scroll (the document is taller than the window).
+    // The viewport own scroll (the document is taller or wider than the window).
     public static unsafe f32 page_top() {
         ScrollSystem* system = Scroll.system();
         return Px.min(system.page_y, system.page_limit);
+    }
+
+    public static unsafe f32 page_left() {
+        ScrollSystem* system = Scroll.system();
+        return Px.min(system.page_x, system.page_limit_x);
+    }
+
+    public static unsafe f32 page_max_y() {
+        return Scroll.system().page_limit;
+    }
+
+    public static unsafe f32 page_max_x() {
+        return Scroll.system().page_limit_x;
     }
 
     // Called by the painter each frame with how far the document can scroll.
@@ -201,15 +342,59 @@ struct Scroll {
         if (system.page_y > value) {
             system.page_y = value;
         }
+        if (system.page_goal_y > value) {
+            system.page_goal_y = value;
+        }
+    }
+
+    // The same for the horizontal axis: a document wider than the window scrolls sideways by default.
+    public static unsafe void page_limit_x(f32 limit, f32 viewport) {
+        ScrollSystem* system = Scroll.system();
+        system.viewport_x = viewport;
+        mut f32 value = limit;
+        if (value < (f32)0.0) {
+            value = (f32)0.0;
+        }
+        system.page_limit_x = value;
+        if (system.page_x > value) {
+            system.page_x = value;
+        }
+        if (system.page_goal_x > value) {
+            system.page_goal_x = value;
+        }
     }
 
     public static unsafe bool page_by(f32 dy) {
+        return Scroll.page_move((f32)0.0, dy);
+    }
+
+    public static unsafe bool page_by_x(f32 dx) {
+        return Scroll.page_move(dx, (f32)0.0);
+    }
+
+    // Moves the page by a delta (gliding when smooth scrolling is on). True when it has somewhere to go.
+    static unsafe bool page_move(f32 dx, f32 dy) {
         ScrollSystem* system = Scroll.system();
-        f32 next = Scroll.clamp(system.page_y + dy, system.page_limit);
-        if (next == system.page_y) {
+        if (Scroll.gliding()) {
+            f32 gx = Scroll.clamp(system.page_goal_x + dx, system.page_limit_x);
+            f32 gy = Scroll.clamp(system.page_goal_y + dy, system.page_limit);
+            if (gx == system.page_goal_x && gy == system.page_goal_y) {
+                return false;
+            }
+            system.page_goal_x = gx;
+            system.page_goal_y = gy;
+            system.version = system.version + 1;
+            return true;
+        }
+        f32 nx = Scroll.clamp(system.page_x + dx, system.page_limit_x);
+        f32 ny = Scroll.clamp(system.page_y + dy, system.page_limit);
+        if (nx == system.page_x && ny == system.page_y) {
             return false;
         }
-        system.page_y = next;
+        system.page_x = nx;
+        system.page_y = ny;
+        system.page_goal_x = nx;
+        system.page_goal_y = ny;
         system.version = system.version + 1;
         return true;
     }
@@ -222,8 +407,8 @@ struct Scroll {
         while (holder != 0) {
             if (Scroll.container(holder)) {
                 bool down = dy > (f32)0.0;
-                bool room = (down && Scroll.top(holder) < Scroll.max_y(holder)) || (!down && Scroll.top(holder) > (f32)0.0);
-                if (room && Scroll.by(holder, (f32)0.0, dy)) {
+                bool room = (down && Scroll.goal_top(holder) < Scroll.max_y(holder)) || (!down && Scroll.goal_top(holder) > (f32)0.0);
+                if (room && Scroll.glide_by(holder, (f32)0.0, dy)) {
                     return true;
                 }
             }
@@ -232,31 +417,51 @@ struct Scroll {
         return Scroll.page_by(dy);
     }
 
+    // The horizontal wheel (or shift + wheel) the same way. Positive is right.
+    public static unsafe bool wheel_x(f32 x, f32 y, f32 dx) {
+        u32 target = Hit.at(x, y);
+        mut u32 holder = target;
+        while (holder != 0) {
+            if (Scroll.container(holder)) {
+                bool right = dx > (f32)0.0;
+                bool room = (right && Scroll.goal_left(holder) < Scroll.max_x(holder)) || (!right && Scroll.goal_left(holder) > (f32)0.0);
+                if (room && Scroll.glide_by(holder, dx, (f32)0.0)) {
+                    return true;
+                }
+            }
+            holder = Dom.parent(holder);
+        }
+        return Scroll.page_by_x(dx);
+    }
+
     // A key that scrolls: the nearest scroll container above the focused element (or the page). The viewport
     // height is the page step. Returns true when it scrolled.
     public static unsafe bool key(u32 focused, i32 key) {
         f32 viewport = Scroll.system().viewport;
         mut f32 dy = (f32)0.0;
+        mut f32 dx = (f32)0.0;
         mut bool top = false;
         mut bool end = false;
         if (key == 33) { dy = (f32)0.0 - viewport * (f32)0.9; }
         else if (key == 34) { dy = viewport * (f32)0.9; }
         else if (key == Key.UP) { dy = (f32)-40.0; }
         else if (key == Key.DOWN) { dy = (f32)40.0; }
+        else if (key == Key.LEFT) { dx = (f32)-40.0; }
+        else if (key == Key.RIGHT) { dx = (f32)40.0; }
         else if (key == Key.HOME) { top = true; }
         else if (key == Key.END) { end = true; }
         else { return false; }
         mut u32 holder = focused;
         while (holder != 0) {
-            if (Scroll.container(holder) && Scroll.max_y(holder) > (f32)0.0) {
-                if (top) { return Scroll.set(holder, Scroll.left(holder), (f32)0.0); }
-                if (end) { return Scroll.set(holder, Scroll.left(holder), Scroll.max_y(holder)); }
-                return Scroll.by(holder, (f32)0.0, dy);
+            if (Scroll.container(holder) && (Scroll.max_y(holder) > (f32)0.0 || (dx != (f32)0.0 && Scroll.max_x(holder) > (f32)0.0))) {
+                if (top) { return Scroll.glide_to(holder, Scroll.goal_left(holder), (f32)0.0); }
+                if (end) { return Scroll.glide_to(holder, Scroll.goal_left(holder), Scroll.max_y(holder)); }
+                return Scroll.glide_by(holder, dx, dy);
             }
             holder = Dom.parent(holder);
         }
         if (top) { return Scroll.page_by((f32)-1000000.0); }
         if (end) { return Scroll.page_by((f32)1000000.0); }
-        return Scroll.page_by(dy);
+        return Scroll.page_move(dx, dy);
     }
 }

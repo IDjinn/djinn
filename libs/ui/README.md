@@ -276,6 +276,14 @@ the geometry the element drew, so it never relayouts (and hit testing still uses
 the press feedback on buttons (scale .97) and the sliding switch thumb; dialogs and popups also pop in from 96% with a spring.
 Not yet: rotate / skew, `transform-origin`, slide / shared-element page transitions, `@keyframes`.
 
+Scrolling glides like the system's: in the native host the wheel, the arrow / Page / Home / End keys and focus changes move a
+goal and the offset eases to it (`Scroll.set_smooth(true)`, advanced by `Animation.advance`); it lands at once without that and
+under reduced motion. A page wider than the window scrolls sideways by default (horizontal wheel, Shift + wheel, Left / Right).
+In the Windows host the extra mouse buttons go back / forward through the router, and Escape closes a `Dialog`.
+`Timers.every(ms, handler)` / `Timers.every_mounted` run a handler on the host clock (a handler that sets a signal drives
+looping transitions; see the Motion page of `examples/ui-native`). Not yet: rubber-band overscroll, draggable scrollbar thumbs,
+an inline `style` attribute.
+
 ## Hotkeys
 
 `Hotkeys.on("Mod+Shift+P", scope, handler)` binds a shortcut and returns its id (0 when the combo is not valid or is
