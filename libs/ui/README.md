@@ -265,7 +265,7 @@ close when you choose and on Escape; `List` and `Table` scroll past 16rem (the `
 `Animation` (`libs/ui/src/anim/animation.djinn`) is a small tween clock: `Animation.fade_in(id, ms)` /
 `fade(id, from, to, ms)` animate the opacity of an element (cubic ease-out, no relayout); the host calls
 `Animation.advance(ms)` each loop iteration and draws while it returns true (the Windows host does). With
-`prefers-reduced-motion` they are skipped. The `Outlet` fades each new page in over 280 ms while it slides in 28 px from the side it came from (right going forward, left going back) with a spring. Motion is on by default: the theme gives buttons, links, inputs, switches, checkboxes and rows a CSS
+`prefers-reduced-motion` they are skipped. The `Outlet` fades each new page in over 280 ms while it slides in 28 px from the side it came from (right going forward, left going back) with a spring, and the page it replaces fades out underneath it. Motion is on by default: the theme gives buttons, links, inputs, switches, checkboxes and rows a CSS
 `transition` of `--ui-motion` (160 ms) on background-color, border-color and color, so hover, press and selection ease
 instead of jumping (`transition: <props> <time>` is supported for those colors and opacity; the time is what counts).
 Dialogs and popups (`data-open`) fade in and fade out, then hide (`data-gone`); a tab panel fades in. All of it

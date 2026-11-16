@@ -13,6 +13,7 @@ struct Timer {
     mut u32 interval;
     mut u32 due;
     mut bool armed;
+    mut bool once;
     mut fn() -> void handler;
 }
 
@@ -42,6 +43,25 @@ struct Timers {
         timer_next_id = timer_next_id + 1;
         timer_count = timer_count + 1;
         return slot.id;
+    }
+
+    // Runs 'handler' once, 'delay' milliseconds from now.
+    public static unsafe u32 after(u32 delay, fn() -> void handler) {
+        u32 id = Timers.every(delay, handler);
+        Timers.slot(id).once = true;
+        return id;
+    }
+
+    static unsafe Timer* slot(u32 id) {
+        mut u32 i = 0;
+        while (i < timer_count) {
+            Timer* item = &((Timer*)timer_items)[i];
+            if (item.id == id) {
+                return item;
+            }
+            i = i + 1;
+        }
+        return (Timer*)0;
     }
 
     // The same, tied to the component that is rendering: the timer stops when that component is removed.
@@ -75,6 +95,12 @@ struct Timers {
                 slot.armed = true;
                 slot.due = now + slot.interval;
             } else if (now >= slot.due) {
+                if (slot.once) {
+                    u32 id = slot.id;
+                    slot.handler();
+                    Timers.cancel(id);
+                    continue;
+                }
                 slot.due = now + slot.interval;
                 slot.handler();
             }

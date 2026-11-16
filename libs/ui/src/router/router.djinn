@@ -233,14 +233,34 @@ struct Router {
 struct Outlet {
     fn(str) -> Node view;
 
+    // A page that is being replaced stays for a moment, lifted out of the flow, and fades out under the new one.
+    static unsafe void retire(u32 page) {
+        if (Dom.has_attr(page, "data-leaving")) {
+            return;
+        }
+        Dom.set_attr(page, "data-leaving", "true", 4);
+        Animation.fade_out(page, Animation.EXIT);
+        Timers.after(Animation.EXIT + 120, () => Dom.remove(page));
+    }
+
     public unsafe Node render() {
-        return Node.element("div").attr("class", "outlet").insert(() => {
+        Node box = Node.element("div").attr("class", "outlet");
+        u32 region = Dom.fragment();
+        Dom.append(box.id, region);
+        effect(() => {
+            mut u32 old = Dom.first_child(region);
+            while (old != 0) {
+                u32 next = Dom.next_sibling(old);
+                Outlet.retire(old);
+                old = next;
+            }
             str path = Router.path();
             Node inner = this.view(path);
             Node page = Node.element("div").attr("class", "route").child(inner);
             Animation.enter(page.id, Animation.ENTER + 80, (f32)(28 * Router.direction()));
-            return page;
+            Dom.append(region, page.id);
         });
+        return box;
     }
 }
 
