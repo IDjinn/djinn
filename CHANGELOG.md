@@ -2,8 +2,36 @@
 
 ## [Unreleased]
 
-### Changed
+## [0.6.0] - 2026-11-15
 
+### Added
+- Closures: `fn(A, B) -> R` types, `(a, b) => expr` and `(i32 a) => { ... }` lambdas with captures (copied or moved, read-only inside), calls through locals, fields and expressions, function names as `fn` values, and `.djlib` support. New errors E3064 (assigning a captured variable), E3065 (moving a captured value) and E3066 (untyped lambda parameter without an expected type).
+- Macros: `name!{...}` and `name![...]` delimiters, statement and declaration macros, `block`, `statement`, `tokens` and variadic (`expression... xs` with `$for`) fragments, bound `type` parameters, hygienic template locals, generic arguments with commas, trailing commas, `ns::name!(...)` calls, and warning W6006 when a function shares the name of a visible `name(...)` macro.
+
+- Procedural macros: `proc macro name => handler;` and `proc attribute Name => handler;` with the `std::meta` token API (`Token`, `TokenStream`); a program that imports the library runs them while it is parsed.
+- `libs/ui` and `libs/ui_macros`: the UI library (reactive core with signals, memos and effects, retained tree, `html!` markup with components, `if`/`for` regions and keyed lists, render modes declared with `[Application(render: ...)]`, `[Server]`, `[Client]` and `[Static]`, an HTML writer that escapes and sanitizes every value, and a test host that logs tree operations), with `examples/ui-showcase` and `tests/djinnc/ui.sh`.
+- UI CSS engine (`libs/ui/src/style`): tokenizer, nesting, `@layer`, `@media`, `@property`, selectors with `:is()`/`:where()`/`:not()` and states, cascade with layers and `!important`, custom properties, `calc()`, `oklch()`/`color-mix()` colors; and a default light/dark theme (`Theme.set`, `--ui-*` variables) applied out of the box. `App.run` writes a full themed page.
+- UI layout engine (`libs/ui/src/layout`): block and inline flow, flexbox (grow, shrink, wrap, gaps, alignment, auto margins, automatic minimum), grid (`fr`, `minmax()`, `repeat(auto-fit, ...)`, spans, auto-placement, track sizing), absolute, fixed and relative positioning. `Layout.compute(root, width, height)` caches per box and input, so a change lays out again only the boxes around it.
+- UI paint, text and native host: display list and software rasterizer (`libs/ui/src/paint`), glyph atlas with GDI fonts (`libs/ui/src/text`), `libs/win32` (window, message pump, mouse and key events to DOM events), `libs/vulkan` (Vulkan renderer, opt-in with `DJINN_UI_GPU=1`, software fallback) and `libs/spirv` (`spirv!{...}` compile-time SPIR-V assembler macro used for the shaders). `examples/ui-native` is the client-mode showcase and `examples/ui-bench` the speed, memory and CPU benchmark.
+- Installers: optional components (UI libraries, Vulkan renderer) in the Windows wizard, `install.ps1` (`-Ui`, `-Vulkan`) and `install.sh` (`--ui`, `--vulkan`); the picks are kept in `.components` so updates repeat them.
+- UI styles: `@supports` evaluated for real, `light-dark()` and system colors following `color-scheme`, logical properties, viewport units (`dvh`, `vi`, `vmin`, ...), `outline`, `overflow-wrap`, grid, inset, `order` and `aspect-ratio` properties, the media features `pointer`, `prefers-contrast` and `forced-colors`, and the host environment setters (`Styles.set_text_scale`, `set_coarse_pointer`, `set_more_contrast`, `set_forced_colors`). A change in the tree now restyles only the node, its subtree and its siblings.
+- UI default theme rewritten after the Chrome team's modern web guidance: tokens joined with `light-dark()` (with a fallback), cascade layers with `:where()` selectors, rem sizes with the root font size left to the user, fluid headings and gutters, touch-sized targets, outline focus rings, more-contrast and forced-colors support, and the responsive layout classes `.page`, `.stack`, `.cluster`, `.tiles` and `.split`.
+- `std::text::Utf8`: strict UTF-8 validation (`sequence_length`, `is_valid`, `first_invalid`, `sanitize`) with an ASCII fast path.
+
+### Fixed
+- A function from a `.djlib` owned its `Value` parameters but callers treated it as borrowing them (like an `extern` function) and disposed them again after the call: closures and strings passed to library functions were freed twice.
+- Instances of the closure templates (`__closureN<...>`) used by a library were left out of its object, so a program that did not use the same `fn` types failed to link.
+- A `[Platform]` declaration that was left out dropped every declaration a macro expansion had queued before it, so a procedural attribute that emitted one item per platform lost them all.
+- A lambda passed to an overloaded call is checked once per candidate; only the instance the code creates is emitted now (the others referenced locals of other functions), and lambdas are no longer listed as methods by reflection.
+- A string literal passed to a generic parameter infers `str` instead of `i8*`.
+- `str.isValidUtf8()` accepted overlong forms, UTF-16 surrogates and bytes past U+10FFFF.
+- A library built against the source std (`--std --std-dir`) no longer defines the std globals again, which made linking it with a program fail with duplicate symbols.
+- Declarations produced by a macro belong to the file of the call (imports, library interface, dependency stripping), not to the file of the macro template.
+
+- Platform-specific code: `[Platform(windows, web, desktop, ...)]` on declarations and struct members, and `name.<platform>.djinn` files that replace `name.djinn` for the target; `Platform.Android`, `Platform.Ios`, `Platform.Web`, `Platform.Desktop` and `Platform.Mobile` constants.
+
+### Changed
+- Macros are token templates expanded and re-parsed (they were AST substitutions): every macro is collected before parsing, so a macro can be used before it is declared or from another file. Macros belong to their namespace and are visible only from it and from files that import it, so a user `log` macro no longer rewrites `log(...)` calls inside `std`. Parse errors inside an expansion are reported at the call.
 - An installed `djinnc` now finds `runtime/`, `std/` and the prebuilt runtime library (`lib/`) next to its own `bin/` directory, so `--runtime-dir`, `--std-dir` and `--runtime-lib` are no longer needed. Explicit flags, `DJINN_STD_DIR` and a `runtime/core` in the current directory still take precedence.
 
 ## [0.5.2] - 2026-11-14

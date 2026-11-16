@@ -106,6 +106,18 @@ void main() {
 }                          // b.disposable() runs here
 ```
 
+Closures:
+
+```djinn
+i32 apply(fn(i32) -> i32 f, i32 x) => f(x);
+
+i32 main() {
+    i32 base = 10;
+    fn(i32) -> i32 add = (v) => v + base;   // base is captured
+    return apply(add, 1) + apply((x) => x * 2, 5);
+}
+```
+
 Compile-time evaluation:
 
 ```djinn
@@ -135,6 +147,7 @@ constexpr i32 BUFFER = 64 * 1024;
 - **Nullable**: `T?`, `p?.member`, `p!.member`, `a ?? b`, `a ??= b`
 - **Errors**: `throws`, `throw`, `try ... ?: fallback`, `require` / `ensure`, runtime panics with `R<code>` codes and hooks
 - **Async/Await**: LLVM coroutines, `yield`, `spawn`, event loop runtime, async sockets and files
+- **Closures**: `fn(A) -> R` types, `(a, b) => expr` lambdas with captured locals, function names as `fn` values
 - **FFI**: `extern "C"` functions and blocks, variadics
 - **Macros**: `expression` / `identifier` / `literal` / `type` / `block` fragments, `local` modifier, multi-rule dispatch
 - **Attributes**: parameterized (`[align(16)]`), LLVM attribute mappings, loop hints, `[llvm("...")]` escape hatch,

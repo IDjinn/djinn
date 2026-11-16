@@ -1,0 +1,543 @@
+import std::types;
+import std::libc;
+
+namespace ui;
+
+unsafe static mut ptr style_engine = null;
+
+// What media queries and relative units are evaluated against; the host updates it (window size, OS theme).
+struct StyleEnvironment {
+    mut f64 viewport_width;
+    mut f64 viewport_height;
+    mut f64 root_font_size;
+    mut bool prefers_dark;
+    mut bool hover;
+    mut bool reduced_motion;
+    mut bool coarse_pointer;
+    mut bool more_contrast;
+    mut bool forced_colors;
+    mut f64 text_scale;
+}
+
+// One matched declaration and the keys that order it in the cascade.
+struct CascadeEntry {
+    mut bool important;
+    mut u8 origin;
+    mut u32 layer;
+    mut u32 specificity;
+    mut u32 sheet;
+    mut u32 declaration;
+}
+
+struct StyleEngine {
+    mut Growable<StyleSheet*> sheets;
+    mut StyleEnvironment environment;
+    mut Style* styles;
+    mut u32* epochs;
+    mut u32* stamps;
+    mut u32 capacity;
+    mut bool themed;
+    mut Growable<CascadeEntry> scratch;
+    mut u32 computed;
+}
+
+// The cascade: matches every rule against an element, orders the declarations (importance, origin, layer,
+// specificity, source order), resolves custom properties and var(), and caches the result per node. A change in the
+// tree restyles only what it can reach (Dom.restyle_stamp); sheets and the environment restyle everything
+// (Dom.epoch()).
+struct Styles {
+    public static unsafe StyleEngine* engine() {
+        if (style_engine == null) {
+            StyleEngine* engine = (StyleEngine*)__djinn_alloc_zeroed((size_long)sizeof(StyleEngine));
+            engine.environment.viewport_width = 1280.0;
+            engine.environment.viewport_height = 800.0;
+            engine.environment.root_font_size = 16.0;
+            engine.environment.text_scale = 1.0;
+            engine.environment.hover = true;
+            style_engine = (ptr)engine;
+            Styles.install(CssParser.parse(BrowserStyles.css(), StyleOrigin.BROWSER));
+            Styles.install(CssParser.parse(Theme.css(), StyleOrigin.THEME));
+            engine.themed = true;
+        }
+        return (StyleEngine*)style_engine;
+    }
+
+    static unsafe void install(StyleSheet* sheet) {
+        StyleEngine* engine = (StyleEngine*)style_engine;
+        sheet.order = engine.sheets.count;
+        engine.sheets.push(sheet);
+        Dom.touch();
+    }
+
+    // Adds an author stylesheet (for example the Tailwind CLI output); later sheets win ties.
+    public static unsafe StyleSheet* add(str css) {
+        Styles.engine();
+        StyleSheet* sheet = CssParser.parse(css, StyleOrigin.AUTHOR);
+        Styles.install(sheet);
+        return sheet;
+    }
+
+    // Drops the built-in theme (the browser defaults stay), for apps that bring their own design system.
+    public static unsafe void without_theme() {
+        StyleEngine* engine = Styles.engine();
+        for (mut u32 i = 0; i < engine.sheets.count; i = i + 1) {
+            StyleSheet* sheet = engine.sheets.get(i);
+            if (sheet.origin == StyleOrigin.THEME) {
+                sheet.rules.count = 0;
+            }
+        }
+        engine.themed = false;
+        Dom.touch();
+    }
+
+    public static unsafe StyleEnvironment* environment() {
+        return &Styles.engine().environment;
+    }
+
+    public static unsafe void set_viewport(f64 width, f64 height) {
+        StyleEnvironment* environment = Styles.environment();
+        if (environment.viewport_width == width && environment.viewport_height == height) {
+            return;
+        }
+        environment.viewport_width = width;
+        environment.viewport_height = height;
+        Dom.touch();
+    }
+
+    // The OS text size setting (1.0 is the default): the root font size, and with it every rem and em, scales by
+    // it, and so do media queries written in em.
+    public static unsafe void set_text_scale(f64 scale) {
+        StyleEnvironment* environment = Styles.environment();
+        if (scale > 0.0 && environment.text_scale != scale) {
+            environment.text_scale = scale;
+            Dom.touch();
+        }
+    }
+
+    // The primary pointer is a finger or another imprecise device ('pointer: coarse'); it then also cannot hover.
+    public static unsafe void set_coarse_pointer(bool coarse) {
+        StyleEnvironment* environment = Styles.environment();
+        environment.coarse_pointer = coarse;
+        environment.hover = !coarse;
+        Dom.touch();
+    }
+
+    public static unsafe void set_reduced_motion(bool reduced) {
+        Styles.environment().reduced_motion = reduced;
+        Dom.touch();
+    }
+
+    // The user asked the OS for more contrast ('prefers-contrast: more').
+    public static unsafe void set_more_contrast(bool more) {
+        Styles.environment().more_contrast = more;
+        Dom.touch();
+    }
+
+    // The OS replaces the colors with its own small palette ('forced-colors: active', Windows High Contrast).
+    public static unsafe void set_forced_colors(bool forced) {
+        Styles.environment().forced_colors = forced;
+        Dom.touch();
+    }
+
+    public static unsafe void set_prefers_dark(bool dark) {
+        Styles.environment().prefers_dark = dark;
+        Dom.touch();
+    }
+
+    static unsafe bool feature(MediaFeature feature, StyleEnvironment* environment) {
+        u8 kind = feature.kind;
+        mut bool result = false;
+        if (kind == MediaKind.ALWAYS) { result = true; }
+        else if (kind == MediaKind.DARK) { result = environment.prefers_dark; }
+        else if (kind == MediaKind.LIGHT) { result = !environment.prefers_dark; }
+        else if (kind == MediaKind.MIN_WIDTH) { result = environment.viewport_width >= Styles.width_of(feature, environment); }
+        else if (kind == MediaKind.MAX_WIDTH) { result = environment.viewport_width <= Styles.width_of(feature, environment); }
+        else if (kind == MediaKind.ABOVE_WIDTH) { result = environment.viewport_width > Styles.width_of(feature, environment); }
+        else if (kind == MediaKind.BELOW_WIDTH) { result = environment.viewport_width < Styles.width_of(feature, environment); }
+        else if (kind == MediaKind.COARSE) { result = environment.coarse_pointer; }
+        else if (kind == MediaKind.FINE) { result = !environment.coarse_pointer; }
+        else if (kind == MediaKind.MORE_CONTRAST) { result = environment.more_contrast; }
+        else if (kind == MediaKind.USUAL_CONTRAST) { result = !environment.more_contrast; }
+        else if (kind == MediaKind.FORCED_COLORS) { result = environment.forced_colors; }
+        else if (kind == MediaKind.FREE_COLORS) { result = !environment.forced_colors; }
+        else if (kind == MediaKind.HOVER) { result = environment.hover; }
+        else if (kind == MediaKind.NO_HOVER) { result = !environment.hover; }
+        else if (kind == MediaKind.REDUCED_MOTION) { result = environment.reduced_motion; }
+        else if (kind == MediaKind.MOTION_OK) { result = !environment.reduced_motion; }
+        if (feature.negated) {
+            return !result;
+        }
+        return result;
+    }
+
+    // A width in a media query: px, or em / rem of the initial font size, which follows the OS text scale.
+    static unsafe f64 width_of(MediaFeature feature, StyleEnvironment* environment) {
+        if (feature.relative) {
+            return feature.value * 16.0 * environment.text_scale;
+        }
+        return feature.value;
+    }
+
+    public static unsafe bool media(StyleSheet* sheet, u32 index) {
+        StyleEnvironment* environment = &Styles.engine().environment;
+        mut u32 at = index;
+        while (at != 0) {
+            MediaQuery query = sheet.media.get(at);
+            mut bool any = query.count == 0;
+            for (mut u32 alternative = 0; alternative < query.alternatives && !any; alternative = alternative + 1) {
+                mut bool all = true;
+                for (mut u32 i = 0; i < query.count; i = i + 1) {
+                    MediaFeature feature = sheet.features.get(query.first + i);
+                    if (feature.alternative == alternative && !Styles.feature(feature, environment)) {
+                        all = false;
+                    }
+                }
+                any = all;
+            }
+            if (!any) {
+                return false;
+            }
+            at = query.parent;
+        }
+        return true;
+    }
+
+    // True when 'b' goes after (wins over) 'a'.
+    static bool later(CascadeEntry a, CascadeEntry b) {
+        if (a.important != b.important) {
+            return b.important;
+        }
+        if (a.origin != b.origin) {
+            if (a.important) {
+                return b.origin < a.origin;
+            }
+            return b.origin > a.origin;
+        }
+        if (a.layer != b.layer) {
+            if (a.important) {
+                return b.layer < a.layer;
+            }
+            return b.layer > a.layer;
+        }
+        if (a.specificity != b.specificity) {
+            return b.specificity > a.specificity;
+        }
+        if (a.sheet != b.sheet) {
+            return b.sheet > a.sheet;
+        }
+        return b.declaration > a.declaration;
+    }
+
+    static unsafe void collect(u32 id, Growable<CascadeEntry>* entries) {
+        StyleEngine* engine = (StyleEngine*)style_engine;
+        for (mut u32 s = 0; s < engine.sheets.count; s = s + 1) {
+            StyleSheet* sheet = engine.sheets.get(s);
+            for (mut u32 r = 0; r < sheet.rules.count; r = r + 1) {
+                CssRule rule = sheet.rules.get(r);
+                mut u32 specificity = 0;
+                mut bool matched = false;
+                for (mut u32 k = 0; k < rule.selector_count; k = k + 1) {
+                    Selector selector = sheet.selectors.selectors.get(rule.selector_first + k);
+                    if (SelectorMatcher.matches(&sheet.selectors, selector, id)) {
+                        if (!matched || selector.specificity > specificity) {
+                            specificity = selector.specificity;
+                        }
+                        matched = true;
+                    }
+                }
+                if (!matched || !Styles.media(sheet, rule.media)) {
+                    continue;
+                }
+                for (mut u32 d = 0; d < rule.decl_count; d = d + 1) {
+                    CssDeclaration declaration = sheet.declarations.get(rule.decl_first + d);
+                    CascadeEntry entry = { .important = declaration.important, .origin = sheet.origin, .layer = rule.layer,
+                        .specificity = specificity, .sheet = s, .declaration = rule.decl_first + d };
+                    entries.push(entry);
+                }
+            }
+        }
+        for (mut u32 i = 1; i < entries.count; i = i + 1) {
+            CascadeEntry item = entries.get(i);
+            mut u32 j = i;
+            while (j > 0 && Styles.later(item, entries.get(j - 1))) {
+                entries.data[j] = entries.data[j - 1];
+                j = j - 1;
+            }
+            entries.data[j] = item;
+        }
+    }
+
+    static unsafe CssDeclaration declaration_of(CascadeEntry entry) {
+        StyleEngine* engine = (StyleEngine*)style_engine;
+        StyleSheet* sheet = engine.sheets.get(entry.sheet);
+        return sheet.declarations.get(entry.declaration);
+    }
+
+    static unsafe bool is_custom(str name) {
+        return name.length > 2 && name.data[0] == 45 && name.data[1] == 45;
+    }
+
+    // The value of a custom property, or its @property initial value; .data is null when there is neither.
+    static unsafe str lookup(Style* style, str name) {
+        str found = style.custom(name);
+        if (found.data != (i8*)0) {
+            return found;
+        }
+        RegisteredProperty* registered = Layers.property(name);
+        if (registered != (RegisteredProperty*)0 && registered.initial.length > 0) {
+            return registered.initial;
+        }
+        str missing = { .data = (i8*)0, .length = 0 };
+        return missing;
+    }
+
+    static unsafe bool has_var(str value) {
+        for (mut u32 i = 0; i + 4 <= (u32)value.length; i = i + 1) {
+            if (value.data[i] == 118 && value.data[i + 1] == 97 && value.data[i + 2] == 114 && value.data[i + 3] == 40) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Replaces every var(--name[, fallback]) with the custom property value (recursively, up to 32 levels).
+    // .data is null when a reference has neither a value nor a fallback: the declaration is then invalid.
+    public static unsafe str substitute(str value, Style* style, u32 depth) {
+        str invalid = { .data = (i8*)0, .length = 0 };
+        if (depth > 32) {
+            return invalid;
+        }
+        if (!Styles.has_var(value)) {
+            return value;
+        }
+        mut TextBuffer out = TextBuffer.create();
+        u32 length = (u32)value.length;
+        mut u32 i = 0;
+        while (i < length) {
+            bool call = i + 4 <= length && value.data[i] == 118 && value.data[i + 1] == 97 && value.data[i + 2] == 114 && value.data[i + 3] == 40
+                && (i == 0 || !CssLexer.is_name(value.data[i - 1]));
+            if (!call) {
+                out.append_byte(value.data[i]);
+                i = i + 1;
+                continue;
+            }
+            mut u32 j = i + 4;
+            mut i32 depth_of = 1;
+            mut u32 comma = 0;
+            while (j < length && depth_of > 0) {
+                i8 c = value.data[j];
+                if (c == 40) {
+                    depth_of = depth_of + 1;
+                } else if (c == 41) {
+                    depth_of = depth_of - 1;
+                } else if (c == 44 && depth_of == 1 && comma == 0) {
+                    comma = j;
+                }
+                if (depth_of > 0) {
+                    j = j + 1;
+                }
+            }
+            mut u32 name_end = j;
+            if (comma != 0) {
+                name_end = comma;
+            }
+            mut u32 name_start = i + 4;
+            while (name_start < name_end && value.data[name_start] == 32) {
+                name_start = name_start + 1;
+            }
+            mut u32 name_stop = name_end;
+            while (name_stop > name_start && value.data[name_stop - 1] == 32) {
+                name_stop = name_stop - 1;
+            }
+            str name = { .data = value.data + name_start, .length = (size)(name_stop - name_start) };
+            str found = Styles.lookup(style, name);
+            mut str replacement = found;
+            if (found.data == (i8*)0) {
+                if (comma == 0) {
+                    out.release();
+                    return invalid;
+                }
+                str fallback = { .data = value.data + comma + 1, .length = (size)(j - comma - 1) };
+                replacement = fallback;
+            }
+            str resolved = Styles.substitute(replacement, style, depth + 1);
+            if (resolved.data == (i8*)0) {
+                out.release();
+                return invalid;
+            }
+            out.append(resolved);
+            i = j + 1;
+        }
+        return out.view();
+    }
+
+    // Applies a declaration to 'style'; an invalid value behaves like 'unset'.
+    static unsafe void apply(Style* style, CssDeclaration declaration, Style* parent, ValueContext* context) {
+        str value = Styles.substitute(declaration.value, style, 0);
+        Style initial = Style.initial();
+        if (value.data == (i8*)0) {
+            if (Props.is_inherited(declaration.property)) {
+                Props.copy(style, declaration.property, parent);
+            } else {
+                Props.copy(style, declaration.property, &initial);
+            }
+            return;
+        }
+        mut CssTokens tokens = CssLexer.tokenize(value);
+        mut ValueReader reader = ValueReader.over(&tokens, 0, tokens.count);
+        reader.text = value.data;
+        CssToken first = reader.peek();
+        if (first.kind == CssKind.IDENT && reader.tokens.count > 0) {
+            bool only = tokens.count == 1 || (tokens.count == 2 && tokens.get(1).kind == CssKind.SPACE);
+            if (only && CssNames.equal(first.text, "inherit")) {
+                Props.copy(style, declaration.property, parent);
+                return;
+            }
+            if (only && CssNames.equal(first.text, "initial")) {
+                Props.copy(style, declaration.property, &initial);
+                return;
+            }
+            if (only && (CssNames.equal(first.text, "unset") || CssNames.equal(first.text, "revert") || CssNames.equal(first.text, "revert-layer"))) {
+                if (Props.is_inherited(declaration.property)) {
+                    Props.copy(style, declaration.property, parent);
+                } else {
+                    Props.copy(style, declaration.property, &initial);
+                }
+                return;
+            }
+        }
+        if (!Props.apply(style, declaration.property, &reader, context, parent)) {
+            if (Props.is_inherited(declaration.property)) {
+                Props.copy(style, declaration.property, parent);
+            } else {
+                Props.copy(style, declaration.property, &initial);
+            }
+        }
+    }
+
+    static unsafe void reserve(StyleEngine* engine) {
+        u32 wanted = Dom.tree().capacity + 1;
+        if (engine.capacity >= wanted) {
+            return;
+        }
+        engine.styles = (Style*)Dom.resize((void*)engine.styles, engine.capacity, wanted, sizeof(Style));
+        engine.epochs = (u32*)Dom.resize((void*)engine.epochs, engine.capacity, wanted, 4);
+        engine.stamps = (u32*)Dom.resize((void*)engine.stamps, engine.capacity, wanted, 4);
+        engine.capacity = wanted;
+    }
+
+    // How many styles were computed (not served from the cache) so far: what tests of the invalidation read.
+    public static unsafe u32 computed_count() {
+        return Styles.engine().computed;
+    }
+
+    // Whether the cached style of 'element' is still the one the tree and the sheets give. A node outside the
+    // document still inherits from it, so the document's own changes count too.
+    static unsafe bool is_current(StyleEngine* engine, u32 element) {
+        if (engine.epochs[element] != Dom.epoch() + 1) {
+            return false;
+        }
+        u32 stamp = engine.stamps[element];
+        return Dom.restyle_stamp(element) <= stamp && Dom.changed_children(Dom.document()) <= stamp;
+    }
+
+    // The computed style of a node (for text and fragments, the one of the element around it).
+    public static unsafe Style* of(u32 id) {
+        StyleEngine* engine = Styles.engine();
+        Styles.reserve(engine);
+        mut u32 element = id;
+        if (!SelectorMatcher.is_box(id)) {
+            element = SelectorMatcher.parent_element(id);
+            if (element == 0) {
+                element = Dom.document();
+            }
+        }
+        u32 epoch = Dom.epoch() + 1;
+        if (Styles.is_current(engine, element)) {
+            return &engine.styles[element];
+        }
+        mut Style parent = Style.initial();
+        parent.font_size = (f32)(16.0 * engine.environment.text_scale);
+        mut u32 above = SelectorMatcher.parent_element(element);
+        if (above == 0 && element != Dom.document()) {
+            above = Dom.document();
+        }
+        if (above != 0) {
+            parent = *Styles.of(above);
+            Styles.reserve(engine);
+        }
+        if (engine.epochs[element] != 0) {
+            Styles.release(&engine.styles[element]);
+        }
+        Style computed = Styles.compute(element, &parent);
+        engine.styles[element] = computed;
+        engine.epochs[element] = epoch;
+        engine.stamps[element] = Dom.stamp();
+        engine.computed = engine.computed + 1;
+        return &engine.styles[element];
+    }
+
+    // Frees the custom property entries a style added on top of the inherited chain.
+    static unsafe void release(Style* style) {
+        mut CssVar* item = style.vars;
+        for (mut u32 i = 0; i < style.own_vars && item != (CssVar*)0; i = i + 1) {
+            CssVar* next = item.next;
+            __djinn_free((void*)item);
+            item = next;
+        }
+        style.own_vars = 0;
+    }
+
+    static unsafe bool is_early(str property) {
+        return CssNames.equal(property, "font-size") || CssNames.equal(property, "color-scheme");
+    }
+
+    static unsafe Style compute(u32 id, Style* parent) {
+        StyleEngine* engine = (StyleEngine*)style_engine;
+        mut Style style = Style.inheriting(parent);
+        mut Growable<CascadeEntry> entries = Growable<CascadeEntry>();
+        Styles.collect(id, &entries);
+        for (mut u32 i = 0; i < entries.count; i = i + 1) {
+            CssDeclaration declaration = Styles.declaration_of(entries.get(i));
+            if (!Styles.is_custom(declaration.property)) {
+                continue;
+            }
+            CssVar* item = (CssVar*)__djinn_alloc((size_long)sizeof(CssVar));
+            item.name = declaration.property;
+            item.value = declaration.value;
+            item.next = style.vars;
+            style.vars = item;
+            style.own_vars = style.own_vars + 1;
+        }
+        mut ValueContext context = { .font_size = (f64)parent.font_size, .root_font_size = engine.environment.root_font_size,
+            .viewport_width = engine.environment.viewport_width, .viewport_height = engine.environment.viewport_height, .dark = parent.dark_scheme };
+        if (id == Dom.document()) {
+            context.root_font_size = (f64)parent.font_size;
+        }
+        // The font size (what em resolves against) and the color scheme (what light-dark() and the system colors
+        // resolve against) come first: every other declaration may depend on them.
+        for (mut u32 i = 0; i < entries.count; i = i + 1) {
+            CssDeclaration declaration = Styles.declaration_of(entries.get(i));
+            if (Styles.is_early(declaration.property)) {
+                Styles.apply(&style, declaration, parent, &context);
+            }
+        }
+        context.font_size = (f64)style.font_size;
+        context.dark = style.dark_scheme;
+        if (id == Dom.document()) {
+            engine.environment.root_font_size = (f64)style.font_size;
+            context.root_font_size = (f64)style.font_size;
+        }
+        for (mut u32 i = 0; i < entries.count; i = i + 1) {
+            CssDeclaration declaration = Styles.declaration_of(entries.get(i));
+            if (Styles.is_custom(declaration.property) || Styles.is_early(declaration.property)) {
+                continue;
+            }
+            Styles.apply(&style, declaration, parent, &context);
+        }
+        if (entries.data != (CascadeEntry*)0) {
+            __djinn_free((void*)entries.data);
+        }
+        return style;
+    }
+}

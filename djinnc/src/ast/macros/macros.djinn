@@ -3,6 +3,8 @@ namespace djinnc;
 unsafe static mut ptr macro_list = null;
 unsafe static mut i32 macro_counter = 0;
 
+// Macros belong to the namespace they are declared in. A call sees the macros of its own namespace and of the
+// namespaces its file imports; 'ns::name!(...)' names one directly.
 struct Macros {
     static unsafe PointerList* all() {
         if (macro_list == null) {
@@ -11,29 +13,65 @@ struct Macros {
         return (PointerList*)macro_list;
     }
 
-    static unsafe MacroInfo* find_exact(u32 atom, bool bang_only) {
+    static unsafe MacroInfo* find_exact(u32 atom, bool bang_only, u32 namespace_atom) {
         PointerList* macros = Macros.all();
         for (mut i32 i = 0; i < macros.length; i = i + 1) {
             MacroInfo* info = (MacroInfo*)macros.get(i);
-            if (info.name_atom == atom && info.bang_only == bang_only) {
+            if (info.name_atom == atom && info.bang_only == bang_only && !info.is_attribute && info.namespace_atom == namespace_atom) {
                 return info;
             }
         }
         return (MacroInfo*)0;
     }
 
-    public static unsafe MacroInfo* find(u32 atom, bool banged) {
+    static unsafe bool visible(MacroInfo* info, u32 namespace_atom, IdList* imports) {
+        if (info.namespace_atom == namespace_atom) {
+            return true;
+        }
+        if (imports == null) {
+            return false;
+        }
+        for (mut i32 i = 0; i < imports.length; i = i + 1) {
+            if (imports.get(i) == info.namespace_atom) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static unsafe MacroInfo* find_kind(u32 atom, bool bang_only, u32 namespace_atom, IdList* imports) {
+        PointerList* macros = Macros.all();
+        for (mut i32 i = 0; i < macros.length; i = i + 1) {
+            MacroInfo* info = (MacroInfo*)macros.get(i);
+            if (info.name_atom == atom && info.bang_only == bang_only && !info.is_attribute && Macros.visible(info, namespace_atom, imports)) {
+                return info;
+            }
+        }
+        return (MacroInfo*)0;
+    }
+
+    public static unsafe MacroInfo* find(u32 atom, bool banged, u32 namespace_atom, IdList* imports) {
         if (banged) {
-            MacroInfo* declared = Macros.find_exact(atom, true);
+            MacroInfo* declared = Macros.find_kind(atom, true, namespace_atom, imports);
             if (declared != null) {
                 return declared;
             }
         }
-        return Macros.find_exact(atom, false);
+        return Macros.find_kind(atom, false, namespace_atom, imports);
     }
 
-    public static unsafe MacroInfo* declare(u32 atom, ptr<i8> name, bool bang_only) {
-        MacroInfo* existing = Macros.find_exact(atom, bang_only);
+    public static unsafe MacroInfo* find_qualified(u32 atom, bool banged, u32 qualifier) {
+        if (banged) {
+            MacroInfo* declared = Macros.find_exact(atom, true, qualifier);
+            if (declared != null) {
+                return declared;
+            }
+        }
+        return Macros.find_exact(atom, false, qualifier);
+    }
+
+    public static unsafe MacroInfo* declare(u32 atom, ptr<i8> name, bool bang_only, u32 namespace_atom) {
+        MacroInfo* existing = Macros.find_exact(atom, bang_only, namespace_atom);
         if (existing != null) {
             return existing;
         }
@@ -41,20 +79,47 @@ struct Macros {
         info.name_atom = atom;
         info.bang_only = bang_only;
         info.name = name;
+        info.namespace_atom = namespace_atom;
         info.rules = PointerList.create();
         PointerList* macros = Macros.all();
         macros.push((ptr)info);
         return info;
     }
 
-    public static ptr<i8> unique_name(ptr<i8> parameter) {
+    public static unsafe MacroInfo* find_attribute(u32 atom, u32 namespace_atom, IdList* imports) {
+        PointerList* macros = Macros.all();
+        for (mut i32 i = 0; i < macros.length; i = i + 1) {
+            MacroInfo* info = (MacroInfo*)macros.get(i);
+            if (info.name_atom == atom && info.is_attribute && Macros.visible(info, namespace_atom, imports)) {
+                return info;
+            }
+        }
+        return (MacroInfo*)0;
+    }
+
+    public static unsafe MacroInfo* declare_procedural(u32 atom, ptr<i8> name, bool attribute, u32 namespace_atom) {
+        MacroInfo* info = (MacroInfo*)Memory.zalloc(sizeof(MacroInfo));
+        info.name_atom = atom;
+        info.name = name;
+        info.bang_only = !attribute;
+        info.is_proc = true;
+        info.is_attribute = attribute;
+        info.namespace_atom = namespace_atom;
+        info.rules = PointerList.create();
+        PointerList* macros = Macros.all();
+        macros.push((ptr)info);
+        return info;
+    }
+
+    public static unsafe u32 unique_atom(ptr<i8> base) {
         macro_counter = macro_counter + 1;
         ByteBuffer* name = ByteBuffer.create();
         name.append("__macro");
         name.append_int(macro_counter);
         name.append("_");
-        name.append(parameter);
-        return name.cstr();
+        name.append(base);
+        AtomTable* atoms = Atoms.get();
+        return atoms.intern_copy(name.cstr(), (u32)strlen(name.cstr()));
     }
 
     public static unsafe bool same_signature(MacroRule* left, MacroRule* right) {
@@ -66,7 +131,7 @@ struct Macros {
         for (mut i32 i = 0; i < a.length; i = i + 1) {
             MacroParam* x = (MacroParam*)a.get(i);
             MacroParam* y = (MacroParam*)b.get(i);
-            if (x.kind != y.kind) {
+            if (x.kind != y.kind || x.variadic != y.variadic) {
                 return false;
             }
             if (x.kind == MacroParamKind.TOKEN && x.name_atom != y.name_atom) {
@@ -74,44 +139,5 @@ struct Macros {
             }
         }
         return true;
-    }
-
-    public static unsafe Node* replace(Node* node, PointerList* bindings) {
-        if (node.kind() == NodeKind::IDENTIFIER) {
-            u32 atom = node.text_atom();
-            for (mut i32 i = 0; i < bindings.length; i = i + 1) {
-                MacroBinding* binding = (MacroBinding*)bindings.get(i);
-                if (binding.name_atom == atom) {
-                    binding.uses = binding.uses + 1;
-                    if (binding.is_local) {
-                        Node* reference = Node.create(NodeKind::IDENTIFIER, node.token);
-                        reference.set_text(binding.temp);
-                        return reference;
-                    }
-                    return Node.clone(binding.node);
-                }
-            }
-            return node;
-        }
-        for (mut i32 field = NodeField.FIRST; field <= NodeField.FOURTH; field = field + 1) {
-            u32 stored = node.get_field(field);
-            if (stored != 0) {
-                Node* child = Ast.at((i32)stored);
-                Node* replaced = Macros.replace(child, bindings);
-                if (replaced != child) {
-                    node.set_field(field, (u32)Ast.id_of(replaced));
-                }
-            }
-        }
-        if (node.has_items()) {
-            for (mut i32 i = 0; i < node.count(); i = i + 1) {
-                Node* child = node.child(i);
-                Node* replaced = Macros.replace(child, bindings);
-                if (replaced != child) {
-                    node.set_child(i, replaced);
-                }
-            }
-        }
-        return node;
     }
 }

@@ -1,0 +1,343 @@
+import std::meta;
+import std::types;
+import std::libc;
+
+namespace spirv::assembler;
+
+// Growable list of words, living until the compiler exits like every macro allocation.
+struct WordList {
+    mut u32* data;
+    mut u32 count;
+    mut u32 capacity;
+
+    public static unsafe WordList create() {
+        WordList list = { .data = (u32*)__djinn_alloc(256), .count = 0, .capacity = 64 };
+        return list;
+    }
+
+    public unsafe void push(u32 word) {
+        if (this.count == this.capacity) {
+            this.capacity = this.capacity * 2;
+            this.data = (u32*)__djinn_realloc((void*)this.data, (size_long)(this.capacity * 4));
+        }
+        this.data[this.count] = word;
+        this.count = this.count + 1;
+    }
+}
+
+// Names of ids ('%name') in order of first use; the id of a name is its index + 1.
+struct IdTable {
+    mut str* names;
+    mut u32 count;
+
+    public static unsafe IdTable create() {
+        IdTable table = { .names = (str*)__djinn_alloc_zeroed((size_long)(1024 * sizeof(str))), .count = 0 };
+        return table;
+    }
+
+    public unsafe u32 id(str name) {
+        for (mut u32 i = 0; i < this.count; i = i + 1) {
+            str known = this.names[i];
+            if (known.length == name.length && memcmp((void*)known.data, (void*)name.data, (size_long)name.length) == 0) {
+                return i + 1;
+            }
+        }
+        this.names[this.count] = name;
+        this.count = this.count + 1;
+        return this.count;
+    }
+}
+
+struct OpInfo {
+    mut u32 code;
+    mut bool typed;
+    mut bool result;
+}
+
+// Assembles SPIR-V text at compile time. A statement is  [%result =] Opcode operand... ;  where an operand is an id
+// (%name), an integer, a decimal like 2.0 (a 32-bit float), a string, or the name of an enumerant (Input, Location, ...).
+// Opcode names are the specification's without the 'Op' prefix. Instructions that have a result type take it as the
+// first operand, as in the textual form. The macro expands to spirv::Words.decode("<hex words>").
+struct SpirvAssembler {
+    static unsafe bool same(str text, str name) {
+        return text.length == name.length && memcmp((void*)text.data, (void*)name.data, (size_long)name.length) == 0;
+    }
+
+    // The specification's instruction numbers, and whether the instruction has a result type / a result id.
+    static unsafe bool op(str name, OpInfo* info) {
+        info.typed = false;
+        info.result = false;
+        if (SpirvAssembler.same(name, "Capability")) { info.code = 17; return true; }
+        if (SpirvAssembler.same(name, "MemoryModel")) { info.code = 14; return true; }
+        if (SpirvAssembler.same(name, "EntryPoint")) { info.code = 15; return true; }
+        if (SpirvAssembler.same(name, "ExecutionMode")) { info.code = 16; return true; }
+        if (SpirvAssembler.same(name, "Decorate")) { info.code = 71; return true; }
+        if (SpirvAssembler.same(name, "MemberDecorate")) { info.code = 72; return true; }
+        if (SpirvAssembler.same(name, "Store")) { info.code = 62; return true; }
+        if (SpirvAssembler.same(name, "Return")) { info.code = 253; return true; }
+        if (SpirvAssembler.same(name, "FunctionEnd")) { info.code = 56; return true; }
+        info.result = true;
+        if (SpirvAssembler.same(name, "TypeVoid")) { info.code = 19; return true; }
+        if (SpirvAssembler.same(name, "TypeInt")) { info.code = 21; return true; }
+        if (SpirvAssembler.same(name, "TypeFloat")) { info.code = 22; return true; }
+        if (SpirvAssembler.same(name, "TypeVector")) { info.code = 23; return true; }
+        if (SpirvAssembler.same(name, "TypeImage")) { info.code = 25; return true; }
+        if (SpirvAssembler.same(name, "TypeSampledImage")) { info.code = 27; return true; }
+        if (SpirvAssembler.same(name, "TypeStruct")) { info.code = 30; return true; }
+        if (SpirvAssembler.same(name, "TypePointer")) { info.code = 32; return true; }
+        if (SpirvAssembler.same(name, "TypeFunction")) { info.code = 33; return true; }
+        if (SpirvAssembler.same(name, "Label")) { info.code = 248; return true; }
+        info.typed = true;
+        if (SpirvAssembler.same(name, "Constant")) { info.code = 43; return true; }
+        if (SpirvAssembler.same(name, "Function")) { info.code = 54; return true; }
+        if (SpirvAssembler.same(name, "Variable")) { info.code = 59; return true; }
+        if (SpirvAssembler.same(name, "Load")) { info.code = 61; return true; }
+        if (SpirvAssembler.same(name, "AccessChain")) { info.code = 65; return true; }
+        if (SpirvAssembler.same(name, "CompositeConstruct")) { info.code = 80; return true; }
+        if (SpirvAssembler.same(name, "CompositeExtract")) { info.code = 81; return true; }
+        if (SpirvAssembler.same(name, "ImageSampleImplicitLod")) { info.code = 87; return true; }
+        if (SpirvAssembler.same(name, "FAdd")) { info.code = 129; return true; }
+        if (SpirvAssembler.same(name, "FSub")) { info.code = 131; return true; }
+        if (SpirvAssembler.same(name, "FMul")) { info.code = 133; return true; }
+        if (SpirvAssembler.same(name, "FDiv")) { info.code = 136; return true; }
+        return false;
+    }
+
+    // Enumerants by name; 4294967295 when unknown.
+    static unsafe u32 enumerant(str name) {
+        if (SpirvAssembler.same(name, "Shader")) { return 1; }
+        if (SpirvAssembler.same(name, "Logical")) { return 0; }
+        if (SpirvAssembler.same(name, "GLSL450")) { return 1; }
+        if (SpirvAssembler.same(name, "Vertex")) { return 0; }
+        if (SpirvAssembler.same(name, "Fragment")) { return 4; }
+        if (SpirvAssembler.same(name, "UniformConstant")) { return 0; }
+        if (SpirvAssembler.same(name, "Input")) { return 1; }
+        if (SpirvAssembler.same(name, "Uniform")) { return 2; }
+        if (SpirvAssembler.same(name, "Output")) { return 3; }
+        if (SpirvAssembler.same(name, "PushConstant")) { return 9; }
+        if (SpirvAssembler.same(name, "Block")) { return 2; }
+        if (SpirvAssembler.same(name, "BuiltIn")) { return 11; }
+        if (SpirvAssembler.same(name, "Position")) { return 0; }
+        if (SpirvAssembler.same(name, "Location")) { return 30; }
+        if (SpirvAssembler.same(name, "Binding")) { return 33; }
+        if (SpirvAssembler.same(name, "DescriptorSet")) { return 34; }
+        if (SpirvAssembler.same(name, "Offset")) { return 35; }
+        if (SpirvAssembler.same(name, "OriginUpperLeft")) { return 7; }
+        if (SpirvAssembler.same(name, "None")) { return 0; }
+        if (SpirvAssembler.same(name, "Dim2D")) { return 1; }
+        if (SpirvAssembler.same(name, "Unknown")) { return 0; }
+        return 4294967295;
+    }
+
+    static unsafe bool has_dot(str text) {
+        for (mut u32 i = 0; i < (u32)text.length; i = i + 1) {
+            if (text.data[i] == 46) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static unsafe u32 integer(str text) {
+        mut u32 value = 0;
+        for (mut u32 i = 0; i < (u32)text.length; i = i + 1) {
+            value = value * 10 + ((u32)text.data[i] - 48);
+        }
+        return value;
+    }
+
+    // 'digits.digits' as the bits of a 32-bit float.
+    static unsafe u32 float_bits(str text) {
+        mut f64 value = 0.0;
+        mut f64 scale = 0.0;
+        for (mut u32 i = 0; i < (u32)text.length; i = i + 1) {
+            i8 c = text.data[i];
+            if (c == 46) {
+                scale = 1.0;
+            } else if (c >= 48 && c <= 57) {
+                if (scale > 0.0) {
+                    scale = scale / 10.0;
+                    value = value + (f64)((u32)c - 48) * scale;
+                } else {
+                    value = value * 10.0 + (f64)((u32)c - 48);
+                }
+            }
+        }
+        mut f32 single = (f32)value;
+        u32* bits = (u32*)&single;
+        return *bits;
+    }
+
+    // A string operand: UTF-8 bytes and a terminating zero, padded to whole words.
+    static unsafe void string_words(WordList* out, str text) {
+        mut u32 word = 0;
+        mut u32 shift = 0;
+        for (mut u32 i = 0; i <= (u32)text.length; i = i + 1) {
+            mut u32 byte = 0;
+            if (i < (u32)text.length) {
+                byte = (u32)(u8)text.data[i];
+            }
+            word = word | (byte << shift);
+            shift = shift + 8;
+            if (shift == 32) {
+                out.push(word);
+                word = 0;
+                shift = 0;
+            }
+        }
+        if (shift != 0) {
+            out.push(word);
+        }
+    }
+
+    static unsafe void hex(Chars* out, u32 word) {
+        for (mut i32 nibble = 7; nibble >= 0; nibble = nibble - 1) {
+            u32 digit = (word >> ((u32)nibble * 4)) & 15;
+            if (digit < 10) {
+                out.append_byte((i8)(48 + digit));
+            } else {
+                out.append_byte((i8)(87 + digit));
+            }
+        }
+    }
+
+    static unsafe TokenStream fail(i32 span, str message) {
+        mut TokenStream out = TokenStream.create();
+        out.push(Token.error(span, message));
+        return out;
+    }
+
+    public static unsafe TokenStream expand(TokenStream input) {
+        mut WordList words = WordList.create();
+        mut IdTable ids = IdTable.create();
+        // the header: magic, version 1.0, generator, bound (patched below), schema
+        words.push(119734787);
+        words.push(65536);
+        words.push(0);
+        words.push(0);
+        words.push(0);
+        mut u32 pos = 0;
+        u32 end = input.length();
+        while (pos < end) {
+            mut u32 start = words.count;
+            words.push(0);
+            mut u32 result_id = 0;
+            mut bool has_result_id = false;
+            if (Tokens.is_symbol(input.get(pos), "%")) {
+                result_id = ids.id(input.get(pos + 1).text);
+                has_result_id = true;
+                pos = pos + 2;
+                if (!Tokens.is_symbol(input.get(pos), "=")) {
+                    return SpirvAssembler.fail(input.get(pos).span, "expected '=' after the result id");
+                }
+                pos = pos + 1;
+            }
+            Token name = input.get(pos);
+            mut OpInfo info = { .code = 0, .typed = false, .result = false };
+            if (!SpirvAssembler.op(name.text, &info)) {
+                return SpirvAssembler.fail(name.span, "unknown SPIR-V instruction");
+            }
+            if (info.result != has_result_id) {
+                return SpirvAssembler.fail(name.span, "this instruction needs (or must not have) a '%result ='");
+            }
+            pos = pos + 1;
+            mut bool type_pending = info.typed;
+            while (pos < end && !Tokens.is_symbol(input.get(pos), ";")) {
+                Token token = input.get(pos);
+                if (Tokens.is_symbol(token, "%")) {
+                    u32 operand = ids.id(input.get(pos + 1).text);
+                    words.push(operand);
+                    pos = pos + 2;
+                    if (type_pending) {
+                        words.push(result_id);
+                        type_pending = false;
+                    }
+                    continue;
+                }
+                if (token.kind == TokenClass.NUMBER) {
+                    if (SpirvAssembler.has_dot(token.text)) {
+                        words.push(SpirvAssembler.float_bits(token.text));
+                    } else {
+                        words.push(SpirvAssembler.integer(token.text));
+                    }
+                } else if (token.kind == TokenClass.STRING) {
+                    SpirvAssembler.string_words(&words, token.text);
+                } else {
+                    u32 value = SpirvAssembler.enumerant(token.text);
+                    if (value == 4294967295) {
+                        return SpirvAssembler.fail(token.span, "unknown SPIR-V operand");
+                    }
+                    words.push(value);
+                }
+                pos = pos + 1;
+            }
+            if (info.result && !info.typed) {
+                // untyped result instructions (types, labels) carry the result id first
+                words.push(0);
+                u32 count = words.count - start - 2;
+                for (mut u32 i = 0; i < count; i = i + 1) {
+                    words.data[start + count - i + 1] = words.data[start + count - i];
+                }
+                words.data[start + 1] = result_id;
+            }
+            if (type_pending) {
+                return SpirvAssembler.fail(name.span, "missing the result type");
+            }
+            words.data[start] = ((words.count - start) << 16) | info.code;
+            pos = pos + 1;
+        }
+        words.data[3] = ids.count + 1;
+        mut Chars text = Chars.create();
+        for (mut u32 i = 0; i < words.count; i = i + 1) {
+            if (i > 0) {
+                text.append_byte(32);
+            }
+            SpirvAssembler.hex(&text, words.data[i]);
+        }
+        mut TokenStream out = TokenStream.create();
+        out.push(Token.ident("Spirv"));
+        out.push(Token.punct("."));
+        out.push(Token.ident("decode"));
+        out.push(Token.open("("));
+        out.push(Token.quoted(text.view()));
+        out.push(Token.close(")"));
+        return out;
+    }
+
+    // placeholder so the helper below keeps one definition
+    static unsafe bool is_symbol(Token token, str text) {
+        return Tokens.is_symbol(token, text);
+    }
+}
+
+// Text assembled by the macro.
+struct Chars {
+    mut i8* data;
+    mut u32 length;
+    mut u32 capacity;
+
+    public static unsafe Chars create() {
+        Chars chars = { .data = (i8*)__djinn_alloc(64), .length = 0, .capacity = 64 };
+        return chars;
+    }
+
+    public unsafe void append_byte(i8 value) {
+        if (this.length + 1 >= this.capacity) {
+            this.capacity = this.capacity * 2;
+            this.data = (i8*)__djinn_realloc((void*)this.data, (size_long)this.capacity);
+        }
+        this.data[this.length] = value;
+        this.length = this.length + 1;
+    }
+
+    public unsafe str view() {
+        str text = { .data = this.data, .length = (size)this.length };
+        return text;
+    }
+}
+
+struct Tokens {
+    public static unsafe bool is_symbol(Token token, str text) {
+        return token.kind != TokenClass.STRING && token.kind != TokenClass.CHAR && token.matches(text);
+    }
+}

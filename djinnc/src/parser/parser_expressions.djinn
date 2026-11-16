@@ -471,11 +471,9 @@ impl Parser {
         }
 
         if (this.kind_of(token) == TokenKind::IDENTIFIER) {
-            TokenKind after = this.kind_of(this.peek_token(1));
-            bool banged = after == TokenKind::BANG && this.kind_of(this.peek_token(2)) == TokenKind::LPAREN;
-            MacroInfo* called = Macros.find(this.atom_of(token), banged);
-            if (called != null && (banged || after == TokenKind::LPAREN)) {
-                return this.expand_macro(token, called);
+            MacroCall* called = this.find_macro_call();
+            if (called != null) {
+                return this.expand_macro(called, MacroMode.EXPRESSION);
             }
             if (this.kind_of(this.peek_token(1)) == TokenKind::LBRACKET && this.kind_of(this.peek_token(2)) != TokenKind::RBRACKET) {
                 TypeRef* element = TypeRef.from_primitive_atom(this.atom_of(token));
@@ -599,6 +597,10 @@ impl Parser {
             return identifier;
         }
 
+        if (this.kind_of(token) == TokenKind::LPAREN && this.is_lambda_start()) {
+            return this.parse_lambda();
+        }
+
         if (this.kind_of(token) == TokenKind::LPAREN) {
             i32 typeEnd = this.scan_type_end(1);
             bool isCast = typeEnd > 0 && this.kind_of(this.peek_token(typeEnd)) == TokenKind::RPAREN;
@@ -621,6 +623,71 @@ impl Parser {
 }
 
 impl Parser {
+    bool is_lambda_start() {
+        mut i32 depth = 0;
+        mut i32 offset = 0;
+        while (true) {
+            TokenKind kind = this.kind_of(this.peek_token(offset));
+            if (kind == TokenKind::END_OF_FILE) {
+                return false;
+            }
+            if (kind == TokenKind::LPAREN) {
+                depth = depth + 1;
+            } else if (kind == TokenKind::RPAREN) {
+                depth = depth - 1;
+                if (depth == 0) {
+                    return this.kind_of(this.peek_token(offset + 1)) == TokenKind::ARROW;
+                }
+            } else if (kind == TokenKind::SEMICOLON || kind == TokenKind::LBRACE || kind == TokenKind::RBRACE) {
+                return false;
+            }
+            offset = offset + 1;
+        }
+        return false;
+    }
+
+    // (a, i32 b) => expr  or  (a) => { statements }. An expression body becomes 'return expr;' and is marked with op 1.
+    unsafe Node* parse_lambda() {
+        i32 start = this.expect(TokenKind::LPAREN, "expected '('");
+        Node* lambda = Node.create_list(NodeKind::LAMBDA, start);
+        while (!this.check(TokenKind::RPAREN) && !this.at_end()) {
+            Node* parameter = Node.create(NodeKind::PARAMETER, this.current());
+            if (this.match(TokenKind::MUT)) {
+                parameter.set_flag(true);
+            }
+            TokenKind follow = this.kind_of(this.peek_token(1));
+            if (this.check(TokenKind::IDENTIFIER) && (follow == TokenKind::COMMA || follow == TokenKind::RPAREN)) {
+                parameter.set_type(TypeRef.create(TypeKind.AUTO));
+            } else {
+                parameter.set_type(this.parse_type());
+            }
+            i32 name = this.expect(TokenKind::IDENTIFIER, "expected a parameter name");
+            parameter.set_text(this.copy_of(name));
+            lambda.add(parameter);
+            if (!this.match(TokenKind::COMMA)) {
+                break;
+            }
+        }
+        this.expect(TokenKind::RPAREN, "expected ')' after the lambda parameters");
+        i32 arrow = this.expect(TokenKind::ARROW, "expected '=>' after the lambda parameters");
+        i32 awaits_before = this.await_count;
+        if (this.check(TokenKind::LBRACE)) {
+            lambda.set_first(this.parse_block());
+        } else {
+            Node* body = Node.create_list(NodeKind::BLOCK, arrow);
+            Node* result = Node.create(NodeKind::RETURN, this.current());
+            result.set_first(this.parse_expression());
+            body.add(result);
+            lambda.set_first(body);
+            lambda.set_op(1);
+        }
+        if (this.await_count != awaits_before) {
+            lambda.set_flag(true);
+            this.await_count = awaits_before;
+        }
+        return lambda;
+    }
+
     unsafe void parse_atomic_operands(Node* call, i32 count) {
         if (count == 0) {
             return;

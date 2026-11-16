@@ -1,0 +1,333 @@
+namespace djinnc;
+
+impl Parser {
+    bool is_proc_declaration() {
+        i32 token = this.current();
+        if (this.kind_of(token) != TokenKind::IDENTIFIER || !this.is_word(token, "proc")) {
+            return false;
+        }
+        i32 next = this.peek_token(1);
+        return this.kind_of(next) == TokenKind::MACRO || (this.kind_of(next) == TokenKind::IDENTIFIER && this.is_word(next, "attribute"));
+    }
+
+    unsafe ptr<i8> proc_entry_name(i32 name, bool attribute) {
+        ByteBuffer* text = ByteBuffer.create();
+        if (attribute) {
+            text.append("__djinn_procattr_");
+        } else {
+            text.append("__djinn_proc_");
+        }
+        text.append_slice(this.text_of(name), this.length_of(name));
+        return text.cstr();
+    }
+
+    unsafe void register_proc_declaration(bool from_library) {
+        this.advance();
+        bool attribute = !this.check(TokenKind::MACRO);
+        this.advance();
+        i32 name = this.expect(TokenKind::IDENTIFIER, "expected the procedural macro name");
+        this.expect(TokenKind::ARROW, "expected '=>' and the handler function");
+        this.expect(TokenKind::IDENTIFIER, "expected the handler function");
+        this.expect(TokenKind::SEMICOLON, "expected ';' after the procedural macro");
+        if (this.failed) {
+            return;
+        }
+        MacroInfo* info = Macros.declare_procedural(this.atom_of(name), this.copy_of(name), attribute, this.namespace_atom);
+        info.from_library = from_library;
+        ByteBuffer* symbol = ByteBuffer.create();
+        if (this.namespace_atom != 0) {
+            AtomTable* atoms = Atoms.get();
+            symbol.append(atoms.text(this.namespace_atom));
+            symbol.append("::");
+        }
+        symbol.append(this.proc_entry_name(name, attribute));
+        info.symbol = symbol.cstr();
+    }
+
+    // In the library itself the declaration becomes its exported entry; in a library interface it is skipped.
+    unsafe Node* parse_proc_declaration() {
+        i32 start = this.advance();
+        bool attribute = !this.check(TokenKind::MACRO);
+        this.advance();
+        i32 name = this.expect(TokenKind::IDENTIFIER, "expected the procedural macro name");
+        this.expect(TokenKind::ARROW, "expected '=>' and the handler function");
+        i32 handler = this.expect(TokenKind::IDENTIFIER, "expected the handler function");
+        this.expect(TokenKind::SEMICOLON, "expected ';' after the procedural macro");
+        SourceFile* file = Sources.of_token(start);
+        if (this.failed || file.is_header) {
+            return (Node*)0;
+        }
+        AtomTable* atoms = Atoms.get();
+        mut ptr<i8> entry_macro = "proc_macro_entry";
+        if (attribute) {
+            entry_macro = "proc_attribute_entry";
+        }
+        u32 meta = atoms.intern_copy("std::meta", 9);
+        u32 entry_atom = atoms.intern_copy(entry_macro, (u32)strlen(entry_macro));
+        MacroInfo* entry = Macros.find_qualified(entry_atom, true, meta);
+        if (entry == null) {
+            this.macro_error(start, "a procedural macro needs 'std::meta' (compile the library with --std)");
+            return (Node*)0;
+        }
+        ptr<i8> symbol = this.proc_entry_name(name, attribute);
+        TokenList* list = this.tokens;
+        i32 base = list.length;
+        list.push_synthetic(TokenKind::IDENTIFIER, entry_atom + 1, start, start);
+        list.push_synthetic(TokenKind::BANG, 0, start, start);
+        i32 open = list.push_synthetic(TokenKind::LPAREN, 0, start, start);
+        list.push_synthetic(TokenKind::IDENTIFIER, atoms.intern_copy(symbol, (u32)strlen(symbol)) + 1, name, start);
+        list.push_synthetic(TokenKind::COMMA, 0, start, start);
+        this.copy_macro_token(handler, start);
+        i32 close = list.push_synthetic(TokenKind::RPAREN, 0, start, start);
+        list.push_synthetic(TokenKind::END_OF_FILE, 0, start, start);
+        i32 resume = this.pos;
+        i32 saved_end = this.end;
+        MacroCall* call = (MacroCall*)Memory.zalloc(sizeof(MacroCall));
+        call.info = entry;
+        call.name = base;
+        call.open = open;
+        call.close = close;
+        this.end = list.length;
+        this.expansion_depth = this.expansion_depth + 1;
+        this.expand_macro(call, MacroMode.ITEM);
+        this.expansion_depth = this.expansion_depth - 1;
+        this.end = saved_end;
+        this.pos = resume;
+        return (Node*)0;
+    }
+
+    i32 token_class(TokenKind kind) {
+        if (kind == TokenKind::IDENTIFIER) {
+            return TokenClassCodes.IDENTIFIER;
+        }
+        if (kind == TokenKind::INTEGER_LITERAL || kind == TokenKind::FLOAT_LITERAL) {
+            return TokenClassCodes.NUMBER;
+        }
+        if (kind == TokenKind::STRING_LITERAL) {
+            return TokenClassCodes.STRING;
+        }
+        if (kind == TokenKind::CHAR_LITERAL) {
+            return TokenClassCodes.CHAR;
+        }
+        if (Parser.opens_group(kind)) {
+            return TokenClassCodes.OPEN;
+        }
+        if (Parser.closes_group(kind)) {
+            return TokenClassCodes.CLOSE;
+        }
+        ptr<i8> text = kind.text;
+        if (Strings.is_ident_start(Strings.char_at(text, 0))) {
+            return TokenClassCodes.KEYWORD;
+        }
+        return TokenClassCodes.PUNCT;
+    }
+
+    unsafe void encode_record(ByteBuffer* out, i32 kind, i32 span, bool joint, ptr<i8> text, i32 length) {
+        out.append_int((i64)kind);
+        out.append_char(',');
+        out.append_int((i64)span);
+        out.append_char(',');
+        if (joint) {
+            out.append_char('1');
+        } else {
+            out.append_char('0');
+        }
+        out.append_char(',');
+        out.append_int((i64)length);
+        out.append_char(':');
+        out.append_slice(text, length);
+    }
+
+    unsafe void encode_tokens(i32 from, i32 to, ByteBuffer* out, IdList* spans) {
+        TokenList* list = this.tokens;
+        for (mut i32 i = from; i < to; i = i + 1) {
+            TokenKind kind = this.kind_of(i);
+            i32 kind_class = this.token_class(kind);
+            ptr<i8> text = this.text_of(i);
+            i32 length = this.length_of(i);
+            mut bool joint = false;
+            if (i + 1 < to && kind_class != TokenClassCodes.STRING && kind_class != TokenClassCodes.CHAR) {
+                joint = list.start(list.located(i + 1)) == list.start(list.located(i)) + (u32)length;
+            }
+            this.encode_record(out, kind_class, spans.length, joint, text, length);
+            spans.push((u32)i);
+        }
+    }
+
+    unsafe Node* expand_procedural(MacroCall* call, i32 mode) {
+        ByteBuffer* input = ByteBuffer.create();
+        IdList* spans = IdList.create();
+        this.encode_tokens(call.open + 1, call.close, input, spans);
+        this.pos = call.close + 1;
+        if (mode != MacroMode.EXPRESSION) {
+            this.match(TokenKind::SEMICOLON);
+        }
+        return this.run_procedural(call.info, input, spans, call.name, mode, this.pos);
+    }
+
+    unsafe i32 read_record_number(ptr<i8> data, i32 length, ptr<i32> cursor) {
+        mut bool negative = false;
+        mut i32 value = 0;
+        if (cursor[0] < length && data[cursor[0]] == 45) {
+            negative = true;
+            cursor[0] = cursor[0] + 1;
+        }
+        while (cursor[0] < length && data[cursor[0]] >= 48 && data[cursor[0]] <= 57) {
+            value = value * 10 + (i32)(data[cursor[0]] - 48);
+            cursor[0] = cursor[0] + 1;
+        }
+        cursor[0] = cursor[0] + 1;
+        if (negative) {
+            return 0 - value;
+        }
+        return value;
+    }
+
+    // The kind and atom of one token written as text, lexed on a scratch list. Returns false when it is not one token.
+    unsafe bool lex_one_token(ptr<i8> text, i32 length, ptr<i32> kind, ptr<u32> raw_atom) {
+        TokenList* saved = TokenList.get();
+        TokenList* scratch = TokenList.create(8);
+        SourceFile* file = SourceFile.create("<procedural macro>", Strings.duplicate(text, length), (u32)length);
+        Diagnostics* quiet = Diagnostics.create("<procedural macro>");
+        Lexer* lexer = Lexer.create(file, scratch, quiet);
+        lexer.tokenize();
+        TokenList.restore(saved);
+        if (quiet.failed() || scratch.length != 2) {
+            return false;
+        }
+        kind[0] = scratch.kind(0).getValue();
+        raw_atom[0] = scratch.raw_atom(0);
+        return true;
+    }
+
+    unsafe Node* run_procedural(MacroInfo* info, ByteBuffer* input, IdList* spans, i32 name_token, i32 mode, i32 resume) {
+        if (!info.from_library) {
+            this.macro_error(name_token, "a procedural macro runs from its compiled library: build the library and import it with --lib");
+            this.pos = resume;
+            return Node.create(NodeKind::NULL_LITERAL, name_token);
+        }
+        mut ptr<i8> problem = (ptr<i8>)0;
+        ByteBuffer* output = ProcMacros.call(info.symbol, input, &problem);
+        if (output == null) {
+            this.macro_error(name_token, problem);
+            this.pos = resume;
+            return Node.create(NodeKind::NULL_LITERAL, name_token);
+        }
+        TokenList* list = this.tokens;
+        AtomTable* atoms = Atoms.get();
+        i32 base = list.length;
+        ptr<i8> data = output.data;
+        i32 length = output.length;
+        mut i32 cursor = 0;
+        while (cursor < length) {
+            i32 kind_class = this.read_record_number(data, length, &cursor);
+            i32 span = this.read_record_number(data, length, &cursor);
+            this.read_record_number(data, length, &cursor);
+            i32 size = this.read_record_number(data, length, &cursor);
+            ptr<i8> text = data + cursor;
+            cursor = cursor + size;
+            mut i32 origin = name_token;
+            if (span >= 0 && span < spans.length) {
+                origin = (i32)spans.get(span);
+            }
+            if (kind_class == TokenClassCodes.ERROR) {
+                this.macro_error(origin, Strings.duplicate(text, size));
+                continue;
+            }
+            if (kind_class == TokenClassCodes.SEPARATOR) {
+                continue;
+            }
+            if (kind_class == TokenClassCodes.STRING) {
+                list.push_synthetic(TokenKind::STRING_LITERAL, atoms.intern_copy(text, (u32)size) + 1, origin, name_token);
+                continue;
+            }
+            mut i32 kind = 0;
+            mut u32 raw_atom = 0;
+            if (!this.lex_one_token(text, size, &kind, &raw_atom)) {
+                ByteBuffer* message = ByteBuffer.create();
+                message.append("the procedural macro produced '");
+                message.append_slice(text, size);
+                message.append("', which is not a single token");
+                this.macro_error(name_token, message.cstr());
+                continue;
+            }
+            list.push_synthetic((TokenKind)kind, raw_atom, origin, name_token);
+        }
+        if (mode == MacroMode.STATEMENT && list.length > base) {
+            TokenKind last = this.kind_of(list.length - 1);
+            if (last != TokenKind::SEMICOLON && last != TokenKind::RBRACE) {
+                list.push_synthetic(TokenKind::SEMICOLON, 0, name_token, name_token);
+            }
+        }
+        list.push_synthetic(TokenKind::END_OF_FILE, 0, name_token, name_token);
+        if (this.failed) {
+            this.pos = resume;
+            return Node.create(NodeKind::NULL_LITERAL, name_token);
+        }
+        return this.parse_expansion(base, mode, (Node*)0, name_token, resume);
+    }
+
+    // The declaration an attribute is written on: up to its ';' or the '}' of its body.
+    i32 item_end(i32 start) {
+        mut i32 depth = 0;
+        for (mut i32 i = start; i < this.end; i = i + 1) {
+            TokenKind kind = this.kind_of(i);
+            if (kind == TokenKind::END_OF_FILE) {
+                return 0 - 1;
+            }
+            if (kind == TokenKind::LBRACE && depth == 0) {
+                return this.matching_close(i);
+            }
+            if (Parser.opens_group(kind)) {
+                depth = depth + 1;
+            } else if (Parser.closes_group(kind)) {
+                depth = depth - 1;
+            } else if (kind == TokenKind::SEMICOLON && depth == 0) {
+                return i;
+            }
+        }
+        return 0 - 1;
+    }
+
+    // [Name] or [Name(args)] before a declaration, where Name is a visible 'proc attribute': the macro gets the
+    // arguments and the declaration and its tokens replace both.
+    unsafe bool try_proc_attribute() {
+        if (!this.check(TokenKind::LBRACKET) || this.kind_of(this.peek_token(1)) != TokenKind::IDENTIFIER) {
+            return false;
+        }
+        i32 name = this.peek_token(1);
+        MacroInfo* info = Macros.find_attribute(this.atom_of(name), this.namespace_atom, this.imports);
+        if (info == null) {
+            return false;
+        }
+        i32 open = this.current();
+        i32 close = this.matching_close(open);
+        if (close < 0) {
+            return false;
+        }
+        mut i32 args_start = name + 1;
+        mut i32 args_end = name + 1;
+        if (this.kind_of(name + 1) == TokenKind::LPAREN) {
+            i32 args_close = this.matching_close(name + 1);
+            if (args_close + 1 != close) {
+                return false;
+            }
+            args_start = name + 2;
+            args_end = args_close;
+        } else if (name + 1 != close) {
+            return false;
+        }
+        i32 last = this.item_end(close + 1);
+        if (last < 0) {
+            this.macro_error(name, "an attribute macro must be written before a declaration");
+            return true;
+        }
+        ByteBuffer* input = ByteBuffer.create();
+        IdList* spans = IdList.create();
+        this.encode_tokens(args_start, args_end, input, spans);
+        this.encode_record(input, TokenClassCodes.SEPARATOR, 0 - 1, false, "", 0);
+        this.encode_tokens(close + 1, last + 1, input, spans);
+        this.run_procedural(info, input, spans, name, MacroMode.ITEM, last + 1);
+        return true;
+    }
+}

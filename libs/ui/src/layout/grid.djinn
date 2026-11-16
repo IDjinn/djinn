@@ -1,0 +1,845 @@
+import std::types;
+import std::libc;
+
+namespace ui;
+
+struct GridItem {
+    mut u32 id;
+    mut u32 above;
+    mut bool text;
+    mut u8 justify;
+    mut u8 align;
+    mut u32 column;
+    mut u32 column_span;
+    mut bool column_definite;
+    mut u32 row;
+    mut u32 row_span;
+    mut bool row_definite;
+    mut bool placed;
+}
+
+struct GridTrack {
+    mut TrackSize size;
+    mut u8 min_kind;
+    mut u8 max_kind;
+    mut f32 base;
+    mut f32 limit;
+    mut f32 content;
+    mut f32 position;
+    mut bool collapsed;
+    mut bool frozen;
+}
+
+// CSS Grid: explicit tracks from grid-template-* (lengths, %, fr, auto, min-content, max-content, minmax(),
+// fit-content(), repeat() with auto-fill / auto-fit), implicit ones from grid-auto-*; placement by line numbers and
+// spans, then auto-placement in row or column flow (sparse or dense); track sizing from the items' min- and
+// max-content contributions, growth up to the limits, fr distribution and stretched auto tracks; alignment of the
+// tracks (justify-content / align-content) and of each item in its area (justify-items / align-items and -self).
+// Not covered: named lines and areas, subgrid, baseline alignment.
+struct GridLayout {
+    public static unsafe Size run(u32 id, Style* style, BoxSizes* sizes, LayoutInput input) {
+        f32 frame_width = sizes.padding.horizontal() + sizes.border.horizontal();
+        f32 frame_height = sizes.padding.vertical() + sizes.border.vertical();
+        mut Size inner = Size.undefined();
+        if (Px.defined(input.known.width)) {
+            inner.width = Px.max(input.known.width - frame_width, (f32)0.0);
+        }
+        if (Px.defined(input.known.height)) {
+            inner.height = Px.max(input.known.height - frame_height, (f32)0.0);
+        }
+        f32 gap_x = Px.offset(style.column_gap, inner.width);
+        f32 gap_y = Px.offset(style.row_gap, inner.height);
+
+        mut Growable<u32> children = Growable<u32>();
+        Layout.children(id, &children);
+        mut Growable<GridItem> items = Growable<GridItem>();
+        mut Growable<GridTrack> columns = Growable<GridTrack>();
+        mut Growable<GridTrack> rows = Growable<GridTrack>();
+        mut f32 repeat_width = inner.width;
+        if (!Px.defined(repeat_width) && Px.defined(sizes.max.width)) {
+            repeat_width = Px.max(sizes.max.width - frame_width, (f32)0.0);
+        }
+        mut f32 repeat_height = inner.height;
+        if (!Px.defined(repeat_height) && Px.defined(sizes.max.height)) {
+            repeat_height = Px.max(sizes.max.height - frame_height, (f32)0.0);
+        }
+        GridLayout.explicit(style.grid_columns, &columns, repeat_width, gap_x);
+        GridLayout.explicit(style.grid_rows, &rows, repeat_height, gap_y);
+        u32 explicit_columns = columns.count;
+        u32 explicit_rows = rows.count;
+
+        for (mut u32 i = 0; i < children.count; i = i + 1) {
+            u32 child = children.get(i);
+            if (Layout.out_of_flow(child)) {
+                continue;
+            }
+            mut GridItem item = GridItem();
+            item.id = child;
+            item.above = Layout.child_above(child, id, input.above);
+            item.justify = Keyword.START;
+            item.align = Keyword.START;
+            item.column_span = 1;
+            item.row_span = 1;
+            if (Layout.is_text(child)) {
+                if (TextMetrics.is_blank(child)) {
+                    Layout.hide(child);
+                    continue;
+                }
+                item.text = true;
+            } else {
+                Style* child_style = Styles.of(child);
+                item.justify = child_style.justify_self;
+                if (item.justify == Keyword.AUTO) {
+                    item.justify = style.justify_items;
+                }
+                if (item.justify == Keyword.NORMAL) {
+                    item.justify = Keyword.STRETCH;
+                }
+                item.align = child_style.align_self;
+                if (item.align == Keyword.AUTO) {
+                    item.align = style.align_items;
+                }
+                if (item.align == Keyword.NORMAL) {
+                    item.align = Keyword.STRETCH;
+                }
+                GridLayout.resolve(child_style.grid_column, explicit_columns, &item.column, &item.column_span, &item.column_definite);
+                GridLayout.resolve(child_style.grid_row, explicit_rows, &item.row, &item.row_span, &item.row_definite);
+            }
+            items.push(item);
+        }
+        Layout.release(&children);
+
+        mut u32 column_count = explicit_columns;
+        mut u32 row_count = explicit_rows;
+        GridLayout.arrange(&items, style.grid_flow != Keyword.COLUMN, style.grid_dense, &column_count, &row_count);
+        while (columns.count < column_count) {
+            columns.push(GridLayout.implicit(style.grid_auto_columns, columns.count - explicit_columns));
+        }
+        while (rows.count < row_count) {
+            rows.push(GridLayout.implicit(style.grid_auto_rows, rows.count - explicit_rows));
+        }
+        GridLayout.collapse(style.grid_columns, &columns, &items, true);
+        GridLayout.collapse(style.grid_rows, &rows, &items, false);
+
+        GridLayout.size_tracks(&columns, &items, true, inner.width, gap_x, input.available.width, &columns, gap_x, style.justify_content);
+        mut f32 width = inner.width;
+        if (!Px.defined(width)) {
+            width = Px.max(Px.clamp(GridLayout.total(&columns, gap_x) + frame_width, sizes.min.width, sizes.max.width) - frame_width, (f32)0.0);
+        }
+        GridLayout.position(&columns, width, gap_x, style.justify_content);
+
+        GridLayout.size_tracks(&rows, &items, false, inner.height, gap_y, Space.MAX_CONTENT, &columns, gap_x, style.align_content);
+        mut f32 height = inner.height;
+        if (!Px.defined(height)) {
+            height = Px.max(Px.clamp(GridLayout.total(&rows, gap_y) + frame_height, sizes.min.height, sizes.max.height) - frame_height, (f32)0.0);
+        }
+        GridLayout.position(&rows, height, gap_y, style.align_content);
+
+        if (input.perform) {
+            f32 origin_x = sizes.border.left + sizes.padding.left;
+            f32 origin_y = sizes.border.top + sizes.padding.top;
+            for (mut u32 i = 0; i < items.count; i = i + 1) {
+                GridItem* item = items.at(i);
+                f32 area_x = columns.at(item.column).position;
+                f32 area_y = rows.at(item.row).position;
+                Size area = Size.of(GridLayout.extent(&columns, item.column, item.column_span), GridLayout.extent(&rows, item.row, item.row_span));
+                mut BoxSizes item_sizes = BoxSizes();
+                mut Size known = Size.undefined();
+                if (!item.text) {
+                    Style item_style = *Styles.of(item.id);
+                    item_sizes = Layout.sizes(&item_style, area);
+                    known = GridLayout.known(item, &item_sizes, area);
+                }
+                Size size = Layout.run(item.id, LayoutInput.of(known, area, area, true, item.above));
+                f32 spare_x = area.width - size.width - item_sizes.margin.horizontal();
+                f32 spare_y = area.height - size.height - item_sizes.margin.vertical();
+                LayoutBox* box = Layout.box(item.id);
+                box.x = origin_x + area_x + item_sizes.margin.left + GridLayout.shift(item.justify, spare_x, item_sizes.auto_left, item_sizes.auto_right);
+                box.y = origin_y + area_y + item_sizes.margin.top + GridLayout.shift(item.align, spare_y, item_sizes.auto_top, item_sizes.auto_bottom);
+            }
+            LayoutBox* own = Layout.box(id);
+            own.content_width = GridLayout.total(&columns, gap_x);
+            own.content_height = GridLayout.total(&rows, gap_y);
+        }
+        if (items.data != (GridItem*)0) {
+            __djinn_free((void*)items.data);
+        }
+        if (columns.data != (GridTrack*)0) {
+            __djinn_free((void*)columns.data);
+        }
+        if (rows.data != (GridTrack*)0) {
+            __djinn_free((void*)rows.data);
+        }
+        mut Size result = Size.of(width + frame_width, height + frame_height);
+        if (Px.defined(input.known.width)) {
+            result.width = input.known.width;
+        }
+        if (Px.defined(input.known.height)) {
+            result.height = input.known.height;
+        }
+        return result;
+    }
+
+    // The sizes an item is given by its area: its own width/height, or the area when it stretches.
+    static Size known(GridItem* item, BoxSizes* sizes, Size area) {
+        mut Size known = sizes.size;
+        if (Px.defined(known.width)) {
+            known.width = Px.clamp(known.width, sizes.min.width, sizes.max.width);
+        } else if (item.justify == Keyword.STRETCH && !sizes.auto_left && !sizes.auto_right && sizes.aspect == (f32)0.0) {
+            known.width = Px.clamp(Px.max(area.width - sizes.margin.horizontal(), (f32)0.0), sizes.min.width, sizes.max.width);
+        }
+        if (Px.defined(known.height)) {
+            known.height = Px.clamp(known.height, sizes.min.height, sizes.max.height);
+        } else if (item.align == Keyword.STRETCH && !sizes.auto_top && !sizes.auto_bottom && Px.defined(area.height) && sizes.aspect == (f32)0.0) {
+            known.height = Px.clamp(Px.max(area.height - sizes.margin.vertical(), (f32)0.0), sizes.min.height, sizes.max.height);
+        }
+        return known;
+    }
+
+    static f32 shift(u8 mode, f32 spare, bool auto_start, bool auto_end) {
+        if (auto_start && auto_end) {
+            return Px.max(spare, (f32)0.0) / (f32)2.0;
+        }
+        if (auto_start) {
+            return Px.max(spare, (f32)0.0);
+        }
+        if (auto_end) {
+            return (f32)0.0;
+        }
+        if (mode == Keyword.END || mode == Keyword.RIGHT) {
+            return spare;
+        }
+        if (mode == Keyword.CENTER) {
+            return spare / (f32)2.0;
+        }
+        return (f32)0.0;
+    }
+
+    static i32 index(i32 line, u32 explicit) {
+        if (line > 0) {
+            return line - 1;
+        }
+        i32 from_end = (i32)explicit + 1 + line;
+        if (from_end < 0) {
+            return 0;
+        }
+        return from_end;
+    }
+
+    // Turns a placement into a 0-based first track and a span; 'definite' is false when the position is automatic.
+    static unsafe void resolve(GridLine line, u32 explicit, u32* start, u32* span, bool* definite) {
+        *start = 0;
+        *span = 1;
+        *definite = false;
+        if (line.start != 0 && line.end != 0) {
+            mut i32 first = GridLayout.index(line.start, explicit);
+            mut i32 last = GridLayout.index(line.end, explicit);
+            if (last < first) {
+                i32 swapped = first;
+                first = last;
+                last = swapped;
+            }
+            if (last == first) {
+                last = first + 1;
+            }
+            *start = (u32)first;
+            *span = (u32)(last - first);
+            *definite = true;
+        } else if (line.start != 0) {
+            *start = (u32)GridLayout.index(line.start, explicit);
+            if (line.end_span > 0) {
+                *span = line.end_span;
+            }
+            *definite = true;
+        } else if (line.end != 0) {
+            mut u32 count = 1;
+            if (line.start_span > 0) {
+                count = line.start_span;
+            }
+            i32 last = GridLayout.index(line.end, explicit);
+            mut i32 first = last - (i32)count;
+            if (first < 0) {
+                first = 0;
+            }
+            *start = (u32)first;
+            *span = count;
+            *definite = true;
+        } else if (line.start_span > 0) {
+            *span = line.start_span;
+        } else if (line.end_span > 0) {
+            *span = line.end_span;
+        }
+    }
+
+    static unsafe bool is_free(Growable<u8>* cells, u32 tracks, u32 a, u32 a_span, u32 b, u32 b_span) {
+        if (a + a_span > tracks) {
+            return false;
+        }
+        for (mut u32 y = b; y < b + b_span; y = y + 1) {
+            for (mut u32 x = a; x < a + a_span; x = x + 1) {
+                u32 cell = y * tracks + x;
+                if (cell < cells.count && cells.get(cell) != 0) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    static unsafe void occupy(Growable<u8>* cells, u32 tracks, u32 a, u32 a_span, u32 b, u32 b_span) {
+        while (cells.count < (b + b_span) * tracks) {
+            cells.push(0);
+        }
+        for (mut u32 y = b; y < b + b_span; y = y + 1) {
+            for (mut u32 x = a; x < a + a_span && x < tracks; x = x + 1) {
+                cells.data[y * tracks + x] = 1;
+            }
+        }
+    }
+
+    // Places every item (CSS Grid 8.5). With row flow the columns are the fixed axis 'a' and rows grow as needed;
+    // with column flow it is the other way around.
+    static unsafe void arrange(Growable<GridItem>* items, bool by_row, bool dense, u32* column_count, u32* row_count) {
+        mut u32 tracks = *column_count;
+        if (!by_row) {
+            tracks = *row_count;
+        }
+        if (tracks == 0) {
+            tracks = 1;
+        }
+        for (mut u32 i = 0; i < items.count; i = i + 1) {
+            GridItem* item = items.at(i);
+            if (!by_row) {
+                GridLayout.swap(item);
+            }
+            mut u32 needed = item.column_span;
+            if (item.column_definite) {
+                needed = item.column + item.column_span;
+            }
+            if (needed > tracks) {
+                tracks = needed;
+            }
+        }
+        mut Growable<u8> cells = Growable<u8>();
+        mut u32 lines = 0;
+        for (mut u32 i = 0; i < items.count; i = i + 1) {
+            GridItem* item = items.at(i);
+            if (item.column_definite && item.row_definite) {
+                GridLayout.occupy(&cells, tracks, item.column, item.column_span, item.row, item.row_span);
+                item.placed = true;
+            }
+        }
+        for (mut u32 i = 0; i < items.count; i = i + 1) {
+            GridItem* item = items.at(i);
+            if (item.placed || !item.row_definite) {
+                continue;
+            }
+            mut u32 a = 0;
+            while (a + item.column_span < tracks && !GridLayout.is_free(&cells, tracks, a, item.column_span, item.row, item.row_span)) {
+                a = a + 1;
+            }
+            item.column = a;
+            GridLayout.occupy(&cells, tracks, item.column, item.column_span, item.row, item.row_span);
+            item.placed = true;
+        }
+        mut u32 cursor_a = 0;
+        mut u32 cursor_b = 0;
+        for (mut u32 i = 0; i < items.count; i = i + 1) {
+            GridItem* item = items.at(i);
+            if (item.placed) {
+                continue;
+            }
+            mut u32 a = cursor_a;
+            mut u32 b = cursor_b;
+            if (dense) {
+                a = 0;
+                b = 0;
+            }
+            if (item.column_definite) {
+                if (!dense && item.column < cursor_a) {
+                    b = b + 1;
+                }
+                a = item.column;
+                while (!GridLayout.is_free(&cells, tracks, a, item.column_span, b, item.row_span)) {
+                    b = b + 1;
+                }
+            } else {
+                while (!GridLayout.is_free(&cells, tracks, a, item.column_span, b, item.row_span)) {
+                    a = a + 1;
+                    if (a + item.column_span > tracks) {
+                        a = 0;
+                        b = b + 1;
+                    }
+                }
+            }
+            item.column = a;
+            item.row = b;
+            item.placed = true;
+            GridLayout.occupy(&cells, tracks, a, item.column_span, b, item.row_span);
+            cursor_a = a + item.column_span;
+            cursor_b = b;
+            if (item.column_definite) {
+                cursor_a = a;
+            }
+        }
+        for (mut u32 i = 0; i < items.count; i = i + 1) {
+            GridItem* item = items.at(i);
+            if (item.row + item.row_span > lines) {
+                lines = item.row + item.row_span;
+            }
+            if (!by_row) {
+                GridLayout.swap(item);
+            }
+        }
+        if (cells.data != (u8*)0) {
+            __djinn_free((void*)cells.data);
+        }
+        if (by_row) {
+            *column_count = tracks;
+            if (lines > *row_count) {
+                *row_count = lines;
+            }
+        } else {
+            *row_count = tracks;
+            if (lines > *column_count) {
+                *column_count = lines;
+            }
+        }
+    }
+
+    static unsafe void swap(GridItem* item) {
+        u32 start = item.column;
+        u32 span = item.column_span;
+        bool definite = item.column_definite;
+        item.column = item.row;
+        item.column_span = item.row_span;
+        item.column_definite = item.row_definite;
+        item.row = start;
+        item.row_span = span;
+        item.row_definite = definite;
+    }
+
+    static GridTrack track(TrackSize size) {
+        mut GridTrack track = GridTrack();
+        track.size = size;
+        return track;
+    }
+
+    // What a track is known to take before layout, for counting auto-fill repetitions.
+    static f32 definite(TrackSize size, f32 space) {
+        if (size.max_kind == TrackKind.FIXED) {
+            return size.max;
+        }
+        if (size.max_kind == TrackKind.PERCENT) {
+            return space * size.max / (f32)100.0;
+        }
+        if (size.max_kind == TrackKind.CAPPED) {
+            return Px.min(size.max, space * size.max_percent / (f32)100.0);
+        }
+        if (size.min_kind == TrackKind.FIXED) {
+            return size.min;
+        }
+        if (size.min_kind == TrackKind.PERCENT) {
+            return space * size.min / (f32)100.0;
+        }
+        if (size.min_kind == TrackKind.CAPPED) {
+            return Px.min(size.min, space * size.min_percent / (f32)100.0);
+        }
+        return (f32)0.0;
+    }
+
+    static unsafe void explicit(u32 template_index, Growable<GridTrack>* out, f32 space, f32 gap) {
+        if (template_index == 0) {
+            return;
+        }
+        GridTemplate* template = GridTemplates.get(template_index);
+        mut u32 repeats = 1;
+        if (template.repeat_mode != RepeatMode.NONE && Px.defined(space)) {
+            mut f32 fixed = (f32)0.0;
+            mut f32 pattern = (f32)0.0;
+            for (mut u32 i = 0; i < template.count; i = i + 1) {
+                f32 size = GridLayout.definite(GridTemplates.track(template.first + i), space);
+                if (i >= template.repeat_at && i < template.repeat_at + template.repeat_count) {
+                    pattern = pattern + size;
+                } else {
+                    fixed = fixed + size;
+                }
+            }
+            f32 others = (f32)(template.count - template.repeat_count);
+            f32 each = pattern + gap * (f32)template.repeat_count;
+            if (each > (f32)0.0) {
+                f32 fit = (space - fixed - gap * (others - (f32)1.0) + (f32)0.01) / each;
+                if (fit >= (f32)1000.0) {
+                    repeats = 1000;
+                } else if (fit >= (f32)2.0) {
+                    repeats = (u32)fit;
+                }
+            }
+        }
+        mut u32 i = 0;
+        while (i < template.count) {
+            if (template.repeat_mode != RepeatMode.NONE && i == template.repeat_at) {
+                for (mut u32 again = 0; again < repeats; again = again + 1) {
+                    for (mut u32 k = 0; k < template.repeat_count; k = k + 1) {
+                        out.push(GridLayout.track(GridTemplates.track(template.first + i + k)));
+                    }
+                }
+                i = i + template.repeat_count;
+                continue;
+            }
+            out.push(GridLayout.track(GridTemplates.track(template.first + i)));
+            i = i + 1;
+        }
+    }
+
+    static unsafe GridTrack implicit(u32 template_index, u32 index) {
+        if (template_index == 0) {
+            return GridLayout.track(TrackSize.automatic());
+        }
+        GridTemplate* template = GridTemplates.get(template_index);
+        return GridLayout.track(GridTemplates.track(template.first + index % template.count));
+    }
+
+    // auto-fit: repeated tracks that hold no item collapse to nothing, with their gaps.
+    static unsafe void collapse(u32 template_index, Growable<GridTrack>* tracks, Growable<GridItem>* items, bool columns) {
+        if (template_index == 0 || GridTemplates.get(template_index).repeat_mode != RepeatMode.FIT) {
+            return;
+        }
+        GridTemplate* template = GridTemplates.get(template_index);
+        u32 tail = template.count - template.repeat_at - template.repeat_count;
+        for (mut u32 t = template.repeat_at; t + tail < tracks.count; t = t + 1) {
+            mut bool used = false;
+            for (mut u32 i = 0; i < items.count && !used; i = i + 1) {
+                GridItem* item = items.at(i);
+                mut u32 start = item.row;
+                mut u32 span = item.row_span;
+                if (columns) {
+                    start = item.column;
+                    span = item.column_span;
+                }
+                used = t >= start && t < start + span;
+            }
+            tracks.at(t).collapsed = !used;
+        }
+    }
+
+    static unsafe f32 total(Growable<GridTrack>* tracks, f32 gap) {
+        mut f32 sum = (f32)0.0;
+        mut u32 shown = 0;
+        for (mut u32 i = 0; i < tracks.count; i = i + 1) {
+            GridTrack* track = tracks.at(i);
+            if (!track.collapsed) {
+                sum = sum + track.base;
+                shown = shown + 1;
+            }
+        }
+        if (shown > 1) {
+            sum = sum + gap * (f32)(shown - 1);
+        }
+        return sum;
+    }
+
+    static unsafe void position(Growable<GridTrack>* tracks, f32 space, f32 gap, u8 mode) {
+        mut u32 shown = 0;
+        for (mut u32 i = 0; i < tracks.count; i = i + 1) {
+            if (!tracks.at(i).collapsed) {
+                shown = shown + 1;
+            }
+        }
+        f32 spare = space - GridLayout.total(tracks, gap);
+        mut f32 at = Px.lead(mode, spare, shown);
+        f32 between = Px.between(mode, spare, shown);
+        for (mut u32 i = 0; i < tracks.count; i = i + 1) {
+            GridTrack* track = tracks.at(i);
+            track.position = at;
+            if (!track.collapsed) {
+                at = at + track.base + gap + between;
+            }
+        }
+    }
+
+    // The length of 'span' tracks from 'start', with the gaps between them.
+    static unsafe f32 extent(Growable<GridTrack>* tracks, u32 start, u32 span) {
+        mut u32 last = start + span - 1;
+        while (last > start && tracks.at(last).collapsed) {
+            last = last - 1;
+        }
+        return tracks.at(last).position + tracks.at(last).base - tracks.at(start).position;
+    }
+
+    static bool is_intrinsic(u8 kind) {
+        return kind == TrackKind.AUTO || kind == TrackKind.MIN_CONTENT || kind == TrackKind.MAX_CONTENT || kind == TrackKind.FIT_CONTENT;
+    }
+
+    // Sizes the tracks of one axis (CSS Grid 12.3 to 12.8). 'space' is the content-box size of the container on
+    // this axis, UNDEFINED when the container is sized by its tracks ('mode' then says min- or max-content). Rows
+    // are sized after the columns, which give each item the width its height is measured at.
+    static unsafe void size_tracks(Growable<GridTrack>* tracks, Growable<GridItem>* items, bool columns, f32 space, f32 gap, f32 mode,
+        Growable<GridTrack>* widths, f32 width_gap, u8 distribution) {
+        for (mut u32 i = 0; i < tracks.count; i = i + 1) {
+            GridTrack* track = tracks.at(i);
+            track.base = (f32)0.0;
+            track.limit = Space.UNDEFINED;
+            track.content = (f32)0.0;
+            track.frozen = false;
+            track.min_kind = track.size.min_kind;
+            track.max_kind = track.size.max_kind;
+            if (track.collapsed) {
+                track.min_kind = TrackKind.FIXED;
+                track.max_kind = TrackKind.FIXED;
+                track.limit = (f32)0.0;
+                continue;
+            }
+            if (track.min_kind == TrackKind.FIXED) {
+                track.base = track.size.min;
+            } else if (track.min_kind == TrackKind.PERCENT || track.min_kind == TrackKind.CAPPED) {
+                if (Px.defined(space)) {
+                    track.base = space * track.size.min / (f32)100.0;
+                    if (track.min_kind == TrackKind.CAPPED) {
+                        track.base = Px.min(track.size.min, space * track.size.min_percent / (f32)100.0);
+                    }
+                    track.min_kind = TrackKind.FIXED;
+                } else if (track.min_kind == TrackKind.CAPPED) {
+                    track.base = track.size.min;
+                    track.min_kind = TrackKind.FIXED;
+                } else {
+                    track.min_kind = TrackKind.AUTO;
+                }
+            }
+            if (track.max_kind == TrackKind.FIXED) {
+                track.limit = track.size.max;
+            } else if (track.max_kind == TrackKind.PERCENT || track.max_kind == TrackKind.CAPPED) {
+                if (Px.defined(space)) {
+                    track.limit = space * track.size.max / (f32)100.0;
+                    if (track.max_kind == TrackKind.CAPPED) {
+                        track.limit = Px.min(track.size.max, space * track.size.max_percent / (f32)100.0);
+                    }
+                    track.max_kind = TrackKind.FIXED;
+                } else if (track.max_kind == TrackKind.CAPPED) {
+                    track.limit = track.size.max;
+                    track.max_kind = TrackKind.FIXED;
+                } else {
+                    track.max_kind = TrackKind.AUTO;
+                }
+            }
+            if (Px.defined(track.limit) && track.limit < track.base) {
+                track.limit = track.base;
+            }
+        }
+
+        // Content contributions of the items.
+        for (mut u32 i = 0; i < items.count; i = i + 1) {
+            GridItem* item = items.at(i);
+            mut u32 start = item.row;
+            mut u32 span = item.row_span;
+            if (columns) {
+                start = item.column;
+                span = item.column_span;
+            }
+            mut bool needed = false;
+            mut u32 growing = 0;
+            mut u32 holding = 0;
+            for (mut u32 t = start; t < start + span; t = t + 1) {
+                GridTrack* track = tracks.at(t);
+                if (GridLayout.is_intrinsic(track.min_kind)) {
+                    needed = true;
+                    growing = growing + 1;
+                }
+                if (GridLayout.is_intrinsic(track.max_kind) || track.max_kind == TrackKind.FR) {
+                    needed = true;
+                    holding = holding + 1;
+                }
+            }
+            if (!needed) {
+                continue;
+            }
+            mut f32 least = (f32)0.0;
+            mut f32 most = (f32)0.0;
+            mut Edges margin = Edges();
+            if (columns) {
+                if (!item.text) {
+                    margin = Layout.sizes(Styles.of(item.id), Size.undefined()).margin;
+                }
+                least = Layout.run(item.id, LayoutInput.of(Size.undefined(), Size.of(Space.MIN_CONTENT, Space.MAX_CONTENT), Size.undefined(), false, item.above)).width
+                    + margin.horizontal();
+                most = Layout.run(item.id, LayoutInput.of(Size.undefined(), Size.of(Space.MAX_CONTENT, Space.MAX_CONTENT), Size.undefined(), false, item.above)).width
+                    + margin.horizontal();
+            } else {
+                Size area = Size.of(GridLayout.extent(widths, item.column, item.column_span), Space.UNDEFINED);
+                mut Size known = Size.undefined();
+                if (!item.text) {
+                    Style item_style = *Styles.of(item.id);
+                    BoxSizes item_sizes = Layout.sizes(&item_style, area);
+                    margin = item_sizes.margin;
+                    known = GridLayout.known(item, &item_sizes, area);
+                }
+                least = Layout.run(item.id, LayoutInput.of(known, Size.of(area.width, Space.MAX_CONTENT), area, false, item.above)).height + margin.vertical();
+                most = least;
+            }
+            if (span == 1) {
+                GridTrack* track = tracks.at(start);
+                if (track.min_kind == TrackKind.AUTO || track.min_kind == TrackKind.MIN_CONTENT || track.min_kind == TrackKind.FIT_CONTENT) {
+                    track.base = Px.max(track.base, least);
+                } else if (track.min_kind == TrackKind.MAX_CONTENT) {
+                    track.base = Px.max(track.base, most);
+                }
+                if (track.max_kind == TrackKind.MIN_CONTENT) {
+                    track.content = Px.max(track.content, least);
+                } else if (track.max_kind == TrackKind.FIT_CONTENT) {
+                    track.content = Px.max(track.content, Px.min(most, Px.max(track.size.max, least)));
+                } else if (GridLayout.is_intrinsic(track.max_kind) || track.max_kind == TrackKind.FR) {
+                    track.content = Px.max(track.content, most);
+                }
+                continue;
+            }
+            // An item across several tracks spreads what it still needs over the content-sized ones.
+            mut f32 have = gap * (f32)(span - 1);
+            mut f32 reach = have;
+            for (mut u32 t = start; t < start + span; t = t + 1) {
+                GridTrack* track = tracks.at(t);
+                have = have + track.base;
+                if (Px.defined(track.limit)) {
+                    reach = reach + track.limit;
+                } else {
+                    reach = reach + Px.max(track.content, track.base);
+                }
+            }
+            for (mut u32 t = start; t < start + span; t = t + 1) {
+                GridTrack* track = tracks.at(t);
+                if (growing > 0 && least > have && GridLayout.is_intrinsic(track.min_kind)) {
+                    track.base = track.base + (least - have) / (f32)growing;
+                }
+                if (holding > 0 && most > reach && (GridLayout.is_intrinsic(track.max_kind) || track.max_kind == TrackKind.FR)) {
+                    track.content = Px.max(track.content, track.base) + (most - reach) / (f32)holding;
+                }
+            }
+        }
+
+        // Growth limits, then growth into the free space.
+        mut f32 flexes = (f32)0.0;
+        for (mut u32 i = 0; i < tracks.count; i = i + 1) {
+            GridTrack* track = tracks.at(i);
+            if (track.max_kind == TrackKind.FR) {
+                flexes = flexes + track.size.max;
+                continue;
+            }
+            if (!Px.defined(track.limit)) {
+                track.limit = Px.max(track.content, track.base);
+            }
+            if (track.limit < track.base) {
+                track.limit = track.base;
+            }
+        }
+        if (Px.defined(space)) {
+            mut f32 spare = space - GridLayout.total(tracks, gap);
+            for (mut u32 round = 0; round <= tracks.count && spare > (f32)0.01; round = round + 1) {
+                mut u32 open = 0;
+                for (mut u32 i = 0; i < tracks.count; i = i + 1) {
+                    GridTrack* track = tracks.at(i);
+                    if (track.max_kind != TrackKind.FR && !track.collapsed && track.limit > track.base) {
+                        open = open + 1;
+                    }
+                }
+                if (open == 0) {
+                    break;
+                }
+                f32 share = spare / (f32)open;
+                for (mut u32 i = 0; i < tracks.count; i = i + 1) {
+                    GridTrack* track = tracks.at(i);
+                    if (track.max_kind != TrackKind.FR && !track.collapsed && track.limit > track.base) {
+                        f32 added = Px.min(share, track.limit - track.base);
+                        track.base = track.base + added;
+                        spare = spare - added;
+                    }
+                }
+            }
+        } else if (mode != Space.MIN_CONTENT) {
+            for (mut u32 i = 0; i < tracks.count; i = i + 1) {
+                GridTrack* track = tracks.at(i);
+                if (track.max_kind != TrackKind.FR) {
+                    track.base = track.limit;
+                }
+            }
+        }
+
+        // Flexible tracks share what is left, in proportion to their fr.
+        if (flexes > (f32)0.0) {
+            mut f32 unit = (f32)0.0;
+            if (Px.defined(space)) {
+                for (mut u32 round = 0; round <= tracks.count; round = round + 1) {
+                    mut f32 left = space;
+                    mut f32 sum = (f32)0.0;
+                    mut u32 shown = 0;
+                    for (mut u32 i = 0; i < tracks.count; i = i + 1) {
+                        GridTrack* track = tracks.at(i);
+                        if (track.collapsed) {
+                            continue;
+                        }
+                        shown = shown + 1;
+                        if (track.max_kind == TrackKind.FR && !track.frozen) {
+                            sum = sum + track.size.max;
+                        } else {
+                            left = left - track.base;
+                        }
+                    }
+                    if (shown > 1) {
+                        left = left - gap * (f32)(shown - 1);
+                    }
+                    if (sum < (f32)1.0) {
+                        sum = (f32)1.0;
+                    }
+                    unit = Px.max(left, (f32)0.0) / sum;
+                    mut bool again = false;
+                    for (mut u32 i = 0; i < tracks.count; i = i + 1) {
+                        GridTrack* track = tracks.at(i);
+                        if (track.max_kind == TrackKind.FR && !track.frozen && !track.collapsed && track.base > unit * track.size.max) {
+                            track.frozen = true;
+                            again = true;
+                        }
+                    }
+                    if (!again) {
+                        break;
+                    }
+                }
+            } else {
+                for (mut u32 i = 0; i < tracks.count; i = i + 1) {
+                    GridTrack* track = tracks.at(i);
+                    if (track.max_kind != TrackKind.FR) {
+                        continue;
+                    }
+                    mut f32 wanted = track.base;
+                    if (mode != Space.MIN_CONTENT) {
+                        wanted = Px.max(wanted, track.content);
+                    }
+                    unit = Px.max(unit, wanted / Px.max(track.size.max, (f32)1.0));
+                }
+            }
+            for (mut u32 i = 0; i < tracks.count; i = i + 1) {
+                GridTrack* track = tracks.at(i);
+                if (track.max_kind == TrackKind.FR && !track.frozen && !track.collapsed) {
+                    track.base = Px.max(track.base, unit * track.size.max);
+                }
+            }
+        }
+
+        // 'normal' / 'stretch' content distribution gives what is still free to the auto tracks.
+        if (Px.defined(space) && (distribution == Keyword.NORMAL || distribution == Keyword.STRETCH)) {
+            f32 spare = space - GridLayout.total(tracks, gap);
+            mut u32 autos = 0;
+            for (mut u32 i = 0; i < tracks.count; i = i + 1) {
+                GridTrack* track = tracks.at(i);
+                if (track.max_kind == TrackKind.AUTO && !track.collapsed) {
+                    autos = autos + 1;
+                }
+            }
+            if (autos > 0 && spare > (f32)0.0) {
+                for (mut u32 i = 0; i < tracks.count; i = i + 1) {
+                    GridTrack* track = tracks.at(i);
+                    if (track.max_kind == TrackKind.AUTO && !track.collapsed) {
+                        track.base = track.base + spare / (f32)autos;
+                    }
+                }
+            }
+        }
+    }
+}

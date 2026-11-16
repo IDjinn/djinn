@@ -1,0 +1,190 @@
+import std::types;
+import std::libc;
+import std::io;
+
+namespace ui;
+
+// A pixel buffer, RGBA8, row after row, top row first.
+struct Canvas {
+    mut u8* pixels;
+    mut u32 width;
+    mut u32 height;
+
+    public static unsafe Canvas create(u32 width, u32 height) {
+        Canvas canvas = { .pixels = (u8*)__djinn_alloc_zeroed((size_long)(width * height * 4)), .width = width, .height = height };
+        return canvas;
+    }
+
+    public unsafe void release() {
+        __djinn_free((void*)this.pixels);
+        this.pixels = (u8*)0;
+    }
+
+    // Fills every pixel with 0xRRGGBBAA.
+    public unsafe void clear(u32 rgba) {
+        u8 r = (u8)((rgba >> 24) & 255);
+        u8 g = (u8)((rgba >> 16) & 255);
+        u8 b = (u8)((rgba >> 8) & 255);
+        u8 a = (u8)(rgba & 255);
+        for (mut u32 i = 0; i < this.width * this.height; i = i + 1) {
+            this.pixels[i * 4] = r;
+            this.pixels[i * 4 + 1] = g;
+            this.pixels[i * 4 + 2] = b;
+            this.pixels[i * 4 + 3] = a;
+        }
+    }
+
+    // The pixel at (x, y) as 0xRRGGBBAA; 0 outside the canvas.
+    public unsafe u32 at(u32 x, u32 y) {
+        if (x >= this.width || y >= this.height) {
+            return 0;
+        }
+        u8* p = this.pixels + (size_long)((y * this.width + x) * 4);
+        return ((u32)p[0] << 24) | ((u32)p[1] << 16) | ((u32)p[2] << 8) | (u32)p[3];
+    }
+
+    // A binary PPM (P6), which every image tool opens.
+    public unsafe bool save_ppm(i8* path) {
+        FILE* file = fopen(path, "wb");
+        if (file == (FILE*)0) {
+            return false;
+        }
+        fprintf(file, "P6\n%u %u\n255\n", this.width, this.height);
+        u8* row = (u8*)__djinn_alloc((size_long)(this.width * 3));
+        for (mut u32 y = 0; y < this.height; y = y + 1) {
+            for (mut u32 x = 0; x < this.width; x = x + 1) {
+                u8* p = this.pixels + (size_long)((y * this.width + x) * 4);
+                row[x * 3] = p[0];
+                row[x * 3 + 1] = p[1];
+                row[x * 3 + 2] = p[2];
+            }
+            fwrite((void*)row, 1, (size_long)(this.width * 3), file);
+        }
+        __djinn_free((void*)row);
+        fclose(file);
+        return true;
+    }
+}
+
+// Draws a display list on the CPU with the same rules the GPU pipeline follows (triangles, the color times the atlas
+// coverage, source-over blending, pixel centers, top-left fill rule). Tests compare frames with it, and a machine
+// without a Vulkan device falls back to it.
+struct SoftRaster {
+    static f32 edge(f32 ax, f32 ay, f32 bx, f32 by, f32 px, f32 py) {
+        return (bx - ax) * (py - ay) - (by - ay) * (px - ax);
+    }
+
+    static bool owns(f32 ax, f32 ay, f32 bx, f32 by, f32 w) {
+        if (w > (f32)0.0) {
+            return true;
+        }
+        if (w < (f32)0.0) {
+            return false;
+        }
+        f32 dx = bx - ax;
+        f32 dy = by - ay;
+        return (dy == (f32)0.0 && dx > (f32)0.0) || dy < (f32)0.0;
+    }
+
+    public static unsafe void draw(Canvas* canvas, DisplayList* list) {
+        Atlas* atlas = Fonts.atlas();
+        mut u32 i = 0;
+        while (i + 2 < list.count) {
+            SoftRaster.triangle(canvas, atlas, &list.vertices[i], &list.vertices[i + 1], &list.vertices[i + 2]);
+            i = i + 3;
+        }
+    }
+
+    // A channel value rounded and kept inside 0..255 (interpolation drifts by a rounding error).
+    static u8 byte(f32 value) {
+        if (!(value > (f32)0.0)) {
+            return (u8)0;
+        }
+        if (value >= (f32)254.5) {
+            return (u8)255;
+        }
+        return (u8)(value + (f32)0.5);
+    }
+
+    static u32 index(f32 value) {
+        if (!(value > (f32)0.0)) {
+            return 0;
+        }
+        return (u32)value;
+    }
+
+    static f32 channel(u32 color, u32 shift) {
+        return (f32)((color >> shift) & 255);
+    }
+
+    static unsafe void triangle(Canvas* canvas, Atlas* atlas, Vertex* a, Vertex* b, Vertex* c) {
+        mut Vertex* v1 = b;
+        mut Vertex* v2 = c;
+        mut f32 area = SoftRaster.edge(a.x, a.y, v1.x, v1.y, v2.x, v2.y);
+        if (area == (f32)0.0) {
+            return;
+        }
+        if (area < (f32)0.0) {
+            v1 = c;
+            v2 = b;
+            area = -area;
+        }
+        f32 min_x = Px.min(a.x, Px.min(v1.x, v2.x));
+        f32 max_x = Px.max(a.x, Px.max(v1.x, v2.x));
+        f32 min_y = Px.min(a.y, Px.min(v1.y, v2.y));
+        f32 max_y = Px.max(a.y, Px.max(v1.y, v2.y));
+        mut i32 x0 = (i32)Math.floor((f64)min_x);
+        mut i32 x1 = (i32)Math.ceiling((f64)max_x);
+        mut i32 y0 = (i32)Math.floor((f64)min_y);
+        mut i32 y1 = (i32)Math.ceiling((f64)max_y);
+        if (x0 < 0) {
+            x0 = 0;
+        }
+        if (y0 < 0) {
+            y0 = 0;
+        }
+        if (x1 > (i32)canvas.width) {
+            x1 = (i32)canvas.width;
+        }
+        if (y1 > (i32)canvas.height) {
+            y1 = (i32)canvas.height;
+        }
+        for (mut i32 y = y0; y < y1; y = y + 1) {
+            for (mut i32 x = x0; x < x1; x = x + 1) {
+                f32 px = (f32)x + (f32)0.5;
+                f32 py = (f32)y + (f32)0.5;
+                f32 w0 = SoftRaster.edge(v1.x, v1.y, v2.x, v2.y, px, py);
+                f32 w1 = SoftRaster.edge(v2.x, v2.y, a.x, a.y, px, py);
+                f32 w2 = SoftRaster.edge(a.x, a.y, v1.x, v1.y, px, py);
+                if (!SoftRaster.owns(v1.x, v1.y, v2.x, v2.y, w0) || !SoftRaster.owns(v2.x, v2.y, a.x, a.y, w1)
+                    || !SoftRaster.owns(a.x, a.y, v1.x, v1.y, w2)) {
+                    continue;
+                }
+                f32 l0 = w0 / area;
+                f32 l1 = w1 / area;
+                f32 l2 = w2 / area;
+                f32 u = a.u * l0 + v1.u * l1 + v2.u * l2;
+                f32 v = a.v * l0 + v1.v * l1 + v2.v * l2;
+                u32 ax = SoftRaster.index(u * (f32)atlas.width);
+                u32 ay = SoftRaster.index(v * (f32)atlas.height);
+                if (ax >= atlas.width || ay >= atlas.height) {
+                    continue;
+                }
+                f32 coverage = (f32)atlas.pixels[ay * atlas.width + ax] / (f32)255.0;
+                f32 alpha = (SoftRaster.channel(a.color, 24) * l0 + SoftRaster.channel(v1.color, 24) * l1 + SoftRaster.channel(v2.color, 24) * l2) / (f32)255.0 * coverage;
+                if (alpha <= (f32)0.0) {
+                    continue;
+                }
+                f32 red = SoftRaster.channel(a.color, 0) * l0 + SoftRaster.channel(v1.color, 0) * l1 + SoftRaster.channel(v2.color, 0) * l2;
+                f32 green = SoftRaster.channel(a.color, 8) * l0 + SoftRaster.channel(v1.color, 8) * l1 + SoftRaster.channel(v2.color, 8) * l2;
+                f32 blue = SoftRaster.channel(a.color, 16) * l0 + SoftRaster.channel(v1.color, 16) * l1 + SoftRaster.channel(v2.color, 16) * l2;
+                u8* p = canvas.pixels + (size_long)(((u32)y * canvas.width + (u32)x) * 4);
+                f32 keep = (f32)1.0 - alpha;
+                p[0] = SoftRaster.byte(red * alpha + (f32)p[0] * keep);
+                p[1] = SoftRaster.byte(green * alpha + (f32)p[1] * keep);
+                p[2] = SoftRaster.byte(blue * alpha + (f32)p[2] * keep);
+                p[3] = SoftRaster.byte((alpha + ((f32)p[3] / (f32)255.0) * keep) * (f32)255.0);
+            }
+        }
+    }
+}

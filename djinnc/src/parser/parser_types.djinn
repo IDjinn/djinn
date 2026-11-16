@@ -43,8 +43,78 @@ impl Parser {
         return end;
     }
 
+    // 'fn' is a type only when '(' follows, so it stays an ordinary name everywhere else.
+    bool is_fn_type_start(i32 offset) {
+        i32 token = this.peek_token(offset);
+        return this.kind_of(token) == TokenKind::IDENTIFIER
+            && Strings.equals(this.text_of(token), this.length_of(token), "fn")
+            && this.kind_of(this.peek_token(offset + 1)) == TokenKind::LPAREN;
+    }
+
+    i32 scan_fn_type(i32 start) {
+        mut i32 offset = start + 2;
+        if (this.kind_of(this.peek_token(offset)) == TokenKind::RPAREN) {
+            offset = offset + 1;
+        } else {
+            while (true) {
+                i32 end = this.scan_type_inner(offset);
+                if (end < 0) {
+                    return end;
+                }
+                offset = end;
+                TokenKind kind = this.kind_of(this.peek_token(offset));
+                if (kind == TokenKind::COMMA) {
+                    offset = offset + 1;
+                } else if (kind == TokenKind::RPAREN) {
+                    offset = offset + 1;
+                    break;
+                } else {
+                    return 0 - 1;
+                }
+            }
+        }
+        if (this.kind_of(this.peek_token(offset)) == TokenKind::THIN_ARROW) {
+            return this.scan_type_inner(offset + 1);
+        }
+        return offset;
+    }
+
+    unsafe TypeRef* parse_fn_type() {
+        this.advance();
+        this.expect(TokenKind::LPAREN, "expected '(' after 'fn'");
+        PointerList* params = PointerList.create();
+        while (!this.check(TokenKind::RPAREN) && !this.at_end() && !this.failed) {
+            params.push((ptr)this.parse_type());
+            if (!this.match(TokenKind::COMMA)) {
+                break;
+            }
+        }
+        this.expect(TokenKind::RPAREN, "expected ')' after the parameter types of 'fn'");
+        PointerList* args = PointerList.create();
+        if (this.match(TokenKind::THIN_ARROW)) {
+            args.push((ptr)this.parse_type());
+        } else {
+            args.push((ptr)TypeRef.create(TypeKind.VOID));
+        }
+        for (mut i32 i = 0; i < params.length; i = i + 1) {
+            args.push(params.get(i));
+        }
+        if (args.length > 9) {
+            this.fail("a 'fn' type takes at most 8 parameters");
+        }
+        ByteBuffer* name = ByteBuffer.create();
+        name.append("__closure");
+        name.append_int((i64)(args.length - 1));
+        TypeRef* type = TypeRef.named(name.cstr());
+        type.args = args;
+        return type;
+    }
+
     i32 scan_type_inner(i32 start) {
         mut i32 offset = start;
+        if (this.is_fn_type_start(offset)) {
+            return this.scan_fn_type(offset);
+        }
         i32 first = this.peek_token(offset);
         if (!this.is_type_start(first) && !this.is_qualified_start(offset)) {
             return 0 - 1;
@@ -204,6 +274,9 @@ impl Parser {
         i32 token = this.current();
         mut TypeRef* base = (TypeRef*)0;
 
+        if (this.is_fn_type_start(0)) {
+            return this.parse_fn_type();
+        }
         if (this.kind_of(token) == TokenKind::VOID || this.kind_of(token) == TokenKind::AUTO) {
             this.advance();
             base = TypeRef.from_primitive_atom(this.atom_of(token));

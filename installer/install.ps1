@@ -9,6 +9,8 @@ Options:
   -Version <tag>      install a specific release tag (default: latest)
   -Extension          also install the VS Code extension (skips the dialog)
   -NoExtension        do not install the VS Code extension (skips the dialog)
+  -Ui                 also install the UI framework libraries (ui, ui_macros, win32)
+  -Vulkan             also install the Vulkan renderer (vulkan, spirv, vulkan-1.lib); implies -Ui
   -NoAutoUpdate       do not register the scheduled task
   -NoPath             do not change the user PATH
   -Quiet              print errors only; never shows the dialog
@@ -21,6 +23,8 @@ param(
     [string] $Version = "",
     [switch] $Extension,
     [switch] $NoExtension,
+    [switch] $Ui,
+    [switch] $Vulkan,
     [switch] $NoAutoUpdate,
     [switch] $NoPath,
     [switch] $Quiet
@@ -73,7 +77,7 @@ function Show-ExtensionDialog([bool] $codeFound) {
     $form.FormBorderStyle = "FixedDialog"
     $form.MaximizeBox = $false
     $form.MinimizeBox = $false
-    $form.ClientSize = New-Object System.Drawing.Size(440, 190)
+    $form.ClientSize = New-Object System.Drawing.Size(460, 262)
 
     $title = New-Object System.Windows.Forms.Label
     $title.Text = "Install Djinn to $Prefix"
@@ -104,22 +108,59 @@ function Show-ExtensionDialog([bool] $codeFound) {
     $pathBox.Location = New-Object System.Drawing.Point(16, 120)
     $form.Controls.Add($pathBox)
 
+    $uiBox = New-Object System.Windows.Forms.CheckBox
+    $uiBox.Text = "UI framework libraries (ui, ui_macros and the Windows host)"
+    $uiBox.AutoSize = $true
+    $uiBox.Location = New-Object System.Drawing.Point(16, 150)
+    $form.Controls.Add($uiBox)
+
+    $vulkanBox = New-Object System.Windows.Forms.CheckBox
+    $vulkanBox.Text = "Vulkan renderer for the UI (GPU drawing)"
+    $vulkanBox.AutoSize = $true
+    $vulkanBox.Enabled = $false
+    $vulkanBox.Location = New-Object System.Drawing.Point(40, 180)
+    $form.Controls.Add($vulkanBox)
+    $uiBox.Add_CheckedChanged({ $vulkanBox.Enabled = $uiBox.Checked; if (-not $uiBox.Checked) { $vulkanBox.Checked = $false } })
+
     $ok = New-Object System.Windows.Forms.Button
     $ok.Text = "Install"
     $ok.DialogResult = [System.Windows.Forms.DialogResult]::OK
-    $ok.Location = New-Object System.Drawing.Point(264, 150)
+    $ok.Location = New-Object System.Drawing.Point(284, 222)
     $form.Controls.Add($ok)
     $form.AcceptButton = $ok
 
     $cancel = New-Object System.Windows.Forms.Button
     $cancel.Text = "Cancel"
     $cancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
-    $cancel.Location = New-Object System.Drawing.Point(350, 150)
+    $cancel.Location = New-Object System.Drawing.Point(370, 222)
     $form.Controls.Add($cancel)
     $form.CancelButton = $cancel
 
     if ($form.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { return $null }
-    return @{ Extension = $extensionBox.Checked; AutoUpdate = $updateBox.Checked; Path = $pathBox.Checked }
+    return @{ Extension = $extensionBox.Checked; AutoUpdate = $updateBox.Checked; Path = $pathBox.Checked; Ui = $uiBox.Checked; Vulkan = $vulkanBox.Checked }
+}
+
+# Optional components are staged in the release under optional\<name>\ with the layout of the install. The picked
+# ones are copied over the version folder and the staging folder goes away. The picks are remembered in
+# <prefix>\.components, so an update keeps them.
+function Get-SavedComponents {
+    $file = Join-Path $Prefix ".components"
+    if (Test-Path $file) { return @(Get-Content $file | Where-Object { $_ }) }
+    return @()
+}
+
+function Install-Components($target, [bool] $ui, [bool] $vulkan) {
+    $staged = Join-Path $target "optional"
+    $picked = @()
+    if ($ui) { $picked += "ui" }
+    if ($ui -and $vulkan) { $picked += "vulkan" }
+    foreach ($name in $picked) {
+        $source = Join-Path $staged $name
+        if (Test-Path $source) { Copy-Item (Join-Path $source "*") $target -Recurse -Force }
+        else { Say "warning: this release has no '$name' component" }
+    }
+    if (Test-Path $staged) { Remove-Item $staged -Recurse -Force }
+    Set-Content (Join-Path $Prefix ".components") $picked
 }
 
 function Install-Extension($tag, $tmp) {
@@ -167,7 +208,9 @@ function Install-Release {
         if ($installed -eq $tag) { Say "Djinn $tag is up to date"; return }
     }
 
-    $choices = @{ Extension = [bool]$Extension; AutoUpdate = -not $NoAutoUpdate; Path = -not $NoPath }
+    $saved = Get-SavedComponents
+    $choices = @{ Extension = [bool]$Extension; AutoUpdate = -not $NoAutoUpdate; Path = -not $NoPath
+        Ui = ([bool]$Ui -or [bool]$Vulkan -or ($saved -contains "ui")); Vulkan = ([bool]$Vulkan -or ($saved -contains "vulkan")) }
     if ($Mode -eq "install" -and -not $Extension -and -not $NoExtension) {
         $code = [bool](Get-CodeCli)
         if ($Quiet -or -not [Environment]::UserInteractive) {
@@ -202,6 +245,7 @@ function Install-Release {
         if (Test-Path $target) { Remove-Item $target -Recurse -Force }
         Move-Item (Join-Path $partial $name) $target
         Remove-Item $partial -Recurse -Force
+        Install-Components $target $choices.Ui $choices.Vulkan
         Set-CurrentLink $tag
 
         # stable copy of this script for the scheduled task

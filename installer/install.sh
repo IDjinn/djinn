@@ -10,6 +10,8 @@
 #   --version <tag>       install a specific release tag (default: latest)
 #   --extension           also install the VS Code extension
 #   --no-extension        do not install the VS Code extension
+#   --ui                  also install the UI framework libraries (ui, ui_macros and the platform host)
+#   --vulkan              also install the Vulkan renderer (vulkan, spirv); implies --ui
 #   --no-auto-update      do not register the cron job
 #   --no-path             do not touch shell profiles
 #   --quiet               print errors only
@@ -24,6 +26,8 @@ HOME_DIR="${DJINN_HOME:-$HOME/.djinn}"
 MODE="install"
 TAG=""
 EXTENSION="ask"
+UI=ask
+VULKAN=ask
 CRON=1
 PATH_SETUP=1
 QUIET=0
@@ -38,11 +42,13 @@ while [ $# -gt 0 ]; do
         --version) TAG="$2"; shift 2 ;;
         --extension) EXTENSION=yes; shift ;;
         --no-extension) EXTENSION=no; shift ;;
+        --ui) UI=yes; shift ;;
+        --vulkan) UI=yes; VULKAN=yes; shift ;;
         --no-auto-update) CRON=0; shift ;;
         --no-path) PATH_SETUP=0; shift ;;
         --quiet) QUIET=1; shift ;;
         -y|--yes) YES=1; shift ;;
-        -h|--help) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "djinn-setup: unknown option $1" >&2; exit 2 ;;
     esac
 done
@@ -101,6 +107,48 @@ ask_extension() {
     case "$answer" in n|N|no|NO) EXTENSION=no ;; *) EXTENSION=yes ;; esac
 }
 
+# Optional components are staged in the release under optional/<name>/ with the layout of the install. The picks are
+# kept in <prefix>/.components so an update installs the same ones.
+ask_yes() { # <question>: yes only when asked on a terminal and answered y; --yes and no terminal mean no
+    if [ "$YES" = 1 ] || ! ( : < /dev/tty ) 2>/dev/null; then return 1; fi
+    printf '[ ] %s [y/N] ' "$1" > /dev/tty
+    read -r answer < /dev/tty || answer=""
+    case "$answer" in y|Y|yes|YES) return 0 ;; *) return 1 ;; esac
+}
+
+choose_components() {
+    saved="$HOME_DIR/.components"
+    if [ "$UI" = ask ]; then
+        if [ -f "$saved" ] && grep -qx ui "$saved"; then UI=yes
+        elif [ "$MODE" = install ] && ask_yes "Install the UI framework libraries (ui, ui_macros, platform host)?"; then UI=yes
+        else UI=no; fi
+    fi
+    if [ "$VULKAN" = ask ]; then
+        if [ "$UI" != yes ]; then VULKAN=no
+        elif [ -f "$saved" ] && grep -qx vulkan "$saved"; then VULKAN=yes
+        elif [ "$MODE" = install ] && ask_yes "Install the Vulkan renderer for the UI (GPU drawing)?"; then VULKAN=yes
+        else VULKAN=no; fi
+    fi
+}
+
+install_components() { # <version dir>
+    staged="$1/optional"
+    : > "$HOME_DIR/.components"
+    for part in ui vulkan; do
+        want=no
+        [ "$part" = ui ] && want="$UI"
+        [ "$part" = vulkan ] && want="$VULKAN"
+        [ "$want" = yes ] || continue
+        if [ -d "$staged/$part" ]; then
+            cp -R "$staged/$part/." "$1/"
+            echo "$part" >> "$HOME_DIR/.components"
+        else
+            say "warning: this release has no '$part' component"
+        fi
+    done
+    rm -rf "$staged"
+}
+
 install_extension() { # <tag> <tmp>
     cli="$(code_cli || true)"
     if [ -z "$cli" ]; then say "VS Code was not found; install the extension later with: djinn-setup extension"; return; fi
@@ -157,6 +205,8 @@ do_install() {
     rm -rf "$HOME_DIR/versions/$TAG"
     mv "$HOME_DIR/versions/$TAG.partial/$name" "$HOME_DIR/versions/$TAG"
     rmdir "$HOME_DIR/versions/$TAG.partial"
+    choose_components
+    install_components "$HOME_DIR/versions/$TAG"
 
     ln -sfn "versions/$TAG" "$HOME_DIR/current.new"
     mv -fT "$HOME_DIR/current.new" "$HOME_DIR/current" 2>/dev/null || { rm -f "$HOME_DIR/current"; mv "$HOME_DIR/current.new" "$HOME_DIR/current"; }

@@ -5,6 +5,10 @@ impl Parser {
         PointerList* found = this.parse_attributes();
         i32 before = owner.count();
         this.parse_struct_member(owner);
+        if (this.platform_excluded(found)) {
+            owner.truncate_children(before);
+            return;
+        }
         if (found.length == 0) {
             return;
         }
@@ -23,9 +27,25 @@ impl Parser {
     }
 
     unsafe Node* parse_declaration() {
+        if (this.try_proc_attribute()) {
+            return (Node*)0;
+        }
         PointerList* attributes = this.parse_attributes();
         this.bodyless_seen = false;
+        mut i32 queued = 0;
+        if (this.extra_declarations != null) {
+            PointerList* before = this.extra_declarations;
+            queued = before.length;
+        }
         Node* declaration = this.parse_declaration_body();
+        if (this.platform_excluded(attributes)) {
+            this.bodyless_seen = false;
+            PointerList* dropped = this.extra_declarations;
+            if (dropped != null && dropped.length > queued) {
+                dropped.length = queued;
+            }
+            return (Node*)0;
+        }
         bool declared_bodyless = this.bodyless_seen;
         if (this.bodyless_seen) {
             bool provided = declaration != null && declaration.kind() == NodeKind::STRUCT_DECL
@@ -74,6 +94,12 @@ impl Parser {
             this.advance();
             Node* import_node = Node.create(NodeKind::IMPORT, token);
             import_node.set_text(this.qualified_name());
+            if (this.imports == null) {
+                this.imports = IdList.create();
+            }
+            IdList* imports = this.imports;
+            AtomTable* import_atoms = Atoms.get();
+            imports.push(import_atoms.intern_copy(import_node.text(), (u32)strlen(import_node.text())));
             this.expect(TokenKind::SEMICOLON, "expected ';' after import");
             return import_node;
         }
@@ -126,6 +152,17 @@ impl Parser {
 
         if (this.kind_of(token) == TokenKind::MACRO) {
             return this.parse_macro_declaration();
+        }
+
+        if (this.is_proc_declaration()) {
+            return this.parse_proc_declaration();
+        }
+
+        if (this.kind_of(token) == TokenKind::IDENTIFIER) {
+            MacroCall* called = this.find_macro_call();
+            if (called != null) {
+                return this.expand_macro(called, MacroMode.ITEM);
+            }
         }
 
         if (this.kind_of(token) == TokenKind::CONSTEXPR || this.kind_of(token) == TokenKind::CONSTEVAL) {
@@ -240,6 +277,9 @@ impl Parser {
         i32 start = this.advance();
         Node* node = Node.create_list(NodeKind::NAMESPACE_DECL, start);
         node.set_text(this.qualified_name());
+        u32 enclosing_namespace = this.namespace_atom;
+        AtomTable* namespace_atoms = Atoms.get();
+        this.namespace_atom = namespace_atoms.intern_copy(node.text(), (u32)strlen(node.text()));
         if (this.match(TokenKind::SEMICOLON)) {
             while (!this.at_end()) {
                 this.add_declaration(node, this.parse_declaration());
@@ -252,6 +292,7 @@ impl Parser {
             this.add_declaration(node, this.parse_declaration());
         }
         this.expect(TokenKind::RBRACE, "expected '}' to close namespace");
+        this.namespace_atom = enclosing_namespace;
         return node;
     }
 
@@ -443,6 +484,7 @@ impl Parser {
         function.set_type(this.parse_type());
         i32 name = this.expect(TokenKind::IDENTIFIER, "expected function name");
         function.set_text(this.copy_of(name));
+        this.warn_macro_shadowing(name);
         if (this.check(TokenKind::LESS)) {
             function.set_generics(this.parse_generic_params());
         }
@@ -494,7 +536,7 @@ impl Parser {
         if (awaits && (function.op() & 33) == 0 && strcmp(function.text(), "main") != 0) {
             function.set_op(function.op() | 1);
         }
-        if (!awaits && function.generics() == null && (function.op() & 7) == 0 && this.generic_depth == 0 && !this.failed) {
+        if (!awaits && function.generics() == null && (function.op() & 7) == 0 && this.generic_depth == 0 && !this.failed && this.expansion_depth == 0) {
             Library.record_body(open, this.pos - 1);
         }
         function.set_first(body);
@@ -526,7 +568,7 @@ impl Parser {
     Node* parse_body(bool strippable) {
         i32 open = this.current();
         Node* block = this.parse_block();
-        if (strippable && this.generic_depth == 0 && !this.failed) {
+        if (strippable && this.generic_depth == 0 && !this.failed && this.expansion_depth == 0) {
             Library.record_body(open, this.pos - 1);
         }
         return block;

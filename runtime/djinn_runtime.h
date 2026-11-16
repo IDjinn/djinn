@@ -82,6 +82,7 @@ int64_t __djinn_unix_timestamp_ms(void);
 void* __djinn_realloc(void* pointer, size_t new_size);
 
 void __djinn_free(void* pointer);
+void __djinn_closure_drop(void* env);
 
 void* __djinn_alloc(size_t size);
 void* __djinn_alloc_zeroed(size_t size);
@@ -217,6 +218,8 @@ int __djinn_path_exists(const char* path);
 
 // Calls a JIT-compiled entry point `int main(void)` at `address` and returns its exit code.
 int __djinn_call_entry(void* address);
+uint64_t __djinn_call_proc(void* address, const char* data, uint64_t length, char** result);
+void __djinn_proc_stub(void);
 void __djinn_call_method(void* address, void* target);
 void* __djinn_call_entry_handle(void* address);
 void* __djinn_call_method_handle(void* address, void* target);

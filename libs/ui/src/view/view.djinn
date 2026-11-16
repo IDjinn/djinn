@@ -1,0 +1,300 @@
+import std::types;
+import std::collections;
+import std::libc;
+
+namespace ui;
+
+// What a keyed list remembers between updates: for each item its key, its node and the root that owns its effects.
+struct ListState {
+    mut u32 region;
+    mut u32 owner;
+    mut i64* keys;
+    mut u32* nodes;
+    mut u32* roots;
+    mut u32 count;
+    mut i64* next_keys;
+    mut u32* next_nodes;
+    mut u32* next_roots;
+    mut i32* next_old;
+    mut u32 next_count;
+}
+
+struct Lists {
+    public static unsafe ListState* create(u32 region) {
+        ListState* state = (ListState*)__djinn_alloc_zeroed((size_long)sizeof(ListState));
+        state.region = region;
+        state.owner = Reactive.owner();
+        return state;
+    }
+
+    // Starts an update to 'count' items: the next arrays are filled by key() and adopt() or create.
+    public static unsafe void begin(ListState* state, u32 count) {
+        state.next_count = count;
+        u64 size = (u64)count + 1;
+        state.next_keys = (i64*)__djinn_alloc_zeroed((size_long)(size * 8));
+        state.next_nodes = (u32*)__djinn_alloc_zeroed((size_long)(size * 4));
+        state.next_roots = (u32*)__djinn_alloc_zeroed((size_long)(size * 4));
+        state.next_old = (i32*)__djinn_alloc_zeroed((size_long)(size * 4));
+    }
+
+    // Takes over the node of the old item with this key; returns false when the item is new.
+    public static unsafe bool adopt(ListState* state, u32 index, i64 key) {
+        state.next_keys[index] = key;
+        for (mut u32 old = 0; old < state.count; old = old + 1) {
+            if (state.roots[old] != 0 && state.keys[old] == key) {
+                state.next_nodes[index] = state.nodes[old];
+                state.next_roots[index] = state.roots[old];
+                state.next_old[index] = (i32)old;
+                state.roots[old] = 0;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Opens the owner of a new item: what its render creates lives until the item leaves the list.
+    public static unsafe Scope open(ListState* state, u32 index) {
+        u32 root = Reactive.create_root(state.owner);
+        state.next_roots[index] = root;
+        state.next_old[index] = 0 - 1;
+        return Reactive.enter(root);
+    }
+
+    public static unsafe void close(ListState* state, u32 index, Node node, Scope saved) {
+        Reactive.leave(saved);
+        state.next_nodes[index] = node.id;
+    }
+
+    // Disposes the items that left, then moves nodes into the new order. Kept items on the longest increasing run of
+    // their old positions stay where they are, so a reorder costs the fewest moves.
+    public static unsafe void finish(ListState* state) {
+        for (mut u32 old = 0; old < state.count; old = old + 1) {
+            if (state.roots[old] != 0) {
+                Reactive.dispose(state.roots[old]);
+                Dom.remove(state.nodes[old]);
+            }
+        }
+        u8* stays = Lists.stable(state.next_old, state.next_count);
+        mut u32 next = 0;
+        mut u32 index = state.next_count;
+        while (index > 0) {
+            index = index - 1;
+            u32 node = state.next_nodes[index];
+            if (stays[index] == 0 || Dom.parent(node) != state.region) {
+                Dom.insert(state.region, node, next);
+            }
+            next = node;
+        }
+        __djinn_free((void*)stays);
+        __djinn_free((void*)state.next_old);
+        Lists.release_current(state);
+        state.keys = state.next_keys;
+        state.nodes = state.next_nodes;
+        state.roots = state.next_roots;
+        state.count = state.next_count;
+    }
+
+    // Marks the positions of the longest increasing subsequence of old indices (-1 = new item, never stable).
+    static unsafe u8* stable(i32* old, u32 count) {
+        u64 size = (u64)count + 1;
+        u8* stays = (u8*)__djinn_alloc_zeroed((size_long)size);
+        i32* tails = (i32*)__djinn_alloc_zeroed((size_long)(size * 4));
+        i32* parents = (i32*)__djinn_alloc_zeroed((size_long)(size * 4));
+        mut u32 length = 0;
+        for (mut u32 i = 0; i < count; i = i + 1) {
+            i32 value = old[i];
+            if (value < 0) {
+                continue;
+            }
+            mut u32 low = 0;
+            mut u32 high = length;
+            while (low < high) {
+                u32 middle = (low + high) / 2;
+                if (old[tails[middle]] < value) {
+                    low = middle + 1;
+                } else {
+                    high = middle;
+                }
+            }
+            parents[i] = 0 - 1;
+            if (low > 0) {
+                parents[i] = tails[low - 1];
+            }
+            tails[low] = (i32)i;
+            if (low == length) {
+                length = length + 1;
+            }
+        }
+        if (length > 0) {
+            mut i32 at = tails[length - 1];
+            while (at >= 0) {
+                stays[at] = 1;
+                at = parents[at];
+            }
+        }
+        __djinn_free((void*)tails);
+        __djinn_free((void*)parents);
+        return stays;
+    }
+
+    static unsafe void release_current(ListState* state) {
+        if (state.keys != (i64*)0) {
+            __djinn_free((void*)state.keys);
+            __djinn_free((void*)state.nodes);
+            __djinn_free((void*)state.roots);
+        }
+    }
+
+    public static unsafe i64 hash(void* data, u32 size) {
+        u8* bytes = (u8*)data;
+        mut u64w value = 14695981039346656037w;
+        for (mut u32 i = 0; i < size; i = i + 1) {
+            value = (value ^ (u64w)bytes[i]) * 1099511628211w;
+        }
+        return (i64)(u64)value;
+    }
+
+    public static unsafe void release(ListState* state) {
+        Lists.release_current(state);
+        __djinn_free((void*)state);
+    }
+}
+
+// Control flow and composition for html!: 'if' becomes show, 'for' becomes each/each_index/range, a component tag
+// becomes mount. Each region is a fragment whose content is replaced or reconciled on its own.
+struct View {
+    public static unsafe Node fragment() {
+        return Node.fragment();
+    }
+
+    // Mounts the branch for the current condition; the other branch is built only when the condition flips.
+    public static unsafe Node show(fn() -> bool when, fn() -> Node yes, fn() -> Node no) {
+        u32 region = Dom.fragment();
+        memo<bool> condition = memo<bool>(when);
+        effect(() => {
+            bool active = condition.get();
+            Dom.clear_children(region);
+            if (active) {
+                Node inner = yes();
+                Dom.append(region, inner.id);
+            } else {
+                Node inner = no();
+                Dom.append(region, inner.id);
+            }
+        });
+        Node node = { .id = region };
+        return node;
+    }
+
+    public static unsafe Node show(fn() -> bool when, fn() -> Node yes) {
+        return View.show(when, yes, () => Node.none());
+    }
+
+    // A keyed list: when the items change, nodes of kept keys are reused and moved, new ones created, gone ones disposed.
+    public static unsafe Node each<T>(fn() -> slice<T> items, fn(T) -> i64 key, fn(T) -> Node render) {
+        u32 region = Dom.fragment();
+        ListState* state = Lists.create(region);
+        Reactive.on_cleanup(() => Lists.release(state));
+        effect(() => {
+            slice<T> list = items();
+            u32 count = (u32)list.length;
+            Lists.begin(state, count);
+            for (mut u32 i = 0; i < count; i = i + 1) {
+                T item = list.data[i];
+                if (!Lists.adopt(state, i, key(item))) {
+                    Scope saved = Lists.open(state, i);
+                    Node node = render(item);
+                    Lists.close(state, i, node, saved);
+                }
+            }
+            Lists.finish(state);
+        });
+        Node node = { .id = region };
+        return node;
+    }
+
+    // A list without a key: items are matched by their bytes, so an unchanged item keeps its node and a changed one is rebuilt.
+    public static unsafe Node each_value<T>(fn() -> slice<T> items, fn(T) -> Node render) {
+        u32 region = Dom.fragment();
+        ListState* state = Lists.create(region);
+        Reactive.on_cleanup(() => Lists.release(state));
+        effect(() => {
+            slice<T> list = items();
+            u32 count = (u32)list.length;
+            Lists.begin(state, count);
+            for (mut u32 i = 0; i < count; i = i + 1) {
+                T item = list.data[i];
+                if (!Lists.adopt(state, i, Lists.hash((void*)&item, (u32)sizeof(T)))) {
+                    Scope saved = Lists.open(state, i);
+                    Node node = render(item);
+                    Lists.close(state, i, node, saved);
+                }
+            }
+            Lists.finish(state);
+        });
+        Node node = { .id = region };
+        return node;
+    }
+
+    // 'for (i32 i in a..b)': one node per number, keyed by the number.
+    public static unsafe Node range(fn() -> i32 start, fn() -> i32 end, fn(i32) -> Node render) {
+        u32 region = Dom.fragment();
+        ListState* state = Lists.create(region);
+        Reactive.on_cleanup(() => Lists.release(state));
+        effect(() => {
+            i32 first = start();
+            i32 last = end();
+            mut u32 count = 0;
+            if (last > first) {
+                count = (u32)(last - first);
+            }
+            Lists.begin(state, count);
+            for (mut u32 i = 0; i < count; i = i + 1) {
+                i32 value = first + (i32)i;
+                if (!Lists.adopt(state, i, (i64)value)) {
+                    Scope saved = Lists.open(state, i);
+                    Node node = render(value);
+                    Lists.close(state, i, node, saved);
+                }
+            }
+            Lists.finish(state);
+        });
+        Node node = { .id = region };
+        return node;
+    }
+
+    // A component: its props are moved to the heap (render() runs once and its closures may keep 'this'),
+    // and freed with the owner that mounted it.
+    public static unsafe Node mount<T>(T props) {
+        T* home = (T*)__djinn_alloc_zeroed((size_long)(sizeof(T) + 1));
+        home[0] = props;
+        Reactive.on_cleanup(() => Components.release<T>(home));
+        return home.render();
+    }
+
+    // A client component inside a server-rendered page: the client hydrates only these.
+    public static unsafe Node island(str name, Node content) {
+        u32 island = Dom.island(name);
+        Dom.append(island, content.id);
+        Node node = { .id = island };
+        return node;
+    }
+
+    public static unsafe Node prerendered(str html) {
+        Node node = { .id = Dom.raw(html) };
+        return node;
+    }
+
+    // What a [Server] component is in the web build: a placeholder that adopts the HTML the server sent.
+    public static unsafe Node server_island(str name) {
+        Node node = { .id = Dom.server_slot(name) };
+        return node;
+    }
+}
+
+struct Components {
+    public static unsafe void release<T>(T* home) {
+        T finished = home[0];
+        __djinn_free((void*)home);
+    }
+}

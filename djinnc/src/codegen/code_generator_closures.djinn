@@ -1,0 +1,196 @@
+namespace djinnc;
+
+// A closure value is { code, env }. The environment is a heap block { drop, captures... }; the lambda body is its own
+// function whose first parameter is that block, and the captured variables read their slots from it.
+impl CodeGenerator {
+    unsafe ptr lambda_environment_type(FunctionInfo* info) {
+        PointerList* captures = info.captures;
+        i32 count = captures.length + 1;
+        ptr<ptr> fields = CodeGenerator.array_of(count);
+        fields[0] = LLVMPointerTypeInContext(this.context, 0);
+        for (mut i32 i = 0; i < captures.length; i = i + 1) {
+            LocalVariable* captured = (LocalVariable*)captures.get(i);
+            fields[i + 1] = this.llvm_type(captured.type);
+        }
+        return LLVMStructTypeInContext(this.context, fields, (u32)count, 0);
+    }
+
+    unsafe bool lambda_needs_drop(FunctionInfo* info) {
+        SymbolTable* symbols = this.symbols;
+        PointerList* captures = info.captures;
+        for (mut i32 i = 0; i < captures.length; i = i + 1) {
+            LocalVariable* captured = (LocalVariable*)captures.get(i);
+            if (Ownership.needs_dispose(symbols, captured.type)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    unsafe ptr lambda_drop_function(FunctionInfo* info) {
+        ByteBuffer* name = ByteBuffer.create();
+        name.append(info.name);
+        name.append("$drop");
+        ptr existing = LLVMGetNamedFunction(this.module, name.cstr());
+        if (existing != null) {
+            return existing;
+        }
+        ptr<ptr> params = CodeGenerator.array_of(1);
+        params[0] = LLVMPointerTypeInContext(this.context, 0);
+        ptr function_type = LLVMFunctionType(LLVMVoidTypeInContext(this.context), params, 1, 0);
+        ptr function = LLVMAddFunction(this.module, name.cstr(), function_type);
+        LLVMSetLinkage(function, LlvmConst.LINKAGE_INTERNAL);
+        return function;
+    }
+
+    unsafe Value* gen_lambda(Node* node) {
+        FunctionInfo* info = (FunctionInfo*)node.symbol();
+        if (this.pending_lambdas == null) {
+            this.pending_lambdas = PointerList.create();
+        }
+        PointerList* pending = this.pending_lambdas;
+        pending.push((ptr)info);
+        u32 type = node.value_type();
+        ptr pointer_llvm = LLVMPointerTypeInContext(this.context, 0);
+        mut ptr environment = LLVMConstNull(pointer_llvm);
+        PointerList* captures = info.captures;
+        if (captures.length > 0) {
+            SymbolTable* symbols = this.symbols;
+            ptr environment_type = this.lambda_environment_type(info);
+            environment = this.allocate_bytes(LLVMSizeOf(environment_type));
+            mut ptr drop = LLVMConstNull(pointer_llvm);
+            if (this.lambda_needs_drop(info)) {
+                drop = this.lambda_drop_function(info);
+            }
+            LLVMBuildStore(this.builder, drop, LLVMBuildStructGEP2(this.builder, environment_type, environment, 0, "env.drop"));
+            for (mut i32 i = 0; i < captures.length; i = i + 1) {
+                LocalVariable* captured = (LocalVariable*)captures.get(i);
+                ptr loaded = LLVMBuildLoad2(this.builder, this.llvm_type(captured.type), captured.slot, captured.name);
+                ptr field = LLVMBuildStructGEP2(this.builder, environment_type, environment, (u32)(i + 1), "env.capture");
+                LLVMBuildStore(this.builder, loaded, field);
+                if (!Ownership.is_copy(symbols, captured.type)) {
+                    this.set_drop_flag(captured, 0);
+                }
+            }
+        }
+        mut ptr value = LLVMGetUndef(this.llvm_type(type));
+        value = LLVMBuildInsertValue(this.builder, value, info.function, 0, "closure.code");
+        value = LLVMBuildInsertValue(this.builder, value, environment, 1, "closure.env");
+        return Value.create(value, type);
+    }
+
+    // A named function used as a 'fn' value: a thunk that drops the environment parameter and forwards the rest.
+    unsafe Value* gen_function_closure(FunctionInfo* target, u32 type) {
+        ByteBuffer* name = ByteBuffer.create();
+        name.append(target.name);
+        name.append("$fn");
+        mut ptr thunk = LLVMGetNamedFunction(this.module, name.cstr());
+        if (thunk == null) {
+            IdList* param_types = target.param_types;
+            i32 count = param_types.length;
+            ptr<ptr> params = CodeGenerator.array_of(count + 1);
+            params[0] = LLVMPointerTypeInContext(this.context, 0);
+            for (mut i32 i = 0; i < count; i = i + 1) {
+                params[i + 1] = this.llvm_type(param_types.get(i));
+            }
+            ptr thunk_type = LLVMFunctionType(this.llvm_type(target.return_type), params, (u32)(count + 1), 0);
+            thunk = LLVMAddFunction(this.module, name.cstr(), thunk_type);
+            LLVMSetLinkage(thunk, LlvmConst.LINKAGE_INTERNAL);
+            ptr saved = LLVMGetInsertBlock(this.builder);
+            ptr entry = LLVMAppendBasicBlockInContext(this.context, thunk, "entry");
+            LLVMPositionBuilderAtEnd(this.builder, entry);
+            ptr<ptr> args = CodeGenerator.array_of(count);
+            for (mut i32 i = 0; i < count; i = i + 1) {
+                args[i] = LLVMGetParam(thunk, (u32)(i + 1));
+            }
+            if (Types.is_void(target.return_type)) {
+                LLVMBuildCall2(this.builder, target.function_type, target.function, args, (u32)count, "");
+                LLVMBuildRetVoid(this.builder);
+            } else {
+                ptr result = LLVMBuildCall2(this.builder, target.function_type, target.function, args, (u32)count, "forward");
+                LLVMBuildRet(this.builder, result);
+            }
+            LLVMPositionBuilderAtEnd(this.builder, saved);
+        }
+        mut ptr value = LLVMGetUndef(this.llvm_type(type));
+        value = LLVMBuildInsertValue(this.builder, value, thunk, 0, "closure.code");
+        value = LLVMBuildInsertValue(this.builder, value, LLVMConstNull(LLVMPointerTypeInContext(this.context, 0)), 1, "closure.env");
+        return Value.create(value, type);
+    }
+
+    unsafe Value* gen_closure_call(Node* node) {
+        Value* closure = this.gen_expression(node.first());
+        SymbolTable* symbols = this.symbols;
+        IdList* signature = symbols.closure_signature(closure.type);
+        i32 count = signature.length - 1;
+        ptr code = LLVMBuildExtractValue(this.builder, closure.ref, 0, "closure.code");
+        ptr environment = LLVMBuildExtractValue(this.builder, closure.ref, 1, "closure.env");
+        ptr<ptr> params = CodeGenerator.array_of(count + 1);
+        ptr<ptr> args = CodeGenerator.array_of(count + 1);
+        params[0] = LLVMPointerTypeInContext(this.context, 0);
+        args[0] = environment;
+        for (mut i32 i = 0; i < count; i = i + 1) {
+            u32 wanted = signature.get(i + 1);
+            Node* argument = node.child(i);
+            params[i + 1] = this.llvm_type(wanted);
+            args[i + 1] = this.coerce(this.gen_expression(argument), wanted);
+            if (!Ownership.is_copy(symbols, wanted)) {
+                this.release_moved(argument);
+            }
+        }
+        u32 result = signature.get(0);
+        ptr function_type = LLVMFunctionType(this.llvm_type(result), params, (u32)(count + 1), 0);
+        mut ptr<i8> label = "closure.result";
+        if (Types.is_void(result)) {
+            label = "";
+        }
+        ptr call = LLVMBuildCall2(this.builder, function_type, code, args, (u32)(count + 1), label);
+        return Value.create(call, result);
+    }
+
+    // Points every captured variable at its field of the environment for the duration of the lambda body.
+    unsafe void bind_captures(FunctionInfo* info) {
+        PointerList* captures = info.captures;
+        if (captures.length == 0) {
+            return;
+        }
+        ptr environment_type = this.lambda_environment_type(info);
+        ptr environment = LLVMGetParam(info.function, 0);
+        for (mut i32 i = 0; i < captures.length; i = i + 1) {
+            LocalVariable* captured = (LocalVariable*)captures.get(i);
+            captured.slot = LLVMBuildStructGEP2(this.builder, environment_type, environment, (u32)(i + 1), captured.name);
+            captured.drop_flag = (ptr)0;
+            captured.tracked = false;
+        }
+    }
+
+    unsafe void define_lambda_drop(FunctionInfo* info) {
+        if (!this.lambda_needs_drop(info)) {
+            return;
+        }
+        SymbolTable* symbols = this.symbols;
+        ptr function = this.lambda_drop_function(info);
+        ptr<i8> name_of_drop = "lambda.drop";
+        FunctionInfo* drop_info = (FunctionInfo*)Memory.zalloc(sizeof(FunctionInfo));
+        drop_info.name = name_of_drop;
+        drop_info.function = function;
+        drop_info.return_type = Types.void_type();
+        FunctionContext* function_context = this.function_context;
+        FunctionInfo* saved = function_context.function;
+        function_context.function = drop_info;
+        ptr entry = LLVMAppendBasicBlockInContext(this.context, function, "entry");
+        LLVMPositionBuilderAtEnd(this.builder, entry);
+        ptr environment_type = this.lambda_environment_type(info);
+        ptr environment = LLVMGetParam(function, 0);
+        PointerList* captures = info.captures;
+        for (mut i32 i = captures.length - 1; i >= 0; i = i - 1) {
+            LocalVariable* captured = (LocalVariable*)captures.get(i);
+            if (Ownership.needs_dispose(symbols, captured.type)) {
+                ptr field = LLVMBuildStructGEP2(this.builder, environment_type, environment, (u32)(i + 1), "drop.capture");
+                this.dispose_value(field, captured.type);
+            }
+        }
+        LLVMBuildRetVoid(this.builder);
+        function_context.function = saved;
+    }
+}

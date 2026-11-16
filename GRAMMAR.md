@@ -80,6 +80,13 @@ Valid on functions, parameters, fields, structs, enums, unions, interfaces and, 
 `[NoUnroll]`, `[Vectorize]`, `[NoVectorize]`), the statement before a loop. `[Reflect]` drives reflection. An unknown
 attribute name is an error.
 
+`[Platform(p, ...)]` keeps a declaration (a top-level declaration or a struct member) only when the target is one of the
+platforms `windows`, `linux`, `macos`, `android`, `ios`, `web`, or a group: `desktop` (windows, linux, macos), `mobile`
+(android, ios), `native` (everything but web); otherwise it is dropped while parsing. In a project, a file
+`name.<platform>.djinn` (same words) replaces `name.djinn` on that platform: the exact platform wins over its group, the
+group over `native`, and variants for other platforms are left out. `Platform.Android`, `.Ios`, `.Web`, `.Desktop` and
+`.Mobile` join `Platform.Windows`, `.Linux` and `.MacOs` as compile-time constants.
+
 ### Enum and Union (tagged unions / ADT)
 
 ```ebnf
@@ -193,15 +200,27 @@ the AST as literals. A compile-time `if` keeps only the taken branch.
 ```ebnf
 macro_decl           = "macro" IDENTIFIER [ "!" ] "{" { macro_rule } "}" ;
 macro_rule           = [ "local" ] "(" [ macro_param { "," macro_param } ] ")" "=>" ( "{" token_stream "}" | "void" ) ;
-macro_param          = [ "local" ] ( fragment_type IDENTIFIER | IDENTIFIER ) ;
-fragment_type        = "expression" | "identifier" | "literal" | "type" | "block" ;
+macro_param          = [ "local" ] ( fragment_type [ "..." ] IDENTIFIER | IDENTIFIER ) ;
+fragment_type        = "expression" | "identifier" | "literal" | "type" | "block" | "statement" | "tokens" ;
+macro_call           = [ qualified_name "::" ] IDENTIFIER ( "!" ( "(" tokens ")" | "[" tokens "]" | "{" tokens "}" ) | "(" tokens ")" ) ;
+repetition           = "$for" "(" IDENTIFIER "in" IDENTIFIER [ "," TOKEN ] ")" "{" token_stream "}" ;   (* inside a body *)
 ```
 
-(* Called as `name(args)` or `name!(args)`; a macro declared `macro name!` is separate from `macro name` and only called with the `!`.
-Expanded at parse time by token substitution and re-parse; hygienic. Bare identifiers in a rule are literal token
-matchers. `local` evaluates the argument once through a temporary (`local` before `(` applies to all expression
-parameters). Several rules per macro: first match by arity and literal tokens wins; ambiguous rules are rejected;
-warning W6001 when a non-local expression parameter is used more than once. `=> void` expands to `0`.
+(* Called as `name!(args)`, `name![args]` or `name!{args}`, or `name(args)` when declared without `!` (a macro declared
+`macro name!` is separate from `macro name` and only called with the `!`). Expanded at parse time by token substitution
+and re-parse: every macro of every file is collected before parsing, so declaration order does not matter. The call
+site decides the shape: in an expression the body must be one expression; as a statement (followed by `;`, or any
+`name!{...}`) it may be several statements, which join the enclosing block; at declaration level it produces
+declarations. Arguments are matched fragment by fragment (an `expression` is parsed, so `f<A, B>(x)` is one argument);
+a trailing comma is accepted. A variadic `expression... xs` takes the remaining comma-separated arguments and is
+expanded with `$for(x in xs) { ... }` or `$for(x in xs, sep) { ... }`. An `expression` argument of several tokens is
+parenthesized. Bare identifiers in a rule are literal token matchers. Hygiene: locals the template declares (`T name =`,
+`T name;`, `T name in`) get fresh names. `local` evaluates the argument once through a temporary (`local` before `(`
+applies to all expression parameters). Several rules per macro: the first whose fragments parse wins; ambiguous rules are
+rejected; warning W6001 when a non-local expression parameter is used more than once. `=> void` expands to `0` (nothing
+as a statement). Macros belong to their namespace: a call sees the macros of its namespace and of imported namespaces,
+or names one with `ns::name!(...)`. A function with the name of a visible `name(...)` macro warns (W6006). A parse
+error inside an expansion is reported at the call; expansion nests at most 64 levels.
 
 ```djinn
 macro square { (local expression v) => { v * v } }
@@ -213,6 +232,20 @@ i32 x = square(foo());   // foo() evaluated once
 i32 c = calc(double, 5);
 ```
 *)
+
+#### Procedural macros
+
+```ebnf
+proc_macro_decl      = "proc" "macro" IDENTIFIER "=>" IDENTIFIER ";" ;       (* handler: TokenStream f(TokenStream input) *)
+proc_attribute_decl  = "proc" "attribute" IDENTIFIER "=>" IDENTIFIER ";" ;   (* handler: TokenStream f(TokenStream args, TokenStream item) *)
+```
+
+A procedural macro is ordinary Djinn code in a library (built with `--std`, importing `std::meta`) that receives the
+call's tokens and returns new ones. It is called like a declarative macro (`name!(...)`, `name![...]`, `name!{...}`); a
+`proc attribute Name` is written `[Name]` or `[Name(args)]` before a declaration and replaces it with what it returns.
+The program that imports the library runs the handler while parsing (the library object is loaded in a JIT inside the
+compiler; the program itself does not use the JIT), so it needs `--runtime-lib` and the host target. Tokens carry the
+span of the input token they came from (`Token.at(span)`); `Token.error(span, message)` reports an error there.
 
 ### Reflection and member queries
 
@@ -242,7 +275,8 @@ the arguments or the expected type when omitted. `impl Box<T> { ... }` names its
 
 ```ebnf
 type                 = [ "mut" ] base_type { "*" | "?" | "[" [ expression ] "]" } ;
-base_type            = primitive_type | qualified_name [ generic_args ] | "void" | "auto" | "var" | "ptr" [ "<" type ">" ] ;
+base_type            = primitive_type | qualified_name [ generic_args ] | "void" | "auto" | "var" | "ptr" [ "<" type ">" ] | fn_type ;
+fn_type              = "fn" "(" [ type { "," type } ] ")" [ "->" type ] ;    (* "fn" is a type only before "(" *)
 
 primitive_type       = integer_type | float_type | native_type | "bool" | "char" | "str" | "string" | "isize" | "usize" ;
 integer_type         = ( "i" | "u" ) DIGITS { integer_suffix } ;    (* i8..i128, u8..u128, i32w, u32n, i32nt, ... *)
@@ -256,6 +290,8 @@ overflow_suffix      = "w" | "t" | "c" | "s" ;
   `unsafe`), `T?` is `optional<T>` (`T*?` uses the pointer niche), `T[]` is `arr<T>`, `i8[n]` is a stack array.
 - Overflow suffix: `w` wrapped (default, C-style), `t` trapped (panic), `c` checked (throws `Overflow`), `s` saturating.
   `n` marks a non-zero type (`i32n` cannot hold 0), combinable in either order (`i32nw`).
+- `fn(A, B) -> R` is a closure type (no `->` means `void`, at most 8 parameters): a `{ code, environment }` value that
+  moves, never copies, and frees its environment when disposed. A function name converts to it without allocating.
 - `isize` / `usize` are always 32 bits; `nint` has the target pointer width. `char` is a 32-bit Unicode scalar value.
   `str` is a trivial view `{ data, length }`, `string` an owned heap text.
 
@@ -322,7 +358,7 @@ postfix              = primary { "." IDENTIFIER [ generic_args ] | "?." IDENTIFI
 
 primary              = INTEGER_LITERAL | FLOAT_LITERAL | STRING_LITERAL | INTERP_STRING | CHAR_LITERAL | "true" | "false" | "null"
                      | IDENTIFIER | "this" | "(" expression ")" | array_literal | brace_initializer | new_expression
-                     | type_expression | switch_expression | intrinsic_call | local_decl_expr ;
+                     | type_expression | switch_expression | intrinsic_call | local_decl_expr | lambda ;
 
 array_literal        = "[" [ expression { "," expression } ] "]" ;
 brace_initializer    = [ type ] "{" [ init_element { "," init_element } ] "}" ;
@@ -331,12 +367,19 @@ new_expression       = "new" type [ "(" [ arg_list ] ")" | brace_initializer ] ;
 type_expression      = IDENTIFIER [ generic_args ] "::" IDENTIFIER [ "(" [ arg_list ] ")" ] ;
 intrinsic_call       = ( "sizeof" | "alignof" | "typeof" | "likely" | "unlikely" | "expect" | "prefetch" | "bounds_check" ) "(" arg_list ")" ;
 arg_list             = argument { "," argument } ;
+lambda               = "(" [ lambda_param { "," lambda_param } ] ")" "=>" ( expression | block ) ;
+lambda_param         = [ "mut" ] [ type ] IDENTIFIER ;
 argument             = [ IDENTIFIER ":" ] expression ;
 ```
 
 - `p?.m` yields a nullable pointer (null when `p` is null); `p!.m` unwraps (error on a value that is not nullable); `a ?? b`
   falls back when `a` is null; `a ??= b` assigns when null.
 - `&function` is the address of a plain, non-generic function as `ptr`.
+- `(a, b) => a + b` and `(i32 v) => { ... }` are lambdas. Untyped parameters take their types from the expected `fn`
+  type; the return type comes from it or from the body. Locals used inside are captured: copied when trivial, moved when
+  they are values (the variable is then moved), and read-only inside the lambda (E3064). A captured value cannot be moved
+  out of the lambda (E3065), and an untyped parameter with no expected type is E3066. `await` inside a lambda is not
+  supported yet. A value of a `fn` type is called like a function: `f(x)`, `this.on_click(id)`.
 - `expr is T` / `expr is T name` tests a boxed `object` and optionally binds the unboxed value; `expr is Enum::Variant a b`
   tests a union value and binds the payload.
 - `sync` is a contextual modifier (a method may still be called `sync`); `await` is an error inside a `sync` function. `task.sync` blocks the calling thread until the task completes (C# `GetAwaiter().GetResult()`) and warns (E6005) inside async functions. `await task` suspends in async functions and runs the event loop in the others; `spawn task;` schedules a task.

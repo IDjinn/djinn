@@ -110,7 +110,7 @@ Evidência em `arquivo:linha`; caminhos do C++ na raiz do repositório, do djinn
 | Campos em `impl` | 3252 | rejeitado (`semantic/analyzer/semantic_analyzer_impls.djinn:86`) |
 | Posição do `where` em método | 440, antes de `(` | depois de `)` (`parser_declarations.djinn:396`); incompatível |
 
-Sem diferença no lexer: todo token e palavra-chave do C++ existe em `lexer/token_kind.djinn`. Alguns (`?.`, `!.`, `??=`, `yield`, `require`, `ensure`) existem como token, mas o parser do djinnc nunca os usa. Closures e lambdas não existem em nenhum dos dois; `private` não é imposto por nenhum; defaults genéricos (`GRAMMAR.md:240`) não são parseados por nenhum.
+Sem diferença no lexer: todo token e palavra-chave do C++ existe em `lexer/token_kind.djinn`. Alguns (`?.`, `!.`, `??=`, `yield`, `require`, `ensure`) existem como token, mas o parser do djinnc nunca os usa. Closures e lambdas não existiam em nenhum dos dois (o djinnc ganhou closures depois; o próprio compilador só pode usá-las quando um seed publicado as suportar); `private` não é imposto por nenhum; defaults genéricos (`GRAMMAR.md:240`) não são parseados por nenhum.
 
 ### Tipos e intrinsics
 

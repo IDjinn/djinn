@@ -8,6 +8,9 @@ struct TokenList {
     ptr<u32> atoms;
     i32 length;
     i32 capacity;
+    i32 synthetic_base;
+    IdList* origins;
+    IdList* sites;
 
     public static unsafe TokenList* create(i32 capacity) {
         Arena* arena = Memory.arena();
@@ -24,6 +27,10 @@ struct TokenList {
         return (TokenList*)all_tokens;
     }
 
+    public static unsafe void restore(TokenList* list) {
+        all_tokens = (ptr)list;
+    }
+
     public unsafe void push(TokenKind kind, u32 start, u32 atom) {
         if (this.length == this.capacity) {
             this.grow();
@@ -32,6 +39,44 @@ struct TokenList {
         this.starts[this.length] = start;
         this.atoms[this.length] = atom;
         this.length = this.length + 1;
+    }
+
+    // Macro expansions append tokens after every lexed file. Each one keeps the token it was copied from (for its line and
+    // file) and the token of the call that produced it (to decide whether it belongs to a library interface).
+    public unsafe i32 push_synthetic(TokenKind kind, u32 raw_atom, i32 origin, i32 site) {
+        if (this.origins == null) {
+            this.synthetic_base = this.length;
+            this.origins = IdList.create();
+            this.sites = IdList.create();
+        }
+        i32 located = this.located(origin);
+        IdList* origins = this.origins;
+        IdList* sites = this.sites;
+        origins.push((u32)located);
+        sites.push((u32)this.site_of(site));
+        i32 index = this.length;
+        this.push(kind, this.starts[located], raw_atom);
+        return index;
+    }
+
+    public bool is_synthetic(i32 index) {
+        return this.origins != null && index >= this.synthetic_base;
+    }
+
+    public unsafe i32 located(i32 index) {
+        if (!this.is_synthetic(index)) {
+            return index;
+        }
+        IdList* origins = this.origins;
+        return (i32)origins.get(index - this.synthetic_base);
+    }
+
+    public unsafe i32 site_of(i32 index) {
+        if (!this.is_synthetic(index)) {
+            return index;
+        }
+        IdList* sites = this.sites;
+        return (i32)sites.get(index - this.synthetic_base);
     }
 
     public unsafe TokenKind kind(i32 index) {

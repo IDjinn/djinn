@@ -30,7 +30,7 @@ that history.
 - `if / else if / else`, `while`, `do-while`, `for`, `break`, `continue`, `return`
 - `switch (integer) { case <const>: ... default: ... }` as a statement: no fallthrough, `break` leaves the switch, `continue` targets the enclosing loop
 - `enum Name { A, B = 5, C }` (variants without a payload need no `()`, neither when declared nor when used: `Name::A`) and tagged enums `union Msg { Empty(), Number(i32), Pair(i32, i32) }`: `Msg::Pair(1, 2)` builds a value, payload-less enums are `i32` tags with `==`, `!=` and `case Name::A():`. `switch value { Empty -> 1, Number n -> n, Pair a b -> a * b }` is an expression and must cover every variant. A payload can be any type: the enum is a tag plus an inline byte area sized to the largest variant, and a type that contains itself by value (not through a pointer) is an error.
-- `interface Name { Type field; Ret method(params); }`, `struct X : interface Name` (or `struct X : Name`), `impl X { methods }` and `impl Name for X { methods }`: conformance (fields and method signatures) is checked at compile time; there is no interface-typed value or dynamic dispatch, no generic interface, and `impl` takes a single struct, enum or primitive target (`impl Hashable for u64 { u64 hash() { ... } }`; `this` is the primitive value and `x.hash()` works on any primitive receiver and as a `where K : Hashable` bound). `impl A, B for X` lists several interfaces, `impl Hashable for u8, u16, i32 { ... }` repeats the body for each type, and `impl` on an enum adds methods whose `this` is the enum value (e.g. `switch this { ... }`).
+- `interface Name { Type field; Ret method(params); }`, `struct X : interface Name` (or `struct X : Name`), `impl X { methods }` and `impl Name for X { methods }`: conformance (fields and method signatures) is checked at compile time; there is no interface-typed value or dynamic dispatch; generic interfaces (`interface Comparable<T>`) bind their parameters on conformance, defaulting to the implementing type when no arguments are given; and `impl` takes a single struct, enum or primitive target (`impl Hashable for u64 { u64 hash() { ... } }`; `this` is the primitive value and `x.hash()` works on any primitive receiver and as a `where K : Hashable` bound). `impl A, B for X` lists several interfaces, `impl Hashable for u8, u16, i32 { ... }` repeats the body for each type, and `impl` on an enum adds methods whose `this` is the enum value (e.g. `switch this { ... }`).
 - assignment to locals, fields and indexed pointers
 
 ## Expressions
@@ -52,7 +52,7 @@ that history.
 
 ## Forbidden
 
-`ensure`/`require` contracts and closures.
+`ensure`/`require` contracts.
 
 ## Errors
 
@@ -70,7 +70,7 @@ A tagged enum with exactly two variants, one without payload and one with a sing
 - `where T : A, B; where U : C` constrains type parameters; a struct or enum type argument must satisfy the interfaces, checked at instantiation. A generic type can also list interfaces (`struct X<T> where T : I : J`).
 - `optional<i32>::Value(1)` builds a generic enum value; the type arguments can be left out when the expected type (`return result::Err(e)` in a `result<i32, E>` function) or the payload arguments (`optional::Some(7)`) determine them; struct initializers and `switch` work on instances.
 - Generic interfaces: `interface Comparable<T> { i32 compare(T other); }`, used as `struct P : Comparable<P>` or in bounds (`where T : Comparable<T>`); interfaces can declare `operator` members.
-- Generic functions: `T larger<T>(T a, T b) where T : Comparable<T> { ... }`; type arguments are inferred from the arguments (including `Pair<K, V>` and `T*` parameters) or given explicitly, as in `first<i64>(1, 2)`.
+- Generic functions: `T larger<T>(T a, T b) where T : Comparable<T> { ... }`; type arguments are inferred from the arguments (including `Pair<K, V>` and `T*` parameters) or given explicitly, as in `first<i64>(1, 2)`; a string literal passed where a bare type parameter is expected infers `str`.
 - `impl Box<T> { ... }` and `impl Iface for Box<T> { ... }` add methods and interfaces to every instance; the impl names the type parameters itself.
 - Generic methods: `T pick<U>(U marker, T other)` in a struct or impl, and `public static T twice<T>(T item)`; inferred from the arguments or explicit (`holder.convert<i64>(30)`).
 - A generic constraint made only of operator members (`Equatable<T>`, `Addition<T>`) is satisfied by numbers and pointers, which have those operators natively.
@@ -157,6 +157,8 @@ An unknown name is an error; a wrong target is a warning.
 attributes are valid everywhere); the form with fields also defines a struct `Name`. `[attribute(...)] struct XAttribute {...}` declares `X`
 and `XAttribute`. `[intrinsic]` and `[no_mangle]` structs are parsed and dropped (the core provides `task<T>` and the coroutine primitives).
 
+`[Platform(windows, web)]` (also the groups `desktop`, `mobile`, `native`) keeps a top-level declaration or a struct member only on those targets; the parser drops it otherwise (`Parser.platform_excluded`, `Target.platform_rank`). Files named `name.<platform>.djinn` replace `name.djinn` for the target, most specific first (`Project.select_platform_files`, applied to the inputs, the std sources and the core). An unknown platform word is an error.
+
 A parameter marked `[Location]` whose type is a struct with `fileName`, `line` and `column` is filled by the compiler with the call site
 when the call omits it (only the last parameter, no overloads).
 
@@ -184,11 +186,7 @@ Only a declaration initialized directly with `&x` is tracked: borrows passed to 
 checked, and there is no flow analysis (a borrow lives for the whole scope of its pointer). `return &local;` is an error.
 
 ## Macros
-`macro name { (params) => { expression } ... }`, called as `name(args)` or `name!(args)`; `macro name! { ... }` is a separate macro that is only called with the `!`, so it neither shadows a function nor merges with a `macro name`. Parameters are `expression x`, `identifier x`, `literal x`, `type T` or a bare literal token
-(`add`, `debug`, ...); `local` (on a parameter or before the parameter list) evaluates the argument once. `=> void` expands to `0`.
-Rules are chosen by arity and fragment kind, in order. Expansion happens in the parser by AST substitution, so precedence is preserved,
-a macro must be declared before it is used, and `type` parameters cannot be referenced from the body. Using a non-`local` expression
-parameter more than once warns.
+`macro name { (params) => { tokens } ... }`, called as `name!(args)`, `name![args]`, `name!{args}` or, without the `!` in the declaration, `name(args)`; `macro name! { ... }` is a separate macro that is only called with the `!`. Parameters are `expression x`, `identifier x`, `literal x`, `type T`, `block b`, `statement s`, `tokens t` (one token or one delimited group), a variadic `expression... xs` (last only, expanded with `$for(x in xs[, sep]) { ... }`) or a bare literal token (`add`, `debug`, ...); `local` evaluates the argument once. `=> void` expands to `0`. The body is a token template (`parser/parser_macros.djinn`): every macro is collected before parsing (`Parser.collect_macros`), a call matches the first rule whose fragments parse from its arguments (quietly, with backtracking), and the substituted tokens are appended to the token list as synthetic tokens that remember their origin (for line and file) and their call site (for the library interface), then parsed in place as an expression, statements or declarations depending on the call site. Multi-token expression arguments are parenthesized; locals the template declares are renamed (hygiene); statements join the enclosing block. Macros are namespaced (visible from their namespace, imported namespaces, or `ns::name!`). Using a non-`local` expression parameter more than once warns (W6001); a function named like a visible non-`!` macro warns (W6006). Procedural macros: `proc macro name => handler;` and `proc attribute Name => handler;` in a library generate an exported entry `__djinn_proc_<name>` / `__djinn_procattr_<Name>` through `std::meta::proc_macro_entry!` (`parser/parser_proc_macros.djinn`). A consumer collects them from the library interface; a call encodes its tokens as `class,span,joint,length:text` records, `ProcMacros` (`driver/proc_macros.djinn`) runs the entry from the library object in an ORC JIT (with the runtime, the C runtime and stubs for the coroutine wrappers), and each returned record is lexed back into one synthetic token. `std::meta` types are `constexpr struct`s, so their code is emitted (linkonce) into the macro library. Not yet: macros in struct bodies, running procedural macros while cross-compiling, and an ahead-of-time (DLL) runner.
 
 ## constexpr and consteval
 `constexpr T NAME = expr;` (global or local), `constexpr`/`consteval` functions and compile-time `if` (`if constexpr cond { }`, `if consteval cond { }` or
@@ -270,6 +268,14 @@ keeps the block for diagnostics but injects nothing. A target that is not declar
 - `$"..."` interpolates `{x}` (`{{` and `}}` are literal braces). With `n` dollar signs, `n` braces delimit the interpolation and fewer braces are literal:
   `$$"{x} is {{x}}"`. `$"""..."""` and `$$"""..."""` are multi-line forms without escapes.
 - `&function` (a plain, non-generic, non-overloaded function) is its address as `ptr`.
+- Closures: `fn(A, B) -> R` types and `(a, b) => expr` / `(i32 a) => { ... }` lambdas. A `fn` type is an instance of a core
+  template (`runtime/core/closures.djinn`, `__closure0` to `__closure8`) holding `{ code, env }`; it is a Value (moves) and
+  frees the environment with `__djinn_closure_drop`. The lambda is checked in place (a scope barrier records the locals it
+  captures, `semantic/checker/type_checker_closures.djinn`) and emitted as its own function `<outer>$lambda<N>` whose first
+  parameter is the environment `{ drop, captures... }` (`codegen/code_generator_closures.djinn`). Captures are copied
+  (trivial) or moved (values), read-only inside (E3064), cannot be moved out (E3065); untyped parameters need an expected
+  `fn` type (E3066). A lambda without captures allocates nothing; a function name converts through a `$fn` thunk. Not
+  supported yet: `await` or `throws` inside a lambda, generic lambdas, and copying a `fn` value. A lambda passed to an overloaded call is checked once per candidate; only the instance the generated code creates is emitted (`define_pending_lambdas`), and lambdas are not listed as methods by reflection. A function from a `.djlib` owns its `Value` parameters like any Djinn function (only `extern "C"` functions borrow them).
 - Hooks (`std::system`): `System.hook(HookKind.PANIC, &handler)` installs `void handler(i8* message, i8* file, u32 line)`, which runs instead of the
   default panic report and then the process aborts; it returns the previous handler. `System.unhook(kind)` removes it, and
   `System.print_default_panic_report` prints the standard report from inside a handler. The macro `hook(panic, handler)` is the short form.

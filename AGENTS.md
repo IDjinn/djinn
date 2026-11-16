@@ -19,15 +19,22 @@ detailed one), `djinnc/USAGE.md` (options), `djinnc/LIBRARY.md`, `examples/`.
 - **Declarations**: structs (methods, properties, static methods, brace init), `enum`/`union` as tagged unions with
   payloads, interfaces + `impl`, generics with `where` constraints (monomorphized), namespaces/`import`, type aliases,
   `extern "C"` blocks for FFI.
+- **Closures**: `fn(A, B) -> R` types and `(a, b) => expr` lambdas (captures copied or moved, read-only inside; a `fn`
+  value moves and frees its environment). See `semantic/checker/type_checker_closures.djinn` and
+  `codegen/code_generator_closures.djinn`.
 - **Expressions**: `$"interpolation {x:6}"`, `is` pattern matching (`obj is i32 v`), range-for (`for (i32 i in 0..10)`),
   `switch`, `auto { x, y } = expr;` destructuring, `likely`/`unlikely`/`sizeof`/`typeof`/`prefetch` intrinsics.
 - **Errors are values**: `result<T, E>`, `optional<T>` and error propagation; there are no real exceptions. Runtime panics
   are `R<code>` errors from `djinnc/src/support/source/runtime_errors.djinn`.
 - **Mutability**: immutable by default, `mut` opts in. Pointer ops need `unsafe`.
+- **Platform code**: `[Platform(windows, web, desktop, mobile, native, ...)]` drops a declaration on other targets, and
+  `name.<platform>.djinn` files replace `name.djinn` (`driver/project.djinn`, `Target.platform_rank`).
 - **Attributes**: `[Name(args)]`, mapped to LLVM function/parameter attributes (`ForceInline`, `Hot`, `Cold`, `Pure`,
   `Restrict`, `Align`, `Unroll`, `Vectorize`, `Export`, ...). Unknown name is an error. `attribute X(targets);` declares new ones.
-- **Macros**: hygienic, multi-rule, pattern matched (`expression`/`identifier`/`literal`/`type`/`block` fragments, `local`
-  for single evaluation).
+- **Macros**: token templates expanded and re-parsed (`parser/parser_macros.djinn`), multi-rule, pattern matched
+  (`expression`/`identifier`/`literal`/`type`/`block`/`statement`/`tokens` fragments, variadic `expression... xs` with
+  `$for`, `local` for single evaluation), hygienic template locals, `name!(...)`/`name![...]`/`name!{...}`, namespaced
+  (visible from their namespace and importers), collected before parsing so order does not matter.
 
 ### Ownership and borrow checker
 
@@ -156,7 +163,7 @@ reflection, no registration. Source is inline (`Verify.source(src).runs(Expected
 - `driver/` holds options, project (`djinn.proj`), library (`.djlib`), linker, JIT, tiering, watch mode.
 - `runtime/`: C runtime (scheduler, threads, coroutines, io, sockets, filesystem, diagnostics, int128). `--runtime-lib`
   links the prebuilt one instead of compiling the sources each time.
-- `libs/testing`: the Djinn test framework (`[Test]`, producers, `--bench`, `--junit`, workflows). `djinn-lsp/`: language
+- `libs/testing`: the Djinn test framework (`[Test]`, producers, `--bench`, `--junit`, workflows). `libs/ui` + `libs/ui_macros`: the UI library (signals, `html!`, render modes, HTML writer, CSS engine, default responsive theme, flex/grid layout; see `libs/ui/README.md`, tested by `tests/djinnc/ui.sh` with `examples/ui-showcase`). `djinn-lsp/`: language
   server. `tools/`: bootstrap, runtime/std builders, Compiler Explorer, VS Code extension.
 - `docs/`: git submodule (Fumadocs site).
 - CI (`.github/workflows/ci.yml`) runs bootstrap, conformance and unit tests on Linux and Windows with `DJINN_USE_LLD=1`.
@@ -177,7 +184,7 @@ Files in `std/` (namespaces `std::<folder>`; consumed as `std.djlib`, built by `
   `map` take an optional `allocator`
 - `memory/` — `arena` (bump allocator with `mark`/`reset_to`/`reset`, blocks from `__djinn_alloc`), `pool`, `allocator`
   (heap, arena or pool handle), `owner<T>`, `shared<T>` (atomic refcount)
-- `text/` — `string_builder`, `Text` (join, number to text, utf-8), `Numbers`, `Chars`, `str`/`string` methods (`split`,
+- `text/` — `string_builder`, `Text` (join, number to text, utf-8), `Utf8` (strict RFC 3629 validation and sanitizing: no overlong forms, surrogates or bytes past U+10FFFF), `Numbers`, `Chars`, `str`/`string` methods (`split`,
   `replace`, `repeat`, `toUpper`, `parseI64`, `utf8At`, ...), `interner`/`symbol` (scoped or `interner.shared`)
 - `encoding/` — `byte_buffer`, `Hex`, `Base64`; `hashing/` — `Hash` (FNV-1a, xxHash64, SHA-256)
 - `format/` — `csv_reader`/`csv_writer`, `toml_reader` (streaming)
@@ -186,5 +193,6 @@ Files in `std/` (namespaces `std::<folder>`; consumed as `std.djlib`, built by `
 - `sys/` — `console`, `io`, `debug` (assertions), `libc` (FFI: malloc, free, printf, memcpy, ...), `atomic`, `intrinsics`,
   `math`/`math_native` (`Math.sqrt`, ... foldable at compile time), `process`, `system` (panic hooks), `task`, `logger`,
   `spectre` (terminal UI: tables, trees, spinners)
+- `meta/tokens.djinn` — `Token`, `TokenStream`, `TokenClass` for procedural macros (`proc macro` / `proc attribute`)
 - `net/socket.djinn` — async sockets; `util/` — `json` (document reader over the runtime parser), `version`
 - `builtin/coro.djinn` — coroutine utilities

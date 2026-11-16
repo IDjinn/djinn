@@ -1,0 +1,120 @@
+import std::types;
+import std::libc;
+import spirv;
+
+namespace vulkan;
+
+// SPIR-V of the UI pipeline, assembled by the spirv!{} macro at compile time (no shader compiler is needed).
+//
+//   vertex   in: vec2 position (px), vec2 uv, vec4 color    push constant: vec2 viewport (px)
+//            gl_Position = (position / viewport * 2 - 1, 0, 1)      (Vulkan clip space: +y is down, like the tree)
+//   fragment out = vec4(color.rgb, color.a * texture(atlas, uv).r)  (the atlas is one 8-bit coverage image)
+struct Shaders {
+    public static unsafe Words vertex() {
+        return spirv!{
+            Capability Shader;
+            MemoryModel Logical GLSL450;
+            EntryPoint Vertex %main "main" %in_pos %in_uv %in_color %out_uv %out_color %out_position;
+            Decorate %out_position BuiltIn Position;
+            Decorate %in_pos Location 0;
+            Decorate %in_uv Location 1;
+            Decorate %in_color Location 2;
+            Decorate %out_uv Location 0;
+            Decorate %out_color Location 1;
+            Decorate %block Block;
+            MemberDecorate %block 0 Offset 0;
+            %void = TypeVoid;
+            %fn = TypeFunction %void;
+            %float = TypeFloat 32;
+            %v2 = TypeVector %float 2;
+            %v4 = TypeVector %float 4;
+            %int = TypeInt 32 1;
+            %zero_int = Constant %int 0;
+            %block = TypeStruct %v2;
+            %push_pointer = TypePointer PushConstant %block;
+            %push = Variable %push_pointer PushConstant;
+            %push_v2 = TypePointer PushConstant %v2;
+            %in_v2 = TypePointer Input %v2;
+            %in_v4 = TypePointer Input %v4;
+            %out_v2 = TypePointer Output %v2;
+            %out_v4 = TypePointer Output %v4;
+            %in_pos = Variable %in_v2 Input;
+            %in_uv = Variable %in_v2 Input;
+            %in_color = Variable %in_v4 Input;
+            %out_uv = Variable %out_v2 Output;
+            %out_color = Variable %out_v4 Output;
+            %out_position = Variable %out_v4 Output;
+            %two = Constant %float 2.0;
+            %one = Constant %float 1.0;
+            %nil = Constant %float 0.0;
+            %main = Function %void None %fn;
+            %entry = Label;
+            %pos = Load %v2 %in_pos;
+            %uv = Load %v2 %in_uv;
+            Store %out_uv %uv;
+            %color = Load %v4 %in_color;
+            Store %out_color %color;
+            %chain = AccessChain %push_v2 %push %zero_int;
+            %size = Load %v2 %chain;
+            %px = CompositeExtract %float %pos 0;
+            %sx = CompositeExtract %float %size 0;
+            %dx = FDiv %float %px %sx;
+            %x2 = FMul %float %dx %two;
+            %nx = FSub %float %x2 %one;
+            %py = CompositeExtract %float %pos 1;
+            %sy = CompositeExtract %float %size 1;
+            %dy = FDiv %float %py %sy;
+            %y2 = FMul %float %dy %two;
+            %ny = FSub %float %y2 %one;
+            %clip = CompositeConstruct %v4 %nx %ny %nil %one;
+            Store %out_position %clip;
+            Return;
+            FunctionEnd;
+        };
+    }
+
+    public static unsafe Words fragment() {
+        return spirv!{
+            Capability Shader;
+            MemoryModel Logical GLSL450;
+            EntryPoint Fragment %main "main" %in_uv %in_color %out_color;
+            ExecutionMode %main OriginUpperLeft;
+            Decorate %in_uv Location 0;
+            Decorate %in_color Location 1;
+            Decorate %out_color Location 0;
+            Decorate %texture DescriptorSet 0;
+            Decorate %texture Binding 0;
+            %void = TypeVoid;
+            %fn = TypeFunction %void;
+            %float = TypeFloat 32;
+            %v2 = TypeVector %float 2;
+            %v4 = TypeVector %float 4;
+            %image = TypeImage %float Dim2D 0 0 0 1 Unknown;
+            %sampled = TypeSampledImage %image;
+            %tex_ptr = TypePointer UniformConstant %sampled;
+            %in_v2 = TypePointer Input %v2;
+            %in_v4 = TypePointer Input %v4;
+            %out_v4 = TypePointer Output %v4;
+            %texture = Variable %tex_ptr UniformConstant;
+            %in_uv = Variable %in_v2 Input;
+            %in_color = Variable %in_v4 Input;
+            %out_color = Variable %out_v4 Output;
+            %main = Function %void None %fn;
+            %entry = Label;
+            %uv = Load %v2 %in_uv;
+            %color = Load %v4 %in_color;
+            %si = Load %sampled %texture;
+            %texel = ImageSampleImplicitLod %v4 %si %uv;
+            %coverage = CompositeExtract %float %texel 0;
+            %alpha = CompositeExtract %float %color 3;
+            %scaled = FMul %float %alpha %coverage;
+            %r = CompositeExtract %float %color 0;
+            %g = CompositeExtract %float %color 1;
+            %b = CompositeExtract %float %color 2;
+            %result = CompositeConstruct %v4 %r %g %b %scaled;
+            Store %out_color %result;
+            Return;
+            FunctionEnd;
+        };
+    }
+}

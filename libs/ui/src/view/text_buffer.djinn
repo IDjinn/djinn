@@ -1,0 +1,141 @@
+import std::types;
+import std::libc;
+import std::text;
+
+namespace ui;
+
+// Growable bytes that always end in a NUL, so the text can be handed to C or compared as i8*.
+struct TextBuffer {
+    mut i8* data;
+    mut u32 length;
+    mut u32 capacity;
+
+    public static unsafe TextBuffer create() {
+        TextBuffer buffer = { .data = (i8*)0, .length = 0, .capacity = 0 };
+        buffer.reserve(32);
+        return buffer;
+    }
+
+    public unsafe void reserve(u32 extra) {
+        u32 needed = this.length + extra + 1;
+        if (needed <= this.capacity) {
+            return;
+        }
+        mut u32 grown = this.capacity * 2;
+        if (grown < needed) {
+            grown = needed;
+        }
+        this.data = (i8*)__djinn_realloc((void*)this.data, (size_long)grown);
+        this.capacity = grown;
+        this.data[this.length] = 0;
+    }
+
+    public unsafe void append_bytes(i8* bytes, u32 count) {
+        this.reserve(count);
+        memcpy((void*)(this.data + this.length), (void*)bytes, (size_long)count);
+        this.length = this.length + count;
+        this.data[this.length] = 0;
+    }
+
+    public unsafe void append(str text) {
+        this.append_bytes(text.data, (u32)text.length);
+    }
+
+    public unsafe void append_byte(i8 value) {
+        this.reserve(1);
+        this.data[this.length] = value;
+        this.length = this.length + 1;
+        this.data[this.length] = 0;
+    }
+
+    public unsafe void append_number(i64 value) {
+        mut u64 rest = (u64)value;
+        if (value < 0) {
+            this.append_byte(45);
+            rest = (u64)(0 - (value + 1)) + 1;
+        }
+        mut u64 divisor = 1;
+        while (rest / divisor >= 10) {
+            divisor = divisor * 10;
+        }
+        while (divisor > 0) {
+            this.append_byte((i8)(48 + (rest / divisor) % 10));
+            divisor = divisor / 10;
+        }
+    }
+
+    public unsafe void append_replacement() {
+        this.append("�");
+    }
+
+    // C0 controls other than tab, line feed and carriage return, and DEL (C1 controls are handled as UTF-8 above).
+    public static bool is_control(i8 c) {
+        return (c >= 1 && c <= 8) || c == 11 || c == 12 || (c >= 14 && c <= 31) || c == 127;
+    }
+
+    // Text made safe for HTML. '&', '<' and '>' are always escaped; with 'quote' (attribute values) also '"', '\''
+    // and '`'. Malformed UTF-8 (overlong forms, UTF-16 surrogates, bytes past U+10FFFF, truncated sequences), NUL and
+    // control characters become U+FFFD, so no byte sequence can be read as markup by a lenient decoder.
+    public unsafe void append_escaped(i8* bytes, u32 count, bool quote) {
+        mut u32 i = 0;
+        while (i < count) {
+            u32 length = (u32)Utf8.sequence_length(bytes, (size)count, (size)i);
+            if (length == 0) {
+                this.append_replacement();
+                i = i + 1;
+                continue;
+            }
+            if (length > 1) {
+                if (length == 2 && (u8)bytes[i] == 194 && (u8)bytes[i + 1] < 160) {
+                    this.append_replacement();
+                } else {
+                    this.append_bytes(bytes + i, length);
+                }
+                i = i + length;
+                continue;
+            }
+            i8 c = bytes[i];
+            if (c == 0 || TextBuffer.is_control(c)) {
+                this.append_replacement();
+            } else if (c == 38) {
+                this.append("&amp;");
+            } else if (c == 60) {
+                this.append("&lt;");
+            } else if (c == 62) {
+                this.append("&gt;");
+            } else if (quote && c == 34) {
+                this.append("&quot;");
+            } else if (quote && c == 39) {
+                this.append("&#39;");
+            } else if (quote && c == 96) {
+                this.append("&#96;");
+            } else {
+                this.append_byte(c);
+            }
+            i = i + 1;
+        }
+    }
+
+    public unsafe str view() {
+        str text = { .data = this.data, .length = (size)this.length };
+        return text;
+    }
+
+    public void clear() {
+        unsafe {
+            this.length = 0;
+            if (this.data != (i8*)0) {
+                this.data[0] = 0;
+            }
+        }
+    }
+
+    public unsafe void release() {
+        if (this.data != (i8*)0) {
+            __djinn_free((void*)this.data);
+        }
+        this.data = (i8*)0;
+        this.length = 0;
+        this.capacity = 0;
+    }
+}

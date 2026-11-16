@@ -1,0 +1,142 @@
+import std::types;
+import std::libc;
+
+namespace ui;
+
+// The rules the HTML writer applies so that no value (from a signal, a prop, the network) can become markup or code:
+// names are checked, listeners are never written as attributes, and URLs that would run script are replaced.
+struct HtmlSafety {
+    public const str BLOCKED_URL = "about:invalid#blocked";
+
+    static bool is_letter(i8 c) {
+        return (c >= 65 && c <= 90) || (c >= 97 && c <= 122);
+    }
+
+    static bool is_digit(i8 c) {
+        return c >= 48 && c <= 57;
+    }
+
+    static i8 lower(i8 c) {
+        if (c >= 65 && c <= 90) {
+            return c + 32;
+        }
+        return c;
+    }
+
+    // A tag name: a letter, then letters, digits or '-' (custom elements).
+    public static unsafe bool is_tag_name(str name) {
+        if (name.length == 0 || !HtmlSafety.is_letter(name.data[0])) {
+            return false;
+        }
+        for (mut u32 i = 1; i < (u32)name.length; i = i + 1) {
+            i8 c = name.data[i];
+            if (!HtmlSafety.is_letter(c) && !HtmlSafety.is_digit(c) && c != 45) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // An attribute name: a letter, '_' or ':', then letters, digits, '-', '_', ':' or '.'.
+    public static unsafe bool is_attribute_name(str name) {
+        if (name.length == 0) {
+            return false;
+        }
+        i8 first = name.data[0];
+        if (!HtmlSafety.is_letter(first) && first != 95 && first != 58) {
+            return false;
+        }
+        for (mut u32 i = 1; i < (u32)name.length; i = i + 1) {
+            i8 c = name.data[i];
+            if (!HtmlSafety.is_letter(c) && !HtmlSafety.is_digit(c) && c != 45 && c != 95 && c != 58 && c != 46) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    static unsafe bool same_lower(str name, str wanted) {
+        if (name.length != wanted.length) {
+            return false;
+        }
+        for (mut u32 i = 0; i < (u32)name.length; i = i + 1) {
+            if (HtmlSafety.lower(name.data[i]) != wanted.data[i]) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // Attributes that would carry code or a whole document: event handlers ('on...', any case) and 'srcdoc'.
+    // Listeners are kept by the tree and attached by the host, never written as text.
+    public static unsafe bool is_forbidden(str name) {
+        if (name.length >= 2 && HtmlSafety.lower(name.data[0]) == 111 && HtmlSafety.lower(name.data[1]) == 110) {
+            return true;
+        }
+        return HtmlSafety.same_lower(name, "srcdoc");
+    }
+
+    public static unsafe bool is_url_attribute(str name) {
+        return HtmlSafety.same_lower(name, "href") || HtmlSafety.same_lower(name, "src") || HtmlSafety.same_lower(name, "action")
+            || HtmlSafety.same_lower(name, "formaction") || HtmlSafety.same_lower(name, "xlink:href") || HtmlSafety.same_lower(name, "poster")
+            || HtmlSafety.same_lower(name, "cite") || HtmlSafety.same_lower(name, "background") || HtmlSafety.same_lower(name, "data")
+            || HtmlSafety.same_lower(name, "codebase") || HtmlSafety.same_lower(name, "manifest") || HtmlSafety.same_lower(name, "ping")
+            || HtmlSafety.same_lower(name, "longdesc") || HtmlSafety.same_lower(name, "lowsrc") || HtmlSafety.same_lower(name, "dynsrc");
+    }
+
+    static unsafe bool starts_lower(TextBuffer* scheme, str prefix) {
+        if (scheme.length < (u32)prefix.length) {
+            return false;
+        }
+        return memcmp((void*)scheme.data, (void*)prefix.data, (size_long)prefix.length) == 0;
+    }
+
+    // Whether a URL is safe to write: a relative URL or one whose scheme is not 'javascript', 'vbscript' or 'data'
+    // (except raster images). The scheme is read the way browsers do: case-insensitive, ignoring ASCII whitespace and
+    // control characters, up to the first ':' that comes before any '/', '?' or '#'.
+    public static unsafe bool is_safe_url(i8* data, u32 length) {
+        mut TextBuffer scheme = TextBuffer.create();
+        mut bool has_scheme = false;
+        for (mut u32 i = 0; i < length; i = i + 1) {
+            i8 c = data[i];
+            if (c == 58) {
+                has_scheme = true;
+                break;
+            }
+            if (c == 47 || c == 63 || c == 35) {
+                break;
+            }
+            if ((u8)c <= 32 || c == 127) {
+                continue;
+            }
+            scheme.append_byte(HtmlSafety.lower(c));
+        }
+        mut bool safe = true;
+        if (has_scheme) {
+            str view = scheme.view();
+            if (HtmlSafety.same_lower(view, "javascript") || HtmlSafety.same_lower(view, "vbscript")) {
+                safe = false;
+            } else if (HtmlSafety.same_lower(view, "data")) {
+                safe = HtmlSafety.is_raster_data(data, length);
+            }
+        }
+        scheme.release();
+        return safe;
+    }
+
+    static unsafe bool is_raster_data(i8* data, u32 length) {
+        mut TextBuffer lowered = TextBuffer.create();
+        for (mut u32 i = 0; i < length && lowered.length < 32; i = i + 1) {
+            i8 c = data[i];
+            if ((u8)c <= 32 || c == 127) {
+                continue;
+            }
+            lowered.append_byte(HtmlSafety.lower(c));
+        }
+        bool raster = HtmlSafety.starts_lower(&lowered, "data:image/png") || HtmlSafety.starts_lower(&lowered, "data:image/gif")
+            || HtmlSafety.starts_lower(&lowered, "data:image/jpeg") || HtmlSafety.starts_lower(&lowered, "data:image/webp")
+            || HtmlSafety.starts_lower(&lowered, "data:image/avif");
+        lowered.release();
+        return raster;
+    }
+}

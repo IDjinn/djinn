@@ -1,0 +1,196 @@
+namespace ui;
+
+import testing;
+import std::types;
+import std::collections;
+
+// A font for the tests: every glyph advances 0.6 em, is a solid box of 0.5 em x 0.7 em that rises 0.7 em above the
+// baseline, and a line has an ascent of 0.8 em and a descent of 0.2 em. Deterministic, so pixels can be asserted.
+struct TestFont {
+    static unsafe void fill(f32 size, GlyphBitmap* out) {
+        i32 width = (i32)(size * (f32)0.5);
+        i32 height = (i32)(size * (f32)0.7);
+        out.width = width;
+        out.height = height;
+        out.bearing_x = 0;
+        out.bearing_y = height;
+        u8* pixels = (u8*)__djinn_alloc((size_long)(width * height));
+        memset((void*)pixels, 255, (size_long)(width * height));
+        out.pixels = pixels;
+    }
+
+    public static unsafe void install() {
+        FontProvider provider = {
+            .advance = (u32 code, f32 size, bool bold) => size * (f32)0.6,
+            .rasterize = (u32 code, f32 size, bool bold, GlyphBitmap* out) => {
+                TestFont.fill(size, out);
+                return true;
+            },
+            .metrics = (f32 size, bool bold, f32* ascent, f32* descent) => {
+                *ascent = size * (f32)0.8;
+                *descent = size * (f32)0.2;
+            }
+        };
+        Fonts.set_provider(provider);
+        Dom.touch();
+    }
+
+    public static unsafe void remove() {
+        Fonts.clear_provider();
+        Dom.touch();
+    }
+}
+
+// A frame of a detached tree on a white canvas.
+struct Shot {
+    public static unsafe Canvas take(Node root, u32 width, u32 height) {
+        Layout.compute(root.id, (f32)width, (f32)height);
+        mut DisplayList list = DisplayList.create();
+        Painter.paint(&list, root.id, (f32)width, (f32)height);
+        mut Canvas canvas = Canvas.create(width, height);
+        canvas.clear(0xFFFFFFFF);
+        SoftRaster.draw(&canvas, &list);
+        list.release();
+        return canvas;
+    }
+
+    public static unsafe u32 vertices(Node root, u32 width, u32 height) {
+        Layout.compute(root.id, (f32)width, (f32)height);
+        mut DisplayList list = DisplayList.create();
+        Painter.paint(&list, root.id, (f32)width, (f32)height);
+        u32 count = list.count;
+        list.release();
+        return count;
+    }
+}
+
+struct TextTests {
+    [Test]
+    unsafe void a_provider_replaces_the_placeholder_metrics() {
+        Styles.add(".t1 { font-size: 10px; line-height: 20px; width: 200px; }");
+        Node text = Node.element("div").attr("class", "t1").add("ab cd");
+        Layout.compute(text.id, (f32)800.0, (f32)600.0);
+        Expect.equal(25, Lay.px(Layout.rect(Dom.first_child(text.id)).width), "5 placeholder characters at 5px, a space included");
+        TestFont.install();
+        Layout.compute(text.id, (f32)800.0, (f32)600.0);
+        Expect.equal(30, Lay.px(Layout.rect(Dom.first_child(text.id)).width), "two words of 12px and a 6px space");
+        TestFont.remove();
+    }
+
+    [Test]
+    unsafe void lines_break_where_the_measure_says() {
+        Styles.add(".t2 { font-size: 10px; line-height: 20px; width: 20px; }");
+        TestFont.install();
+        Node text = Node.element("div").attr("class", "t2").add("ab cd ef");
+        Layout.compute(text.id, (f32)800.0, (f32)600.0);
+        u32 child = Dom.first_child(text.id);
+        mut TextLine* lines = (TextLine*)__djinn_alloc((size_long)(8 * sizeof(TextLine)));
+        u32 count = TextLines.split(child, Layout.rect(child).width, lines, 8);
+        Expect.equal(3, (i64)count, "one word per line in 20px");
+        Expect.equal(60, Lay.px(Layout.rect(text.id).height), "three 20px lines");
+        Expect.equal(12, Lay.px(lines[1].width));
+        Expect.equal(3, (i64)lines[1].start, "the second line starts at 'cd'");
+        __djinn_free((void*)lines);
+        TestFont.remove();
+    }
+
+    [Test]
+    unsafe void a_glyph_is_rasterized_into_the_atlas_once() {
+        TestFont.install();
+        Glyph* first = Fonts.glyph(65, (f32)10.0, false);
+        Expect.is_true(first != (Glyph*)0, "the glyph exists");
+        u32 version = Fonts.atlas().version;
+        Glyph* again = Fonts.glyph(65, (f32)10.0, false);
+        Expect.is_true(first == again, "the same slot");
+        Expect.equal((i64)version, (i64)Fonts.atlas().version, "nothing was uploaded again");
+        Glyph* other = Fonts.glyph(66, (f32)10.0, false);
+        Expect.is_true(other.atlas_x != first.atlas_x || other.atlas_y != first.atlas_y, "another place in the atlas");
+        Expect.is_true(Fonts.glyph(32, (f32)10.0, false) != (Glyph*)0, "the test font draws a box even for a blank");
+        TestFont.remove();
+    }
+
+    [Test]
+    unsafe void text_paints_one_quad_per_glyph() {
+        Styles.add(".t4 { font-size: 20px; line-height: 20px; color: #112233; width: 100px; }");
+        TestFont.install();
+        Node text = Node.element("div").attr("class", "t4").add("ab");
+        u32 count = Shot.vertices(text, 100, 40);
+        Expect.equal(12, (i64)count, "2 glyphs, 6 vertices each");
+        mut Canvas canvas = Shot.take(text, 100, 40);
+        // the first glyph is 10 x 14 px, its top 14 px above the baseline at 16
+        Expect.equal(0x112233FF, (i64)canvas.at(5, 10), "inside the first glyph");
+        Expect.equal(0xFFFFFFFF, (i64)canvas.at(11, 10), "between the glyphs");
+        canvas.release();
+        TestFont.remove();
+    }
+}
+
+struct PaintTests {
+    [Test]
+    unsafe void a_background_fills_its_box() {
+        Styles.add(".p1 { width: 20px; height: 10px; background: #ff0000; }");
+        Node box = Node.element("div").attr("class", "p1");
+        Expect.equal(6, (i64)Shot.vertices(box, 40, 40), "one quad");
+        mut Canvas canvas = Shot.take(box, 40, 40);
+        Expect.equal(0xFF0000FF, (i64)canvas.at(5, 5));
+        Expect.equal(0xFF0000FF, (i64)canvas.at(0, 0), "the corner pixel belongs to the box");
+        Expect.equal(0xFF0000FF, (i64)canvas.at(19, 9), "so does the last one");
+        Expect.equal(0xFFFFFFFF, (i64)canvas.at(20, 5), "the pixel after it does not");
+        Expect.equal(0xFFFFFFFF, (i64)canvas.at(5, 10));
+        canvas.release();
+    }
+
+    [Test]
+    unsafe void opacity_blends_with_what_is_behind() {
+        Styles.add(".p2 { width: 10px; height: 10px; background: #000000; opacity: 0.5; }");
+        Node box = Node.element("div").attr("class", "p2");
+        mut Canvas canvas = Shot.take(box, 20, 20);
+        u32 pixel = canvas.at(5, 5);
+        u32 red = pixel >> 24;
+        Expect.is_true(red >= 126 && red <= 129, "half way between black and white");
+        canvas.release();
+    }
+
+    [Test]
+    unsafe void a_border_is_drawn_around_the_box() {
+        Styles.add(".p3 { width: 20px; height: 20px; box-sizing: border-box; border: 2px solid #0000ff; }");
+        Node box = Node.element("div").attr("class", "p3");
+        mut Canvas canvas = Shot.take(box, 30, 30);
+        Expect.equal(0x0000FFFF, (i64)canvas.at(0, 10), "the left edge");
+        Expect.equal(0x0000FFFF, (i64)canvas.at(10, 1), "the top edge");
+        Expect.equal(0xFFFFFFFF, (i64)canvas.at(10, 10), "the inside is not painted");
+        canvas.release();
+    }
+
+    [Test]
+    unsafe void rounded_corners_leave_the_corner_empty() {
+        Styles.add(".p4 { width: 40px; height: 40px; background: #00aa00; border-radius: 12px; }");
+        Node box = Node.element("div").attr("class", "p4");
+        mut Canvas canvas = Shot.take(box, 50, 50);
+        Expect.equal(0xFFFFFFFF, (i64)canvas.at(0, 0), "the corner is cut away");
+        Expect.equal(0x00AA00FF, (i64)canvas.at(20, 20), "the middle is solid");
+        Expect.equal(0x00AA00FF, (i64)canvas.at(20, 1), "so is the straight edge");
+        canvas.release();
+    }
+
+    [Test]
+    unsafe void overflow_hidden_clips_the_children() {
+        Styles.add(".p5 { width: 20px; height: 20px; overflow: hidden; } .p5a { width: 60px; height: 60px; background: #ff00ff; }");
+        Node inner = Node.element("div").attr("class", "p5a");
+        Node box = Node.element("div").attr("class", "p5").child(inner);
+        mut Canvas canvas = Shot.take(box, 80, 80);
+        Expect.equal(0xFF00FFFF, (i64)canvas.at(10, 10), "inside the clip");
+        Expect.equal(0xFFFFFFFF, (i64)canvas.at(30, 10), "outside it");
+        Expect.equal(0xFFFFFFFF, (i64)canvas.at(10, 30));
+        canvas.release();
+    }
+
+    [Test]
+    unsafe void hidden_and_display_none_paint_nothing() {
+        Styles.add(".p6 { width: 10px; height: 10px; background: #000; } .p6h { visibility: hidden; } .p6n { display: none; }");
+        Node hidden = Node.element("div").attr("class", "p6 p6h");
+        Node gone = Node.element("div").attr("class", "p6 p6n");
+        Expect.equal(0, (i64)Shot.vertices(hidden, 20, 20));
+        Expect.equal(0, (i64)Shot.vertices(gone, 20, 20));
+    }
+}

@@ -1,0 +1,1103 @@
+import std::types;
+import std::libc;
+
+namespace ui;
+
+unsafe static mut ptr layout_engine = null;
+
+// Sizes are px. UNDEFINED marks a size the parent did not fix; available space is px, or MAX_CONTENT /
+// MIN_CONTENT when a box is measured by its content (the widest it gets without wrapping, the narrowest it gets).
+struct Space {
+    const f32 UNDEFINED = -1.0;
+    const f32 MIN_CONTENT = -2.0;
+    const f32 MAX_CONTENT = -3.0;
+}
+
+struct Size {
+    mut f32 width;
+    mut f32 height;
+
+    public static Size of(f32 width, f32 height) {
+        Size size = { .width = width, .height = height };
+        return size;
+    }
+
+    public static Size undefined() {
+        return Size.of(Space.UNDEFINED, Space.UNDEFINED);
+    }
+}
+
+struct Edges {
+    mut f32 top;
+    mut f32 right;
+    mut f32 bottom;
+    mut f32 left;
+
+    public f32 horizontal() {
+        return this.left + this.right;
+    }
+
+    public f32 vertical() {
+        return this.top + this.bottom;
+    }
+}
+
+struct Rect {
+    mut f32 x;
+    mut f32 y;
+    mut f32 width;
+    mut f32 height;
+
+    public static Rect of(f32 x, f32 y, f32 width, f32 height) {
+        Rect rect = { .x = x, .y = y, .width = width, .height = height };
+        return rect;
+    }
+}
+
+// The layout of one node. 'x'/'y' place its border box inside the border box of its parent box; 'left'/'top' are
+// absolute (from the origin of the layout root). 'content_width'/'content_height' are how far its children reach
+// (what a scroll container scrolls). Fragments and 'display: contents' have no box of their own.
+struct LayoutBox {
+    mut f32 x;
+    mut f32 y;
+    mut f32 width;
+    mut f32 height;
+    mut f32 left;
+    mut f32 top;
+    mut Edges margin;
+    mut Edges border;
+    mut Edges padding;
+    mut f32 content_width;
+    mut f32 content_height;
+    mut bool visible;
+}
+
+// What a box is asked: the border-box sizes its parent fixed, the space it has, the content-box size of its
+// containing block (what percentages resolve against), whether to place its children, and the newest change stamp
+// above it in the tree (to know when its cached results are stale).
+struct LayoutInput {
+    mut Size known;
+    mut Size available;
+    mut Size parent;
+    mut bool perform;
+    mut u32 above;
+
+    public static LayoutInput of(Size known, Size available, Size parent, bool perform, u32 above) {
+        LayoutInput input = { .known = known, .available = available, .parent = parent, .perform = perform, .above = above };
+        return input;
+    }
+}
+
+// One cached result: the inputs it answers and the border-box size.
+struct LayoutKey {
+    mut f32 known_width;
+    mut f32 known_height;
+    mut f32 available_width;
+    mut f32 available_height;
+    mut f32 parent_width;
+    mut f32 parent_height;
+    mut f32 width;
+    mut f32 height;
+}
+
+struct LayoutNode {
+    mut LayoutBox box;
+    mut u32 epoch;
+    mut u32 stamp;
+    mut u32 used;
+    mut u32 slot;
+    mut bool has_performed;
+    mut LayoutKey performed;
+}
+
+struct TextMeasurer {
+    fn(u32, f32) -> Size run;
+}
+
+struct LayoutEngine {
+    mut LayoutNode* nodes;
+    mut LayoutKey* keys;
+    mut u32 capacity;
+    mut u32 runs;
+    mut bool custom_text;
+    mut TextMeasurer measurer;
+    mut u32 root;
+    mut f32 root_width;
+    mut f32 root_height;
+    mut u32 root_epoch;
+    mut u32 root_stamp;
+}
+
+// The used box model of an element against its containing block: margins (auto ones are 0 and flagged), border
+// and padding, and the border-box width/height from the style with their min/max limits (UNDEFINED when auto or
+// none; a minimum is never below padding + border).
+struct BoxSizes {
+    mut Edges margin;
+    mut Edges border;
+    mut Edges padding;
+    mut bool auto_top;
+    mut bool auto_right;
+    mut bool auto_bottom;
+    mut bool auto_left;
+    mut Size size;
+    mut Size min;
+    mut Size max;
+    mut bool auto_min_width;
+    mut bool auto_min_height;
+    mut f32 aspect;
+}
+
+struct Px {
+    [ForceInline] public static bool defined(f32 value) {
+        return value >= (f32)0.0;
+    }
+
+    [ForceInline] public static f32 max(f32 a, f32 b) {
+        if (a > b) {
+            return a;
+        }
+        return b;
+    }
+
+    [ForceInline] public static f32 min(f32 a, f32 b) {
+        if (a < b) {
+            return a;
+        }
+        return b;
+    }
+
+    // 'value' kept between 'low' and 'high' (UNDEFINED: no upper limit); the minimum wins, as in CSS.
+    public static f32 clamp(f32 value, f32 low, f32 high) {
+        mut f32 result = value;
+        if (Px.defined(high) && result > high) {
+            result = high;
+        }
+        if (result < low) {
+            result = low;
+        }
+        return result;
+    }
+
+    // A size: px, or a percentage of 'basis' when that is definite; UNDEFINED for auto, none and % of indefinite.
+    public static f32 size(Length length, f32 basis) {
+        if (length.unit == Unit.PX) {
+            return Px.max(length.value, (f32)0.0);
+        }
+        if (length.unit == Unit.PERCENT && Px.defined(basis)) {
+            return Px.max(basis * length.value / (f32)100.0, (f32)0.0);
+        }
+        return Space.UNDEFINED;
+    }
+
+    public static bool is_definite(Length length, f32 basis) {
+        return length.unit == Unit.PX || (length.unit == Unit.PERCENT && Px.defined(basis));
+    }
+
+    // A margin or inset, which may be negative: 0 when auto or not resolvable.
+    public static f32 offset(Length length, f32 basis) {
+        if (length.unit == Unit.PX) {
+            return length.value;
+        }
+        if (length.unit == Unit.PERCENT && Px.defined(basis)) {
+            return basis * length.value / (f32)100.0;
+        }
+        return (f32)0.0;
+    }
+
+    // Adjoining vertical margins collapse into the largest positive and the most negative one.
+    public static f32 collapse(f32 a, f32 b) {
+        if (a >= (f32)0.0 && b >= (f32)0.0) {
+            return Px.max(a, b);
+        }
+        if (a < (f32)0.0 && b < (f32)0.0) {
+            return Px.min(a, b);
+        }
+        return a + b;
+    }
+
+    // Offset of the first item and extra space between items for justify-content / align-content.
+    public static f32 lead(u8 mode, f32 free, u32 count) {
+        if (free < (f32)0.0) {
+            if (mode == Keyword.CENTER || mode == Keyword.AROUND || mode == Keyword.EVENLY) {
+                return free / (f32)2.0;
+            }
+            if (mode == Keyword.END || mode == Keyword.RIGHT) {
+                return free;
+            }
+            return (f32)0.0;
+        }
+        if (mode == Keyword.END || mode == Keyword.RIGHT) {
+            return free;
+        }
+        if (mode == Keyword.CENTER) {
+            return free / (f32)2.0;
+        }
+        if (mode == Keyword.AROUND && count > 0) {
+            return free / (f32)count / (f32)2.0;
+        }
+        if (mode == Keyword.EVENLY) {
+            return free / (f32)(count + 1);
+        }
+        return (f32)0.0;
+    }
+
+    public static f32 between(u8 mode, f32 free, u32 count) {
+        if (free <= (f32)0.0) {
+            return (f32)0.0;
+        }
+        if (mode == Keyword.BETWEEN && count > 1) {
+            return free / (f32)(count - 1);
+        }
+        if (mode == Keyword.AROUND && count > 0) {
+            return free / (f32)count;
+        }
+        if (mode == Keyword.EVENLY) {
+            return free / (f32)(count + 1);
+        }
+        return (f32)0.0;
+    }
+}
+
+// The layout engine: block and inline flow, flexbox, grid and absolute positioning over the retained tree, from
+// the computed styles. Results are cached per node and per input (a parent measures a child several times while
+// sizing it), and a cache stays valid until something inside the node, its style or the sheets change, so a change
+// lays out again only the boxes it can affect.
+struct Layout {
+    static unsafe LayoutEngine* engine() {
+        if (layout_engine == null) {
+            layout_engine = (ptr)__djinn_alloc_zeroed((size_long)sizeof(LayoutEngine));
+        }
+        return (LayoutEngine*)layout_engine;
+    }
+
+    static unsafe void reserve(LayoutEngine* engine) {
+        u32 wanted = Dom.tree().capacity + 1;
+        if (engine.capacity >= wanted) {
+            return;
+        }
+        engine.nodes = (LayoutNode*)Dom.resize((void*)engine.nodes, engine.capacity, wanted, sizeof(LayoutNode));
+        engine.keys = (LayoutKey*)Dom.resize((void*)engine.keys, engine.capacity * 4, wanted * 4, sizeof(LayoutKey));
+        engine.capacity = wanted;
+    }
+
+    // Lays out 'root' and everything under it in a viewport of 'width' x 'height' px. The root fills the width;
+    // its height comes from its content unless the style fixes it.
+    public static unsafe void compute(u32 root, f32 width, f32 height) {
+        LayoutEngine* engine = Layout.engine();
+        Layout.reserve(engine);
+        Styles.set_viewport((f64)width, (f64)height);
+        u32 above = Layout.above_root(root);
+        u32 epoch = Dom.epoch() + 1;
+        if (engine.root == root && engine.root_width == width && engine.root_height == height && engine.root_epoch == epoch
+            && engine.root_stamp >= above && engine.root_stamp >= Dom.changed_inside(root)) {
+            return;
+        }
+        Size viewport = Size.of(width, height);
+        Style style = *Styles.of(root);
+        BoxSizes sizes = Layout.sizes(&style, viewport);
+        mut f32 used = sizes.size.width;
+        if (!Px.defined(used)) {
+            used = Px.max(width - sizes.margin.horizontal(), (f32)0.0);
+        }
+        used = Px.clamp(used, sizes.min.width, sizes.max.width);
+        Layout.run(root, LayoutInput.of(Size.of(used, Space.UNDEFINED), viewport, viewport, true, above));
+        LayoutBox* box = Layout.box(root);
+        box.x = sizes.margin.left;
+        box.y = sizes.margin.top;
+        f32 spare = width - used - sizes.margin.horizontal();
+        if (spare > (f32)0.0 && sizes.auto_left && sizes.auto_right) {
+            box.x = box.x + spare / (f32)2.0;
+        } else if (spare > (f32)0.0 && sizes.auto_left) {
+            box.x = box.x + spare;
+        }
+        Rect screen = Rect.of((f32)0.0, (f32)0.0, width, height);
+        Layout.place(root, box.x, box.y, screen, screen, above);
+        engine.root = root;
+        engine.root_width = width;
+        engine.root_height = height;
+        engine.root_epoch = epoch;
+        engine.root_stamp = Dom.stamp();
+    }
+
+    public static unsafe LayoutBox* box(u32 id) {
+        LayoutEngine* engine = Layout.engine();
+        Layout.reserve(engine);
+        return &engine.nodes[id].box;
+    }
+
+    // The absolute border box of 'id' from the last Layout.compute.
+    public static unsafe Rect rect(u32 id) {
+        mut LayoutBox* box = Layout.box(id);
+        return Rect.of(box.left, box.top, box.width, box.height);
+    }
+
+    // How many boxes were laid out (not served from the cache) so far.
+    public static unsafe u32 runs() {
+        return Layout.engine().runs;
+    }
+
+    // Replaces the placeholder text metrics: 'measure(text node, width limit)' gives the size of the text wrapped to
+    // the limit (a negative limit: on one line; 0: every break taken, the min-content width).
+    public static unsafe void set_text_measure(fn(u32, f32) -> Size measure) {
+        LayoutEngine* engine = Layout.engine();
+        TextMeasurer measurer = { .run = measure };
+        engine.measurer = measurer;
+        engine.custom_text = true;
+    }
+
+    public static unsafe void reset_text_measure() {
+        Layout.engine().custom_text = false;
+    }
+
+    static unsafe u32 above_root(u32 root) {
+        mut u32 newest = Dom.changed_children(Dom.document());
+        mut u32 at = Dom.parent(root);
+        while (at != 0) {
+            if (Dom.changed_children(at) > newest) {
+                newest = Dom.changed_children(at);
+            }
+            at = Dom.parent(at);
+        }
+        return newest;
+    }
+
+    // The stamp above 'child' when its box parent is 'parent': the fragments and 'display: contents' elements in
+    // between count too.
+    public static unsafe u32 child_above(u32 child, u32 parent, u32 above) {
+        mut u32 newest = above;
+        mut u32 at = Dom.parent(child);
+        while (at != 0) {
+            if (Dom.changed_children(at) > newest) {
+                newest = Dom.changed_children(at);
+            }
+            if (at == parent) {
+                return newest;
+            }
+            at = Dom.parent(at);
+        }
+        return newest;
+    }
+
+    static bool same(LayoutKey* key, LayoutInput input) {
+        return key.known_width == input.known.width && key.known_height == input.known.height
+            && key.available_width == input.available.width && key.available_height == input.available.height
+            && key.parent_width == input.parent.width && key.parent_height == input.parent.height;
+    }
+
+    // The border-box size of 'id' for 'input', from the cache when it already answered the same question.
+    public static unsafe Size run(u32 id, LayoutInput input) {
+        LayoutEngine* engine = Layout.engine();
+        mut LayoutNode* node = &engine.nodes[id];
+        u32 epoch = Dom.epoch() + 1;
+        mut u32 newest = Dom.changed_inside(id);
+        if (input.above > newest) {
+            newest = input.above;
+        }
+        if (node.epoch != epoch || node.stamp < newest) {
+            node.epoch = epoch;
+            node.stamp = Dom.stamp();
+            node.used = 0;
+            node.slot = 0;
+            node.has_performed = false;
+        }
+        if (node.has_performed && Layout.same(&node.performed, input)) {
+            return Size.of(node.performed.width, node.performed.height);
+        }
+        if (!input.perform) {
+            for (mut u32 k = 0; k < node.used; k = k + 1) {
+                LayoutKey* key = &engine.keys[id * 4 + k];
+                if (Layout.same(key, input)) {
+                    return Size.of(key.width, key.height);
+                }
+            }
+        }
+        engine.runs = engine.runs + 1;
+        Size size = Layout.dispatch(id, input);
+        LayoutKey key = { .known_width = input.known.width, .known_height = input.known.height, .available_width = input.available.width,
+            .available_height = input.available.height, .parent_width = input.parent.width, .parent_height = input.parent.height,
+            .width = size.width, .height = size.height };
+        node = &engine.nodes[id];
+        if (input.perform) {
+            node.performed = key;
+            node.has_performed = true;
+        } else {
+            engine.keys[id * 4 + node.slot] = key;
+            node.slot = (node.slot + 1) % 4;
+            if (node.used < 4) {
+                node.used = node.used + 1;
+            }
+        }
+        return size;
+    }
+
+    static unsafe Size dispatch(u32 id, LayoutInput input) {
+        mut LayoutBox* box = Layout.box(id);
+        if (Dom.kind(id) == DomKind.TEXT) {
+            Size text = Layout.text(id, input);
+            if (input.perform) {
+                box.visible = true;
+                box.width = text.width;
+                box.height = text.height;
+            }
+            return text;
+        }
+        Style style = *Styles.of(id);
+        if (style.display == Display.NONE) {
+            Layout.hide(id);
+            return Size.of((f32)0.0, (f32)0.0);
+        }
+        BoxSizes sizes = Layout.sizes(&style, input.parent);
+        mut LayoutInput inner = input;
+        if (!Px.defined(inner.known.width) && Px.defined(sizes.size.width)) {
+            inner.known.width = Px.clamp(sizes.size.width, sizes.min.width, sizes.max.width);
+        }
+        if (!Px.defined(inner.known.height) && Px.defined(sizes.size.height)) {
+            inner.known.height = Px.clamp(sizes.size.height, sizes.min.height, sizes.max.height);
+        }
+        inner.known = Layout.ratio(inner.known, &sizes);
+        if (!Px.defined(inner.known.width) && Px.defined(input.available.width)) {
+            // Shrink to fit: the max-content width, no wider than the space, no narrower than the min-content width.
+            f32 space = Px.max(input.available.width - sizes.margin.horizontal(), (f32)0.0);
+            mut LayoutInput probe = inner;
+            probe.perform = false;
+            probe.available.width = Space.MAX_CONTENT;
+            mut f32 used = Layout.run(id, probe).width;
+            if (used > space) {
+                probe.available.width = Space.MIN_CONTENT;
+                used = Px.max(Layout.run(id, probe).width, space);
+            }
+            inner.known.width = Px.clamp(used, sizes.min.width, sizes.max.width);
+            inner.known = Layout.ratio(inner.known, &sizes);
+        }
+        Size size = Layout.algorithm(id, &style, &sizes, inner);
+        if (input.perform) {
+            box = Layout.box(id);
+            box.visible = true;
+            box.width = size.width;
+            box.height = size.height;
+            box.margin = sizes.margin;
+            box.border = sizes.border;
+            box.padding = sizes.padding;
+        }
+        return size;
+    }
+
+    // The size of 'id' from its content alone, ignoring its own width (or its height when 'width' is false): what
+    // a flex item's automatic minimum is measured from. With 'width' the input asks for MIN_CONTENT.
+    public static unsafe Size content(u32 id, LayoutInput input, bool width) {
+        if (Dom.kind(id) == DomKind.TEXT) {
+            return Layout.run(id, input);
+        }
+        Style style = *Styles.of(id);
+        if (style.display == Display.NONE) {
+            return Size.of((f32)0.0, (f32)0.0);
+        }
+        mut BoxSizes sizes = Layout.sizes(&style, input.parent);
+        mut LayoutInput inner = input;
+        inner.perform = false;
+        if (width) {
+            sizes.size.width = Space.UNDEFINED;
+            if (!Px.defined(inner.known.height) && Px.defined(sizes.size.height)) {
+                inner.known.height = Px.clamp(sizes.size.height, sizes.min.height, sizes.max.height);
+            }
+        } else {
+            sizes.size.height = Space.UNDEFINED;
+            if (!Px.defined(inner.known.width)) {
+                inner.known.width = Layout.run(id, input).width;
+            }
+            inner.known.height = Space.UNDEFINED;
+        }
+        return Layout.algorithm(id, &style, &sizes, inner);
+    }
+
+    static Size ratio(Size known, BoxSizes* sizes) {
+        mut Size result = known;
+        if (sizes.aspect > (f32)0.0) {
+            if (Px.defined(result.width) && !Px.defined(result.height)) {
+                result.height = Px.clamp(result.width / sizes.aspect, sizes.min.height, sizes.max.height);
+            } else if (Px.defined(result.height) && !Px.defined(result.width)) {
+                result.width = Px.clamp(result.height * sizes.aspect, sizes.min.width, sizes.max.width);
+            }
+        }
+        return result;
+    }
+
+    // Lays out the content of an element whose width is known, or is measured by its content (MIN/MAX_CONTENT).
+    static unsafe Size algorithm(u32 id, Style* style, BoxSizes* sizes, LayoutInput input) {
+        if (style.display == Display.FLEX || style.display == Display.INLINE_FLEX) {
+            return FlexLayout.run(id, style, sizes, input);
+        }
+        if (style.display == Display.GRID) {
+            return GridLayout.run(id, style, sizes, input);
+        }
+        return FlowLayout.run(id, style, sizes, input);
+    }
+
+    static unsafe void hide(u32 id) {
+        mut LayoutBox* box = Layout.box(id);
+        box.visible = false;
+        box.width = (f32)0.0;
+        box.height = (f32)0.0;
+    }
+
+    public static unsafe BoxSizes sizes(Style* style, Size parent) {
+        mut BoxSizes sizes = BoxSizes();
+        f32 basis = parent.width;
+        sizes.margin.top = Px.offset(style.margin_top, basis);
+        sizes.margin.right = Px.offset(style.margin_right, basis);
+        sizes.margin.bottom = Px.offset(style.margin_bottom, basis);
+        sizes.margin.left = Px.offset(style.margin_left, basis);
+        sizes.auto_top = style.margin_top.unit == Unit.AUTO;
+        sizes.auto_right = style.margin_right.unit == Unit.AUTO;
+        sizes.auto_bottom = style.margin_bottom.unit == Unit.AUTO;
+        sizes.auto_left = style.margin_left.unit == Unit.AUTO;
+        sizes.padding.top = Px.max(Px.offset(style.padding_top, basis), (f32)0.0);
+        sizes.padding.right = Px.max(Px.offset(style.padding_right, basis), (f32)0.0);
+        sizes.padding.bottom = Px.max(Px.offset(style.padding_bottom, basis), (f32)0.0);
+        sizes.padding.left = Px.max(Px.offset(style.padding_left, basis), (f32)0.0);
+        if (style.border_style != Keyword.NONE && style.border_style != Keyword.HIDDEN) {
+            sizes.border.top = style.border_top;
+            sizes.border.right = style.border_right;
+            sizes.border.bottom = style.border_bottom;
+            sizes.border.left = style.border_left;
+        }
+        f32 extra_width = sizes.padding.horizontal() + sizes.border.horizontal();
+        f32 extra_height = sizes.padding.vertical() + sizes.border.vertical();
+        mut f32 add_width = (f32)0.0;
+        mut f32 add_height = (f32)0.0;
+        if (style.box_sizing != Keyword.BORDER_BOX) {
+            add_width = extra_width;
+            add_height = extra_height;
+        }
+        sizes.size = Size.of(Layout.border_box(style.width, parent.width, add_width), Layout.border_box(style.height, parent.height, add_height));
+        sizes.min = Size.of(Px.max(Layout.border_box(style.min_width, parent.width, add_width), extra_width),
+            Px.max(Layout.border_box(style.min_height, parent.height, add_height), extra_height));
+        sizes.max = Size.of(Layout.border_box(style.max_width, parent.width, add_width), Layout.border_box(style.max_height, parent.height, add_height));
+        if (Px.defined(sizes.max.width) && sizes.max.width < extra_width) {
+            sizes.max.width = extra_width;
+        }
+        if (Px.defined(sizes.max.height) && sizes.max.height < extra_height) {
+            sizes.max.height = extra_height;
+        }
+        if (Px.defined(sizes.size.width) && sizes.size.width < extra_width) {
+            sizes.size.width = extra_width;
+        }
+        if (Px.defined(sizes.size.height) && sizes.size.height < extra_height) {
+            sizes.size.height = extra_height;
+        }
+        sizes.auto_min_width = style.min_width.unit == Unit.AUTO;
+        sizes.auto_min_height = style.min_height.unit == Unit.AUTO;
+        sizes.aspect = style.aspect_ratio;
+        return sizes;
+    }
+
+    static f32 border_box(Length length, f32 basis, f32 extra) {
+        f32 value = Px.size(length, basis);
+        if (!Px.defined(value)) {
+            return Space.UNDEFINED;
+        }
+        return value + extra;
+    }
+
+    // The boxes laid out as children of 'id': elements and text, looking through fragments, islands, server
+    // slots and 'display: contents'. Elements with 'display: none' are hidden and left out.
+    public static unsafe void children(u32 id, Growable<u32>* out) {
+        mut u32 child = Dom.first_child(id);
+        while (child != 0) {
+            u8 kind = Dom.kind(child);
+            if (kind == DomKind.ELEMENT) {
+                u8 display = Styles.of(child).display;
+                if (display == Display.CONTENTS) {
+                    Layout.children(child, out);
+                } else if (display == Display.NONE) {
+                    Layout.hide(child);
+                } else {
+                    out.push(child);
+                }
+            } else if (kind == DomKind.TEXT) {
+                out.push(child);
+            } else if (kind == DomKind.FRAGMENT || kind == DomKind.ISLAND || kind == DomKind.SERVER_SLOT) {
+                Layout.children(child, out);
+            }
+            child = Dom.next_sibling(child);
+        }
+    }
+
+    public static unsafe void release(Growable<u32>* list) {
+        if (list.data != (u32*)0) {
+            __djinn_free((void*)list.data);
+        }
+    }
+
+    public static unsafe bool is_text(u32 id) {
+        return Dom.kind(id) == DomKind.TEXT;
+    }
+
+    public static unsafe bool out_of_flow(u32 id) {
+        if (Layout.is_text(id)) {
+            return false;
+        }
+        u8 position = Styles.of(id).position;
+        return position == Keyword.ABSOLUTE || position == Keyword.FIXED;
+    }
+
+    public static unsafe bool is_inline_level(u32 id) {
+        if (Layout.is_text(id)) {
+            return true;
+        }
+        u8 display = Styles.of(id).display;
+        return display == Display.INLINE || display == Display.INLINE_BLOCK || display == Display.INLINE_FLEX;
+    }
+
+    static unsafe Size text(u32 id, LayoutInput input) {
+        mut f32 limit = (f32)-1.0;
+        if (Px.defined(input.known.width)) {
+            limit = input.known.width;
+        } else if (Px.defined(input.available.width)) {
+            limit = input.available.width;
+        } else if (input.available.width == Space.MIN_CONTENT) {
+            limit = (f32)0.0;
+        }
+        LayoutEngine* engine = Layout.engine();
+        if (engine.custom_text) {
+            return engine.measurer.run(id, limit);
+        }
+        return TextMetrics.measure(id, limit);
+    }
+
+    // Sets the absolute positions, lays out absolutely positioned boxes against their containing block (the
+    // padding box of the nearest positioned ancestor, the viewport for 'fixed') and shifts relative ones.
+    static unsafe void place(u32 id, f32 left, f32 top, Rect containing, Rect screen, u32 above) {
+        mut LayoutBox* box = Layout.box(id);
+        box.left = left;
+        box.top = top;
+        if (Layout.is_text(id)) {
+            return;
+        }
+        Style style = *Styles.of(id);
+        mut Rect inner = containing;
+        if (style.position != Keyword.STATIC) {
+            inner = Rect.of(left + box.border.left, top + box.border.top, box.width - box.border.horizontal(), box.height - box.border.vertical());
+        }
+        f32 content_width = box.width - box.border.horizontal() - box.padding.horizontal();
+        f32 content_height = box.height - box.border.vertical() - box.padding.vertical();
+        mut Growable<u32> children = Growable<u32>();
+        Layout.children(id, &children);
+        for (mut u32 i = 0; i < children.count; i = i + 1) {
+            u32 child = children.get(i);
+            u32 child_above = Layout.child_above(child, id, above);
+            mut f32 dx = (f32)0.0;
+            mut f32 dy = (f32)0.0;
+            if (!Layout.is_text(child)) {
+                Style child_style = *Styles.of(child);
+                if (child_style.position == Keyword.ABSOLUTE || child_style.position == Keyword.FIXED) {
+                    mut Rect area = inner;
+                    if (child_style.position == Keyword.FIXED) {
+                        area = screen;
+                    }
+                    Layout.absolute(child, &child_style, Layout.box(id), area, child_above);
+                } else if (child_style.position == Keyword.RELATIVE || child_style.position == Keyword.STICKY) {
+                    if (child_style.inset_left.unit != Unit.AUTO) {
+                        dx = Px.offset(child_style.inset_left, content_width);
+                    } else {
+                        dx = (f32)0.0 - Px.offset(child_style.inset_right, content_width);
+                    }
+                    if (child_style.inset_top.unit != Unit.AUTO) {
+                        dy = Px.offset(child_style.inset_top, content_height);
+                    } else {
+                        dy = (f32)0.0 - Px.offset(child_style.inset_bottom, content_height);
+                    }
+                }
+            }
+            LayoutBox* child_box = Layout.box(child);
+            if (!child_box.visible) {
+                continue;
+            }
+            Layout.place(child, left + child_box.x + dx, top + child_box.y + dy, inner, screen, child_above);
+        }
+        Layout.release(&children);
+    }
+
+    static unsafe void absolute(u32 id, Style* style, LayoutBox* parent, Rect area, u32 above) {
+        Size block = Size.of(area.width, area.height);
+        BoxSizes sizes = Layout.sizes(style, block);
+        bool has_left = Px.is_definite(style.inset_left, block.width);
+        bool has_right = Px.is_definite(style.inset_right, block.width);
+        bool has_top = Px.is_definite(style.inset_top, block.height);
+        bool has_bottom = Px.is_definite(style.inset_bottom, block.height);
+        f32 left = Px.offset(style.inset_left, block.width);
+        f32 right = Px.offset(style.inset_right, block.width);
+        f32 top = Px.offset(style.inset_top, block.height);
+        f32 bottom = Px.offset(style.inset_bottom, block.height);
+        mut Size known = Size.undefined();
+        if (!Px.defined(sizes.size.width) && has_left && has_right) {
+            known.width = Px.clamp(Px.max(block.width - left - right - sizes.margin.horizontal(), (f32)0.0), sizes.min.width, sizes.max.width);
+        }
+        if (!Px.defined(sizes.size.height) && has_top && has_bottom) {
+            known.height = Px.clamp(Px.max(block.height - top - bottom - sizes.margin.vertical(), (f32)0.0), sizes.min.height, sizes.max.height);
+        }
+        mut f32 space = block.width;
+        if (has_left) {
+            space = space - left;
+        }
+        if (has_right) {
+            space = space - right;
+        }
+        Size size = Layout.run(id, LayoutInput.of(known, Size.of(Px.max(space, (f32)0.0), block.height), block, true, above));
+        mut f32 x = parent.left + parent.border.left + parent.padding.left + sizes.margin.left;
+        if (has_left) {
+            x = area.x + left + sizes.margin.left;
+        } else if (has_right) {
+            x = area.x + area.width - right - sizes.margin.right - size.width;
+        }
+        mut f32 y = parent.top + parent.border.top + parent.padding.top + sizes.margin.top;
+        if (has_top) {
+            y = area.y + top + sizes.margin.top;
+        } else if (has_bottom) {
+            y = area.y + area.height - bottom - sizes.margin.bottom - size.height;
+        }
+        mut LayoutBox* box = Layout.box(id);
+        box.x = x - parent.left;
+        box.y = y - parent.top;
+    }
+}
+
+// Block flow: in-flow children stacked top to bottom with adjoining sibling margins collapsed; runs of
+// inline-level children (text, inline, inline-block, inline-flex) broken into lines, aligned by text-align.
+// Inline boxes are atomic for now: a span wraps inside its own box, not across lines (that comes with text shaping).
+struct FlowLayout {
+    public static unsafe Size run(u32 id, Style* style, BoxSizes* sizes, LayoutInput input) {
+        f32 frame_width = sizes.padding.horizontal() + sizes.border.horizontal();
+        f32 frame_height = sizes.padding.vertical() + sizes.border.vertical();
+        mut f32 width = input.known.width;
+        if (!Px.defined(width)) {
+            f32 content = FlowLayout.intrinsic(id, input.available.width, input.above);
+            width = Px.clamp(content + frame_width, sizes.min.width, sizes.max.width);
+        }
+        f32 inner_width = Px.max(width - frame_width, (f32)0.0);
+        mut f32 inner_height = Space.UNDEFINED;
+        if (Px.defined(input.known.height)) {
+            inner_height = Px.max(input.known.height - frame_height, (f32)0.0);
+        }
+        Size content = FlowLayout.stack(id, style, sizes, inner_width, inner_height, input);
+        mut f32 height = input.known.height;
+        if (!Px.defined(height)) {
+            height = Px.clamp(content.height + frame_height, sizes.min.height, sizes.max.height);
+        }
+        if (input.perform) {
+            LayoutBox* box = Layout.box(id);
+            box.content_width = content.width;
+            box.content_height = content.height;
+        }
+        return Size.of(width, height);
+    }
+
+    // The min-content or max-content width of the content: the widest block child, or the longest line (max) or
+    // the widest unbreakable item (min) of the inline runs.
+    static unsafe f32 intrinsic(u32 id, f32 mode, u32 above) {
+        mut Growable<u32> children = Growable<u32>();
+        Layout.children(id, &children);
+        mut f32 widest = (f32)0.0;
+        mut f32 line = (f32)0.0;
+        for (mut u32 i = 0; i < children.count; i = i + 1) {
+            u32 child = children.get(i);
+            if (Layout.out_of_flow(child)) {
+                continue;
+            }
+            mut f32 margins = (f32)0.0;
+            if (!Layout.is_text(child)) {
+                Style* child_style = Styles.of(child);
+                margins = Px.offset(child_style.margin_left, Space.UNDEFINED) + Px.offset(child_style.margin_right, Space.UNDEFINED);
+            }
+            Size size = Layout.run(child, LayoutInput.of(Size.undefined(), Size.of(mode, Space.MAX_CONTENT), Size.undefined(), false,
+                Layout.child_above(child, id, above)));
+            f32 outer = size.width + margins;
+            if (Layout.is_inline_level(child)) {
+                if (mode == Space.MAX_CONTENT) {
+                    line = line + outer;
+                    widest = Px.max(widest, line);
+                } else {
+                    widest = Px.max(widest, outer);
+                }
+            } else {
+                line = (f32)0.0;
+                widest = Px.max(widest, outer);
+            }
+        }
+        Layout.release(&children);
+        return widest;
+    }
+
+    static unsafe Size stack(u32 id, Style* style, BoxSizes* sizes, f32 inner_width, f32 inner_height, LayoutInput input) {
+        mut Growable<u32> children = Growable<u32>();
+        Layout.children(id, &children);
+        f32 origin_x = sizes.border.left + sizes.padding.left;
+        f32 origin_y = sizes.border.top + sizes.padding.top;
+        Size parent = Size.of(inner_width, inner_height);
+        mut f32 available_height = inner_height;
+        if (!Px.defined(available_height)) {
+            available_height = Space.MAX_CONTENT;
+        }
+        mut f32 y = (f32)0.0;
+        mut f32 pending = (f32)0.0;
+        mut bool first = true;
+        mut f32 widest = (f32)0.0;
+        mut u32 i = 0;
+        while (i < children.count) {
+            u32 child = children.get(i);
+            if (Layout.out_of_flow(child)) {
+                i = i + 1;
+                continue;
+            }
+            if (Layout.is_inline_level(child)) {
+                mut u32 end = i;
+                while (end < children.count && (Layout.is_inline_level(children.get(end)) || Layout.out_of_flow(children.get(end)))) {
+                    end = end + 1;
+                }
+                Size lines = FlowLayout.lines(id, style, &children, i, end, inner_width, parent, origin_x, origin_y + y + pending, input);
+                if (lines.height > (f32)0.0) {
+                    y = y + pending + lines.height;
+                    pending = (f32)0.0;
+                    first = false;
+                }
+                widest = Px.max(widest, lines.width);
+                i = end;
+                continue;
+            }
+            Style child_style = *Styles.of(child);
+            BoxSizes child_sizes = Layout.sizes(&child_style, parent);
+            mut f32 left = child_sizes.margin.left;
+            mut f32 right = child_sizes.margin.right;
+            mut f32 width = child_sizes.size.width;
+            if (!Px.defined(width)) {
+                width = inner_width - left - right;
+            }
+            width = Px.clamp(width, child_sizes.min.width, child_sizes.max.width);
+            f32 free = inner_width - width - left - right;
+            if (free > (f32)0.0) {
+                if (child_sizes.auto_left && child_sizes.auto_right) {
+                    left = left + free / (f32)2.0;
+                    right = right + free / (f32)2.0;
+                } else if (child_sizes.auto_left) {
+                    left = left + free;
+                }
+            }
+            if (first) {
+                y = y + child_sizes.margin.top;
+            } else {
+                y = y + Px.collapse(pending, child_sizes.margin.top);
+            }
+            Size size = Layout.run(child, LayoutInput.of(Size.of(width, Space.UNDEFINED), Size.of(inner_width, available_height), parent,
+                input.perform, Layout.child_above(child, id, input.above)));
+            if (input.perform) {
+                LayoutBox* box = Layout.box(child);
+                box.x = origin_x + left;
+                box.y = origin_y + y;
+                box.margin.left = left;
+                box.margin.right = right;
+            }
+            y = y + size.height;
+            pending = child_sizes.margin.bottom;
+            first = false;
+            widest = Px.max(widest, left + size.width + right);
+            i = i + 1;
+        }
+        y = y + pending;
+        Layout.release(&children);
+        return Size.of(widest, y);
+    }
+
+    // Lays the inline-level children [start, end) into lines 'width' px wide; returns the widest line and the height.
+    static unsafe Size lines(u32 id, Style* style, Growable<u32>* children, u32 start, u32 end, f32 width, Size parent, f32 left, f32 top, LayoutInput input) {
+        mut f32 x = (f32)0.0;
+        mut f32 y = (f32)0.0;
+        mut f32 line_height = (f32)0.0;
+        mut f32 widest = (f32)0.0;
+        mut u32 line_start = start;
+        for (mut u32 i = start; i < end; i = i + 1) {
+            u32 child = children.get(i);
+            if (Layout.out_of_flow(child)) {
+                continue;
+            }
+            bool text = Layout.is_text(child);
+            if (text && x == (f32)0.0 && TextMetrics.is_blank(child)) {
+                Layout.hide(child);
+                continue;
+            }
+            mut Edges margin = Edges();
+            if (!text) {
+                margin = Layout.sizes(Styles.of(child), parent).margin;
+            }
+            u32 child_above = Layout.child_above(child, id, input.above);
+            Size natural = Layout.run(child, LayoutInput.of(Size.undefined(), Size.of(Space.MAX_CONTENT, Space.MAX_CONTENT), parent, false, child_above));
+            mut f32 outer = natural.width + margin.horizontal();
+            if (x > (f32)0.0 && x + outer > width + (f32)0.01) {
+                FlowLayout.align(style, children, line_start, i, width - x, input.perform);
+                widest = Px.max(widest, x);
+                y = y + line_height;
+                x = (f32)0.0;
+                line_height = (f32)0.0;
+                line_start = i;
+            }
+            mut Size known = Size.of(natural.width, Space.UNDEFINED);
+            if (outer > width) {
+                Size fitted = Layout.run(child, LayoutInput.of(Size.undefined(), Size.of(width, Space.MAX_CONTENT), parent, false, child_above));
+                known.width = fitted.width;
+                outer = fitted.width + margin.horizontal();
+            }
+            Size size = Layout.run(child, LayoutInput.of(known, Size.of(width, Space.MAX_CONTENT), parent, input.perform, child_above));
+            if (input.perform) {
+                LayoutBox* box = Layout.box(child);
+                box.x = left + x + margin.left;
+                box.y = top + y + margin.top;
+            }
+            x = x + outer;
+            line_height = Px.max(line_height, size.height + margin.vertical());
+        }
+        FlowLayout.align(style, children, line_start, end, width - x, input.perform);
+        widest = Px.max(widest, x);
+        return Size.of(widest, y + line_height);
+    }
+
+    static unsafe void align(Style* style, Growable<u32>* children, u32 start, u32 end, f32 free, bool perform) {
+        if (!perform || free <= (f32)0.0) {
+            return;
+        }
+        mut f32 shift = (f32)0.0;
+        if (style.text_align == Keyword.CENTER) {
+            shift = free / (f32)2.0;
+        } else if (style.text_align == Keyword.RIGHT || style.text_align == Keyword.END) {
+            shift = free;
+        }
+        if (shift == (f32)0.0) {
+            return;
+        }
+        for (mut u32 i = start; i < end; i = i + 1) {
+            u32 child = children.get(i);
+            if (!Layout.out_of_flow(child)) {
+                LayoutBox* box = Layout.box(child);
+                box.x = box.x + shift;
+            }
+        }
+    }
+}
+
+// Placeholder text metrics until the text stage brings font shaping: every character advances half the font size
+// (wide East Asian ones a full size), words wrap at spaces, lines are line-height apart.
+struct TextMetrics {
+    public static unsafe bool is_blank(u32 id) {
+        str text = Dom.text_of(id);
+        for (mut u32 i = 0; i < (u32)text.length; i = i + 1) {
+            u32 b = (u32)(u8)text.data[i];
+            if (b != 32 && b != 9 && b != 10 && b != 13 && b != 12) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    public static unsafe Size measure(u32 id, f32 limit) {
+        str text = Dom.text_of(id);
+        Style* style = Styles.of(id);
+        f32 narrow = style.font_size * (f32)0.5 + style.letter_spacing;
+        f32 wide = style.font_size + style.letter_spacing;
+        bool real = Fonts.active();
+        bool bold = style.font_weight >= 600;
+        mut f32 space = narrow;
+        if (real) {
+            space = Fonts.advance(32, style.font_size, bold) + style.letter_spacing;
+        }
+        mut f32 line = (f32)0.0;
+        mut f32 widest = (f32)0.0;
+        mut u32 lines = 0;
+        mut f32 word = (f32)0.0;
+        mut u32 letters = 0;
+        mut bool in_word = false;
+        mut bool gap = false;
+        u32 length = (u32)text.length;
+        mut u32 i = 0;
+        while (i <= length) {
+            mut u32 b = 32;
+            if (i < length) {
+                b = (u32)(u8)text.data[i];
+            }
+            bool blank = b == 32 || b == 9 || b == 10 || b == 13 || b == 12;
+            if (blank || i == length) {
+                if (in_word) {
+                    if (style.wrap_anywhere && limit > (f32)0.0 && word > limit + (f32)0.01 && letters > 1) {
+                        // overflow-wrap: a word wider than the line goes to a line of its own and breaks inside.
+                        f32 each = word / (f32)letters;
+                        mut u32 fit = (u32)(limit / each);
+                        if (fit < 1) {
+                            fit = 1;
+                        }
+                        u32 rows = (letters + fit - 1) / fit;
+                        lines = lines + rows;
+                        line = (f32)(letters - (rows - 1) * fit) * each;
+                        widest = Px.max(widest, Px.max((f32)fit * each, line));
+                    } else if (lines == 0) {
+                        lines = 1;
+                        line = word;
+                        if (gap) {
+                            line = line + space;
+                        }
+                    } else if (limit >= (f32)0.0 && line + space + word > limit + (f32)0.01) {
+                        lines = lines + 1;
+                        line = word;
+                    } else {
+                        line = line + space + word;
+                    }
+                    widest = Px.max(widest, line);
+                    word = (f32)0.0;
+                    letters = 0;
+                    in_word = false;
+                    gap = false;
+                }
+                if (blank && i < length) {
+                    gap = true;
+                }
+                i = i + 1;
+                continue;
+            }
+            mut f32 advance = narrow;
+            mut u32 step = 1;
+            if (real) {
+                u32 code = Codepoints.decode(text.data, length, i, &step);
+                advance = (f32)0.0;
+                if (!Codepoints.is_zero_width(code)) {
+                    advance = Fonts.advance(code, style.font_size, bold) + style.letter_spacing;
+                }
+            } else if (b >= 240) {
+                advance = wide;
+                step = 4;
+            } else if (b >= 225) {
+                advance = wide;
+                step = 3;
+            } else if (b >= 224) {
+                step = 3;
+            } else if (b >= 192) {
+                step = 2;
+            } else if (b >= 128) {
+                advance = (f32)0.0;
+            }
+            word = word + advance;
+            if (advance > (f32)0.0) {
+                letters = letters + 1;
+            }
+            in_word = true;
+            i = i + step;
+        }
+        f32 height = style.line_px();
+        if (lines == 0) {
+            if (gap) {
+                return Size.of(space, height);
+            }
+            return Size.of((f32)0.0, (f32)0.0);
+        }
+        if (gap && (limit < (f32)0.0 || line + space <= limit)) {
+            line = line + space;
+            widest = Px.max(widest, line);
+        }
+        return Size.of(widest, (f32)lines * height);
+    }
+}

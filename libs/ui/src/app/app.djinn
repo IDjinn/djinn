@@ -1,0 +1,84 @@
+import std::types;
+import std::libc;
+
+namespace ui;
+
+// How a page is rendered, declared with [Application(render: ...)] for the whole app (and later per route):
+//   CLIENT   the client builds everything;
+//   HYDRATE  the server sends HTML with markers and the client adopts it (the web default);
+//   SERVER   rendered only on the server: plain HTML, no listeners, no reactive graph kept, no client code
+//            except [Client] islands;
+//   STATIC   SERVER at build time.
+struct RenderMode {
+    const u8 CLIENT = 0;
+    const u8 HYDRATE = 1;
+    const u8 SERVER = 2;
+    const u8 STATIC = 3;
+
+    public static bool keeps_graph(u8 mode) {
+        return mode == RenderMode.CLIENT || mode == RenderMode.HYDRATE;
+    }
+}
+
+// A mounted application: the node it rendered and the root that owns its effects.
+struct Mounted {
+    Node node;
+    u32 root;
+
+    public unsafe void unmount() {
+        Reactive.dispose(this.root);
+        Dom.remove(this.node.id);
+    }
+}
+
+struct App {
+    public static unsafe Mounted mount<T>(T app) {
+        u32 root = Reactive.create_root(0);
+        Scope saved = Reactive.enter(root);
+        Node node = View.mount<T>(app);
+        Reactive.leave(saved);
+        Dom.append(Dom.document(), node.id);
+        Mounted mounted = { .node = node, .root = root };
+        return mounted;
+    }
+
+    // Renders the app to HTML. In SERVER and STATIC mode computations run once without subscribing and
+    // everything is released before returning, so a request leaves nothing behind.
+    public static unsafe TextBuffer render_to_string<T>(T app, u8 mode) {
+        bool server_only = !RenderMode.keeps_graph(mode);
+        Reactive.set_static(server_only);
+        Dom.set_static(server_only);
+        Mounted mounted = App.mount<T>(app);
+        TextBuffer html = Html.render(mounted.node, mode == RenderMode.HYDRATE);
+        if (server_only) {
+            mounted.unmount();
+        }
+        Reactive.set_static(false);
+        Dom.set_static(false);
+        return html;
+    }
+
+    // A whole page (doctype, theme and app stylesheets, body) rendered the same way as render_to_string.
+    public static unsafe TextBuffer render_document<T>(T app, u8 mode) {
+        bool server_only = !RenderMode.keeps_graph(mode);
+        Reactive.set_static(server_only);
+        Dom.set_static(server_only);
+        Mounted mounted = App.mount<T>(app);
+        TextBuffer html = Html.document(mounted.node, mode == RenderMode.HYDRATE);
+        if (server_only) {
+            mounted.unmount();
+        }
+        Reactive.set_static(false);
+        Dom.set_static(false);
+        return html;
+    }
+
+    // The entry point [Application] generates. Until the native window host lands (roadmap phase 7) a desktop
+    // build renders headless and prints the page of the first frame.
+    public static unsafe i32 run<T>(T app, u8 mode) {
+        mut TextBuffer html = App.render_document<T>(app, mode);
+        printf("%s\n", html.data);
+        html.release();
+        return 0;
+    }
+}

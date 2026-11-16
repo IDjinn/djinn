@@ -1,0 +1,749 @@
+import std::types;
+import std::libc;
+import std::math;
+
+namespace ui;
+
+struct Unit {
+    const u8 INVALID = 0;
+    const u8 NUMBER = 1;
+    const u8 PX = 2;
+    const u8 PERCENT = 3;
+    const u8 AUTO = 4;
+    const u8 NONE = 5;
+    const u8 DEGREES = 6;
+}
+
+// A resolved number: px for every absolute or font/viewport-relative length, PERCENT kept for layout to resolve.
+struct Numeric {
+    mut u8 unit;
+    mut f64 value;
+
+    public static Numeric of(u8 unit, f64 value) {
+        Numeric number = { .unit = unit, .value = value };
+        return number;
+    }
+
+    public static Numeric invalid() {
+        return Numeric.of(Unit.INVALID, 0.0);
+    }
+}
+
+struct Length {
+    mut u8 unit;
+    mut f32 value;
+
+    public static Length of(u8 unit, f32 value) {
+        Length length = { .unit = unit, .value = value };
+        return length;
+    }
+
+    public static Length px(f32 value) {
+        return Length.of(Unit.PX, value);
+    }
+
+    public static Length automatic() {
+        return Length.of(Unit.AUTO, (f32)0.0);
+    }
+}
+
+// What relative units resolve against.
+struct ValueContext {
+    mut f64 font_size;
+    mut f64 root_font_size;
+    mut f64 viewport_width;
+    mut f64 viewport_height;
+    mut bool dark;
+}
+
+// A cursor over the tokens of one value, skipping whitespace.
+struct ValueReader {
+    mut CssTokens* tokens;
+    mut u32 pos;
+    mut u32 end;
+    mut i8* text;
+
+    public static unsafe ValueReader over(CssTokens* tokens, u32 start, u32 end) {
+        ValueReader reader = { .tokens = tokens, .pos = start, .end = end, .text = (i8*)0 };
+        return reader;
+    }
+
+    public unsafe void skip_space() {
+        while (this.pos < this.end && this.tokens.get(this.pos).kind == CssKind.SPACE) {
+            this.pos = this.pos + 1;
+        }
+    }
+
+    public unsafe bool done() {
+        this.skip_space();
+        return this.pos >= this.end;
+    }
+
+    public unsafe CssToken peek() {
+        this.skip_space();
+        if (this.pos >= this.end) {
+            CssToken none = { .kind = CssKind.EOF, .text = "", .number = 0.0, .start = 0, .end = 0 };
+            return none;
+        }
+        return this.tokens.get(this.pos);
+    }
+
+    public unsafe CssToken next() {
+        CssToken token = this.peek();
+        if (this.pos < this.end) {
+            this.pos = this.pos + 1;
+        }
+        return token;
+    }
+
+    public unsafe bool is_delim(str text) {
+        CssToken token = this.peek();
+        return token.kind == CssKind.DELIM && Texts.same(token.text, text);
+    }
+
+    // The index just after the ')' that closes a function or parenthesis opened before 'pos'.
+    public unsafe u32 closing() {
+        mut i32 depth = 1;
+        mut u32 i = this.pos;
+        while (i < this.end) {
+            u8 kind = this.tokens.get(i).kind;
+            if (kind == CssKind.FUNCTION || kind == CssKind.OPEN_PAREN) {
+                depth = depth + 1;
+            } else if (kind == CssKind.CLOSE_PAREN) {
+                depth = depth - 1;
+                if (depth == 0) {
+                    return i;
+                }
+            }
+            i = i + 1;
+        }
+        return this.end;
+    }
+}
+
+struct CssNames {
+    public static unsafe bool equal(str text, str wanted) {
+        if (text.length != wanted.length) {
+            return false;
+        }
+        for (mut u32 i = 0; i < (u32)text.length; i = i + 1) {
+            mut i8 c = text.data[i];
+            if (c >= 65 && c <= 90) {
+                c = c + 32;
+            }
+            if (c != wanted.data[i]) {
+                return false;
+            }
+        }
+        return true;
+    }
+}
+
+struct CssNumbers {
+    public static unsafe Numeric dimension(CssToken token, ValueContext* context) {
+        f64 value = token.number;
+        str unit = token.text;
+        if (CssNames.equal(unit, "px")) {
+            return Numeric.of(Unit.PX, value);
+        }
+        if (CssNames.equal(unit, "rem")) {
+            return Numeric.of(Unit.PX, value * context.root_font_size);
+        }
+        if (CssNames.equal(unit, "em")) {
+            return Numeric.of(Unit.PX, value * context.font_size);
+        }
+        // The dynamic, small and large viewport units are the same here: a native window has no browser bars that
+        // come and go. The inline axis is the horizontal one (horizontal writing modes only, for now).
+        if (CssNames.equal(unit, "vw") || CssNames.equal(unit, "vi") || CssNames.equal(unit, "dvw") || CssNames.equal(unit, "svw")
+            || CssNames.equal(unit, "lvw") || CssNames.equal(unit, "dvi") || CssNames.equal(unit, "svi") || CssNames.equal(unit, "lvi")) {
+            return Numeric.of(Unit.PX, value * context.viewport_width / 100.0);
+        }
+        if (CssNames.equal(unit, "vh") || CssNames.equal(unit, "vb") || CssNames.equal(unit, "dvh") || CssNames.equal(unit, "svh")
+            || CssNames.equal(unit, "lvh") || CssNames.equal(unit, "dvb") || CssNames.equal(unit, "svb") || CssNames.equal(unit, "lvb")) {
+            return Numeric.of(Unit.PX, value * context.viewport_height / 100.0);
+        }
+        if (CssNames.equal(unit, "vmin") || CssNames.equal(unit, "vmax")) {
+            mut f64 side = context.viewport_width;
+            bool smaller = context.viewport_height < context.viewport_width;
+            if (smaller == CssNames.equal(unit, "vmin")) {
+                side = context.viewport_height;
+            }
+            return Numeric.of(Unit.PX, value * side / 100.0);
+        }
+        if (CssNames.equal(unit, "pt")) {
+            return Numeric.of(Unit.PX, value * 4.0 / 3.0);
+        }
+        if (CssNames.equal(unit, "ch")) {
+            return Numeric.of(Unit.PX, value * context.font_size * 0.5);
+        }
+        if (CssNames.equal(unit, "deg")) {
+            return Numeric.of(Unit.DEGREES, value);
+        }
+        if (CssNames.equal(unit, "turn")) {
+            return Numeric.of(Unit.DEGREES, value * 360.0);
+        }
+        if (CssNames.equal(unit, "rad")) {
+            return Numeric.of(Unit.DEGREES, value * 57.29577951308232);
+        }
+        if (CssNames.equal(unit, "ms")) {
+            return Numeric.of(Unit.NUMBER, value);
+        }
+        if (CssNames.equal(unit, "s")) {
+            return Numeric.of(Unit.NUMBER, value * 1000.0);
+        }
+        return Numeric.invalid();
+    }
+
+    // One term: a number, percentage, dimension, '(sum)' or calc()/min()/max()/clamp().
+    public static unsafe Numeric term(ValueReader* reader, ValueContext* context) {
+        CssToken token = reader.next();
+        if (token.kind == CssKind.NUMBER) {
+            return Numeric.of(Unit.NUMBER, token.number);
+        }
+        if (token.kind == CssKind.PERCENT) {
+            return Numeric.of(Unit.PERCENT, token.number);
+        }
+        if (token.kind == CssKind.DIMENSION) {
+            return CssNumbers.dimension(token, context);
+        }
+        if (token.kind == CssKind.OPEN_PAREN || (token.kind == CssKind.FUNCTION && CssNames.equal(token.text, "calc"))) {
+            u32 close = reader.closing();
+            mut ValueReader inner = ValueReader.over(reader.tokens, reader.pos, close);
+            Numeric value = CssNumbers.sum(&inner, context);
+            reader.pos = close + 1;
+            return value;
+        }
+        if (token.kind == CssKind.FUNCTION && (CssNames.equal(token.text, "min") || CssNames.equal(token.text, "max") || CssNames.equal(token.text, "clamp"))) {
+            u32 close = reader.closing();
+            mut ValueReader inner = ValueReader.over(reader.tokens, reader.pos, close);
+            Numeric* items = (Numeric*)__djinn_alloc_zeroed((size_long)(8 * sizeof(Numeric)));
+            mut u32 count = 0;
+            while (!inner.done() && count < 8) {
+                items[count] = CssNumbers.sum(&inner, context);
+                count = count + 1;
+                if (inner.peek().kind == CssKind.COMMA) {
+                    inner.next();
+                }
+            }
+            reader.pos = close + 1;
+            mut Numeric result = Numeric.invalid();
+            if (CssNames.equal(token.text, "clamp")) {
+                if (count == 3 && items[0].unit == items[1].unit && items[1].unit == items[2].unit) {
+                    mut f64 value = items[1].value;
+                    if (value < items[0].value) {
+                        value = items[0].value;
+                    }
+                    if (value > items[2].value) {
+                        value = items[2].value;
+                    }
+                    result = Numeric.of(items[1].unit, value);
+                }
+            } else if (count > 0) {
+                result = items[0];
+                for (mut u32 i = 1; i < count; i = i + 1) {
+                    if (items[i].unit != result.unit) {
+                        result = Numeric.invalid();
+                        break;
+                    }
+                    if ((CssNames.equal(token.text, "min") && items[i].value < result.value) || (CssNames.equal(token.text, "max") && items[i].value > result.value)) {
+                        result = items[i];
+                    }
+                }
+            }
+            __djinn_free((void*)items);
+            return result;
+        }
+        return Numeric.invalid();
+    }
+
+    public static unsafe Numeric product(ValueReader* reader, ValueContext* context) {
+        mut Numeric left = CssNumbers.term(reader, context);
+        while (reader.is_delim("*") || reader.is_delim("/")) {
+            bool divide = reader.is_delim("/");
+            reader.next();
+            Numeric right = CssNumbers.term(reader, context);
+            if (left.unit == Unit.INVALID || right.unit == Unit.INVALID) {
+                return Numeric.invalid();
+            }
+            if (divide) {
+                if (right.unit != Unit.NUMBER || right.value == 0.0) {
+                    return Numeric.invalid();
+                }
+                left.value = left.value / right.value;
+            } else if (left.unit == Unit.NUMBER) {
+                left = Numeric.of(right.unit, left.value * right.value);
+            } else if (right.unit == Unit.NUMBER) {
+                left.value = left.value * right.value;
+            } else {
+                return Numeric.invalid();
+            }
+        }
+        return left;
+    }
+
+    public static unsafe Numeric sum(ValueReader* reader, ValueContext* context) {
+        mut Numeric left = CssNumbers.product(reader, context);
+        while (reader.is_delim("+") || reader.is_delim("-")) {
+            bool minus = reader.is_delim("-");
+            reader.next();
+            Numeric right = CssNumbers.product(reader, context);
+            if (left.unit == Unit.INVALID || right.unit != left.unit) {
+                return Numeric.invalid();
+            }
+            if (minus) {
+                left.value = left.value - right.value;
+            } else {
+                left.value = left.value + right.value;
+            }
+        }
+        return left;
+    }
+
+    public static unsafe Numeric read(ValueReader* reader, ValueContext* context) {
+        CssToken token = reader.peek();
+        if (token.kind == CssKind.IDENT) {
+            reader.next();
+            if (CssNames.equal(token.text, "auto")) {
+                return Numeric.of(Unit.AUTO, 0.0);
+            }
+            if (CssNames.equal(token.text, "none")) {
+                return Numeric.of(Unit.NONE, 0.0);
+            }
+            return Numeric.invalid();
+        }
+        return CssNumbers.term(reader, context);
+    }
+
+    // A length (a bare 0 counts as 0px), or AUTO/NONE; INVALID otherwise.
+    public static unsafe Length length(ValueReader* reader, ValueContext* context) {
+        Numeric value = CssNumbers.read(reader, context);
+        if (value.unit == Unit.NUMBER && value.value == 0.0) {
+            return Length.px((f32)0.0);
+        }
+        if (value.unit == Unit.PX || value.unit == Unit.PERCENT || value.unit == Unit.AUTO || value.unit == Unit.NONE) {
+            return Length.of(value.unit, (f32)value.value);
+        }
+        return Length.of(Unit.INVALID, (f32)0.0);
+    }
+}
+
+// Colors are packed as 0xRRGGBBAA (sRGB, straight alpha).
+struct Colors {
+    [ForceInline] public static u32 pack(f64 r, f64 g, f64 b, f64 a) {
+        return (Colors.channel(r) << 24) | (Colors.channel(g) << 16) | (Colors.channel(b) << 8) | Colors.channel(a);
+    }
+
+    [ForceInline] static u32 channel(f64 value) {
+        mut f64 v = value;
+        if (!(v > 0.0)) {
+            v = 0.0;
+        }
+        if (v > 1.0) {
+            v = 1.0;
+        }
+        return (u32)Math.round(v * 255.0);
+    }
+
+    [ForceInline] public static f64 red(u32 color) {
+        return (f64)((color >> 24) & 255) / 255.0;
+    }
+
+    [ForceInline] public static f64 green(u32 color) {
+        return (f64)((color >> 16) & 255) / 255.0;
+    }
+
+    [ForceInline] public static f64 blue(u32 color) {
+        return (f64)((color >> 8) & 255) / 255.0;
+    }
+
+    [ForceInline] public static f64 alpha(u32 color) {
+        return (f64)(color & 255) / 255.0;
+    }
+
+    static f64 to_linear(f64 value) {
+        if (value <= 0.04045) {
+            return value / 12.92;
+        }
+        return Math.pow((value + 0.055) / 1.055, 2.4);
+    }
+
+    static f64 from_linear(f64 value) {
+        if (value <= 0.0031308) {
+            return 12.92 * value;
+        }
+        return 1.055 * Math.pow(value, 1.0 / 2.4) - 0.055;
+    }
+
+    public static u32 oklab(f64 lightness, f64 a, f64 b, f64 alpha) {
+        f64 l_ = lightness + 0.3963377774 * a + 0.2158037573 * b;
+        f64 m_ = lightness - 0.1055613458 * a - 0.0638541728 * b;
+        f64 s_ = lightness - 0.0894841775 * a - 1.2914855480 * b;
+        f64 l = l_ * l_ * l_;
+        f64 m = m_ * m_ * m_;
+        f64 s = s_ * s_ * s_;
+        f64 r = 4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s;
+        f64 g = 0.0 - 1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s;
+        f64 bl = 0.0 - 0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s;
+        return Colors.pack(Colors.from_linear(r), Colors.from_linear(g), Colors.from_linear(bl), alpha);
+    }
+
+    public static u32 oklch(f64 lightness, f64 chroma, f64 hue, f64 alpha) {
+        f64 radians = hue * 0.017453292519943295;
+        return Colors.oklab(lightness, chroma * Math.cos(radians), chroma * Math.sin(radians), alpha);
+    }
+
+    // The OKLab coordinates of a color, written to 'out' (L, a, b).
+    public static unsafe void to_oklab(u32 color, f64* out) {
+        f64 r = Colors.to_linear(Colors.red(color));
+        f64 g = Colors.to_linear(Colors.green(color));
+        f64 b = Colors.to_linear(Colors.blue(color));
+        f64 l = Math.cubeRoot(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b);
+        f64 m = Math.cubeRoot(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b);
+        f64 s = Math.cubeRoot(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b);
+        out[0] = 0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s;
+        out[1] = 1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s;
+        out[2] = 0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s;
+    }
+
+    static f64 hue_to_rgb(f64 p, f64 q, f64 t) {
+        mut f64 h = t;
+        if (h < 0.0) {
+            h = h + 1.0;
+        }
+        if (h > 1.0) {
+            h = h - 1.0;
+        }
+        if (h < 1.0 / 6.0) {
+            return p + (q - p) * 6.0 * h;
+        }
+        if (h < 0.5) {
+            return q;
+        }
+        if (h < 2.0 / 3.0) {
+            return p + (q - p) * (2.0 / 3.0 - h) * 6.0;
+        }
+        return p;
+    }
+
+    public static u32 hsl(f64 hue, f64 saturation, f64 lightness, f64 alpha) {
+        mut f64 h = hue / 360.0;
+        h = h - Math.floor(h);
+        if (saturation == 0.0) {
+            return Colors.pack(lightness, lightness, lightness, alpha);
+        }
+        mut f64 q = lightness + saturation - lightness * saturation;
+        if (lightness < 0.5) {
+            q = lightness * (1.0 + saturation);
+        }
+        f64 p = 2.0 * lightness - q;
+        return Colors.pack(Colors.hue_to_rgb(p, q, h + 1.0 / 3.0), Colors.hue_to_rgb(p, q, h), Colors.hue_to_rgb(p, q, h - 1.0 / 3.0), alpha);
+    }
+
+    // color-mix(): premultiplied interpolation in OKLab (or sRGB) as CSS Color 5 defines it.
+    public static unsafe u32 mix(u32 first, f64 first_weight, u32 second, f64 second_weight, bool oklab) {
+        mut f64 total = first_weight + second_weight;
+        if (total <= 0.0) {
+            return 0;
+        }
+        f64 p = first_weight / total;
+        f64 q = second_weight / total;
+        f64 alpha_one = Colors.alpha(first);
+        f64 alpha_two = Colors.alpha(second);
+        f64 alpha = alpha_one * p + alpha_two * q;
+        mut f64 scale = 1.0;
+        if (total < 1.0) {
+            scale = total;
+        }
+        if (alpha <= 0.0) {
+            return 0;
+        }
+        f64* one = (f64*)__djinn_alloc_zeroed(24);
+        f64* two = (f64*)__djinn_alloc_zeroed(24);
+        if (oklab) {
+            Colors.to_oklab(first, one);
+            Colors.to_oklab(second, two);
+        } else {
+            one[0] = Colors.red(first);
+            one[1] = Colors.green(first);
+            one[2] = Colors.blue(first);
+            two[0] = Colors.red(second);
+            two[1] = Colors.green(second);
+            two[2] = Colors.blue(second);
+        }
+        f64 x = (one[0] * alpha_one * p + two[0] * alpha_two * q) / alpha;
+        f64 y = (one[1] * alpha_one * p + two[1] * alpha_two * q) / alpha;
+        f64 z = (one[2] * alpha_one * p + two[2] * alpha_two * q) / alpha;
+        __djinn_free((void*)one);
+        __djinn_free((void*)two);
+        if (oklab) {
+            return Colors.oklab(x, y, z, alpha * scale);
+        }
+        return Colors.pack(x, y, z, alpha * scale);
+    }
+
+    static unsafe i32 hex_digit(i8 c) {
+        if (c >= 48 && c <= 57) {
+            return (i32)(c - 48);
+        }
+        if (c >= 97 && c <= 102) {
+            return (i32)(c - 87);
+        }
+        if (c >= 65 && c <= 70) {
+            return (i32)(c - 55);
+        }
+        return 0 - 1;
+    }
+
+    public static unsafe bool hex(str text, u32* out) {
+        u32 length = (u32)text.length;
+        if (length != 3 && length != 4 && length != 6 && length != 8) {
+            return false;
+        }
+        mut u32 value = 0;
+        for (mut u32 i = 0; i < length; i = i + 1) {
+            i32 digit = Colors.hex_digit(text.data[i]);
+            if (digit < 0) {
+                return false;
+            }
+            if (length <= 4) {
+                value = (value << 8) | (u32)(digit * 17);
+            } else {
+                value = (value << 4) | (u32)digit;
+            }
+        }
+        if (length == 3 || length == 6) {
+            value = (value << 8) | 255;
+        }
+        out[0] = value;
+        return true;
+    }
+
+    // CSS system colors, which follow the color scheme. These are the defaults browsers use; a host that knows the
+    // OS palette (forced colors) will report its own.
+    public static unsafe bool system(str name, bool dark, u32* out) {
+        mut u32 light = 0;
+        mut u32 night = 0;
+        if (CssNames.equal(name, "canvas") || CssNames.equal(name, "field")) { light = 0xffffffff; night = 0x121212ff; }
+        else if (CssNames.equal(name, "canvastext") || CssNames.equal(name, "fieldtext") || CssNames.equal(name, "buttontext")) { light = 0x000000ff; night = 0xffffffff; }
+        else if (CssNames.equal(name, "linktext")) { light = 0x0000eeff; night = 0x9e9effff; }
+        else if (CssNames.equal(name, "visitedtext")) { light = 0x551a8bff; night = 0xd0adf0ff; }
+        else if (CssNames.equal(name, "activetext")) { light = 0xff0000ff; night = 0xff9e9eff; }
+        else if (CssNames.equal(name, "buttonface")) { light = 0xefefefff; night = 0x6b6b6bff; }
+        else if (CssNames.equal(name, "buttonborder")) { light = 0x767676ff; night = 0x858585ff; }
+        else if (CssNames.equal(name, "highlight") || CssNames.equal(name, "selecteditem")) { light = 0x0078d7ff; night = 0x0078d7ff; }
+        else if (CssNames.equal(name, "highlighttext") || CssNames.equal(name, "selecteditemtext")) { light = 0xffffffff; night = 0xffffffff; }
+        else if (CssNames.equal(name, "graytext")) { light = 0x6d6d6dff; night = 0x808080ff; }
+        else if (CssNames.equal(name, "mark")) { light = 0xffff00ff; night = 0xffff00ff; }
+        else if (CssNames.equal(name, "marktext")) { light = 0x000000ff; night = 0x000000ff; }
+        else if (CssNames.equal(name, "accentcolor")) { light = 0x0075ffff; night = 0x99c8ffff; }
+        else if (CssNames.equal(name, "accentcolortext")) { light = 0xffffffff; night = 0x000000ff; }
+        else { return false; }
+        out[0] = light;
+        if (dark) {
+            out[0] = night;
+        }
+        return true;
+    }
+
+    public static unsafe bool named(str name, u32* out) {
+        if (CssNames.equal(name, "transparent")) { out[0] = 0; return true; }
+        if (CssNames.equal(name, "black")) { out[0] = 255; return true; }
+        if (CssNames.equal(name, "white")) { out[0] = 4294967295; return true; }
+        if (CssNames.equal(name, "red")) { out[0] = 4278190335; return true; }
+        if (CssNames.equal(name, "green")) { out[0] = 8388863; return true; }
+        if (CssNames.equal(name, "lime")) { out[0] = 16711935; return true; }
+        if (CssNames.equal(name, "blue")) { out[0] = 65535; return true; }
+        if (CssNames.equal(name, "yellow")) { out[0] = 4294902015; return true; }
+        if (CssNames.equal(name, "orange")) { out[0] = 4289003775; return true; }
+        if (CssNames.equal(name, "purple")) { out[0] = 2147516671; return true; }
+        if (CssNames.equal(name, "gray") || CssNames.equal(name, "grey")) { out[0] = 2155905279; return true; }
+        if (CssNames.equal(name, "silver")) { out[0] = 3233857791; return true; }
+        if (CssNames.equal(name, "navy")) { out[0] = 33023; return true; }
+        if (CssNames.equal(name, "teal")) { out[0] = 8421631; return true; }
+        if (CssNames.equal(name, "maroon")) { out[0] = 2147483903; return true; }
+        if (CssNames.equal(name, "olive")) { out[0] = 2155872511; return true; }
+        if (CssNames.equal(name, "aqua") || CssNames.equal(name, "cyan")) { out[0] = 16777215; return true; }
+        if (CssNames.equal(name, "fuchsia") || CssNames.equal(name, "magenta")) { out[0] = 4278255615; return true; }
+        return false;
+    }
+
+    // The arguments of a color function: up to four components ('none' reads as 0), the alpha after '/' or a 4th one.
+    static unsafe u32 components(ValueReader* reader, ValueContext* context, Numeric* out) {
+        mut u32 count = 0;
+        while (!reader.done() && count < 4) {
+            CssToken token = reader.peek();
+            if (token.kind == CssKind.COMMA || (token.kind == CssKind.DELIM && Texts.same(token.text, "/"))) {
+                reader.next();
+                if (token.kind == CssKind.DELIM) {
+                    while (count < 3) {
+                        out[count] = Numeric.of(Unit.NUMBER, 0.0);
+                        count = count + 1;
+                    }
+                }
+                continue;
+            }
+            if (token.kind == CssKind.IDENT && CssNames.equal(token.text, "none")) {
+                reader.next();
+                out[count] = Numeric.of(Unit.NUMBER, 0.0);
+            } else {
+                out[count] = CssNumbers.term(reader, context);
+            }
+            count = count + 1;
+        }
+        return count;
+    }
+
+    [ForceInline] static f64 fraction(Numeric value, f64 percent_scale) {
+        if (value.unit == Unit.PERCENT) {
+            return value.value / 100.0 * percent_scale;
+        }
+        return value.value;
+    }
+
+    [ForceInline] static unsafe f64 alpha_of(Numeric* parts, u32 count) {
+        if (count < 4) {
+            return 1.0;
+        }
+        return Colors.fraction(parts[3], 1.0);
+    }
+
+    // A color value at the reader: hex, named, currentcolor, rgb(), hsl(), oklch(), oklab(), color-mix().
+    public static unsafe bool read(ValueReader* reader, ValueContext* context, u32 current, u32* out) {
+        CssToken token = reader.next();
+        if (token.kind == CssKind.HASH) {
+            return Colors.hex(token.text, out);
+        }
+        if (token.kind == CssKind.IDENT) {
+            if (CssNames.equal(token.text, "currentcolor")) {
+                out[0] = current;
+                return true;
+            }
+            if (Colors.system(token.text, context.dark, out)) {
+                return true;
+            }
+            return Colors.named(token.text, out);
+        }
+        if (token.kind != CssKind.FUNCTION) {
+            return false;
+        }
+        u32 close = reader.closing();
+        mut ValueReader inner = ValueReader.over(reader.tokens, reader.pos, close);
+        reader.pos = close + 1;
+        str name = token.text;
+        if (CssNames.equal(name, "light-dark")) {
+            // The first color when the element's color scheme is light, the second when it is dark.
+            mut u32 comma = close;
+            mut i32 depth = 0;
+            for (mut u32 i = inner.pos; i < close; i = i + 1) {
+                u8 kind = reader.tokens.get(i).kind;
+                if (kind == CssKind.FUNCTION || kind == CssKind.OPEN_PAREN) {
+                    depth = depth + 1;
+                } else if (kind == CssKind.CLOSE_PAREN) {
+                    depth = depth - 1;
+                } else if (kind == CssKind.COMMA && depth == 0) {
+                    comma = i;
+                    break;
+                }
+            }
+            if (comma == close) {
+                return false;
+            }
+            mut ValueReader light = ValueReader.over(reader.tokens, inner.pos, comma);
+            mut ValueReader dark = ValueReader.over(reader.tokens, comma + 1, close);
+            mut u32 first = 0;
+            mut u32 second = 0;
+            if (!Colors.read(&light, context, current, &first) || !light.done() || !Colors.read(&dark, context, current, &second) || !dark.done()) {
+                return false;
+            }
+            out[0] = first;
+            if (context.dark) {
+                out[0] = second;
+            }
+            return true;
+        }
+        if (CssNames.equal(name, "color-mix")) {
+            return Colors.read_mix(&inner, context, current, out);
+        }
+        Numeric* parts = (Numeric*)__djinn_alloc_zeroed((size_long)(4 * sizeof(Numeric)));
+        u32 count = Colors.components(&inner, context, parts);
+        mut bool ok = count >= 3;
+        if (ok) {
+            f64 alpha = Colors.alpha_of(parts, count);
+            if (CssNames.equal(name, "rgb") || CssNames.equal(name, "rgba")) {
+                out[0] = Colors.pack(Colors.fraction(parts[0], 255.0) / 255.0, Colors.fraction(parts[1], 255.0) / 255.0, Colors.fraction(parts[2], 255.0) / 255.0, alpha);
+            } else if (CssNames.equal(name, "hsl") || CssNames.equal(name, "hsla")) {
+                out[0] = Colors.hsl(parts[0].value, Colors.fraction(parts[1], 1.0), Colors.fraction(parts[2], 1.0), alpha);
+            } else if (CssNames.equal(name, "oklch")) {
+                out[0] = Colors.oklch(Colors.fraction(parts[0], 1.0), Colors.fraction(parts[1], 0.4), parts[2].value, alpha);
+            } else if (CssNames.equal(name, "oklab")) {
+                out[0] = Colors.oklab(Colors.fraction(parts[0], 1.0), Colors.fraction(parts[1], 0.4), Colors.fraction(parts[2], 0.4), alpha);
+            } else {
+                ok = false;
+            }
+        }
+        __djinn_free((void*)parts);
+        return ok;
+    }
+
+    // color-mix(in oklab | srgb, <color> [p%], <color> [q%]); a missing percentage is 100% minus the other.
+    static unsafe bool read_mix(ValueReader* reader, ValueContext* context, u32 current, u32* out) {
+        CssToken first = reader.next();
+        if (!(first.kind == CssKind.IDENT && CssNames.equal(first.text, "in"))) {
+            return false;
+        }
+        CssToken space = reader.next();
+        bool oklab = !(CssNames.equal(space.text, "srgb") || CssNames.equal(space.text, "srgb-linear"));
+        while (!reader.done() && reader.peek().kind != CssKind.COMMA) {
+            reader.next();
+        }
+        reader.next();
+        mut u32 one = 0;
+        mut u32 two = 0;
+        mut f64 p = 0.0 - 1.0;
+        mut f64 q = 0.0 - 1.0;
+        if (!Colors.read(reader, context, current, &one)) {
+            return false;
+        }
+        if (reader.peek().kind == CssKind.PERCENT) {
+            p = reader.next().number / 100.0;
+        }
+        if (reader.peek().kind != CssKind.COMMA) {
+            return false;
+        }
+        reader.next();
+        if (reader.peek().kind == CssKind.PERCENT) {
+            q = reader.next().number / 100.0;
+        }
+        if (!Colors.read(reader, context, current, &two)) {
+            return false;
+        }
+        if (reader.peek().kind == CssKind.PERCENT) {
+            q = reader.next().number / 100.0;
+        }
+        if (p < 0.0 && q < 0.0) {
+            p = 0.5;
+            q = 0.5;
+        } else if (p < 0.0) {
+            p = 1.0 - q;
+        } else if (q < 0.0) {
+            q = 1.0 - p;
+        }
+        out[0] = Colors.mix(one, p, two, q, oklab);
+        return true;
+    }
+
+    // '#rrggbb', or '#rrggbbaa' when not opaque.
+    public static unsafe str format(u32 color) {
+        mut TextBuffer out = TextBuffer.create();
+        str digits = "0123456789abcdef";
+        out.append_byte(35);
+        mut u32 count = 8;
+        if ((color & 255) == 255) {
+            count = 6;
+        }
+        for (mut u32 i = 0; i < count; i = i + 1) {
+            out.append_byte(digits.data[(color >> (28 - i * 4)) & 15]);
+        }
+        return out.view();
+    }
+}

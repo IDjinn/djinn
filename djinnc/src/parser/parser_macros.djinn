@@ -5,17 +5,102 @@ impl Parser {
         return Strings.equals(this.text_of(token), this.length_of(token), word);
     }
 
-    unsafe Node* parse_macro_declaration() {
+    public static unsafe bool collect_macros(TokenList* tokens, SourceFile* file, Diagnostics* diagnostics, U32Map* type_names) {
+        Parser* parser = Parser.create(tokens, file, diagnostics, type_names);
+        mut i32 depth = 0;
+        mut i32 namespace_depth = 0 - 1;
+        while (parser.pos < file.token_end && !parser.failed) {
+            TokenKind kind = parser.kind_of(parser.pos);
+            if (kind == TokenKind::END_OF_FILE) {
+                break;
+            }
+            if (kind == TokenKind::NAMESPACE && parser.kind_of(parser.pos + 1) == TokenKind::IDENTIFIER) {
+                parser.advance();
+                ptr<i8> name = parser.qualified_name();
+                AtomTable* atoms = Atoms.get();
+                parser.namespace_atom = atoms.intern_copy(name, (u32)strlen(name));
+                if (parser.check(TokenKind::LBRACE)) {
+                    namespace_depth = depth + 1;
+                }
+                continue;
+            }
+            if (kind == TokenKind::MACRO) {
+                parser.register_macro_declaration();
+                continue;
+            }
+            if (kind == TokenKind::IDENTIFIER && parser.is_proc_declaration()) {
+                parser.register_proc_declaration(file.is_header);
+                continue;
+            }
+            if (kind == TokenKind::LBRACE) {
+                depth = depth + 1;
+            } else if (kind == TokenKind::RBRACE) {
+                depth = depth - 1;
+                if (depth < namespace_depth) {
+                    parser.namespace_atom = 0;
+                    namespace_depth = 0 - 1;
+                }
+            }
+            parser.advance();
+        }
+        return !diagnostics.failed();
+    }
+
+    unsafe void register_macro_declaration() {
         this.advance();
         i32 name = this.expect(TokenKind::IDENTIFIER, "expected the macro name");
         bool bang_only = this.match(TokenKind::BANG);
-        MacroInfo* info = Macros.declare(this.atom_of(name), this.copy_of(name), bang_only);
+        MacroInfo* info = Macros.declare(this.atom_of(name), this.copy_of(name), bang_only, this.namespace_atom);
         this.expect(TokenKind::LBRACE, "expected '{' to open the macro");
         while (!this.check(TokenKind::RBRACE) && !this.at_end()) {
             this.parse_macro_rule(info, name);
         }
         this.expect(TokenKind::RBRACE, "expected '}' to close the macro");
+    }
+
+    // The declaration was registered before parsing; here it is only skipped.
+    unsafe Node* parse_macro_declaration() {
+        this.advance();
+        this.expect(TokenKind::IDENTIFIER, "expected the macro name");
+        this.match(TokenKind::BANG);
+        i32 open = this.current();
+        i32 close = this.matching_close(open);
+        if (this.kind_of(open) != TokenKind::LBRACE || close < 0) {
+            this.fail("expected '{' to open the macro");
+            return (Node*)0;
+        }
+        this.pos = close + 1;
         return (Node*)0;
+    }
+
+    static bool opens_group(TokenKind kind) {
+        return kind == TokenKind::LPAREN || kind == TokenKind::LBRACKET || kind == TokenKind::LBRACE;
+    }
+
+    static bool closes_group(TokenKind kind) {
+        return kind == TokenKind::RPAREN || kind == TokenKind::RBRACKET || kind == TokenKind::RBRACE;
+    }
+
+    i32 matching_close(i32 open) {
+        if (!Parser.opens_group(this.kind_of(open))) {
+            return 0 - 1;
+        }
+        mut i32 depth = 0;
+        for (mut i32 i = open; i < this.end; i = i + 1) {
+            TokenKind kind = this.kind_of(i);
+            if (kind == TokenKind::END_OF_FILE) {
+                return 0 - 1;
+            }
+            if (Parser.opens_group(kind)) {
+                depth = depth + 1;
+            } else if (Parser.closes_group(kind)) {
+                depth = depth - 1;
+                if (depth == 0) {
+                    return i;
+                }
+            }
+        }
+        return 0 - 1;
     }
 
     unsafe void parse_macro_rule(MacroInfo* info, i32 name_token) {
@@ -37,27 +122,40 @@ impl Parser {
                 local = true;
             }
             i32 word = this.advance();
-            bool followedByName = this.kind_of(this.current()) == TokenKind::IDENTIFIER;
+            bool variadic = this.check(TokenKind::DOT_DOT_DOT) && this.kind_of(this.peek_token(1)) == TokenKind::IDENTIFIER;
+            if (variadic) {
+                this.advance();
+            }
+            bool followed_by_name = this.kind_of(this.current()) == TokenKind::IDENTIFIER;
             mut i32 kind = MacroParamKind.TOKEN;
-            if (followedByName && this.is_word(word, "expression")) {
-                kind = MacroParamKind.EXPRESSION;
-            } else if (followedByName && this.is_word(word, "identifier")) {
-                kind = MacroParamKind.IDENTIFIER;
-            } else if (followedByName && this.is_word(word, "literal")) {
-                kind = MacroParamKind.LITERAL;
-            } else if (followedByName && this.is_word(word, "type")) {
-                kind = MacroParamKind.TYPE;
+            if (followed_by_name) {
+                if (this.is_word(word, "expression")) {
+                    kind = MacroParamKind.EXPRESSION;
+                } else if (this.is_word(word, "identifier")) {
+                    kind = MacroParamKind.IDENTIFIER;
+                } else if (this.is_word(word, "literal")) {
+                    kind = MacroParamKind.LITERAL;
+                } else if (this.is_word(word, "type")) {
+                    kind = MacroParamKind.TYPE;
+                } else if (this.is_word(word, "block")) {
+                    kind = MacroParamKind.BLOCK;
+                } else if (this.is_word(word, "statement")) {
+                    kind = MacroParamKind.STATEMENT;
+                } else if (this.is_word(word, "tokens")) {
+                    kind = MacroParamKind.TOKENS;
+                }
             }
             param.kind = kind;
+            param.variadic = variadic && kind != MacroParamKind.TOKEN;
             if (kind == MacroParamKind.TOKEN) {
                 param.name = this.copy_of(word);
                 param.name_atom = this.atom_of(word);
             } else {
                 i32 parameter_name = this.advance();
                 param.name = this.copy_of(parameter_name);
-                param.name_atom = Ast.intern_base_name(param.name, this.length_of(parameter_name));
+                param.name_atom = this.atom_of(parameter_name);
             }
-            param.is_local = local && kind == MacroParamKind.EXPRESSION;
+            param.is_local = local && kind == MacroParamKind.EXPRESSION && !param.variadic;
             params.push((ptr)param);
             if (!this.match(TokenKind::COMMA)) {
                 break;
@@ -66,12 +164,23 @@ impl Parser {
         this.expect(TokenKind::RPAREN, "expected ')' to close the macro rule parameters");
         this.expect(TokenKind::ARROW, "expected '=>' after the macro rule parameters");
         if (this.match(TokenKind::VOID)) {
-            rule.body = (Node*)0;
+            rule.is_void = true;
         } else {
-            this.expect(TokenKind::LBRACE, "expected '{' to open the macro body");
-            rule.body = this.parse_expression();
-            this.match(TokenKind::SEMICOLON);
-            this.expect(TokenKind::RBRACE, "expected '}' to close the macro body");
+            i32 open = this.current();
+            i32 close = this.matching_close(open);
+            if (this.kind_of(open) != TokenKind::LBRACE || close < 0) {
+                this.fail("expected '{' to open the macro body");
+                return;
+            }
+            rule.body_start = open + 1;
+            rule.body_end = close;
+            this.pos = close + 1;
+        }
+        for (mut i32 i = 0; i + 1 < params.length; i = i + 1) {
+            MacroParam* earlier = (MacroParam*)params.get(i);
+            if (earlier.variadic) {
+                this.macro_error(name_token, "only the last macro parameter can be variadic ('...')");
+            }
         }
 
         PointerList* rules = info.rules;
@@ -85,159 +194,514 @@ impl Parser {
                 message.append_int(rules.length + 1);
                 message.append(" has the same signature as rule ");
                 message.append_int(i + 1);
-                Diagnostics* diagnostics = this.diagnostics;
-                diagnostics.error(DiagnosticErrors.MACRO, this.line_of(name_token), this.column_of(name_token), message.cstr());
-                this.failed = true;
+                this.macro_error(name_token, message.cstr());
             }
         }
         rules.push((ptr)rule);
     }
 
-    bool macro_param_matches(MacroParam* param, i32 start, i32 end) {
-        if (end - start <= 0) {
-            return false;
+    void macro_error(i32 token, ptr<i8> message) {
+        if (this.quiet) {
+            this.failed = true;
+            return;
         }
-        TokenKind kind = this.kind_of(start);
-        bool single = end - start == 1;
-        if (param.kind == MacroParamKind.TOKEN) {
-            return single && kind == TokenKind::IDENTIFIER && this.atom_of(start) == param.name_atom;
-        }
-        if (param.kind == MacroParamKind.IDENTIFIER) {
-            return single && kind == TokenKind::IDENTIFIER;
-        }
-        if (param.kind == MacroParamKind.LITERAL) {
-            return single && (kind == TokenKind::INTEGER_LITERAL || kind == TokenKind::FLOAT_LITERAL
-                || kind == TokenKind::STRING_LITERAL || kind == TokenKind::TRUE || kind == TokenKind::FALSE);
-        }
-        if (param.kind == MacroParamKind.TYPE) {
-            return this.is_type_start(start);
-        }
-        return true;
+        TokenList* list = this.tokens;
+        i32 site = list.site_of(token);
+        Diagnostics* diagnostics = this.diagnostics;
+        diagnostics.error(DiagnosticErrors.MACRO, this.line_of(site), this.column_of(site), message);
+        this.failed = true;
     }
 
-    unsafe Node* expand_macro(i32 name_token, MacroInfo* info) {
-        this.advance();
-        if (this.check(TokenKind::BANG)) {
-            this.advance();
+    // Errors in tokens produced by a macro are reported at the call that produced them.
+    void fail_in_expansion(ptr<i8> message) {
+        i32 token = this.current();
+        TokenList* list = this.tokens;
+        i32 site = list.site_of(token);
+        ByteBuffer* text = ByteBuffer.create();
+        text.append(message);
+        text.append(" (in the expansion of this macro call)");
+        mut ptr<i8> found = this.copy_of(token);
+        if (this.kind_of(token) == TokenKind::END_OF_FILE) {
+            found = "end of the macro expansion";
         }
-        this.advance();
-        IdList* starts = IdList.create();
-        IdList* ends = IdList.create();
-        mut i32 depth = 0;
-        mut i32 argument_start = this.pos;
-        if (!this.check(TokenKind::RPAREN)) {
-            while (!this.at_end()) {
-                i32 token = this.current();
-                TokenKind kind = this.kind_of(token);
-                if (kind == TokenKind::LPAREN || kind == TokenKind::LBRACKET || kind == TokenKind::LBRACE) {
-                    depth = depth + 1;
-                } else if (kind == TokenKind::RPAREN || kind == TokenKind::RBRACKET || kind == TokenKind::RBRACE) {
-                    if (depth == 0) {
+        Diagnostics* diagnostics = this.diagnostics;
+        diagnostics.error_near(DiagnosticErrors.UNEXPECTED_TOKEN, this.line_of(site), this.column_of(site), text.cstr(), found);
+        this.failed = true;
+    }
+
+    // name!(...), name![...], name!{...}, a plain name(...) for a macro declared without '!', and the same behind
+    // 'ns::'. Returns null when the current tokens are not a call of a visible macro.
+    unsafe MacroCall* find_macro_call() {
+        if (this.kind_of(this.current()) != TokenKind::IDENTIFIER) {
+            return (MacroCall*)0;
+        }
+        mut i32 offset = 0;
+        while (this.kind_of(this.peek_token(offset + 1)) == TokenKind::COLON_COLON
+            && this.kind_of(this.peek_token(offset + 2)) == TokenKind::IDENTIFIER) {
+            offset = offset + 2;
+        }
+        i32 name = this.peek_token(offset);
+        bool banged = this.kind_of(this.peek_token(offset + 1)) == TokenKind::BANG;
+        mut i32 open_offset = offset + 1;
+        if (banged) {
+            open_offset = offset + 2;
+        }
+        i32 open = this.peek_token(open_offset);
+        TokenKind open_kind = this.kind_of(open);
+        if (banged && !Parser.opens_group(open_kind)) {
+            return (MacroCall*)0;
+        }
+        if (!banged && open_kind != TokenKind::LPAREN) {
+            return (MacroCall*)0;
+        }
+        mut MacroInfo* info = (MacroInfo*)0;
+        if (offset > 0) {
+            ByteBuffer* qualifier = ByteBuffer.create();
+            for (mut i32 i = 0; i < offset; i = i + 2) {
+                if (i > 0) {
+                    qualifier.append("::");
+                }
+                i32 part = this.peek_token(i);
+                qualifier.append_slice(this.text_of(part), this.length_of(part));
+            }
+            AtomTable* atoms = Atoms.get();
+            u32 namespace_atom = atoms.intern_copy(qualifier.cstr(), (u32)strlen(qualifier.cstr()));
+            info = Macros.find_qualified(this.atom_of(name), banged, namespace_atom);
+        } else {
+            info = Macros.find(this.atom_of(name), banged, this.namespace_atom, this.imports);
+        }
+        if (info == null) {
+            return (MacroCall*)0;
+        }
+        i32 close = this.matching_close(open);
+        if (close < 0) {
+            return (MacroCall*)0;
+        }
+        MacroCall* call = (MacroCall*)Memory.zalloc(sizeof(MacroCall));
+        call.info = info;
+        call.name = name;
+        call.open = open;
+        call.close = close;
+        return call;
+    }
+
+    unsafe Node* parse_macro_fragment(MacroParam* param) {
+        i32 token = this.current();
+        TokenKind kind = this.kind_of(token);
+        if (param.kind == MacroParamKind.TOKEN) {
+            if (kind == TokenKind::IDENTIFIER && this.atom_of(token) == param.name_atom) {
+                this.advance();
+            } else {
+                this.failed = true;
+            }
+            return (Node*)0;
+        }
+        if (param.kind == MacroParamKind.IDENTIFIER) {
+            if (kind != TokenKind::IDENTIFIER) {
+                this.failed = true;
+                return (Node*)0;
+            }
+            Node* identifier = Node.create(NodeKind::IDENTIFIER, token);
+            identifier.set_text(this.copy_of(token));
+            this.advance();
+            return identifier;
+        }
+        if (param.kind == MacroParamKind.LITERAL) {
+            bool literal = kind == TokenKind::INTEGER_LITERAL || kind == TokenKind::FLOAT_LITERAL
+                || kind == TokenKind::STRING_LITERAL || kind == TokenKind::TRUE || kind == TokenKind::FALSE;
+            if (!literal) {
+                this.failed = true;
+                return (Node*)0;
+            }
+            this.advance();
+            return (Node*)0;
+        }
+        if (param.kind == MacroParamKind.TYPE) {
+            if (!this.is_type_start(token) && !this.is_fn_type_start(0) && !this.is_qualified_start(0)) {
+                this.failed = true;
+                return (Node*)0;
+            }
+            this.parse_type();
+            return (Node*)0;
+        }
+        if (param.kind == MacroParamKind.BLOCK) {
+            i32 close = this.matching_close(token);
+            if (kind != TokenKind::LBRACE || close < 0) {
+                this.failed = true;
+                return (Node*)0;
+            }
+            this.pos = close + 1;
+            return (Node*)0;
+        }
+        if (param.kind == MacroParamKind.STATEMENT) {
+            return this.parse_statement();
+        }
+        if (param.kind == MacroParamKind.TOKENS) {
+            if (Parser.opens_group(kind)) {
+                i32 group_end = this.matching_close(token);
+                if (group_end < 0) {
+                    this.failed = true;
+                    return (Node*)0;
+                }
+                this.pos = group_end + 1;
+                return (Node*)0;
+            }
+            if (Parser.closes_group(kind) || kind == TokenKind::COMMA || kind == TokenKind::END_OF_FILE) {
+                this.failed = true;
+                return (Node*)0;
+            }
+            this.advance();
+            return (Node*)0;
+        }
+        return this.parse_expression();
+    }
+
+    unsafe MacroBinding* bind_macro_param(MacroParam* param, i32 start, i32 end, Node* node) {
+        MacroBinding* binding = (MacroBinding*)Memory.zalloc(sizeof(MacroBinding));
+        binding.name_atom = param.name_atom;
+        binding.name = param.name;
+        binding.kind = param.kind;
+        binding.start = start;
+        binding.end = end;
+        binding.node = node;
+        binding.is_local = param.is_local;
+        binding.warn = param.kind == MacroParamKind.EXPRESSION && !param.is_local && !param.variadic;
+        return binding;
+    }
+
+    // Parses the arguments between 'open' and 'close' against one rule without reporting anything. Returns the
+    // bindings of its parameters, or null when the rule does not fit.
+    unsafe PointerList* match_macro_rule(MacroRule* rule, i32 open, i32 close) {
+        bool saved_quiet = this.quiet;
+        bool saved_failed = this.failed;
+        this.quiet = true;
+        this.failed = false;
+        this.pos = open + 1;
+        PointerList* params = rule.params;
+        PointerList* bindings = PointerList.create();
+        mut bool fits = true;
+        for (mut i32 p = 0; p < params.length && fits; p = p + 1) {
+            MacroParam* param = (MacroParam*)params.get(p);
+            bool last = p + 1 == params.length;
+            if (param.variadic) {
+                MacroBinding* list = this.bind_macro_param(param, 0, 0, (Node*)0);
+                list.items = IdList.create();
+                IdList* items = list.items;
+                while (this.pos < close && !this.failed) {
+                    i32 item_start = this.pos;
+                    this.parse_macro_fragment(param);
+                    if (this.failed) {
                         break;
                     }
-                    depth = depth - 1;
-                } else if (kind == TokenKind::COMMA && depth == 0) {
-                    starts.push((u32)argument_start);
-                    ends.push((u32)this.pos);
-                    this.advance();
-                    argument_start = this.pos;
+                    items.push((u32)item_start);
+                    items.push((u32)this.pos);
+                    if (!this.match(TokenKind::COMMA)) {
+                        break;
+                    }
+                }
+                bindings.push((ptr)list);
+                fits = !this.failed;
+                continue;
+            }
+            if (this.pos >= close) {
+                fits = false;
+                break;
+            }
+            i32 start = this.pos;
+            Node* parsed = this.parse_macro_fragment(param);
+            if (this.failed) {
+                fits = false;
+                break;
+            }
+            if (param.kind != MacroParamKind.TOKEN) {
+                bindings.push((ptr)this.bind_macro_param(param, start, this.pos, parsed));
+            }
+            if (last) {
+                if (this.pos < close) {
+                    this.match(TokenKind::COMMA);
+                }
+            } else if (!this.match(TokenKind::COMMA)) {
+                fits = false;
+            }
+        }
+        if (fits && this.pos != close) {
+            fits = false;
+        }
+        this.quiet = saved_quiet;
+        this.failed = saved_failed;
+        if (!fits) {
+            return (PointerList*)0;
+        }
+        return bindings;
+    }
+
+    unsafe MacroBinding* macro_binding_named(PointerList* bindings, u32 atom) {
+        for (mut i32 i = bindings.length - 1; i >= 0; i = i - 1) {
+            MacroBinding* binding = (MacroBinding*)bindings.get(i);
+            if (binding.name_atom == atom) {
+                return binding;
+            }
+        }
+        return (MacroBinding*)0;
+    }
+
+    // Locals the template declares itself ('T name =', 'T name;', 'T name in') get fresh names, so they cannot
+    // capture or shadow the caller's variables.
+    unsafe U32Map* template_declarations(MacroRule* rule, PointerList* bindings) {
+        U32Map* renames = U32Map.create(Memory.arena(), 8);
+        for (mut i32 i = rule.body_start + 1; i < rule.body_end; i = i + 1) {
+            if (this.kind_of(i) != TokenKind::IDENTIFIER) {
+                continue;
+            }
+            TokenKind before = this.kind_of(i - 1);
+            TokenKind after = this.kind_of(i + 1);
+            bool typed = before == TokenKind::IDENTIFIER || before == TokenKind::AUTO || before == TokenKind::RBRACKET
+                || before == TokenKind::QUESTION;
+            bool declares = after == TokenKind::EQUAL || after == TokenKind::SEMICOLON || after == TokenKind::IN;
+            u32 atom = this.atom_of(i);
+            if (!typed || !declares || this.macro_binding_named(bindings, atom) != null || renames.contains(atom)) {
+                continue;
+            }
+            renames.put(atom, Macros.unique_atom(this.copy_of(i)) + 1);
+        }
+        return renames;
+    }
+
+    unsafe void copy_macro_token(i32 token, i32 site) {
+        TokenList* list = this.tokens;
+        list.push_synthetic(this.kind_of(token), list.raw_atom(token), token, site);
+    }
+
+    unsafe void emit_macro_binding(MacroBinding* binding, i32 start, i32 end, i32 at, i32 site) {
+        TokenList* list = this.tokens;
+        if (binding.is_local) {
+            list.push_synthetic(TokenKind::IDENTIFIER, binding.temp_atom + 1, at, site);
+            return;
+        }
+        bool grouped = this.kind_of(start) == TokenKind::LPAREN && this.matching_close(start) == end - 1;
+        bool wrap = binding.kind == MacroParamKind.EXPRESSION && end - start > 1 && !grouped;
+        if (wrap) {
+            list.push_synthetic(TokenKind::LPAREN, 0, at, site);
+        }
+        for (mut i32 i = start; i < end; i = i + 1) {
+            this.copy_macro_token(i, site);
+        }
+        if (wrap) {
+            list.push_synthetic(TokenKind::RPAREN, 0, at, site);
+        }
+    }
+
+    unsafe void emit_macro_template(i32 from, i32 to, PointerList* bindings, U32Map* renames, i32 site) {
+        TokenList* list = this.tokens;
+        mut i32 i = from;
+        while (i < to && !this.failed) {
+            TokenKind kind = this.kind_of(i);
+            if (kind == TokenKind::DOLLAR && this.kind_of(i + 1) == TokenKind::FOR && this.kind_of(i + 2) == TokenKind::LPAREN) {
+                i = this.emit_macro_repetition(i, to, bindings, renames, site);
+                continue;
+            }
+            if (kind == TokenKind::IDENTIFIER) {
+                MacroBinding* binding = this.macro_binding_named(bindings, this.atom_of(i));
+                if (binding != null && binding.items == null) {
+                    binding.uses = binding.uses + 1;
+                    this.emit_macro_binding(binding, binding.start, binding.end, i, site);
+                    i = i + 1;
                     continue;
                 }
-                this.advance();
+                if (renames != null) {
+                    i64 renamed = renames.find(this.atom_of(i));
+                    if (renamed >= 0) {
+                        list.push_synthetic(TokenKind::IDENTIFIER, (u32)renamed, i, site);
+                        i = i + 1;
+                        continue;
+                    }
+                }
             }
-            starts.push((u32)argument_start);
-            ends.push((u32)this.pos);
+            this.copy_macro_token(i, site);
+            i = i + 1;
         }
-        this.expect(TokenKind::RPAREN, "expected ')' after the macro arguments");
-        i32 resume = this.pos;
+    }
 
+    // $for(item in list) { tokens } or $for(item in list, separator) { tokens }: the tokens once per argument of a
+    // variadic parameter, with 'item' bound to it.
+    unsafe i32 emit_macro_repetition(i32 at, i32 to, PointerList* bindings, U32Map* renames, i32 site) {
+        i32 item_token = at + 3;
+        i32 list_token = at + 5;
+        mut i32 after = at + 6;
+        mut i32 separator = 0 - 1;
+        if (this.kind_of(item_token) != TokenKind::IDENTIFIER || this.kind_of(at + 4) != TokenKind::IN
+            || this.kind_of(list_token) != TokenKind::IDENTIFIER) {
+            this.macro_error(site, "malformed '$for': expected '$for(item in list) { ... }'");
+            return to;
+        }
+        if (this.kind_of(after) == TokenKind::COMMA) {
+            separator = after + 1;
+            after = after + 2;
+        }
+        i32 body_open = after + 1;
+        i32 body_close = this.matching_close(body_open);
+        if (this.kind_of(after) != TokenKind::RPAREN || this.kind_of(body_open) != TokenKind::LBRACE || body_close < 0 || body_close >= to) {
+            this.macro_error(site, "malformed '$for': expected '$for(item in list) { ... }'");
+            return to;
+        }
+        MacroBinding* source = this.macro_binding_named(bindings, this.atom_of(list_token));
+        if (source == null || source.items == null) {
+            this.macro_error(site, "'$for' needs a variadic macro parameter ('expression... name')");
+            return body_close + 1;
+        }
+        IdList* items = source.items;
+        for (mut i32 k = 0; k + 1 < items.length; k = k + 2) {
+            if (k > 0 && separator >= 0) {
+                this.copy_macro_token(separator, site);
+            }
+            MacroBinding* item = (MacroBinding*)Memory.zalloc(sizeof(MacroBinding));
+            item.name_atom = this.atom_of(item_token);
+            item.kind = source.kind;
+            item.start = (i32)items.get(k);
+            item.end = (i32)items.get(k + 1);
+            bindings.push((ptr)item);
+            this.emit_macro_template(body_open + 1, body_close, bindings, renames, site);
+            bindings.truncate(bindings.length - 1);
+        }
+        return body_close + 1;
+    }
+
+    unsafe Node* expand_macro(MacroCall* call, i32 mode) {
+        MacroInfo* info = call.info;
+        i32 name_token = call.name;
+        if (this.expansion_depth >= 64) {
+            this.macro_error(name_token, "macro expansion is nested too deeply (64 levels)");
+            this.pos = call.close + 1;
+            return Node.create(NodeKind::NULL_LITERAL, name_token);
+        }
+        if (info.is_proc) {
+            return this.expand_procedural(call, mode);
+        }
         mut MacroRule* chosen = (MacroRule*)0;
+        mut PointerList* bindings = (PointerList*)0;
         PointerList* rules = info.rules;
         for (mut i32 r = 0; r < rules.length && chosen == null; r = r + 1) {
             MacroRule* candidate = (MacroRule*)rules.get(r);
-            PointerList* candidate_params = candidate.params;
-            if (candidate_params.length != starts.length) {
-                continue;
-            }
-            mut bool fits = true;
-            for (mut i32 p = 0; p < candidate_params.length; p = p + 1) {
-                MacroParam* param = (MacroParam*)candidate_params.get(p);
-                if (!this.macro_param_matches(param, (i32)starts.get(p), (i32)ends.get(p))) {
-                    fits = false;
-                    break;
-                }
-            }
-            if (fits) {
+            bindings = this.match_macro_rule(candidate, call.open, call.close);
+            if (bindings != null) {
                 chosen = candidate;
             }
         }
+        this.pos = call.close + 1;
+        if (mode != MacroMode.EXPRESSION) {
+            this.match(TokenKind::SEMICOLON);
+        }
+        i32 resume = this.pos;
         if (chosen == null) {
-            Diagnostics* diagnostics = this.diagnostics;
             ByteBuffer* message = ByteBuffer.create();
             message.append("no rule of macro '");
             message.append(info.name);
             message.append("' matches these arguments");
-            diagnostics.error(DiagnosticErrors.MACRO, this.line_of(name_token), this.column_of(name_token), message.cstr());
-            this.failed = true;
+            this.macro_error(name_token, message.cstr());
             return Node.create(NodeKind::NULL_LITERAL, name_token);
         }
+        if (chosen.is_void) {
+            if (mode == MacroMode.ITEM) {
+                return (Node*)0;
+            }
+            if (mode == MacroMode.STATEMENT) {
+                return Node.create_list(NodeKind::BLOCK, name_token);
+            }
+            Node* nothing = Node.create(NodeKind::INT_LITERAL, name_token);
+            nothing.set_int_value(0);
+            return nothing;
+        }
 
-        PointerList* chosen_params = chosen.params;
-        PointerList* bindings = PointerList.create();
+        TokenList* list = this.tokens;
+        i32 base = list.length;
+        Node* scope_node = this.prepare_macro_locals(bindings, mode, name_token);
+        mut U32Map* renames = (U32Map*)0;
+        if (mode != MacroMode.ITEM) {
+            renames = this.template_declarations(chosen, bindings);
+        }
+        this.emit_macro_template(chosen.body_start, chosen.body_end, bindings, renames, name_token);
+        if (mode == MacroMode.STATEMENT && list.length > base) {
+            TokenKind last = this.kind_of(list.length - 1);
+            if (last != TokenKind::SEMICOLON && last != TokenKind::RBRACE) {
+                list.push_synthetic(TokenKind::SEMICOLON, 0, name_token, name_token);
+            }
+        }
+        list.push_synthetic(TokenKind::END_OF_FILE, 0, name_token, name_token);
+        this.warn_repeated_parameters(bindings, name_token);
+        return this.parse_expansion(base, mode, scope_node, name_token, resume);
+    }
+
+    // Parses the tokens from 'base' (ended by a synthetic end of file) in the shape the call site asks for, then
+    // continues after the call.
+    unsafe Node* parse_expansion(i32 base, i32 mode, Node* scope_node, i32 name_token, i32 resume) {
+        TokenList* list = this.tokens;
+        i32 saved_end = this.end;
+        bool saved_in_block = this.in_block;
+        PointerList* saved_queue = this.queued_statements;
+        this.queued_statements = (PointerList*)0;
+        this.pos = base;
+        this.end = list.length;
+        this.expansion_depth = this.expansion_depth + 1;
+        mut Node* result = (Node*)0;
+        if (mode == MacroMode.EXPRESSION) {
+            result = this.parse_macro_expression(scope_node, name_token);
+        } else if (mode == MacroMode.STATEMENT) {
+            result = this.parse_macro_statements(saved_in_block, saved_queue, name_token);
+        } else {
+            this.parse_macro_items();
+        }
+        this.expansion_depth = this.expansion_depth - 1;
+        if (mode != MacroMode.STATEMENT) {
+            this.queued_statements = saved_queue;
+        }
+        this.in_block = saved_in_block;
+        this.end = saved_end;
+        this.pos = resume;
+        return result;
+    }
+
+    // A 'local' parameter is evaluated once: a temporary holds it (a let expression around an expression body, a
+    // declaration before the statements of a statement body) and the template reads the temporary.
+    unsafe Node* prepare_macro_locals(PointerList* bindings, i32 mode, i32 name_token) {
+        TokenList* list = this.tokens;
         mut Node* scope_node = (Node*)0;
-        for (mut i32 p = 0; p < chosen_params.length; p = p + 1) {
-            MacroParam* param = (MacroParam*)chosen_params.get(p);
-            if (param.kind == MacroParamKind.TOKEN) {
+        for (mut i32 b = 0; b < bindings.length; b = b + 1) {
+            MacroBinding* binding = (MacroBinding*)bindings.get(b);
+            if (!binding.is_local) {
                 continue;
             }
-            i32 start = (i32)starts.get(p);
-            i32 end = (i32)ends.get(p);
-            this.pos = start;
-            mut Node* argument = (Node*)0;
-            if (param.kind == MacroParamKind.TYPE) {
-                this.parse_type();
-            } else if (param.kind == MacroParamKind.IDENTIFIER) {
-                argument = Node.create(NodeKind::IDENTIFIER, start);
-                argument.set_text(this.copy_of(start));
-                this.advance();
-            } else {
-                argument = this.parse_expression();
-            }
-            if (this.pos != end && !this.failed) {
-                this.fail("invalid macro argument");
-            }
-            if (param.kind == MacroParamKind.TYPE) {
-                continue;
-            }
-            MacroBinding* binding = (MacroBinding*)Memory.zalloc(sizeof(MacroBinding));
-            binding.name_atom = param.name_atom;
-            binding.name = param.name;
-            binding.node = argument;
-            binding.is_local = param.is_local;
-            binding.warn = param.kind == MacroParamKind.EXPRESSION && !param.is_local;
-            if (param.is_local) {
-                binding.temp = Macros.unique_name(param.name);
+            binding.temp_atom = Macros.unique_atom(binding.name);
+            AtomTable* atoms = Atoms.get();
+            if (mode == MacroMode.EXPRESSION) {
                 if (scope_node == null) {
                     scope_node = Node.create_list(NodeKind::LET_EXPR, name_token);
                 }
                 Node* item = Node.create(NodeKind::FIELD_DECL, name_token);
-                item.set_text(binding.temp);
-                item.set_first(argument);
+                item.set_text(atoms.text(binding.temp_atom));
+                item.set_first(binding.node);
                 scope_node.add(item);
+            } else {
+                list.push_synthetic(TokenKind::AUTO, atoms.intern_copy("auto", 4) + 1, name_token, name_token);
+                list.push_synthetic(TokenKind::IDENTIFIER, binding.temp_atom + 1, binding.start, name_token);
+                list.push_synthetic(TokenKind::EQUAL, 0, name_token, name_token);
+                list.push_synthetic(TokenKind::LPAREN, 0, binding.start, name_token);
+                for (mut i32 i = binding.start; i < binding.end; i = i + 1) {
+                    this.copy_macro_token(i, name_token);
+                }
+                list.push_synthetic(TokenKind::RPAREN, 0, binding.start, name_token);
+                list.push_synthetic(TokenKind::SEMICOLON, 0, name_token, name_token);
             }
-            bindings.push((ptr)binding);
         }
-        this.pos = resume;
+        return scope_node;
+    }
 
-        mut Node* result = (Node*)0;
-        if (chosen.body == null) {
-            result = Node.create(NodeKind::INT_LITERAL, name_token);
-            result.set_int_value(0);
-        } else {
-            result = Macros.replace(Node.clone(chosen.body), bindings);
+    unsafe void warn_repeated_parameters(PointerList* bindings, i32 name_token) {
+        if (this.quiet) {
+            return;
         }
-
         Diagnostics* warnings = this.diagnostics;
+        TokenList* list = this.tokens;
+        i32 site = list.site_of(name_token);
         for (mut i32 b = 0; b < bindings.length; b = b + 1) {
             MacroBinding* binding = (MacroBinding*)bindings.get(b);
             if (binding.warn && binding.uses > 1) {
@@ -247,13 +711,93 @@ impl Parser {
                 message.append("' is used ");
                 message.append_int(binding.uses);
                 message.append(" times without 'local', which may cause side effects");
-                warnings.warning(DiagnosticWarnings.MACRO_SIDE_EFFECT, this.line_of(name_token), this.column_of(name_token), message.cstr());
+                warnings.warning(DiagnosticWarnings.MACRO_SIDE_EFFECT, this.line_of(site), this.column_of(site), message.cstr());
             }
         }
+    }
+
+    unsafe Node* parse_macro_expression(Node* scope_node, i32 name_token) {
+        if (this.check(TokenKind::END_OF_FILE)) {
+            this.macro_error(name_token, "the macro body is empty where an expression is expected");
+            return Node.create(NodeKind::NULL_LITERAL, name_token);
+        }
+        Node* expression = this.parse_expression();
+        this.match(TokenKind::SEMICOLON);
+        if (!this.check(TokenKind::END_OF_FILE)) {
+            this.fail("expected the macro body to be a single expression here");
+        }
         if (scope_node != null) {
-            scope_node.set_first(result);
+            scope_node.set_first(expression);
             return scope_node;
         }
-        return result;
+        return expression;
+    }
+
+    // In a block the statements join it (so a declaration stays visible after the call); elsewhere ('if (c) m!{..}')
+    // they are wrapped in a block of their own.
+    unsafe Node* parse_macro_statements(bool in_block, PointerList* outer_queue, i32 name_token) {
+        PointerList* produced = PointerList.create();
+        while (!this.at_end()) {
+            this.in_block = false;
+            Node* statement = this.parse_statement();
+            if (statement != null) {
+                produced.push((ptr)statement);
+            }
+            PointerList* queued = this.queued_statements;
+            if (queued != null) {
+                for (mut i32 i = 0; i < queued.length; i = i + 1) {
+                    produced.push(queued.get(i));
+                }
+                queued.length = 0;
+            }
+        }
+        this.queued_statements = outer_queue;
+        if (produced.length == 1) {
+            return (Node*)produced.get(0);
+        }
+        if (in_block && produced.length > 1) {
+            if (this.queued_statements == null) {
+                this.queued_statements = PointerList.create();
+            }
+            PointerList* queue = this.queued_statements;
+            for (mut i32 i = 1; i < produced.length; i = i + 1) {
+                queue.push(produced.get(i));
+            }
+            return (Node*)produced.get(0);
+        }
+        Node* block = Node.create_list(NodeKind::BLOCK, name_token);
+        for (mut i32 i = 0; i < produced.length; i = i + 1) {
+            block.add((Node*)produced.get(i));
+        }
+        return block;
+    }
+
+    unsafe void parse_macro_items() {
+        if (this.extra_declarations == null) {
+            this.extra_declarations = PointerList.create();
+        }
+        while (!this.at_end()) {
+            Node* declaration = this.parse_declaration();
+            if (declaration != null) {
+                PointerList* extra = this.extra_declarations;
+                extra.push((ptr)declaration);
+            }
+        }
+    }
+
+    unsafe void warn_macro_shadowing(i32 name) {
+        if (this.expansion_depth > 0 || this.in_member || this.kind_of(name) != TokenKind::IDENTIFIER) {
+            return;
+        }
+        MacroInfo* shadow = Macros.find(this.atom_of(name), false, this.namespace_atom, this.imports);
+        if (shadow == null || shadow.bang_only) {
+            return;
+        }
+        ByteBuffer* message = ByteBuffer.create();
+        message.append("calls to '");
+        message.append(shadow.name);
+        message.append("(...)' expand the macro of the same name, not this function; declare the macro with '!' or rename one");
+        Diagnostics* warnings = this.diagnostics;
+        warnings.warning(DiagnosticWarnings.MACRO_SHADOWS_FUNCTION, this.line_of(name), this.column_of(name), message.cstr());
     }
 }

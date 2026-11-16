@@ -1,0 +1,84 @@
+import std::types;
+import std::libc;
+
+namespace ui;
+
+unsafe static mut ptr static_pages = null;
+
+struct StaticPage {
+    mut str name;
+    mut TextBuffer html;
+}
+
+struct StaticPageTable {
+    mut StaticPage* pages;
+    mut u32 count;
+    mut u32 capacity;
+    mut u32 renders;
+}
+
+// The HTML of every [Static] page, rendered the first time it is shown and then shared by all requests.
+// 'ui build --mode=static' (roadmap phase 14) writes the same HTML to files at build time.
+struct StaticPages {
+    static unsafe StaticPageTable* table() {
+        if (static_pages == null) {
+            StaticPageTable* table = (StaticPageTable*)__djinn_alloc_zeroed((size_long)sizeof(StaticPageTable));
+            static_pages = (ptr)table;
+        }
+        return (StaticPageTable*)static_pages;
+    }
+
+    public static unsafe str find(str name) {
+        StaticPageTable* table = StaticPages.table();
+        for (mut u32 i = 0; i < table.count; i = i + 1) {
+            if (Texts.same(table.pages[i].name, name)) {
+                return table.pages[i].html.view();
+            }
+        }
+        str missing = { .data = (i8*)0, .length = 0 };
+        return missing;
+    }
+
+    public static unsafe void store(str name, TextBuffer html) {
+        StaticPageTable* table = StaticPages.table();
+        if (table.count == table.capacity) {
+            mut u32 grown = table.capacity * 2;
+            if (grown < 8) {
+                grown = 8;
+            }
+            table.pages = (StaticPage*)__djinn_realloc((void*)table.pages, (size_long)((u64)grown * sizeof(StaticPage)));
+            table.capacity = grown;
+        }
+        table.pages[table.count].name = name;
+        table.pages[table.count].html = html;
+        table.count = table.count + 1;
+        table.renders = table.renders + 1;
+    }
+
+    // How many pages were actually rendered (each [Static] page counts once however often it is shown).
+    public static unsafe u32 renders() {
+        return StaticPages.table().renders;
+    }
+
+    public static unsafe str html<T>(str name, T* page) {
+        str cached = StaticPages.find(name);
+        if (cached.data != (i8*)0) {
+            return cached;
+        }
+        bool was_static = Reactive.is_static();
+        bool dom_static = Dom.is_static();
+        Reactive.set_static(true);
+        Dom.set_static(true);
+        u32 root = Reactive.create_root(0);
+        Scope saved = Reactive.enter(root);
+        Node node = page.render_static_content();
+        Reactive.leave(saved);
+        TextBuffer html = Html.render(node, false);
+        Reactive.dispose(root);
+        Dom.remove(node.id);
+        Reactive.set_static(was_static);
+        Dom.set_static(dom_static);
+        StaticPages.store(name, html);
+        return StaticPages.find(name);
+    }
+}

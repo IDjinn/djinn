@@ -1,0 +1,93 @@
+import std::types;
+import std::libc;
+
+namespace ui;
+
+// A reactive value: a u32 handle, so it is copied freely and captured by closures at no cost. The value is stored
+// in the graph and compared byte by byte on write, so T is a trivial type (numbers, bool, str, slices, plain structs).
+struct signal<T> {
+    u32 id;
+
+    signal(T initial) {
+        unsafe {
+            mut T value = initial;
+            this.id = Reactive.create_signal((void*)&value, (u32)sizeof(T));
+        }
+    }
+
+    public unsafe T get() {
+        return *(T*)Reactive.read(this.id);
+    }
+
+    public unsafe T peek() {
+        return *(T*)Reactive.peek(this.id);
+    }
+
+    public unsafe void set(T value) {
+        mut T copy = value;
+        Reactive.write(this.id, (void*)&copy);
+    }
+
+    public unsafe void update(fn(T) -> T change) {
+        T next = change(*(T*)Reactive.peek(this.id));
+        this.set(next);
+    }
+
+    // Wakes the observers even when the bytes did not change (the value points at memory that was edited in place).
+    public unsafe void notify() {
+        Reactive.notify(this.id);
+    }
+}
+
+// A derived value, recomputed only when what it read changed, and only propagated when its result changed.
+struct memo<T> {
+    u32 id;
+
+    memo(fn() -> T compute) {
+        unsafe {
+            u32 id = Reactive.allocate(ReactiveKind.MEMO, (u32)sizeof(T));
+            Computation computation = { .run = () => Memos.store<T>(id, compute()) };
+            Reactive.attach(id, computation);
+            Reactive.start(id);
+            this.id = id;
+        }
+    }
+
+    public unsafe T get() {
+        return *(T*)Reactive.read(this.id);
+    }
+
+    public unsafe T peek() {
+        return *(T*)Reactive.peek(this.id);
+    }
+}
+
+struct Memos {
+    public static unsafe bool store<T>(u32 id, T value) {
+        mut T copy = value;
+        return Reactive.store(id, (void*)&copy);
+    }
+}
+
+T untracked<T>(fn() -> T body) {
+    unsafe {
+        ReactiveGraph* g = Reactive.graph();
+        u32 saved = g.observer;
+        g.observer = 0;
+        T value = body();
+        g.observer = saved;
+        return value;
+    }
+}
+
+signal<T> state<T>(T initial) {
+    return signal<T>(initial);
+}
+
+memo<T> derived<T>(fn() -> T compute) {
+    return memo<T>(compute);
+}
+
+u32 effect(fn() -> void body) {
+    return Reactive.effect(body);
+}

@@ -1,0 +1,342 @@
+namespace ui;
+
+import testing;
+import std::types;
+import std::collections;
+
+// Builds a subtree under the document so selectors, inheritance and the theme apply to it.
+struct Page {
+    public static unsafe Node attach(Node node) {
+        Dom.append(Dom.document(), node.id);
+        return node;
+    }
+
+    public static unsafe i8* color(Node node) {
+        return Colors.format(Styles.of(node.id).color).data;
+    }
+
+    public static unsafe i8* background(Node node) {
+        return Colors.format(Styles.of(node.id).background).data;
+    }
+
+    public static unsafe i8* parse_color(str css) {
+        mut CssTokens tokens = CssLexer.tokenize(css);
+        mut ValueReader reader = ValueReader.over(&tokens, 0, tokens.count);
+        mut ValueContext context = { .font_size = 16.0, .root_font_size = 16.0, .viewport_width = 1000.0, .viewport_height = 800.0, .dark = false };
+        mut u32 color = 0;
+        if (!Colors.read(&reader, &context, 255, &color)) {
+            str bad = "invalid";
+            return bad.data;
+        }
+        return Colors.format(color).data;
+    }
+
+    public static unsafe f64 length(str css) {
+        mut CssTokens tokens = CssLexer.tokenize(css);
+        mut ValueReader reader = ValueReader.over(&tokens, 0, tokens.count);
+        mut ValueContext context = { .font_size = 20.0, .root_font_size = 16.0, .viewport_width = 1000.0, .viewport_height = 800.0, .dark = false };
+        Length value = CssNumbers.length(&reader, &context);
+        if (value.unit == Unit.PERCENT) {
+            return 0.0 - (f64)value.value;
+        }
+        return (f64)value.value;
+    }
+}
+
+struct CssLexerTests {
+    [Test]
+    unsafe void escapes_in_class_names_are_decoded() {
+        CssTokens tokens = CssLexer.tokenize(".md\\:flex .w-1\\/2 .\\31 0");
+        Expect.equal_text("md:flex", tokens.get(1).text.data);
+        Expect.equal_text("w-1/2", tokens.get(4).text.data);
+        Expect.equal_text("10", tokens.get(7).text.data);
+    }
+
+    [Test]
+    unsafe void numbers_dimensions_and_comments() {
+        CssTokens tokens = CssLexer.tokenize("/* x */12.5px -3 50% 1e2");
+        Expect.equal((i64)CssKind.DIMENSION, (i64)tokens.get(0).kind);
+        Expect.equal(125, (i64)(tokens.get(0).number * 10.0));
+        Expect.equal_text("px", tokens.get(0).text.data);
+        Expect.equal(0 - 3, (i64)tokens.get(2).number);
+        Expect.equal((i64)CssKind.PERCENT, (i64)tokens.get(4).kind);
+        Expect.equal(100, (i64)tokens.get(6).number);
+    }
+}
+
+struct CssValueTests {
+    [Test]
+    unsafe void colors_in_every_notation() {
+        Expect.equal_text("#ffffff", Page.parse_color("#fff"));
+        Expect.equal_text("#2563eb", Page.parse_color("#2563EB"));
+        Expect.equal_text("#11223344", Page.parse_color("#11223344"));
+        Expect.equal_text("#ff000080", Page.parse_color("rgb(255 0 0 / 50%)"));
+        Expect.equal_text("#00ff00", Page.parse_color("rgba(0, 255, 0, 1)"));
+        Expect.equal_text("#008000", Page.parse_color("hsl(120 100% 25%)"));
+        Expect.equal_text("#ff0000", Page.parse_color("oklch(62.8% 0.2577 29.23)"));
+        Expect.equal_text("#ffffff", Page.parse_color("oklch(1 0 0)"));
+        Expect.equal_text("#000000", Page.parse_color("oklab(0 0 0)"));
+        Expect.equal_text("#00000000", Page.parse_color("transparent"));
+        Expect.equal_text("#000000", Page.parse_color("currentColor"));
+        Expect.equal_text("invalid", Page.parse_color("#12345"));
+        Expect.equal_text("invalid", Page.parse_color("notacolor"));
+    }
+
+    [Test]
+    unsafe void color_mix_interpolates_with_alpha() {
+        Expect.equal_text("#800080", Page.parse_color("color-mix(in srgb, red 50%, blue)"));
+        Expect.equal_text("#ff000080", Page.parse_color("color-mix(in oklab, red 50%, transparent)"));
+        Expect.equal_text("#ff0000", Page.parse_color("color-mix(in oklab, red, red)"));
+    }
+
+    [Test]
+    unsafe void lengths_and_calc() {
+        Expect.equal(16, (i64)Page.length("1rem"));
+        Expect.equal(40, (i64)Page.length("2em"));
+        Expect.equal(100, (i64)Page.length("10vw"));
+        Expect.equal(16, (i64)Page.length("calc(0.25rem * 4)"));
+        Expect.equal(80, (i64)Page.length("calc(100px - 2 * 10px)"));
+        Expect.equal(30, (i64)Page.length("calc((10px + 5px) * 2)"));
+        Expect.equal(10, (i64)Page.length("min(10px, 20px)"));
+        Expect.equal(20, (i64)Page.length("max(10px, 20px)"));
+        Expect.equal(15, (i64)Page.length("clamp(10px, 15px, 20px)"));
+        Expect.equal(0 - 50, (i64)Page.length("50%"));
+    }
+}
+
+struct CascadeTests {
+    [Test]
+    unsafe void specificity_then_order_decides() {
+        Styles.add("p { color: red; } .note { color: green; } #main { color: blue; } p { color: yellow; }");
+        Node a = Page.attach(Node.element("p"));
+        Node b = Page.attach(Node.element("p").attr("class", "note"));
+        Node c = Page.attach(Node.element("p").attr("class", "note").attr("id", "main"));
+        Expect.equal_text("#ffff00", Page.color(a), "the later 'p' rule wins the tie");
+        Expect.equal_text("#008000", Page.color(b));
+        Expect.equal_text("#0000ff", Page.color(c));
+    }
+
+    [Test]
+    unsafe void important_and_layers() {
+        Styles.add("@layer base, components; @layer components { .x { color: green; } } @layer base { .x.y { color: blue; } } .x { color: red; }");
+        Node plain = Page.attach(Node.element("span").attr("class", "x y"));
+        Expect.equal_text("#ff0000", Page.color(plain), "unlayered beats any layer, even with lower specificity");
+        Styles.add("@layer base { .z { color: blue !important; } } .z { color: red !important; }");
+        Node important = Page.attach(Node.element("span").attr("class", "z"));
+        Expect.equal_text("#0000ff", Page.color(important), "for !important the earlier layer wins");
+    }
+
+    [Test]
+    unsafe void inheritance_and_custom_properties() {
+        Styles.add(".box { color: green; padding: 4px; --gap: 12px; --tint: #123456; } .inner { margin: var(--gap); background-color: var(--missing, var(--tint)); } .broken { color: var(--nothing); }");
+        Node inner = Node.element("i").attr("class", "inner");
+        Node broken = Node.element("b").attr("class", "broken");
+        Node box = Page.attach(Node.element("div").attr("class", "box").child(inner).child(broken));
+        Expect.equal_text("#008000", Page.color(inner), "color is inherited");
+        Expect.equal(0, (i64)Styles.of(inner.id).padding_top.value, "padding is not");
+        Expect.equal(12, (i64)Styles.of(inner.id).margin_left.value, "custom properties are inherited and substituted");
+        Expect.equal_text("#123456", Page.background(inner), "fallbacks may use var() too");
+        Expect.equal_text("#008000", Page.color(broken), "an unresolvable var() makes the declaration unset (inherit)");
+    }
+
+    [Test]
+    unsafe void combinators_and_pseudo_classes() {
+        Styles.add("ul > li { color: red; } li + li { color: green; } li ~ .last { color: blue; } li:first-child { font-weight: 700; } div em { color: purple; } a:hover { color: orange; } button:disabled { opacity: 0.5; } :root .rooted { color: teal; }");
+        Node first = Node.element("li");
+        Node second = Node.element("li");
+        Node third = Node.element("li").attr("class", "last");
+        Node list = Page.attach(Node.element("ul").child(first).child(View.fragment().child(second)).child(third));
+        Expect.equal_text("#ff0000", Page.color(first));
+        Expect.equal_text("#008000", Page.color(second), "a fragment between siblings is transparent");
+        Expect.equal_text("#0000ff", Page.color(third));
+        Expect.equal(700, (i64)Styles.of(first.id).font_weight);
+        Expect.equal(400, (i64)Styles.of(second.id).font_weight);
+        Node em = Node.element("em");
+        Page.attach(Node.element("div").child(Node.element("p").child(em)));
+        Expect.equal_text("#800080", Page.color(em));
+        Node link = Page.attach(Node.element("a"));
+        Dom.set_state(link.id, NodeState.HOVER, true);
+        Expect.equal_text("#ffa500", Page.color(link), ":hover follows the state the host sets");
+        Dom.set_state(link.id, NodeState.HOVER, false);
+        Expect.is_false(Texts.same(Colors.format(Styles.of(link.id).color), "#ffa500"));
+        Node button = Page.attach(Node.element("button").attr("disabled", ""));
+        Expect.equal(50, (i64)(Styles.of(button.id).opacity * (f32)100.0 + (f32)0.5));
+        Node rooted = Page.attach(Node.element("span").attr("class", "rooted"));
+        Expect.equal_text("#008080", Page.color(rooted));
+    }
+
+    [Test]
+    unsafe void is_where_and_not() {
+        Styles.add(":is(.a, .b) span { color: red; } :where(.c) span { color: green; } span:not(.skip) { font-weight: 700; } .d span { color: blue; }");
+        Node one = Node.element("span");
+        Page.attach(Node.element("div").attr("class", "b").child(one));
+        Node two = Node.element("span").attr("class", "skip");
+        Page.attach(Node.element("div").attr("class", "c d").child(two));
+        Expect.equal_text("#ff0000", Page.color(one));
+        Expect.equal_text("#0000ff", Page.color(two), ":where() adds no specificity, so the later '.d span' wins");
+        Expect.equal(700, (i64)Styles.of(one.id).font_weight);
+        Expect.equal(400, (i64)Styles.of(two.id).font_weight);
+    }
+
+    [Test]
+    unsafe void attribute_selectors() {
+        Styles.add("[data-a] { color: red; } [data-b=\"x\" i] { color: green; } [data-c~=\"two\"] { color: blue; } [data-d^=\"pre\"] { color: purple; } [data-e$=\"end\"] { color: teal; } [data-f*=\"mid\"] { color: orange; } [lang|=\"pt\"] { color: navy; }");
+        Expect.equal_text("#ff0000", Page.color(Page.attach(Node.element("i").attr("data-a", ""))));
+        Expect.equal_text("#008000", Page.color(Page.attach(Node.element("i").attr("data-b", "X"))));
+        Expect.equal_text("#0000ff", Page.color(Page.attach(Node.element("i").attr("data-c", "one two three"))));
+        Expect.equal_text("#800080", Page.color(Page.attach(Node.element("i").attr("data-d", "prefix"))));
+        Expect.equal_text("#008080", Page.color(Page.attach(Node.element("i").attr("data-e", "the-end"))));
+        Expect.equal_text("#ffa500", Page.color(Page.attach(Node.element("i").attr("data-f", "amidst"))));
+        Expect.equal_text("#000080", Page.color(Page.attach(Node.element("i").attr("lang", "pt-BR"))));
+    }
+
+    [Test]
+    unsafe void nesting_and_media() {
+        Styles.add(".btn { color: red; &:hover { color: blue; } .icon { color: green; } @media (width >= 48rem) { padding: 10px; } } @media (max-width: 600px) { .btn { padding: 2px; } }");
+        Node icon = Node.element("i").attr("class", "icon");
+        Node button = Page.attach(Node.element("button").attr("class", "btn").child(icon));
+        Expect.equal_text("#ff0000", Page.color(button));
+        Expect.equal_text("#008000", Page.color(icon));
+        Dom.set_state(button.id, NodeState.HOVER, true);
+        Expect.equal_text("#0000ff", Page.color(button));
+        Styles.set_viewport(1024.0, 768.0);
+        Expect.equal(10, (i64)Styles.of(button.id).padding_left.value);
+        Styles.set_viewport(500.0, 768.0);
+        Expect.equal(2, (i64)Styles.of(button.id).padding_left.value);
+    }
+
+    [Test]
+    unsafe void style_follows_reactive_class_changes() {
+        Styles.add(".on { color: green; } .off { color: red; }");
+        signal<bool> on = state(false);
+        u32 root = Reactive.root(() => {
+            Node light = Page.attach(Node.element("span").attr("class", () => Switches.css(on.get())));
+            Expect.equal_text("#ff0000", Page.color(light));
+            on.set(true);
+            Expect.equal_text("#008000", Page.color(light), "a new class value restyles on the next read");
+        });
+        Reactive.dispose(root);
+    }
+
+    [Test]
+    unsafe void tailwind_v4_output() {
+        Styles.add("""
+@layer theme, base, components, utilities;
+@layer theme {
+  :root, :host {
+    --spacing: 0.25rem;
+    --color-blue-500: oklch(62.3% 0.214 259.815);
+    --color-blue-600: oklch(54.6% 0.245 262.881);
+    --radius-lg: 0.5rem;
+  }
+}
+@layer utilities {
+  .p-4 { padding: calc(var(--spacing) * 4); }
+  .gap-2 { gap: calc(var(--spacing) * 2); }
+  .flex { display: flex; }
+  .rounded-lg { border-radius: var(--radius-lg); }
+  .bg-blue-500 { background-color: var(--color-blue-500); }
+  .text-white { color: var(--color-white, #fff); }
+  .bg-blue-500\/50 { background-color: color-mix(in oklab, var(--color-blue-500) 50%, transparent); }
+  .hover\:bg-blue-600 {
+    &:hover {
+      @media (hover: hover) {
+        background-color: var(--color-blue-600);
+      }
+    }
+  }
+  .md\:flex-col {
+    @media (width >= 48rem) {
+      flex-direction: column;
+    }
+  }
+}
+@property --tw-shadow-color { syntax: "*"; inherits: false; initial-value: #0000; }
+""");
+        Styles.set_viewport(1280.0, 800.0);
+        Node button = Page.attach(Node.element("button").attr("class", "p-4 flex gap-2 rounded-lg bg-blue-500 text-white hover:bg-blue-600 md:flex-col"));
+        Style* style = Styles.of(button.id);
+        Expect.equal(16, (i64)style.padding_top.value);
+        Expect.equal(8, (i64)style.row_gap.value);
+        Expect.equal((i64)Display.FLEX, (i64)style.display);
+        Expect.equal(8, (i64)style.border_radius);
+        Expect.equal((i64)Keyword.COLUMN, (i64)style.flex_direction);
+        Expect.equal_text("#ffffff", Page.color(button));
+        Expect.equal_text("#2b7fff", Page.background(button));
+        Dom.set_state(button.id, NodeState.HOVER, true);
+        Expect.equal_text("#155dfc", Page.background(button));
+        Node faded = Page.attach(Node.element("div").attr("class", "bg-blue-500/50"));
+        Expect.equal_text("#2b7fff80", Page.background(faded));
+    }
+}
+
+struct Switches {
+    public static str css(bool on) {
+        if (on) {
+            return "on";
+        }
+        return "off";
+    }
+}
+
+struct ThemeTests {
+    [Test]
+    unsafe void light_theme_by_default() {
+        Expect.equal_text("#ffffff", Colors.format(Styles.of(Dom.document()).background).data);
+        Expect.equal_text("#1b1f24", Colors.format(Styles.of(Dom.document()).color).data);
+        Node button = Page.attach(Node.element("button"));
+        Expect.equal_text("#f6f7f9", Page.background(button));
+        Expect.equal(8, (i64)Styles.of(button.id).border_radius);
+        Expect.equal(16, (i64)Styles.of(button.id).padding_left.value, "1rem: sizes follow the root font size");
+        Expect.equal(16, (i64)Styles.of(button.id).font_size, "the theme leaves the root font size to the user");
+        Expect.equal(40, (i64)Styles.of(button.id).min_height.value, "a target of 2.5rem");
+        Node primary = Page.attach(Node.element("button").attr("class", "primary"));
+        Expect.equal_text("#2563eb", Page.background(primary));
+        Expect.equal_text("#ffffff", Page.color(primary));
+        Expect.is_false(Theme.is_dark());
+    }
+
+    [Test]
+    unsafe void dark_theme_when_forced() {
+        Theme.set(ThemeMode.DARK);
+        Expect.equal_text("#0f1115", Colors.format(Styles.of(Dom.document()).background).data);
+        Node button = Page.attach(Node.element("button").attr("data-variant", "primary"));
+        Expect.equal_text("#4f8cff", Page.background(button));
+        Node card = Page.attach(Node.element("div").attr("class", "card"));
+        Expect.equal_text("#171a21", Page.background(card));
+        Expect.equal(12, (i64)Styles.of(card.id).border_radius, "calc(var(--ui-radius) + 4px)");
+        Expect.is_true(Theme.is_dark());
+        Expect.equal((i64)ThemeMode.DARK, (i64)Theme.mode());
+    }
+
+    [Test]
+    unsafe void system_preference_unless_forced_light() {
+        Theme.set(ThemeMode.SYSTEM);
+        Styles.set_prefers_dark(true);
+        Expect.is_true(Theme.is_dark(), "the OS asks for dark");
+        Theme.set(ThemeMode.LIGHT);
+        Expect.is_false(Theme.is_dark(), "a forced light theme ignores the OS");
+        Expect.equal_text("#ffffff", Colors.format(Styles.of(Dom.document()).background).data);
+    }
+
+    [Test]
+    unsafe void app_sheets_override_theme_variables() {
+        Styles.add(":root { --ui-accent: #ff00ff; }");
+        Node primary = Page.attach(Node.element("button").attr("class", "primary"));
+        Expect.equal_text("#ff00ff", Page.background(primary));
+    }
+
+    [Test]
+    unsafe void server_document_carries_the_theme() {
+        Theme.set(ThemeMode.DARK);
+        Styles.add(".evil::after { content: \"</style><script>alert(1)</script>\"; }");
+        mut TextBuffer page = Html.document(Node.element("main").add("hi"), false);
+        Expect.contains(page.data, "<!doctype html><html data-theme=\"dark\">");
+        Expect.contains(page.data, "<meta name=\"color-scheme\" content=\"light dark\">");
+        Expect.contains(page.data, "<meta name=\"text-scale\" content=\"scale\">");
+        Expect.contains(page.data, "--ui-accent-light: #2563eb");
+        Expect.contains(page.data, "<body><main>hi</main></body></html>");
+        Expect.contains(page.data, "<\\/style><script>");
+        Expect.is_false(Text.contains(page.data, "\"</style><script>"), "no stylesheet can close the style tag");
+    }
+}

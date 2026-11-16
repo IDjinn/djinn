@@ -1,0 +1,121 @@
+namespace djinnc;
+
+unsafe static mut ptr proc_runtime_lib = null;
+unsafe static mut ptr proc_jit = null;
+unsafe static mut bool proc_failed = false;
+
+// Runs procedural macros at compile time. Their code is in the object of a loaded '.djlib'; on the first call the
+// objects of every loaded library are put in an ORC JIT next to the runtime, and each macro entry is looked up there.
+// The program being compiled does not use the JIT: it only runs the macros.
+struct ProcMacros {
+    public static unsafe void configure(Options* options) {
+        proc_runtime_lib = (ptr)options.runtime_lib;
+    }
+
+    static unsafe ptr<i8> start() {
+        if (proc_jit != null) {
+            return (ptr<i8>)0;
+        }
+        if (proc_failed) {
+            return "the JIT that runs procedural macros could not start";
+        }
+        proc_failed = true;
+        if (proc_runtime_lib == null) {
+            return "procedural macros need the precompiled runtime (--runtime-lib <lib>) to run";
+        }
+        if (!Target.is_native()) {
+            return "procedural macros run on the host, so they cannot be used while cross-compiling yet";
+        }
+        if (!Target.initialize_backend()) {
+            return "cannot initialize the host backend for procedural macros";
+        }
+        __djinn_link_debug_support();
+        ptr machine = ObjectWriter.jit_machine_model("O0", LlvmConst.CODE_MODEL_DEFAULT);
+        if (machine == null) {
+            return "cannot create the target machine for procedural macros";
+        }
+        ptr builder = LLVMOrcCreateLLJITBuilder();
+        LLVMOrcLLJITBuilderSetJITTargetMachineBuilder(builder, LLVMOrcJITTargetMachineBuilderCreateFromTargetMachine(machine));
+        ptr jit = (ptr)0;
+        if (!Jit.check(LLVMOrcCreateLLJIT(&jit, builder), "cannot create the JIT for procedural macros")) {
+            return "cannot create the JIT for procedural macros";
+        }
+        ptr dylib = LLVMOrcLLJITGetMainJITDylib(jit);
+        ptr runtime = (ptr)0;
+        if (!Jit.check(LLVMOrcCreateStaticLibrarySearchGeneratorForPath(&runtime, LLVMOrcLLJITGetObjLinkingLayer(jit), (ptr<i8>)proc_runtime_lib), "cannot load the runtime library")) {
+            return "cannot load the runtime library for procedural macros";
+        }
+        LLVMOrcJITDylibAddGenerator(dylib, runtime);
+        if (Linker.is_windows()) {
+            ptr crt = (ptr)0;
+            if (!Jit.check(LLVMOrcCreateDynamicLibrarySearchGeneratorForPath(&crt, "ucrtbase.dll", LLVMOrcLLJITGetGlobalPrefix(jit), null, null), "cannot load the C runtime")) {
+                return "cannot load the C runtime for procedural macros";
+            }
+            LLVMOrcJITDylibAddGenerator(dylib, crt);
+        }
+        ptr process = (ptr)0;
+        if (!Jit.check(LLVMOrcCreateDynamicLibrarySearchGeneratorForProcess(&process, LLVMOrcLLJITGetGlobalPrefix(jit), null, null), "cannot expose the process symbols")) {
+            return "cannot expose the process symbols to procedural macros";
+        }
+        LLVMOrcJITDylibAddGenerator(dylib, process);
+        if (Linker.is_windows()) {
+            u64 target = 0;
+            if (!Jit.check(LLVMOrcLLJITLookup(jit, &target, "_write"), "cannot find '_write'")) {
+                return "cannot find '_write' for procedural macros";
+            }
+            ptr<u64> pair = (ptr<u64>)Memory.zalloc(24);
+            pair[0] = (u64)LLVMOrcLLJITMangleAndIntern(jit, "write");
+            pair[1] = target;
+            pair[2] = 3;
+            if (!Jit.check(LLVMOrcJITDylibDefine(dylib, LLVMOrcAbsoluteSymbols((ptr)pair, 1)), "cannot alias 'write'")) {
+                return "cannot alias 'write' for procedural macros";
+            }
+        }
+        ptr<ptr<i8>> stubbed = (ptr<ptr<i8>>)Memory.zalloc(32);
+        stubbed[0] = "__djinn_coro_resume";
+        stubbed[1] = "__djinn_coro_destroy";
+        stubbed[2] = "__djinn_coro_done";
+        stubbed[3] = "__djinn_coro_promise";
+        ptr<u64> stubs = (ptr<u64>)Memory.zalloc(24 * 4);
+        for (mut i32 i = 0; i < 4; i = i + 1) {
+            stubs[i * 3] = (u64)LLVMOrcLLJITMangleAndIntern(jit, stubbed[i]);
+            stubs[i * 3 + 1] = (u64)(ptr)&__djinn_proc_stub;
+            stubs[i * 3 + 2] = 3;
+        }
+        if (!Jit.check(LLVMOrcJITDylibDefine(dylib, LLVMOrcAbsoluteSymbols((ptr)stubs, 4)), "cannot define the coroutine stubs")) {
+            return "cannot define the coroutine stubs for procedural macros";
+        }
+        PointerList* objects = Library.macro_objects();
+        PointerList* sizes = Library.macro_object_sizes();
+        for (mut i32 i = 0; i < objects.length; i = i + 1) {
+            ptr buffer = LLVMCreateMemoryBufferWithMemoryRangeCopy((ptr<i8>)objects.get(i), (u64)sizes.get(i), "library");
+            if (!Jit.check(LLVMOrcLLJITAddObjectFile(jit, dylib, buffer), "cannot add a library object")) {
+                return "cannot add a library object to the JIT for procedural macros";
+            }
+        }
+        proc_jit = jit;
+        proc_failed = false;
+        return (ptr<i8>)0;
+    }
+
+    // Calls the entry of a procedural macro with the encoded tokens. Returns null and sets 'error' on failure.
+    public static unsafe ByteBuffer* call(ptr<i8> symbol, ByteBuffer* input, ptr<ptr<i8>> error) {
+        ptr<i8> problem = ProcMacros.start();
+        if (problem != null) {
+            error[0] = problem;
+            return (ByteBuffer*)0;
+        }
+        u64 address = 0;
+        if (!Jit.check(LLVMOrcLLJITLookup(proc_jit, &address, symbol), "cannot find the procedural macro")) {
+            error[0] = "cannot find the procedural macro in the loaded libraries (was the library built with this compiler?)";
+            return (ByteBuffer*)0;
+        }
+        mut ptr<i8> produced = (ptr<i8>)0;
+        u64 length = __djinn_call_proc((ptr)address, input.cstr(), (u64)input.length, &produced);
+        ByteBuffer* output = ByteBuffer.create();
+        if (length > 0) {
+            output.append_slice(produced, (i32)length);
+        }
+        return output;
+    }
+}

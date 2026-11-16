@@ -1,0 +1,140 @@
+import std::types;
+import std::libc;
+import ui;
+
+namespace win32;
+
+unsafe static mut ptr gdi_dc = null;
+unsafe static mut ptr gdi_matrix = null;
+unsafe static mut ptr gdi_metrics = null;
+unsafe static mut ptr gdi_fonts = null;
+unsafe static mut ptr gdi_bitmap = null;
+unsafe static mut u32 gdi_bitmap_capacity = 0;
+unsafe static mut ptr gdi_last = null;
+
+// The FontProvider of the Windows host: GDI draws the glyphs (hinted, grayscale anti-aliased) and measures them, so the
+// text of a page looks like the text of the system. Fonts are created once per size and weight.
+struct GdiFonts {
+    const u32 SLOTS = 32;
+    const u32 CHARSET = 1;
+    const u32 TT_PRECISION = 4;
+    const u32 ANTIALIASED = 4;
+
+    static unsafe void* dc() {
+        if (gdi_dc == null) {
+            gdi_dc = (ptr)CreateCompatibleDC((void*)0);
+            gdi_matrix = (ptr)Raw.make(16);
+            // the identity transform: 1.0 in a 16.16 fixed number is 0x00010000
+            Raw.put_u32((void*)gdi_matrix, 0, 65536);
+            Raw.put_u32((void*)gdi_matrix, 12, 65536);
+            gdi_metrics = (ptr)Raw.make(64);
+            gdi_fonts = (ptr)Raw.make(GdiFonts.SLOTS * 16);
+        }
+        return (void*)gdi_dc;
+    }
+
+    // Selects the font for a size and weight into the device context, creating it the first time.
+    static unsafe void select(f32 size, bool bold) {
+        void* dc = GdiFonts.dc();
+        mut u32 key = (u32)(size * (f32)16.0 + (f32)0.5);
+        if (bold) {
+            key = key | 0x80000000;
+        }
+        u64* table = (u64*)gdi_fonts;
+        mut u32 free_slot = GdiFonts.SLOTS;
+        for (mut u32 i = 0; i < GdiFonts.SLOTS; i = i + 1) {
+            if (table[i * 2 + 1] != 0 && (u32)table[i * 2] == key) {
+                SelectObject(dc, (void*)table[i * 2 + 1]);
+                return;
+            }
+            if (table[i * 2 + 1] == 0 && free_slot == GdiFonts.SLOTS) {
+                free_slot = i;
+            }
+        }
+        mut u32 weight = 400;
+        if (bold) {
+            weight = 700;
+        }
+        i32 pixels = (i32)(size + (f32)0.5);
+        void* font = CreateFontA(-pixels, 0, 0, 0, (i32)weight, 0, 0, 0, GdiFonts.CHARSET, GdiFonts.TT_PRECISION, 0,
+            GdiFonts.ANTIALIASED, 0, "Segoe UI");
+        if (free_slot < GdiFonts.SLOTS) {
+            table[free_slot * 2] = (u64)key;
+            table[free_slot * 2 + 1] = (u64)font;
+        }
+        SelectObject(dc, font);
+    }
+
+    static unsafe f32 advance(u32 code, f32 size, bool bold) {
+        GdiFonts.select(size, bold);
+        if (GetGlyphOutlineW(GdiFonts.dc(), code, 2, (void*)gdi_metrics, 0, (void*)0, (void*)gdi_matrix) == 4294967295) {
+            return size * (f32)0.5;
+        }
+        return (f32)Raw.get_i16((void*)gdi_metrics, 16);
+    }
+
+    static unsafe bool rasterize(u32 code, f32 size, bool bold, GlyphBitmap* out) {
+        GdiFonts.select(size, bold);
+        void* dc = GdiFonts.dc();
+        u32 bytes = GetGlyphOutlineW(dc, code, 6, (void*)gdi_metrics, 0, (void*)0, (void*)gdi_matrix);
+        if (bytes == 4294967295 || bytes == 0) {
+            return false;
+        }
+        if (bytes > gdi_bitmap_capacity) {
+            if (gdi_bitmap != null) {
+                __djinn_free((void*)gdi_bitmap);
+            }
+            gdi_bitmap_capacity = bytes + 1024;
+            gdi_bitmap = (ptr)__djinn_alloc((size_long)gdi_bitmap_capacity);
+        }
+        if (GetGlyphOutlineW(dc, code, 6, (void*)gdi_metrics, bytes, (void*)gdi_bitmap, (void*)gdi_matrix) == 4294967295) {
+            return false;
+        }
+        u32 width = Raw.get_u32((void*)gdi_metrics, 0);
+        u32 height = Raw.get_u32((void*)gdi_metrics, 4);
+        if (width == 0 || height == 0) {
+            return false;
+        }
+        // GDI rows are padded to 4 bytes and hold 0..64; the atlas takes 0..255
+        u32 pitch = (width + 3) & 0xFFFFFFFC;
+        u8* source = (u8*)gdi_bitmap;
+        u8* pixels = (u8*)__djinn_alloc((size_long)(width * height));
+        for (mut u32 y = 0; y < height; y = y + 1) {
+            for (mut u32 x = 0; x < width; x = x + 1) {
+                mut u32 level = (u32)source[y * pitch + x] * 4;
+                if (level > 255) {
+                    level = 255;
+                }
+                pixels[y * width + x] = (u8)level;
+            }
+        }
+        out.width = (i32)width;
+        out.height = (i32)height;
+        out.bearing_x = Raw.get_i32((void*)gdi_metrics, 8);
+        out.bearing_y = Raw.get_i32((void*)gdi_metrics, 12);
+        // the provider hands the pixels over until its next call: keep this buffer for the next glyph to free
+        if (gdi_last != null) {
+            __djinn_free((void*)gdi_last);
+        }
+        gdi_last = (ptr)pixels;
+        out.pixels = pixels;
+        return true;
+    }
+
+    static unsafe void metrics(f32 size, bool bold, f32* ascent, f32* descent) {
+        GdiFonts.select(size, bold);
+        GetTextMetricsW(GdiFonts.dc(), (void*)gdi_metrics);
+        *ascent = (f32)Raw.get_i32((void*)gdi_metrics, 4);
+        *descent = (f32)Raw.get_i32((void*)gdi_metrics, 8);
+    }
+
+    public static unsafe void install() {
+        FontProvider provider = {
+            .advance = (u32 code, f32 size, bool bold) => GdiFonts.advance(code, size, bold),
+            .rasterize = (u32 code, f32 size, bool bold, GlyphBitmap* out) => GdiFonts.rasterize(code, size, bold, out),
+            .metrics = (f32 size, bool bold, f32* ascent, f32* descent) => GdiFonts.metrics(size, bold, ascent, descent)
+        };
+        Fonts.set_provider(provider);
+        Dom.touch();
+    }
+}

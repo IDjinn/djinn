@@ -1,0 +1,118 @@
+import std::meta;
+import std::types;
+import std::libc;
+
+namespace ui::markup;
+
+// Text assembled by the macros (tag names, static text). It lives until the compiler exits, like every token.
+struct Chars {
+    mut i8* data;
+    mut u32 length;
+    mut u32 capacity;
+
+    public static unsafe Chars create() {
+        Chars chars = { .data = (i8*)__djinn_alloc(32), .length = 0, .capacity = 32 };
+        return chars;
+    }
+
+    public unsafe void append_byte(i8 value) {
+        if (this.length + 1 >= this.capacity) {
+            this.capacity = this.capacity * 2;
+            this.data = (i8*)__djinn_realloc((void*)this.data, (size_long)this.capacity);
+        }
+        this.data[this.length] = value;
+        this.length = this.length + 1;
+    }
+
+    public unsafe void append(str text) {
+        for (mut u32 i = 0; i < (u32)text.length; i = i + 1) {
+            this.append_byte(text.data[i]);
+        }
+    }
+
+    public unsafe str view() {
+        str text = { .data = this.data, .length = (size)this.length };
+        return text;
+    }
+}
+
+struct AttrKind {
+    const i32 FLAG = 0;
+    const i32 TEXT = 1;
+    const i32 EXPRESSION = 2;
+}
+
+// One attribute as written: 'name', 'name="text"' or 'name={expression}' (the tokens between the braces).
+struct MarkupAttr {
+    mut str name;
+    mut i32 span;
+    mut i32 kind;
+    mut u32 start;
+    mut u32 end;
+}
+
+// The cursor over the tokens given to html!.
+struct Markup {
+    mut TokenStream input;
+    mut u32 pos;
+    mut bool failed;
+}
+
+struct Tokens {
+    public static unsafe bool is_symbol(Token token, str text) {
+        return token.kind != TokenClass.STRING && token.kind != TokenClass.CHAR && token.matches(text);
+    }
+
+    public static unsafe bool is_word(Token token) {
+        return token.kind == TokenClass.IDENTIFIER || token.kind == TokenClass.KEYWORD;
+    }
+
+    public static unsafe bool is_upper(str text) {
+        return text.length > 0 && text.data[0] >= 65 && text.data[0] <= 90;
+    }
+
+    public static unsafe void ident(TokenStream* out, str text, i32 span) {
+        out.push(Token.ident(text).at(span));
+    }
+
+    public static unsafe void keyword(TokenStream* out, str text, i32 span) {
+        out.push(Token.keyword(text).at(span));
+    }
+
+    public static unsafe void punct(TokenStream* out, str text, i32 span) {
+        out.push(Token.punct(text).at(span));
+    }
+
+    public static unsafe void open(TokenStream* out, str text, i32 span) {
+        out.push(Token.open(text).at(span));
+    }
+
+    public static unsafe void close(TokenStream* out, str text, i32 span) {
+        out.push(Token.close(text).at(span));
+    }
+
+    public static unsafe void quoted(TokenStream* out, str text, i32 span) {
+        out.push(Token.quoted(text).at(span));
+    }
+
+    // 'Owner.method' as tokens.
+    public static unsafe void path(TokenStream* out, str owner, str method, i32 span) {
+        Tokens.ident(out, owner, span);
+        Tokens.punct(out, ".", span);
+        Tokens.ident(out, method, span);
+    }
+
+    public static unsafe void copy(TokenStream* out, TokenStream input, u32 start, u32 end) {
+        for (mut u32 i = start; i < end; i = i + 1) {
+            out.push(input.get(i));
+        }
+    }
+
+    // '() => ' followed by the tokens [start, end).
+    public static unsafe void thunk(TokenStream* out, TokenStream input, u32 start, u32 end, i32 span) {
+        Tokens.open(out, "(", span);
+        Tokens.close(out, ")", span);
+        Tokens.punct(out, "=>", span);
+        Tokens.copy(out, input, start, end);
+    }
+}

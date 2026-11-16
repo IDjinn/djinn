@@ -456,6 +456,12 @@ impl TypeChecker {
         mut FunctionInfo* info = (FunctionInfo*)0;
         mut i32 offset = 0;
 
+        if (callee.kind() == NodeKind::IDENTIFIER && !callee.flag()) {
+            u32 closure_result = this.check_named_closure_call(node, callee);
+            if (closure_result != 0) {
+                return closure_result;
+            }
+        }
         if (callee.kind() == NodeKind::IDENTIFIER) {
             Node* variant = this.find_enum_variant(callee, node, expected);
             if (variant != null) {
@@ -531,6 +537,12 @@ impl TypeChecker {
                     return Types.i32_type();
                 }
                 info = symbols.find_method(owner, callee.name());
+                if (info == null) {
+                    FieldInfo* closure_field = symbols.find_field(owner, callee.name());
+                    if (closure_field != null && symbols.closure_signature(closure_field.type) != null) {
+                        return this.check_closure_call(node, this.check_expression(callee, 0));
+                    }
+                }
                 if (info == null && owner.is_enum && !owner.has_payload && node.count() == 0
                     && callee.name() == Ast.intern_base_name("getValue", 8)) {
                     callee.set_symbol(SymbolKind.ENUM_VALUE, null);
@@ -566,7 +578,11 @@ impl TypeChecker {
                 offset = 1;
             }
         } else {
-            this.error_code(node, DiagnosticErrors.UNDECLARED_FUNCTION, "only calls to named functions are supported yet");
+            u32 callee_type = this.check_expression(callee, 0);
+            if (symbols.closure_signature(callee_type) != null) {
+                return this.check_closure_call(node, callee_type);
+            }
+            this.error_code(node, DiagnosticErrors.UNDECLARED_FUNCTION, "only calls to named functions and 'fn' values are supported");
             return Types.i32_type();
         }
 

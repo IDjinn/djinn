@@ -16,6 +16,19 @@ void __djinn_free(void* pointer)
     free(pointer);
 }
 
+// A closure environment starts with its drop function: it disposes the captured values, then the block is freed.
+void __djinn_closure_drop(void* env)
+{
+    if (env == NULL) {
+        return;
+    }
+    void (*drop)(void*) = *(void (**)(void*))env;
+    if (drop != NULL) {
+        drop(env);
+    }
+    free(env);
+}
+
 DJINN_ATTR_REALLOC
 void* __djinn_realloc(void* pointer, size_t new_size)
 {
@@ -154,6 +167,17 @@ void __djinn_call_method(void* address, void* target)
 {
     __djinn_jit = 1;
     ((void (*)(void*))address)(target);
+}
+
+// Stands in for the coroutine wrappers every program generates, in the JIT that runs procedural macros.
+void __djinn_proc_stub(void)
+{
+}
+
+// A procedural macro entry: tokens in as records, records out in a buffer the macro allocates.
+uint64_t __djinn_call_proc(void* address, const char* data, uint64_t length, char** result)
+{
+    return ((uint64_t (*)(const char*, uint64_t, char**))address)(data, length, result);
 }
 
 void* __djinn_call_entry_handle(void* address)

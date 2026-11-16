@@ -12,6 +12,8 @@ impl TypeChecker {
         state.unsafe_depth = this.unsafe_depth;
         state.assign_target = this.assign_target;
         state.bindings = symbols.bindings;
+        state.lambda = this.lambda;
+        this.lambda = (LambdaScope*)0;
         this.scopes = LocalScopes.create();
         return state;
     }
@@ -25,6 +27,7 @@ impl TypeChecker {
         this.switch_depth = state.switch_depth;
         this.unsafe_depth = state.unsafe_depth;
         this.assign_target = state.assign_target;
+        this.lambda = state.lambda;
         symbols.bindings = state.bindings;
     }
 
@@ -289,6 +292,10 @@ impl TypeChecker {
     void check_return(Node* node) {
         FunctionInfo* info = this.function;
         u32 expected = info.return_type;
+        if (expected == Types.auto_type() && info.is_lambda) {
+            this.infer_lambda_return(node, info);
+            return;
+        }
         if (node.first() == null) {
             if (!Types.is_void(expected)) {
                 this.error_code(node, DiagnosticErrors.RETURN_MISMATCH, "missing return value");
@@ -317,6 +324,9 @@ impl TypeChecker {
         LocalScopes* scopes = this.scopes;
         LocalVariable* local = scopes.find(name);
         if (local != null) {
+            if (this.lambda != null) {
+                this.capture_crossing(scopes.find_index(name), local);
+            }
             return local;
         }
         SymbolTable* symbols = this.symbols;

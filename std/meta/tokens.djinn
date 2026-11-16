@@ -1,0 +1,296 @@
+import std::types;
+import std::libc;
+
+namespace std::meta;
+
+// Procedural macros receive and return token streams. A library declares one with
+//   proc macro name => handler;                 TokenStream handler(TokenStream input)
+//   proc attribute Name => handler;             TokenStream handler(TokenStream args, TokenStream item)
+// and the compiler runs the handler while it parses the code that calls the macro. Tokens keep the span (the index of
+// an input token) they were made from, so errors and generated code point back at the call; a new token has span -1.
+// Everything a handler allocates lives until the compiler exits, so nothing here is freed.
+struct TokenClass {
+    const i32 IDENTIFIER = 0;
+    const i32 KEYWORD = 1;
+    const i32 NUMBER = 2;
+    const i32 STRING = 3;
+    const i32 PUNCT = 4;
+    const i32 OPEN = 5;
+    const i32 CLOSE = 6;
+    const i32 CHAR = 7;
+    const i32 ERROR = 8;
+    const i32 SEPARATOR = 9;
+}
+
+constexpr struct Token {
+    i32 kind;
+    str text;
+    i32 span;
+    bool joint;
+
+    public static Token make(i32 kind, str text) {
+        Token token = { .kind = kind, .text = text, .span = 0 - 1, .joint = false };
+        return token;
+    }
+
+    public static Token ident(str text) {
+        return Token.make(TokenClass.IDENTIFIER, text);
+    }
+
+    public static Token keyword(str text) {
+        return Token.make(TokenClass.KEYWORD, text);
+    }
+
+    public static Token punct(str text) {
+        return Token.make(TokenClass.PUNCT, text);
+    }
+
+    public static Token number(str text) {
+        return Token.make(TokenClass.NUMBER, text);
+    }
+
+    public static Token quoted(str text) {
+        return Token.make(TokenClass.STRING, text);
+    }
+
+    public static Token open(str text) {
+        return Token.make(TokenClass.OPEN, text);
+    }
+
+    public static Token close(str text) {
+        return Token.make(TokenClass.CLOSE, text);
+    }
+
+    // Reported by the compiler as an error at the input token 'span' (or at the call when it is -1).
+    public static Token error(i32 span, str message) {
+        Token token = { .kind = TokenClass.ERROR, .text = message, .span = span, .joint = false };
+        return token;
+    }
+
+    public Token at(i32 span) {
+        Token token = { .kind = this.kind, .text = this.text, .span = span, .joint = this.joint };
+        return token;
+    }
+
+    public unsafe bool matches(str text) {
+        if (this.text.length != text.length) {
+            return false;
+        }
+        for (mut u32 i = 0; i < (u32)text.length; i = i + 1) {
+            if (this.text.data[i] != text.data[i]) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    public bool is_ident() {
+        return this.kind == TokenClass.IDENTIFIER;
+    }
+
+    public bool is_open() {
+        return this.kind == TokenClass.OPEN;
+    }
+
+    public bool is_close() {
+        return this.kind == TokenClass.CLOSE;
+    }
+}
+
+constexpr struct TokenStream {
+    Token* data;
+    u32 count;
+    u32 capacity;
+
+    public static unsafe TokenStream create() {
+        TokenStream stream = { .data = (Token*)0, .count = 0, .capacity = 0 };
+        return stream;
+    }
+
+    public u32 length() {
+        return this.count;
+    }
+
+    public unsafe Token get(u32 index) {
+        return this.data[index];
+    }
+
+    public unsafe void push(Token token) {
+        if (this.count == this.capacity) {
+            mut u32 grown = this.capacity * 2;
+            if (grown < 16) {
+                grown = 16;
+            }
+            this.data = (Token*)__djinn_realloc((void*)this.data, (size_long)((u64)grown * sizeof(Token)));
+            this.capacity = grown;
+        }
+        this.data[this.count] = token;
+        this.count = this.count + 1;
+    }
+
+    public unsafe void append(TokenStream other) {
+        for (mut u32 i = 0; i < other.count; i = i + 1) {
+            this.push(other.data[i]);
+        }
+    }
+
+    // The tokens from 'start' up to, not including, 'end'.
+    public unsafe TokenStream slice(u32 start, u32 end) {
+        mut TokenStream part = TokenStream.create();
+        for (mut u32 i = start; i < end && i < this.count; i = i + 1) {
+            part.push(this.data[i]);
+        }
+        return part;
+    }
+
+    // Index of the token that closes the group opened at 'open', or the length when it is not closed.
+    public unsafe u32 matching(u32 open) {
+        mut i32 depth = 0;
+        for (mut u32 i = open; i < this.count; i = i + 1) {
+            i32 kind = this.data[i].kind;
+            if (kind == TokenClass.OPEN) {
+                depth = depth + 1;
+            } else if (kind == TokenClass.CLOSE) {
+                depth = depth - 1;
+                if (depth == 0) {
+                    return i;
+                }
+            }
+        }
+        return this.count;
+    }
+
+    static unsafe u32 read_number(i8* data, u64 length, u64* cursor, bool* negative) {
+        mut u32 value = 0;
+        negative[0] = false;
+        if (cursor[0] < length && data[cursor[0]] == 45) {
+            negative[0] = true;
+            cursor[0] = cursor[0] + 1;
+        }
+        while (cursor[0] < length && data[cursor[0]] >= 48 && data[cursor[0]] <= 57) {
+            value = value * 10 + (u32)(data[cursor[0]] - 48);
+            cursor[0] = cursor[0] + 1;
+        }
+        cursor[0] = cursor[0] + 1;
+        return value;
+    }
+
+    // Records 'kind,span,joint,length:text' as the compiler writes them.
+    public static unsafe TokenStream decode(i8* data, u64 length) {
+        mut TokenStream stream = TokenStream.create();
+        mut u64 cursor = 0;
+        mut bool negative = false;
+        while (cursor < length) {
+            u32 kind = TokenStream.read_number(data, length, &cursor, &negative);
+            u32 span_value = TokenStream.read_number(data, length, &cursor, &negative);
+            mut i32 span = (i32)span_value;
+            if (negative) {
+                span = 0 - span;
+            }
+            u32 joint = TokenStream.read_number(data, length, &cursor, &negative);
+            u32 size = TokenStream.read_number(data, length, &cursor, &negative);
+            str text = { .data = data + cursor, .length = size };
+            Token token = { .kind = (i32)kind, .text = text, .span = span, .joint = joint != 0 };
+            stream.push(token);
+            cursor = cursor + (u64)size;
+        }
+        return stream;
+    }
+
+    static unsafe void write_number(i8* buffer, u64* cursor, i32 value) {
+        mut i32 rest = value;
+        if (rest < 0) {
+            buffer[cursor[0]] = 45;
+            cursor[0] = cursor[0] + 1;
+            rest = 0 - rest;
+        }
+        mut i32 divisor = 1;
+        while (rest / divisor >= 10) {
+            divisor = divisor * 10;
+        }
+        while (divisor > 0) {
+            buffer[cursor[0]] = (i8)(48 + (rest / divisor) % 10);
+            cursor[0] = cursor[0] + 1;
+            divisor = divisor / 10;
+        }
+    }
+
+    public unsafe u64 encode(i8** result) {
+        mut u64 capacity = 16;
+        for (mut u32 i = 0; i < this.count; i = i + 1) {
+            capacity = capacity + 48 + (u64)this.data[i].text.length;
+        }
+        i8* buffer = (i8*)__djinn_alloc((size_long)capacity);
+        mut u64 cursor = 0;
+        for (mut u32 i = 0; i < this.count; i = i + 1) {
+            Token token = this.data[i];
+            TokenStream.write_number(buffer, &cursor, token.kind);
+            buffer[cursor] = 44;
+            cursor = cursor + 1;
+            TokenStream.write_number(buffer, &cursor, token.span);
+            buffer[cursor] = 44;
+            cursor = cursor + 1;
+            mut i32 joint = 0;
+            if (token.joint) {
+                joint = 1;
+            }
+            TokenStream.write_number(buffer, &cursor, joint);
+            buffer[cursor] = 44;
+            cursor = cursor + 1;
+            TokenStream.write_number(buffer, &cursor, (i32)token.text.length);
+            buffer[cursor] = 58;
+            cursor = cursor + 1;
+            memcpy((void*)(buffer + cursor), (void*)token.text.data, (size_long)token.text.length);
+            cursor = cursor + (u64)token.text.length;
+        }
+        result[0] = buffer;
+        return cursor;
+    }
+}
+
+// The stream before the first separator and the one after it: an attribute macro gets its arguments and its item.
+constexpr struct TokenStreams {
+    public static unsafe TokenStream before_separator(TokenStream all) {
+        mut TokenStream part = TokenStream.create();
+        for (mut u32 i = 0; i < all.count; i = i + 1) {
+            if (all.data[i].kind == TokenClass.SEPARATOR) {
+                break;
+            }
+            part.push(all.data[i]);
+        }
+        return part;
+    }
+
+    public static unsafe TokenStream after_separator(TokenStream all) {
+        mut TokenStream part = TokenStream.create();
+        mut bool seen = false;
+        for (mut u32 i = 0; i < all.count; i = i + 1) {
+            if (seen) {
+                part.push(all.data[i]);
+            } else if (all.data[i].kind == TokenClass.SEPARATOR) {
+                seen = true;
+            }
+        }
+        return part;
+    }
+}
+
+macro proc_macro_entry! {
+    (identifier symbol, identifier handler) => {
+        [Export] public unsafe u64 symbol(i8* data, u64 length, i8** result) {
+            TokenStream input = TokenStream.decode(data, length);
+            TokenStream output = handler(input);
+            return output.encode(result);
+        }
+    }
+}
+
+macro proc_attribute_entry! {
+    (identifier symbol, identifier handler) => {
+        [Export] public unsafe u64 symbol(i8* data, u64 length, i8** result) {
+            TokenStream input = TokenStream.decode(data, length);
+            TokenStream output = handler(TokenStreams.before_separator(input), TokenStreams.after_separator(input));
+            return output.encode(result);
+        }
+    }
+}

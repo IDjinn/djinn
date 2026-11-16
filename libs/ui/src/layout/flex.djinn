@@ -1,0 +1,551 @@
+import std::types;
+import std::libc;
+
+namespace ui;
+
+// Maps the main and cross axes of a flex container to width and height.
+struct Axis {
+    [ForceInline] public static f32 main(Size size, bool row) {
+        if (row) {
+            return size.width;
+        }
+        return size.height;
+    }
+
+    [ForceInline] public static f32 cross(Size size, bool row) {
+        if (row) {
+            return size.height;
+        }
+        return size.width;
+    }
+
+    [ForceInline] public static Size size(f32 main, f32 cross, bool row) {
+        if (row) {
+            return Size.of(main, cross);
+        }
+        return Size.of(cross, main);
+    }
+}
+
+struct FlexItem {
+    mut u32 id;
+    mut u32 above;
+    mut i32 order;
+    mut f32 grow;
+    mut f32 shrink;
+    mut u8 align;
+    mut f32 margin_main_start;
+    mut f32 margin_main_end;
+    mut f32 margin_cross_start;
+    mut f32 margin_cross_end;
+    mut bool auto_main_start;
+    mut bool auto_main_end;
+    mut bool auto_cross_start;
+    mut bool auto_cross_end;
+    mut bool auto_min;
+    mut f32 style_main;
+    mut f32 style_cross;
+    mut f32 min_main;
+    mut f32 max_main;
+    mut f32 min_cross;
+    mut f32 max_cross;
+    mut f32 basis;
+    mut f32 content;
+    mut f32 known_cross;
+    mut f32 hypothetical;
+    mut f32 target;
+    mut f32 violation;
+    mut bool frozen;
+    mut f32 cross;
+    mut f32 main_position;
+    mut f32 cross_position;
+
+    public f32 margin_main() {
+        return this.margin_main_start + this.margin_main_end;
+    }
+
+    public f32 margin_cross() {
+        return this.margin_cross_start + this.margin_cross_end;
+    }
+}
+
+struct FlexLine {
+    mut u32 start;
+    mut u32 end;
+    mut f32 used;
+    mut f32 cross;
+    mut f32 position;
+}
+
+// Flexbox (CSS Flexible Box Layout, section 9): flex base sizes from flex-basis, the main size or the content;
+// lines when wrapping; flexible lengths resolved by freezing the items that hit their min or max; cross sizes with
+// stretch; auto margins, justify-content, align-items / align-self and align-content; gaps, order and reversed
+// directions. Not covered: baseline alignment (treated as start) and wrap-reverse.
+struct FlexLayout {
+    public static unsafe Size run(u32 id, Style* style, BoxSizes* sizes, LayoutInput input) {
+        bool row = style.flex_direction == Keyword.ROW || style.flex_direction == Keyword.ROW_REVERSE;
+        bool reverse = style.flex_direction == Keyword.ROW_REVERSE || style.flex_direction == Keyword.COLUMN_REVERSE;
+        bool wrap = style.flex_wrap == Keyword.WRAP;
+        f32 frame_width = sizes.padding.horizontal() + sizes.border.horizontal();
+        f32 frame_height = sizes.padding.vertical() + sizes.border.vertical();
+        mut Size inner = Size.undefined();
+        mut Size room = input.available;
+        if (Px.defined(input.known.width)) {
+            inner.width = Px.max(input.known.width - frame_width, (f32)0.0);
+            room.width = inner.width;
+        } else if (Px.defined(room.width)) {
+            room.width = Px.max(room.width - frame_width - sizes.margin.horizontal(), (f32)0.0);
+        }
+        if (Px.defined(input.known.height)) {
+            inner.height = Px.max(input.known.height - frame_height, (f32)0.0);
+            room.height = inner.height;
+        } else if (Px.defined(room.height)) {
+            room.height = Px.max(room.height - frame_height - sizes.margin.vertical(), (f32)0.0);
+        } else {
+            room.height = Space.MAX_CONTENT;
+        }
+        f32 inner_main = Axis.main(inner, row);
+        mut f32 inner_cross = Axis.cross(inner, row);
+        f32 room_cross = Axis.cross(room, row);
+        mut f32 content_mode = Space.MAX_CONTENT;
+        if (Axis.main(room, row) == Space.MIN_CONTENT) {
+            content_mode = Space.MIN_CONTENT;
+        }
+        f32 frame_main = Axis.main(Size.of(frame_width, frame_height), row);
+        f32 frame_cross = Axis.cross(Size.of(frame_width, frame_height), row);
+        mut f32 gap_main = Px.offset(style.column_gap, inner.width);
+        mut f32 gap_cross = Px.offset(style.row_gap, inner.height);
+        if (!row) {
+            gap_main = Px.offset(style.row_gap, inner.height);
+            gap_cross = Px.offset(style.column_gap, inner.width);
+        }
+
+        mut Growable<u32> children = Growable<u32>();
+        Layout.children(id, &children);
+        mut Growable<FlexItem> items = Growable<FlexItem>();
+        for (mut u32 i = 0; i < children.count; i = i + 1) {
+            u32 child = children.get(i);
+            if (Layout.out_of_flow(child)) {
+                continue;
+            }
+            mut FlexItem item = FlexItem();
+            item.id = child;
+            item.above = Layout.child_above(child, id, input.above);
+            mut Style child_style = Style.initial();
+            mut BoxSizes child_sizes = BoxSizes();
+            if (Layout.is_text(child)) {
+                if (TextMetrics.is_blank(child)) {
+                    Layout.hide(child);
+                    continue;
+                }
+                child_sizes.size = Size.undefined();
+                child_sizes.max = Size.undefined();
+                child_sizes.auto_min_width = true;
+                child_sizes.auto_min_height = true;
+            } else {
+                child_style = *Styles.of(child);
+                child_sizes = Layout.sizes(&child_style, inner);
+            }
+            FlexLayout.prepare(&item, &child_style, &child_sizes, style, row, inner_main);
+            mut u32 at = items.push(item);
+            while (at > 0 && items.at(at - 1).order > item.order) {
+                FlexItem moved = items.get(at - 1);
+                items.data[at] = moved;
+                at = at - 1;
+            }
+            items.data[at] = item;
+        }
+        Layout.release(&children);
+
+        // Flex base size and hypothetical main size of each item.
+        mut f32 wanted_main = (f32)0.0;
+        for (mut u32 i = 0; i < items.count; i = i + 1) {
+            FlexItem* item = items.at(i);
+            mut f32 known_cross = item.style_cross;
+            if (Px.defined(known_cross)) {
+                known_cross = Px.clamp(known_cross, item.min_cross, item.max_cross);
+            } else if (item.align == Keyword.STRETCH && Px.defined(inner_cross) && !wrap && !item.auto_cross_start && !item.auto_cross_end) {
+                known_cross = Px.clamp(Px.max(inner_cross - item.margin_cross(), (f32)0.0), item.min_cross, item.max_cross);
+            }
+            mut f32 cross_room = room_cross;
+            if (Px.defined(inner_cross)) {
+                cross_room = inner_cross;
+            }
+            mut f32 content = Space.UNDEFINED;
+            if (!Px.defined(item.basis)) {
+                Size natural = Layout.run(item.id, LayoutInput.of(Axis.size(Space.UNDEFINED, known_cross, row),
+                    Axis.size(content_mode, cross_room, row), inner, false, item.above));
+                item.basis = Axis.main(natural, row);
+                content = item.basis;
+            }
+            item.known_cross = known_cross;
+            item.content = content;
+            item.hypothetical = Px.clamp(item.basis, item.min_main, item.max_main);
+            wanted_main = wanted_main + item.hypothetical + item.margin_main();
+            if (i > 0) {
+                wanted_main = wanted_main + gap_main;
+            }
+        }
+        // The automatic minimum: an item does not shrink below its content unless it scrolls. For an item with a
+        // main size of its own it only matters when the items overflow, so it is measured only then.
+        for (mut u32 i = 0; i < items.count; i = i + 1) {
+            FlexItem* item = items.at(i);
+            if (!item.auto_min) {
+                continue;
+            }
+            bool sized = Px.defined(item.style_main);
+            if (sized && item.basis >= item.style_main && !(Px.defined(inner_main) && wanted_main > inner_main)) {
+                continue;
+            }
+            mut f32 cross_room = room_cross;
+            if (Px.defined(inner_cross)) {
+                cross_room = inner_cross;
+            }
+            mut f32 least = item.content;
+            if (sized) {
+                least = Axis.main(Layout.content(item.id, LayoutInput.of(Axis.size(Space.UNDEFINED, item.known_cross, row),
+                    Axis.size(Space.MIN_CONTENT, cross_room, row), inner, false, item.above), row), row);
+                least = Px.min(least, item.style_main);
+            } else if (row) {
+                least = Layout.run(item.id, LayoutInput.of(Axis.size(Space.UNDEFINED, item.known_cross, row),
+                    Axis.size(Space.MIN_CONTENT, cross_room, row), inner, false, item.above)).width;
+            } else if (!Px.defined(least)) {
+                least = Layout.run(item.id, LayoutInput.of(Axis.size(Space.UNDEFINED, item.known_cross, row),
+                    Axis.size(Space.MAX_CONTENT, cross_room, row), inner, false, item.above)).height;
+            }
+            if (Px.defined(item.max_main)) {
+                least = Px.min(least, item.max_main);
+            }
+            item.min_main = Px.max(item.min_main, least);
+            item.hypothetical = Px.clamp(item.basis, item.min_main, item.max_main);
+        }
+
+        // Lines.
+        mut Growable<FlexLine> lines = Growable<FlexLine>();
+        if (items.count > 0) {
+            if (wrap && !Px.defined(inner_main) && content_mode == Space.MIN_CONTENT) {
+                for (mut u32 i = 0; i < items.count; i = i + 1) {
+                    FlexLine single = { .start = i, .end = i + 1, .used = (f32)0.0, .cross = (f32)0.0, .position = (f32)0.0 };
+                    lines.push(single);
+                }
+            } else if (!wrap || !Px.defined(inner_main)) {
+                FlexLine all = { .start = 0, .end = items.count, .used = (f32)0.0, .cross = (f32)0.0, .position = (f32)0.0 };
+                lines.push(all);
+            } else {
+                mut u32 start = 0;
+                mut f32 length = (f32)0.0;
+                for (mut u32 i = 0; i < items.count; i = i + 1) {
+                    FlexItem* item = items.at(i);
+                    f32 outer = item.hypothetical + item.margin_main();
+                    if (i > start && length + gap_main + outer > inner_main + (f32)0.01) {
+                        FlexLine full = { .start = start, .end = i, .used = (f32)0.0, .cross = (f32)0.0, .position = (f32)0.0 };
+                        lines.push(full);
+                        start = i;
+                        length = outer;
+                    } else if (i > start) {
+                        length = length + gap_main + outer;
+                    } else {
+                        length = outer;
+                    }
+                }
+                FlexLine last = { .start = start, .end = items.count, .used = (f32)0.0, .cross = (f32)0.0, .position = (f32)0.0 };
+                lines.push(last);
+            }
+        }
+
+        // Main sizes, then the cross size each item takes at its main size.
+        mut f32 content_main = (f32)0.0;
+        mut f32 content_cross = (f32)0.0;
+        for (mut u32 l = 0; l < lines.count; l = l + 1) {
+            FlexLine* line = lines.at(l);
+            line.used = FlexLayout.flex(&items, line.start, line.end, inner_main, gap_main);
+            content_main = Px.max(content_main, line.used);
+            for (mut u32 i = line.start; i < line.end; i = i + 1) {
+                FlexItem* item = items.at(i);
+                mut f32 cross = item.style_cross;
+                if (!Px.defined(cross)) {
+                    mut f32 cross_room = room_cross;
+                    if (Px.defined(inner_cross)) {
+                        cross_room = Px.max(inner_cross - item.margin_cross(), (f32)0.0);
+                        if (!row) {
+                            cross_room = inner_cross;
+                        }
+                    }
+                    Size measured = Layout.run(item.id, LayoutInput.of(Axis.size(item.target, Space.UNDEFINED, row),
+                        Axis.size(item.target, cross_room, row), inner, false, item.above));
+                    cross = Axis.cross(measured, row);
+                }
+                item.cross = Px.clamp(cross, item.min_cross, item.max_cross);
+                line.cross = Px.max(line.cross, item.cross + item.margin_cross());
+            }
+            content_cross = content_cross + line.cross;
+            if (l > 0) {
+                content_cross = content_cross + gap_cross;
+            }
+        }
+
+        mut f32 final_main = inner_main;
+        if (!Px.defined(final_main)) {
+            final_main = Px.max(Px.clamp(content_main + frame_main, Axis.main(sizes.min, row), Axis.main(sizes.max, row)) - frame_main, (f32)0.0);
+        }
+        if (!Px.defined(inner_cross)) {
+            inner_cross = Px.max(Px.clamp(content_cross + frame_cross, Axis.cross(sizes.min, row), Axis.cross(sizes.max, row)) - frame_cross, (f32)0.0);
+        }
+        mut u8 content_align = style.align_content;
+        if (lines.count == 1 && !wrap) {
+            lines.at(0).cross = inner_cross;
+        } else if ((content_align == Keyword.NORMAL || content_align == Keyword.STRETCH) && lines.count > 0 && content_cross < inner_cross) {
+            f32 share = (inner_cross - content_cross) / (f32)lines.count;
+            for (mut u32 l = 0; l < lines.count; l = l + 1) {
+                lines.at(l).cross = lines.at(l).cross + share;
+            }
+            content_cross = inner_cross;
+        }
+
+        // Positions.
+        f32 cross_free = inner_cross - content_cross;
+        mut f32 cross_at = (f32)0.0;
+        mut f32 cross_between = (f32)0.0;
+        if (!(lines.count == 1 && !wrap)) {
+            cross_at = Px.lead(content_align, cross_free, lines.count);
+            cross_between = Px.between(content_align, cross_free, lines.count);
+        }
+        for (mut u32 l = 0; l < lines.count; l = l + 1) {
+            FlexLine* line = lines.at(l);
+            line.position = cross_at;
+            cross_at = cross_at + line.cross + gap_cross + cross_between;
+            u32 count = line.end - line.start;
+            mut f32 leftover = final_main - line.used;
+            mut u32 autos = 0;
+            for (mut u32 i = line.start; i < line.end; i = i + 1) {
+                FlexItem* item = items.at(i);
+                if (item.auto_main_start) {
+                    autos = autos + 1;
+                }
+                if (item.auto_main_end) {
+                    autos = autos + 1;
+                }
+            }
+            mut f32 auto_share = (f32)0.0;
+            if (autos > 0 && leftover > (f32)0.0) {
+                auto_share = leftover / (f32)autos;
+                leftover = (f32)0.0;
+            }
+            mut f32 at = Px.lead(style.justify_content, leftover, count);
+            f32 between = Px.between(style.justify_content, leftover, count);
+            for (mut u32 i = line.start; i < line.end; i = i + 1) {
+                FlexItem* item = items.at(i);
+                if (item.auto_main_start) {
+                    at = at + auto_share;
+                }
+                at = at + item.margin_main_start;
+                item.main_position = at;
+                if (reverse) {
+                    item.main_position = final_main - at - item.target;
+                }
+                at = at + item.target + item.margin_main_end + gap_main + between;
+                if (item.auto_main_end) {
+                    at = at + auto_share;
+                }
+                if (item.align == Keyword.STRETCH && !Px.defined(item.style_cross) && !item.auto_cross_start && !item.auto_cross_end) {
+                    item.cross = Px.clamp(Px.max(line.cross - item.margin_cross(), (f32)0.0), item.min_cross, item.max_cross);
+                }
+                f32 spare = line.cross - item.cross - item.margin_cross();
+                mut f32 shift = (f32)0.0;
+                if (item.auto_cross_start && item.auto_cross_end) {
+                    shift = Px.max(spare, (f32)0.0) / (f32)2.0;
+                } else if (item.auto_cross_start) {
+                    shift = Px.max(spare, (f32)0.0);
+                } else if (item.auto_cross_end) {
+                    shift = (f32)0.0;
+                } else if (item.align == Keyword.END) {
+                    shift = spare;
+                } else if (item.align == Keyword.CENTER) {
+                    shift = spare / (f32)2.0;
+                }
+                item.cross_position = line.position + item.margin_cross_start + shift;
+            }
+        }
+
+        if (input.perform) {
+            f32 origin_x = sizes.border.left + sizes.padding.left;
+            f32 origin_y = sizes.border.top + sizes.padding.top;
+            mut f32 reach_main = (f32)0.0;
+            for (mut u32 i = 0; i < items.count; i = i + 1) {
+                FlexItem* item = items.at(i);
+                Layout.run(item.id, LayoutInput.of(Axis.size(item.target, item.cross, row), Axis.size(final_main, inner_cross, row), inner, true, item.above));
+                LayoutBox* box = Layout.box(item.id);
+                Size position = Axis.size(item.main_position, item.cross_position, row);
+                box.x = origin_x + position.width;
+                box.y = origin_y + position.height;
+                reach_main = Px.max(reach_main, item.main_position + item.target + item.margin_main_end);
+            }
+            LayoutBox* own = Layout.box(id);
+            Size reach = Axis.size(Px.max(reach_main, content_main), content_cross, row);
+            own.content_width = reach.width;
+            own.content_height = reach.height;
+        }
+        if (items.data != (FlexItem*)0) {
+            __djinn_free((void*)items.data);
+        }
+        if (lines.data != (FlexLine*)0) {
+            __djinn_free((void*)lines.data);
+        }
+        mut Size result = Axis.size(final_main + frame_main, inner_cross + frame_cross, row);
+        if (Px.defined(input.known.width)) {
+            result.width = input.known.width;
+        }
+        if (Px.defined(input.known.height)) {
+            result.height = input.known.height;
+        }
+        return result;
+    }
+
+    static unsafe void prepare(FlexItem* item, Style* style, BoxSizes* sizes, Style* container, bool row, f32 inner_main) {
+        item.order = style.order;
+        item.grow = style.flex_grow;
+        item.shrink = style.flex_shrink;
+        item.align = style.align_self;
+        if (item.align == Keyword.AUTO) {
+            item.align = container.align_items;
+        }
+        if (item.align == Keyword.NORMAL) {
+            item.align = Keyword.STRETCH;
+        }
+        mut f32 frame = sizes.padding.vertical() + sizes.border.vertical();
+        if (row) {
+            frame = sizes.padding.horizontal() + sizes.border.horizontal();
+            item.margin_main_start = sizes.margin.left;
+            item.margin_main_end = sizes.margin.right;
+            item.margin_cross_start = sizes.margin.top;
+            item.margin_cross_end = sizes.margin.bottom;
+            item.auto_main_start = sizes.auto_left;
+            item.auto_main_end = sizes.auto_right;
+            item.auto_cross_start = sizes.auto_top;
+            item.auto_cross_end = sizes.auto_bottom;
+            item.auto_min = sizes.auto_min_width;
+        } else {
+            item.margin_main_start = sizes.margin.top;
+            item.margin_main_end = sizes.margin.bottom;
+            item.margin_cross_start = sizes.margin.left;
+            item.margin_cross_end = sizes.margin.right;
+            item.auto_main_start = sizes.auto_top;
+            item.auto_main_end = sizes.auto_bottom;
+            item.auto_cross_start = sizes.auto_left;
+            item.auto_cross_end = sizes.auto_right;
+            item.auto_min = sizes.auto_min_height;
+        }
+        if (style.overflow != Keyword.VISIBLE) {
+            item.auto_min = false;
+        }
+        item.style_main = Axis.main(sizes.size, row);
+        item.style_cross = Axis.cross(sizes.size, row);
+        item.min_main = Axis.main(sizes.min, row);
+        item.max_main = Axis.main(sizes.max, row);
+        item.min_cross = Axis.cross(sizes.min, row);
+        item.max_cross = Axis.cross(sizes.max, row);
+        item.basis = Space.UNDEFINED;
+        if (style.flex_basis.unit == Unit.AUTO) {
+            item.basis = item.style_main;
+        } else {
+            mut f32 basis = Px.size(style.flex_basis, inner_main);
+            if (Px.defined(basis)) {
+                if (style.box_sizing != Keyword.BORDER_BOX) {
+                    basis = basis + frame;
+                }
+                item.basis = Px.max(basis, frame);
+            }
+        }
+    }
+
+    // Resolves the main sizes of the items [start, end) of one line; returns what they take with margins and gaps.
+    static unsafe f32 flex(Growable<FlexItem>* items, u32 start, u32 end, f32 inner_main, f32 gap) {
+        u32 count = end - start;
+        f32 gaps = gap * (f32)(count - 1);
+        mut f32 hypothetical = gaps;
+        for (mut u32 i = start; i < end; i = i + 1) {
+            FlexItem* item = items.at(i);
+            item.target = item.hypothetical;
+            hypothetical = hypothetical + item.hypothetical + item.margin_main();
+        }
+        if (!Px.defined(inner_main)) {
+            return hypothetical;
+        }
+        bool growing = hypothetical < inner_main;
+        mut f32 initial_free = inner_main - gaps;
+        for (mut u32 i = start; i < end; i = i + 1) {
+            FlexItem* item = items.at(i);
+            mut f32 factor = item.shrink;
+            if (growing) {
+                factor = item.grow;
+            }
+            item.frozen = factor == (f32)0.0 || (growing && item.basis > item.hypothetical) || (!growing && item.basis < item.hypothetical);
+            if (item.frozen) {
+                initial_free = initial_free - item.target - item.margin_main();
+            } else {
+                initial_free = initial_free - item.basis - item.margin_main();
+            }
+        }
+        for (mut u32 round = 0; round <= count; round = round + 1) {
+            mut f32 leftover = inner_main - gaps;
+            mut f32 factors = (f32)0.0;
+            mut f32 scaled = (f32)0.0;
+            mut u32 active = 0;
+            for (mut u32 i = start; i < end; i = i + 1) {
+                FlexItem* item = items.at(i);
+                if (item.frozen) {
+                    leftover = leftover - item.target - item.margin_main();
+                    continue;
+                }
+                leftover = leftover - item.basis - item.margin_main();
+                active = active + 1;
+                scaled = scaled + item.shrink * item.basis;
+                if (growing) {
+                    factors = factors + item.grow;
+                } else {
+                    factors = factors + item.shrink;
+                }
+            }
+            if (active == 0) {
+                break;
+            }
+            if (factors < (f32)1.0) {
+                f32 limited = initial_free * factors;
+                if ((growing && limited < leftover) || (!growing && limited > leftover)) {
+                    leftover = limited;
+                }
+            }
+            mut f32 total = (f32)0.0;
+            for (mut u32 i = start; i < end; i = i + 1) {
+                FlexItem* item = items.at(i);
+                if (item.frozen) {
+                    continue;
+                }
+                mut f32 wanted = item.basis;
+                if (growing) {
+                    if (factors > (f32)0.0) {
+                        wanted = item.basis + leftover * item.grow / factors;
+                    }
+                } else if (scaled > (f32)0.0) {
+                    wanted = item.basis + leftover * item.shrink * item.basis / scaled;
+                }
+                f32 clamped = Px.clamp(wanted, item.min_main, item.max_main);
+                item.violation = clamped - wanted;
+                item.target = clamped;
+                total = total + item.violation;
+            }
+            for (mut u32 i = start; i < end; i = i + 1) {
+                FlexItem* item = items.at(i);
+                if (!item.frozen && (total == (f32)0.0 || (total > (f32)0.0 && item.violation > (f32)0.0) || (total < (f32)0.0 && item.violation < (f32)0.0))) {
+                    item.frozen = true;
+                }
+            }
+        }
+        mut f32 used = gaps;
+        for (mut u32 i = start; i < end; i = i + 1) {
+            FlexItem* item = items.at(i);
+            used = used + item.target + item.margin_main();
+        }
+        return used;
+    }
+}

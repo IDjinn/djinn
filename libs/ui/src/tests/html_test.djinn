@@ -1,0 +1,244 @@
+namespace ui;
+
+import testing;
+import std::types;
+import std::collections;
+
+struct Todo {
+    i64 id;
+    str title;
+    bool done;
+
+    public str css() {
+        if (this.done) {
+            return "done";
+        }
+        return "open";
+    }
+}
+
+struct Badge {
+    str label;
+    i32 count;
+
+    public unsafe Node render() {
+        return html!{ <span class="badge">{this.label}: {this.count}</span> };
+    }
+}
+
+struct Card {
+    str title;
+    Node children;
+
+    public unsafe Node render() {
+        return html!{
+            <section class="card">
+                <h3>{this.title}</h3>
+                {this.children}
+            </section>
+        };
+    }
+}
+
+struct Counter {
+    i32 start;
+
+    public unsafe Node render() {
+        signal<i32> count = state(this.start);
+        return html!{
+            <div class="p-4 flex gap-2">
+                <h1>Hello World!</h1>
+                <h2>Counter: {count}</h2>
+                <button id="inc" on_click={() => count.set(count.get() + 1)}>Increment</button>
+                <button id="reset" onClick={() => count.set(0)}>Reset</button>
+            </div>
+        };
+    }
+}
+
+[Client]
+struct LikeButton {
+    i32 likes;
+
+    public unsafe Node render() {
+        signal<i32> count = state(this.likes);
+        return html!{ <button on_click={() => count.set(count.get() + 1)}>{count} likes</button> };
+    }
+}
+
+[Server]
+struct Report {
+    str title;
+
+    public unsafe Node render() {
+        return html!{ <article><h1>{this.title}</h1><LikeButton likes={3}/></article> };
+    }
+}
+
+unsafe static mut i32 home_renders = 0;
+
+[Static]
+struct Home {
+    public unsafe Node render() {
+        home_renders = home_renders + 1;
+        return html!{ <main><h1>Welcome</h1><p>Rendered once, shared by every visitor.</p></main> };
+    }
+}
+
+struct Shell {
+    public unsafe Node render() {
+        return html!{ <body><Home/></body> };
+    }
+}
+
+struct HtmlTests {
+    [Test]
+    unsafe void elements_text_and_attributes() {
+        Node page = html!{ <div class="a b" data-id="7" hidden><p>Hello, world!</p></div> };
+        mut TextBuffer out = Html.render(page, false);
+        Expect.equal_text("<div class=\"a b\" data-id=\"7\" hidden><p>Hello, world!</p></div>", out.data);
+        out.release();
+    }
+
+    [Test]
+    unsafe void several_roots_make_a_fragment() {
+        Node page = html!{ <b>one</b> <i>two</i> };
+        mut TextBuffer out = Html.render(page, false);
+        Expect.equal_text("<b>one</b><i>two</i>", out.data);
+        out.release();
+    }
+
+    [Test]
+    unsafe void counter_click_sets_one_text() {
+        Counter counter = { .start = 0 };
+        Mounted app = App.mount<Counter>(counter);
+        mut TextBuffer before = Html.render(app.node, false);
+        Expect.equal_text("<div class=\"p-4 flex gap-2\"><h1>Hello World!</h1><h2>Counter: 0</h2><button id=\"inc\">Increment</button><button id=\"reset\">Reset</button></div>", before.data);
+        Dom.record();
+        Dom.dispatch(Dom.find(app.node.id, "inc"), "click");
+        Dom.dispatch(Dom.find(app.node.id, "inc"), "click");
+        Expect.equal(2, (i64)Dom.operation_count(), "two clicks, two text updates, nothing else");
+        Dom.dispatch(Dom.find(app.node.id, "reset"), "click");
+        mut TextBuffer after = Html.render(app.node, false);
+        Expect.contains(after.data, "Counter: 0");
+        app.unmount();
+    }
+
+    [Test]
+    unsafe void components_get_props_and_children() {
+        Node page = html!{
+            <Card title="Totals">
+                <Badge label="open" count={2}/>
+            </Card>
+        };
+        mut TextBuffer out = Html.render(page, false);
+        Expect.equal_text("<section class=\"card\"><h3>Totals</h3><span class=\"badge\">open: 2</span></section>", out.data);
+        out.release();
+    }
+
+    [Test]
+    unsafe void if_else_switches_branches() {
+        signal<i32> count = state(0);
+        u32 root = Reactive.root(() => {
+            Node page = html!{
+                <p>
+                    {if (count.get() == 0) {
+                        <i>empty</i>
+                    } else if (count.get() < 10) {
+                        <b>{count} items</b>
+                    } else {
+                        <strong>many</strong>
+                    }}
+                </p>
+            };
+            mut TextBuffer empty = Html.render(page, false);
+            Expect.equal_text("<p><i>empty</i></p>", empty.data);
+            count.set(3);
+            mut TextBuffer few = Html.render(page, false);
+            Expect.equal_text("<p><b>3 items</b></p>", few.data);
+            Dom.record();
+            count.set(4);
+            Expect.equal(1, (i64)Dom.operation_count(), "same branch: only the text changes");
+            count.set(50);
+            mut TextBuffer many = Html.render(page, false);
+            Expect.equal_text("<p><strong>many</strong></p>", many.data);
+        });
+        Reactive.dispose(root);
+    }
+
+    [Test]
+    unsafe void keyed_for_reconciles() {
+        Todo* todos = (Todo*)__djinn_alloc_zeroed((size_long)(3 * sizeof(Todo)));
+        Todo a = { .id = 1, .title = "write", .done = true };
+        Todo b = { .id = 2, .title = "test", .done = false };
+        Todo c = { .id = 3, .title = "ship", .done = false };
+        todos[0] = a;
+        todos[1] = b;
+        todos[2] = c;
+        slice<Todo> all = { .data = todos, .length = 3 };
+        signal<slice<Todo>> items = state(all);
+        u32 root = Reactive.root(() => {
+            Node page = html!{
+                <ul>
+                    {for (Todo todo in items.get()) key(todo.id) {
+                        <li class={todo.css()}>{todo.title}</li>
+                    }}
+                </ul>
+            };
+            mut TextBuffer first = Html.render(page, false);
+            Expect.equal_text("<ul><li class=\"done\">write</li><li class=\"open\">test</li><li class=\"open\">ship</li></ul>", first.data);
+            slice<Todo> tail = { .data = &todos[1], .length = 2 };
+            Dom.record();
+            items.set(tail);
+            Expect.equal(1, (i64)Dom.operation_count(), "the first item leaves, the others stay");
+            Expect.contains(Dom.operations(), "remove");
+        });
+        Reactive.dispose(root);
+    }
+
+    [Test]
+    unsafe void for_shortcut_and_ranges() {
+        Todo* todos = (Todo*)__djinn_alloc_zeroed((size_long)(2 * sizeof(Todo)));
+        Todo a = { .id = 1, .title = "a", .done = true };
+        Todo b = { .id = 2, .title = "b", .done = false };
+        todos[0] = a;
+        todos[1] = b;
+        slice<Todo> all = { .data = todos, .length = 2 };
+        signal<i32> rows = state(3);
+        u32 root = Reactive.root(() => {
+            Node page = html!{
+                <div>
+                    <em for={Todo todo in all} key={todo.id} if={todo.done}>{todo.title}</em>
+                    {for (i32 i in 0..rows.get()) { <s>{i}</s> }}
+                </div>
+            };
+            mut TextBuffer out = Html.render(page, false);
+            Expect.equal_text("<div><em>a</em><s>0</s><s>1</s><s>2</s></div>", out.data);
+            Dom.record();
+            rows.set(4);
+            Expect.contains(Dom.operations(), "insert");
+            mut TextBuffer more = Html.render(page, false);
+            Expect.contains(more.data, "<s>3</s>");
+        });
+        Reactive.dispose(root);
+    }
+
+    [Test]
+    unsafe void server_component_with_a_client_island() {
+        Report report = { .title = "Q3" };
+        mut TextBuffer out = App.render_to_string<Report>(report, RenderMode.SERVER);
+        Expect.equal_text("<article><h1>Q3</h1><dj-island data-component=\"LikeButton\"><button>3 likes</button></dj-island></article>", out.data);
+        out.release();
+    }
+
+    [Test]
+    unsafe void static_page_renders_once_for_every_request() {
+        home_renders = 0;
+        Shell shell = Shell();
+        mut TextBuffer first = App.render_to_string<Shell>(shell, RenderMode.SERVER);
+        mut TextBuffer second = App.render_to_string<Shell>(shell, RenderMode.SERVER);
+        Expect.equal_text("<body><main><h1>Welcome</h1><p>Rendered once, shared by every visitor.</p></main></body>", first.data);
+        Expect.equal_text(first.data, second.data);
+        Expect.equal(1, home_renders, "the page body ran once; the second request reused its HTML");
+    }
+}

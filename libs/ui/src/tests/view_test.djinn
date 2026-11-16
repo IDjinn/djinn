@@ -1,0 +1,117 @@
+namespace ui;
+
+import testing;
+import std::types;
+import std::collections;
+
+struct Row {
+    i64 id;
+    str name;
+}
+
+struct CounterView {
+    i32 start;
+
+    public unsafe Node render() {
+        signal<i32> count = state(this.start);
+        return Node.element("div").attr("class", "p-4")
+            .child(Node.element("h2").add("Counter: ").insert(() => count))
+            .child(Node.element("button").attr("id", "inc").on("click", () => count.set(count.get() + 1)).add("+"));
+    }
+}
+
+struct ViewTests {
+    [Test]
+    unsafe void click_updates_exactly_one_text_node() {
+        CounterView view = { .start = 0 };
+        Mounted app = App.mount<CounterView>(view);
+        Dom.record();
+        Dom.dispatch(Dom.find(app.node.id, "inc"), "click");
+        Expect.equal(1, (i64)Dom.operation_count());
+        Expect.contains(Dom.operations(), "set_text");
+        Expect.contains(Dom.operations(), "\"1\"");
+        app.unmount();
+    }
+
+    [Test]
+    unsafe void html_is_written_in_source_order() {
+        CounterView view = { .start = 3 };
+        Mounted app = App.mount<CounterView>(view);
+        mut TextBuffer html = Html.render(app.node, false);
+        Expect.equal_text("<div class=\"p-4\"><h2>Counter: 3</h2><button id=\"inc\">+</button></div>", html.data);
+        html.release();
+        app.unmount();
+    }
+
+    [Test]
+    unsafe void show_swaps_only_the_branch() {
+        signal<bool> on = state(true);
+        u32 root = Reactive.root(() => {
+            Node page = Node.element("main").child(View.show(() => on.get(), () => Node.element("b").add("yes"), () => Node.element("i").add("no")));
+            Dom.record();
+            on.set(false);
+            Expect.equal(3, (i64)Dom.operation_count(), "build the new branch, remove the old one, insert the new one");
+            Expect.contains(Dom.operations(), "remove");
+            Expect.contains(Dom.operations(), "insert");
+            mut TextBuffer html = Html.render(page, false);
+            Expect.equal_text("<main><i>no</i></main>", html.data);
+            Dom.record();
+            on.set(false);
+            Expect.equal(0, (i64)Dom.operation_count());
+        });
+        Reactive.dispose(root);
+    }
+
+    [Test]
+    unsafe void keyed_reorder_only_moves() {
+        Row* rows = (Row*)__djinn_alloc_zeroed((size_long)(3 * sizeof(Row)));
+        Row a = { .id = 1, .name = "a" };
+        Row b = { .id = 2, .name = "b" };
+        Row c = { .id = 3, .name = "c" };
+        rows[0] = a;
+        rows[1] = b;
+        rows[2] = c;
+        slice<Row> first = { .data = rows, .length = 3 };
+        signal<slice<Row>> items = state(first);
+        u32 root = Reactive.root(() => {
+            Node list = Node.element("ul").child(View.each<Row>(() => items.get(), (Row row) => row.id, (Row row) => Node.element("li").add(row.name)));
+            Row* swapped = (Row*)__djinn_alloc_zeroed((size_long)(3 * sizeof(Row)));
+            swapped[0] = c;
+            swapped[1] = a;
+            swapped[2] = b;
+            slice<Row> second = { .data = swapped, .length = 3 };
+            Dom.record();
+            items.set(second);
+            Expect.equal(1, (i64)Dom.operation_count(), "moving 'c' to the front is the only change");
+            Expect.contains(Dom.operations(), "move");
+            mut TextBuffer html = Html.render(list, false);
+            Expect.equal_text("<ul><li>c</li><li>a</li><li>b</li></ul>", html.data);
+            slice<Row> shorter = { .data = swapped, .length = 2 };
+            Dom.record();
+            items.set(shorter);
+            Expect.equal(1, (i64)Dom.operation_count(), "dropping 'b' removes one node");
+            Expect.contains(Dom.operations(), "remove");
+        });
+        Reactive.dispose(root);
+    }
+
+    [Test]
+    unsafe void server_render_keeps_nothing() {
+        u32 nodes = Reactive.live();
+        u32 elements = Dom.live();
+        CounterView view = { .start = 7 };
+        mut TextBuffer html = App.render_to_string<CounterView>(view, RenderMode.SERVER);
+        Expect.equal_text("<div class=\"p-4\"><h2>Counter: 7</h2><button id=\"inc\">+</button></div>", html.data);
+        Expect.equal((i64)nodes, (i64)Reactive.live(), "even the component state is released with the request");
+        Expect.equal((i64)elements, (i64)Dom.live());
+        html.release();
+    }
+
+    [Test]
+    unsafe void hydrate_render_marks_interactive_nodes() {
+        CounterView view = { .start = 1 };
+        mut TextBuffer html = App.render_to_string<CounterView>(view, RenderMode.HYDRATE);
+        Expect.contains(html.data, "<button id=\"inc\" data-dj=");
+        html.release();
+    }
+}

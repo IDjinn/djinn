@@ -1,0 +1,138 @@
+import std::types;
+import std::libc;
+
+namespace ui;
+
+// One line of a wrapped text: the bytes [start, end) of the node's text (leading and trailing blanks left out,
+// blanks between words count as one space) and the width they take.
+struct TextLine {
+    mut u32 start;
+    mut u32 end;
+    mut f32 width;
+}
+
+// Breaks the text of a node into lines the way TextMetrics.measure counts them: words wrap at blanks, a word wider
+// than the line breaks inside it with overflow-wrap, and every blank run is one space.
+struct TextLines {
+    public static unsafe bool is_blank(u32 code) {
+        return code == 32 || code == 9 || code == 10 || code == 13 || code == 12;
+    }
+
+    // The pen movement of one code point under a style (the placeholder metrics when no font is installed).
+    public static unsafe f32 advance(u32 code, Style* style, bool real, bool bold) {
+        if (Codepoints.is_zero_width(code)) {
+            return (f32)0.0;
+        }
+        if (real) {
+            return Fonts.advance(code, style.font_size, bold) + style.letter_spacing;
+        }
+        if (Codepoints.is_wide(code)) {
+            return style.font_size + style.letter_spacing;
+        }
+        return style.font_size * (f32)0.5 + style.letter_spacing;
+    }
+
+    // Splits the text of 'id' for a box 'limit' px wide (a negative limit: one line). Writes at most 'max' lines and
+    // returns how many there are.
+    public static unsafe u32 split(u32 id, f32 limit, TextLine* out, u32 max) {
+        str text = Dom.text_of(id);
+        Style* style = Styles.of(id);
+        bool real = Fonts.active();
+        bool bold = style.font_weight >= 600;
+        f32 space = TextLines.advance(32, style, real, bold);
+        u32 length = (u32)text.length;
+        mut u32 count = 0;
+        mut f32 line_width = (f32)0.0;
+        mut u32 line_start = 0;
+        mut u32 line_end = 0;
+        mut bool has_line = false;
+        mut u32 i = 0;
+        while (i < length) {
+            mut u32 step = 1;
+            u32 first = Codepoints.decode(text.data, length, i, &step);
+            if (TextLines.is_blank(first)) {
+                i = i + step;
+                continue;
+            }
+            // one word
+            u32 word_start = i;
+            mut u32 word_end = i;
+            mut f32 word_width = (f32)0.0;
+            mut u32 letters = 0;
+            mut u32 j = i;
+            while (j < length) {
+                mut u32 s = 1;
+                u32 code = Codepoints.decode(text.data, length, j, &s);
+                if (TextLines.is_blank(code)) {
+                    break;
+                }
+                word_width = word_width + TextLines.advance(code, style, real, bold);
+                letters = letters + 1;
+                j = j + s;
+                word_end = j;
+            }
+            i = j;
+            if (style.wrap_anywhere && limit > (f32)0.0 && word_width > limit + (f32)0.01 && letters > 1) {
+                // finish the line in progress, then cut the word into pieces that fit
+                if (has_line) {
+                    if (count < max) {
+                        TextLine done = { .start = line_start, .end = line_end, .width = line_width };
+                        out[count] = done;
+                    }
+                    count = count + 1;
+                    has_line = false;
+                }
+                mut u32 piece_start = word_start;
+                mut f32 piece_width = (f32)0.0;
+                mut u32 k = word_start;
+                while (k < word_end) {
+                    mut u32 s = 1;
+                    u32 code = Codepoints.decode(text.data, length, k, &s);
+                    f32 glyph = TextLines.advance(code, style, real, bold);
+                    if (piece_width + glyph > limit + (f32)0.01 && k > piece_start) {
+                        if (count < max) {
+                            TextLine done = { .start = piece_start, .end = k, .width = piece_width };
+                            out[count] = done;
+                        }
+                        count = count + 1;
+                        piece_start = k;
+                        piece_width = (f32)0.0;
+                    }
+                    piece_width = piece_width + glyph;
+                    k = k + s;
+                }
+                line_start = piece_start;
+                line_end = word_end;
+                line_width = piece_width;
+                has_line = true;
+                continue;
+            }
+            if (!has_line) {
+                line_start = word_start;
+                line_end = word_end;
+                line_width = word_width;
+                has_line = true;
+            } else if (limit >= (f32)0.0 && line_width + space + word_width > limit + (f32)0.01) {
+                if (count < max) {
+                    TextLine done = { .start = line_start, .end = line_end, .width = line_width };
+                    out[count] = done;
+                }
+                count = count + 1;
+                line_start = word_start;
+                line_end = word_end;
+                line_width = word_width;
+            } else {
+                line_end = word_end;
+                line_width = line_width + space + word_width;
+            }
+        }
+        if (has_line) {
+            if (count < max) {
+                TextLine done = { .start = line_start, .end = line_end, .width = line_width };
+                out[count] = done;
+            }
+            count = count + 1;
+        }
+        return count;
+    }
+}
