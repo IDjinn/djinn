@@ -9,10 +9,9 @@ unsafe static mut ptr block_counts = null;
 // Recycled memory blocks in power-of-two size classes (64 bytes up to 4 MB). A layout, a restyle or a frame needs
 // about the same scratch memory as the one before it, so a block that is given back is kept on a free list and the
 // next take of its class reuses it: after the first frame the hot paths do not call malloc or free at all. Each class
-// keeps at most 64 blocks, the rest go back to the allocator. Meant for the UI thread (the lists are not locked).
+// keeps up to 256 KB worth of blocks (at least 2, at most 4096), the rest go back to the allocator. Meant for the UI thread (the lists are not locked).
 struct Blocks {
     const u32 CLASSES = 17;
-    const u32 KEEP = 64;
 
     public static u32 class_of(u64 bytes) {
         mut u32 k = 0;
@@ -22,6 +21,18 @@ struct Blocks {
             k = k + 1;
         }
         return k;
+    }
+
+    // How many blocks of class k are kept: many small ones (a style sheet has hundreds of custom properties), few big.
+    public static u32 keep_of(u32 k) {
+        u64 count = (u64)262144 / ((u64)64 << k);
+        if (count > 4096) {
+            return 4096;
+        }
+        if (count < 2) {
+            return 2;
+        }
+        return (u32)count;
     }
 
     public static u64 size_of(u32 k) {
@@ -61,7 +72,7 @@ struct Blocks {
         }
         void** heads = (void**)block_heads;
         u32* counts = (u32*)block_counts;
-        if (counts[k] >= Blocks.KEEP) {
+        if (counts[k] >= Blocks.keep_of(k)) {
             __djinn_free(block);
             return;
         }
