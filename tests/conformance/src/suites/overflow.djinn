@@ -552,6 +552,80 @@ i32 main() {
     }
 
     [Test]
+    void wrapping_cast_truncates() {
+        str source = """
+i32 main() {
+    mut i32 big = 70000;
+    i16 a = (i16w)big;
+    if (a != 4464) { return 1; }
+    return 42;
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void saturating_cast_clamps_to_the_target_range() {
+        str source = """
+i32 main() {
+    mut i32 big = 70000;
+    i16 high = (i16s)big;
+    i16 low = (i16s)(0 - big);
+    u8 byte = (u8s)big;
+    u8 floor = (u8s)(0 - 5);
+    i16 inside = (i16s)(300 + 0 * big);
+    if (high != 32767) { return 1; }
+    if ((i32)low != 0 - 32768) { return 2; }
+    if (byte != 255) { return 3; }
+    if (floor != 0) { return 4; }
+    if (inside != 300) { return 5; }
+    return 42;
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void saturating_cast_is_folded_at_compile_time() {
+        str source = """
+struct Limits {
+    public static constexpr i16 clamp(i32 value) {
+        return (i16s)value;
+    }
+}
+
+i32 main() {
+    i16 low = Limits.clamp(0 - 99999);
+    i16 high = (i16s)(70000 + 0);
+    if ((i32)low != 0 - 32768) { return 1; }
+    if (high != 32767) { return 2; }
+    return 42;
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void pointer_arithmetic_steps_by_the_element_size() {
+        str source = """
+i32 main() {
+    unsafe {
+        i32* items = (i32*)__djinn_alloc(40);
+        for (mut i32 i = 0; i < 10; i = i + 1) { items[i] = i * 10; }
+        i32* third = items + 3;
+        mut i32* cursor = third;
+        cursor++;
+        i32 sum = *third + *cursor + *(items + 9);
+        __djinn_free((void*)items);
+        if (sum != 160) { return 1; }
+    }
+    return 42;
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
     void narrowing_cast_in_range_runs() {
         str source = """
 i32 main() {

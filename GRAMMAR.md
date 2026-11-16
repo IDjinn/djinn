@@ -287,8 +287,10 @@ overflow_suffix      = "w" | "t" | "c" | "s" ;
 ```
 
 - `T*` is a safe pointer, `ptr` / `ptr<T>` are raw pointers (dereference, indexing, arithmetic and int-to-pointer casts need
-  `unsafe`), `T?` is `optional<T>` (`T*?` uses the pointer niche), `T[]` is `arr<T>`, `i8[n]` is a stack array.
+  `unsafe`), `T?` is `optional<T>` (`T*?` uses the pointer niche), `T[]` is `arr<T>`, `i8[n]` is a stack array (any primitive or struct type: `Point[n]` gives a `Point*`).
 - Overflow suffix: `w` wrapped (default, C-style), `t` trapped (panic), `c` checked (throws `Overflow`), `s` saturating.
+  On a cast the suffix picks the conversion: `(i16w)x` truncates like C, `(i16s)x` clamps to the range of `i16`, and a plain
+  `(i16)x` panics when the value does not fit (R10005).
   `n` marks a non-zero type (`i32n` cannot hold 0), combinable in either order (`i32nw`).
 - `fn(A, B) -> R` is a closure type (no `->` means `void`, at most 8 parameters): a `{ code, environment }` value that
   moves, never copies, and frees its environment when disposed. A function name converts to it without allocating.
@@ -374,7 +376,10 @@ argument             = [ IDENTIFIER ":" ] expression ;
 
 - `p?.m` yields a nullable pointer (null when `p` is null); `p!.m` unwraps (error on a value that is not nullable); `a ?? b`
   falls back when `a` is null; `a ??= b` assigns when null.
-- `&function` is the address of a plain, non-generic function as `ptr`.
+- `&function` is the address of a plain, non-generic function as `ptr`. `[Abi(C)]` on a function (also `Stdcall`,
+  `Fastcall`, `SysV`, `Win64`) makes it safe to hand that pointer to C code (a window procedure, a `qsort` comparator):
+  the function keeps the named calling convention and stays in the binary, and its signature may only use integers,
+  floats, `bool`, `char`, pointers and `void` (E3067); not async, generic, throwing, variadic or an instance method.
 - `(a, b) => a + b` and `(i32 v) => { ... }` are lambdas. Untyped parameters take their types from the expected `fn`
   type; the return type comes from it or from the body. Locals used inside are captured: copied when trivial, moved when
   they are values (the variable is then moved), and read-only inside the lambda (E3064). A captured value cannot be moved

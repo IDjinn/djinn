@@ -57,7 +57,7 @@ Section table: one 32 byte entry per section: `u32 kind, u32 pad, u64 offset, u6
 
 | Kind | Section | Content |
 |---|---|---|
-| 1 | manifest | `u32 len + name`, `u32 len + target triple`, file count |
+| 1 | manifest | `u32 len + name`, `u32 len + target triple`, file count, then `u32` link count and that many `u32 len + text` link arguments |
 | 2 | interface | per file: `u32 len + path`, `u32 len + minified Djinn text` |
 | 3 | object | native object file |
 | 4 | bitcode | optional LLVM bitcode of the small, self-contained exported functions (see below). Readers that do not know the kind ignore it |
@@ -80,6 +80,10 @@ constexpr and struct layouts stay complete. Modifiers (`private`, `async`, `sync
   kept for that (`Library.macro_objects`). `std::meta` code is linkonce, so it stays in the macro library object.
 - Dedup across modules: generic instances, constexpr functions and struct-instance methods are `linkonce_odr` in a
   comdat; typeinfo is `linkonce_odr`; reflection tables are internal.
+
+## Link dependencies
+
+A library project lists the system libraries it needs as quoted lines in its `djinn.proj` (`'-luser32'`, `'-lvulkan-1'`, `'-Ldir'`, or a path). They are stored in the manifest. When a program imports the library the compiler adds them to the link once, however many libraries ask for the same one, and verifies them: a path that does not exist is an error, and on Windows a `-lname` whose `name.lib` is not found (next to the library, in `../native`, in a `-L` directory or in `LIB`; common system libraries are assumed present) is reported as a warning before the linker fails. A directory that holds the import library is added to the search path. `--inspect-lib` lists them as `links:`.
 
 ## Bitcode and cross-library inlining
 

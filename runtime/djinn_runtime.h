@@ -78,6 +78,8 @@ do {                                                              \
 #endif
 
 int64_t __djinn_unix_timestamp_ms(void);
+int64_t __djinn_monotonic_ms(void);
+int64_t __djinn_monotonic_precise_ms(void);
 
 void* __djinn_realloc(void* pointer, size_t new_size);
 

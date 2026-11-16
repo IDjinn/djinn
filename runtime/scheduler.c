@@ -671,10 +671,31 @@ typedef struct djinn_timer
 
 static djinn_timer_t* djinn_timers = NULL;
 
-static int64_t djinn_now_ms(void)
+/* Monotonic milliseconds, cheap but coarse (about 15 ms on Windows): for timeouts and statistics that do not need precision. */
+int64_t __djinn_monotonic_ms(void)
 {
 #ifdef _WIN32
     return (int64_t)GetTickCount64();
+#else
+    struct timespec ts;
+#ifdef CLOCK_MONOTONIC_COARSE
+    clock_gettime(CLOCK_MONOTONIC_COARSE, &ts);
+#else
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+#endif
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+#endif
+}
+
+/* Monotonic milliseconds from the high resolution clock: what timers use, so that a delay never ends early. */
+int64_t __djinn_monotonic_precise_ms(void)
+{
+#ifdef _WIN32
+    static LARGE_INTEGER frequency;
+    LARGE_INTEGER counter;
+    if (frequency.QuadPart == 0) QueryPerformanceFrequency(&frequency);
+    QueryPerformanceCounter(&counter);
+    return (int64_t)(counter.QuadPart / frequency.QuadPart * 1000 + counter.QuadPart % frequency.QuadPart * 1000 / frequency.QuadPart);
 #else
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -688,7 +709,7 @@ int64_t __djinn_async_sleep(int64_t milliseconds, void* coro)
     djinn_timer_t* timer = (djinn_timer_t*)malloc(sizeof(djinn_timer_t));
     if (!timer) return -1;
     timer->coro = coro;
-    timer->deadline_ms = djinn_now_ms() + (milliseconds > 0 ? milliseconds : 0);
+    timer->deadline_ms = __djinn_monotonic_precise_ms() + (milliseconds > 0 ? milliseconds : 0) + 1;
     timer->next = djinn_timers;
     djinn_timers = timer;
     __djinn_mark_waiting(coro);
@@ -699,7 +720,7 @@ int64_t __djinn_async_sleep(int64_t milliseconds, void* coro)
 static int64_t djinn_fire_timers(void)
 {
     if (!djinn_timers) return -1;
-    const int64_t now = djinn_now_ms();
+    const int64_t now = __djinn_monotonic_precise_ms();
     int64_t next = -1;
     djinn_timer_t** link = &djinn_timers;
     while (*link)

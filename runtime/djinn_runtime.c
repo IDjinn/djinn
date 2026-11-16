@@ -9,9 +9,12 @@ int64_t __djinn_unix_timestamp_ms(void)
     return (int64_t)ts.tv_sec * 1000LL + ts.tv_nsec / 1000000LL;
 }
 
-DJINN_ATTR_NONNULL_1
+// Like free: a null pointer is accepted and ignored, so code can release optional buffers without a check.
 void __djinn_free(void* pointer)
 {
+    if (pointer == NULL) {
+        return;
+    }
     DJINN_TRACE("de-allocating heap memory at %p", pointer);
     free(pointer);
 }

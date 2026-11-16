@@ -824,6 +824,59 @@ i32 main() {
     }
 
     [Test]
+    void abi_function_is_callable_from_c() {
+        str source = """
+[Abi(C)]
+i32 compare(void* a, void* b) {
+    unsafe {
+        i32 x = *(i32*)a;
+        i32 y = *(i32*)b;
+        if (x < y) { return -1; }
+        if (x > y) { return 1; }
+    }
+    return 0;
+}
+
+extern void qsort(void* base, u64 count, u64 size, void* compare);
+
+i32 main() {
+    unsafe {
+        i32* v = i32[4];
+        v[0] = 5; v[1] = 2; v[2] = 9; v[3] = 1;
+        qsort((void*)v, 4, 4, &compare);
+        if (v[0] == 1 && v[1] == 2 && v[2] == 5 && v[3] == 9) { return 0; }
+    }
+    return 1;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(0));
+    }
+
+    [Test]
+    void abi_rejects_a_signature_c_cannot_use() {
+        str source = """
+[Abi(C)]
+str name(str value) {
+    return value;
+}
+i32 main() { return 0; }
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.INVALID_ABI).at(2, 1));
+    }
+
+    [Test]
+    void abi_rejects_an_unknown_convention() {
+        str source = """
+[Abi(Pascal)]
+i32 value(i32 x) {
+    return x;
+}
+i32 main() { return 0; }
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.INVALID_ABI).at(2, 1));
+    }
+
+    [Test]
     void unknown_attribute() {
         str source = """
 [NotAnAttribute]

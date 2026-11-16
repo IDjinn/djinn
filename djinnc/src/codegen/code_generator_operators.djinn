@@ -149,7 +149,7 @@ impl CodeGenerator {
             }
             ptr<ptr> indices = CodeGenerator.array_of(1);
             indices[0] = LLVMConstInt(LLVMIntTypeInContext(this.context, 64), (u64)step, 1);
-            after = LLVMBuildGEP2(this.builder, LLVMIntTypeInContext(this.context, 8), before, indices, 1, "count.ptr");
+            after = LLVMBuildGEP2(this.builder, this.pointee_llvm_type(type), before, indices, 1, "count.ptr");
         } else if (Types.is_float(type)) {
             ptr one = LLVMConstReal(llvm, 1.0);
             if (increment) {
@@ -395,6 +395,14 @@ impl CodeGenerator {
         return this.gen_arithmetic(node, common, lhs, rhs);
     }
 
+    // Pointer arithmetic steps by the size of the element, as in C; a pointer to void (ptr) steps by bytes.
+    unsafe ptr pointee_llvm_type(u32 pointer_type) {
+        if (Types.is_sized_pointer(pointer_type)) {
+            return this.llvm_type(Types.element(pointer_type));
+        }
+        return LLVMIntTypeInContext(this.context, 8);
+    }
+
     unsafe Value* gen_pointer_offset(Node* node, Value* pointer, Value* offset) {
         mut ptr amount = this.coerce(offset, Types.i64_type());
         if (node.op_kind() == TokenKind::MINUS) {
@@ -402,8 +410,7 @@ impl CodeGenerator {
         }
         ptr<ptr> indices = CodeGenerator.array_of(1);
         indices[0] = amount;
-        ptr byte_type = LLVMIntTypeInContext(this.context, 8);
-        ptr moved = LLVMBuildGEP2(this.builder, byte_type, pointer.ref, indices, 1, "ptradd");
+        ptr moved = LLVMBuildGEP2(this.builder, this.pointee_llvm_type(pointer.type), pointer.ref, indices, 1, "ptradd");
         return Value.create(moved, pointer.type);
     }
 
@@ -564,6 +571,49 @@ impl CodeGenerator {
         ptr below = LLVMBuildFCmp(this.builder, LlvmConst.REAL_OLT, value, LLVMConstReal(type, upper), "cast.below");
         ptr in_range = LLVMBuildAnd(this.builder, above, below, "cast.in_range");
         this.stop_when(LLVMBuildNot(this.builder, in_range, "cast.invalid"), node, RuntimeErrors.FLOAT_CAST_OUT_OF_RANGE);
+    }
+
+    // (i16s)x: an integer cast with the saturating suffix clamps to the range of the target instead of trapping.
+    bool is_saturating_cast(Node* node, Value* source, u32 target) {
+        if (node.mode() != OverflowMode::SATURATING) {
+            return false;
+        }
+        if (!Types.is_integer(source.type) || !Types.is_integer(target) || source.type == target) {
+            return false;
+        }
+        return Types.bits(source.type) > 1 && Types.bits(target) > 1 && Types.bits(target) < 128;
+    }
+
+    // The comparison is done in 128 bits, where every smaller integer, signed or not, is exact.
+    unsafe Value* gen_saturating_cast(Value* source, u32 target) {
+        ptr wide = LLVMIntTypeInContext(this.context, 128);
+        mut i32 widen = LlvmConst.OP_ZEXT;
+        if (Types.is_signed(source.type)) {
+            widen = LlvmConst.OP_SEXT;
+        }
+        ptr extended = LLVMBuildCast(this.builder, widen, source.ref, wide, "sat.wide");
+        u64 bits = (u64)Types.bits(target);
+        u64 one = 1;
+        mut u64 high_value = 0;
+        mut u64 low_value = 0;
+        mut i32 low_signed = 0;
+        if (Types.is_signed(target)) {
+            u64 maximum = (one << (bits - 1)) - 1;
+            high_value = maximum;
+            low_value = (u64)(0 - (i64)maximum - 1);
+            low_signed = 1;
+        } else {
+            u64 half = (one << (bits - 1)) - 1;
+            high_value = half * 2 + 1;
+        }
+        ptr high = LLVMConstInt(wide, high_value, 0);
+        ptr low = LLVMConstInt(wide, low_value, low_signed);
+        ptr above = LLVMBuildICmp(this.builder, LlvmConst.INT_SGT, extended, high, "sat.above");
+        ptr below = LLVMBuildICmp(this.builder, LlvmConst.INT_SLT, extended, low, "sat.below");
+        ptr capped = LLVMBuildSelect(this.builder, above, high, extended, "sat.high");
+        ptr clamped = LLVMBuildSelect(this.builder, below, low, capped, "sat.low");
+        ptr narrow = LLVMBuildCast(this.builder, LlvmConst.OP_TRUNC, clamped, this.llvm_type(target), "sat.narrow");
+        return Value.create(narrow, target);
     }
 
     // A narrowing cast is valid when extending the truncated value back gives the original. Casts that keep or widen the
