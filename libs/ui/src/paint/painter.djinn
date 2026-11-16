@@ -9,7 +9,84 @@ unsafe static mut u32 painter_line_capacity = 0;
 // Turns the laid out tree into a display list: backgrounds, borders, text and outlines in tree order, with clipping
 // for overflow. It reads the boxes from Layout and the computed styles from Styles, so the caller runs
 // Layout.compute first (Painter.frame does).
+unsafe static mut ptr raised_items = null;
+unsafe static mut u32 raised_count = 0;
+unsafe static mut u32 raised_capacity = 0;
+unsafe static mut u32 raised_now = 0;
+
+// A positioned element with a positive z-index waiting to be drawn above the normal flow.
+struct Raised {
+    mut u32 id;
+    mut f32 dx;
+    mut f32 dy;
+    mut i32 z;
+    mut bool done;
+}
+
 struct Painter {
+    static unsafe bool is_raised(u32 id) {
+        if (Dom.kind(id) != DomKind.ELEMENT || id == raised_now) {
+            return false;
+        }
+        Style* style = Styles.of(id);
+        return style.z_index > 0 && style.position != Keyword.STATIC && style.position != Keyword.FIXED
+            && style.display != Display.NONE;
+    }
+
+    static unsafe void defer(DisplayList* list, u32 id) {
+        if (raised_count == raised_capacity) {
+            u32 grown = raised_capacity * 2 + 8;
+            ptr items = (ptr)__djinn_alloc_zeroed((size_long)(grown * (u32)sizeof(Raised)));
+            if (raised_count > 0) {
+                memcpy((void*)items, (void*)raised_items, (size_long)(raised_count * (u32)sizeof(Raised)));
+            }
+            if (raised_items != null) {
+                __djinn_free((void*)raised_items);
+            }
+            raised_items = items;
+            raised_capacity = grown;
+        }
+        Raised* slot = &((Raised*)raised_items)[raised_count];
+        slot.id = id;
+        slot.dx = list.shift_x;
+        slot.dy = list.shift_y;
+        slot.z = Styles.of(id).z_index;
+        slot.done = false;
+        raised_count = raised_count + 1;
+    }
+
+    // Draws the deferred elements, lowest z-index first (document order among equals); drawing one may defer more.
+    static unsafe void flush_raised(DisplayList* list) {
+        mut bool more = true;
+        while (more) {
+            more = false;
+            mut u32 pick = raised_count;
+            mut u32 i = 0;
+            while (i < raised_count) {
+                Raised* slot = &((Raised*)raised_items)[i];
+                if (!slot.done) {
+                    if (pick == raised_count || slot.z < ((Raised*)raised_items)[pick].z) {
+                        pick = i;
+                    }
+                }
+                i = i + 1;
+            }
+            if (pick < raised_count) {
+                more = true;
+                ((Raised*)raised_items)[pick].done = true;
+                Raised item = ((Raised*)raised_items)[pick];
+                f32 keep_x = list.shift_x;
+                f32 keep_y = list.shift_y;
+                list.shift(item.dx - keep_x, item.dy - keep_y);
+                raised_now = item.id;
+                Painter.body(list, item.id, (f32)1.0);
+                raised_now = 0;
+                list.shift(keep_x - item.dx, keep_y - item.dy);
+            }
+        }
+        raised_count = 0;
+    }
+
     // One whole frame: layout for the viewport, then paint. Returns the document height (what a page scrolls).
     public static unsafe f32 frame(DisplayList* list, f32 width, f32 height) {
         u32 document = Dom.document();
@@ -26,7 +103,9 @@ struct Painter {
     public static unsafe void paint(DisplayList* list, u32 root, f32 width, f32 height) {
         list.clip_to((f32)0.0, (f32)0.0, width, height);
         list.shift((f32)0.0, (f32)0.0 - Scroll.page_top());
+        raised_count = 0;
         Painter.node(list, root, (f32)1.0);
+        Painter.flush_raised(list);
         list.shift((f32)0.0, Scroll.page_top());
         list.restore_clip();
     }
@@ -58,6 +137,10 @@ struct Painter {
             list.shift((f32)0.0, page);
             Painter.body(list, id, opacity);
             list.shift((f32)0.0, (f32)0.0 - page);
+            return;
+        }
+        if (Painter.is_raised(id)) {
+            Painter.defer(list, id);
             return;
         }
         Painter.body(list, id, opacity);

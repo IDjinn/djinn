@@ -4,18 +4,36 @@ namespace ui;
 
 // Finds the element under a point of the window, following the page scroll and the scroll of every container
 // (a scrolled-out part of a container is not hit).
+unsafe static mut u32 hit_best = 0;
+unsafe static mut i32 hit_best_z = 0;
+
 struct Hit {
+    // The topmost element under the point: a raised (positive z-index) element wins over the normal flow, and
+    // among equals the later one in document order.
     public static unsafe u32 at(f32 x, f32 y) {
-        return Hit.search(Dom.document(), x, y + Scroll.page_top());
+        hit_best = 0;
+        hit_best_z = 0;
+        Hit.search(Dom.document(), x, y + Scroll.page_top(), 0);
+        return hit_best;
     }
 
-    static unsafe u32 search(u32 id, f32 x, f32 line) {
+    static unsafe void search(u32 id, f32 x, f32 line, i32 z) {
         if (Dom.kind(id) != DomKind.ELEMENT) {
-            return 0;
+            // a fragment or a region marker has no box: its children sit in the parent
+            mut u32 member = Dom.first_child(id);
+            while (member != 0) {
+                Hit.search(member, x, line, z);
+                member = Dom.next_sibling(member);
+            }
+            return;
         }
         Style* style = Styles.of(id);
         if (style.display == Display.NONE) {
-            return 0;
+            return;
+        }
+        mut i32 layer = z;
+        if (style.z_index > 0 && style.position != Keyword.STATIC) {
+            layer = style.z_index;
         }
         mut f32 y = line;
         if (style.position == Keyword.FIXED) {
@@ -31,21 +49,17 @@ struct Hit {
         }
         bool clips = style.overflow == Keyword.HIDDEN || style.overflow == Keyword.SCROLL || style.overflow == Keyword.AUTO;
         if (clips && !inside) {
-            return 0;
+            return;
         }
-        mut u32 found = 0;
-        if (inside) {
-            found = id;
+        if (inside && layer >= hit_best_z) {
+            hit_best = id;
+            hit_best_z = layer;
         }
         mut u32 child = Dom.first_child(id);
         while (child != 0) {
-            u32 deeper = Hit.search(child, cx, cy);
-            if (deeper != 0) {
-                found = deeper;
-            }
+            Hit.search(child, cx, cy, layer);
             child = Dom.next_sibling(child);
         }
-        return found;
     }
 }
 

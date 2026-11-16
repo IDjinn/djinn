@@ -5,6 +5,14 @@ namespace ui;
 
 unsafe static mut ptr clipboard_system = null;
 
+// The contract of a platform clipboard, the same on every platform: win32 implements it with CF_UNICODETEXT, a web
+// host would with navigator.clipboard, and so on. 'write' replaces the text, 'read' returns the current text (UTF-8)
+// and its length, or null when there is none; the pointer belongs to the backend and stays valid until its next call.
+interface ClipboardBackend {
+    void write(i8* data, u32 length);
+    i8* read(u32* length);
+}
+
 // What a platform provides for the system clipboard: 'write' replaces its text, 'read' returns the current text (UTF-8)
 // and its length; the pointer belongs to the host and stays valid until its next call.
 struct ClipboardProvider {
@@ -33,6 +41,15 @@ struct Clipboard {
         ClipboardSystem* system = Clipboard.system();
         system.provider = provider;
         system.active = true;
+    }
+
+    // Installs a platform backend; every platform goes through the same ClipboardBackend interface.
+    public static unsafe void use<T>(T backend) where T : ClipboardBackend {
+        ClipboardProvider provider = {
+            .write = (i8* data, u32 length) => backend.write(data, length),
+            .read = (u32* length) => backend.read(length)
+        };
+        Clipboard.install(provider);
     }
 
     public static unsafe void write(i8* data, u32 length) {
