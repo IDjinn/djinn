@@ -59,6 +59,7 @@ struct WinHost {
     const u32 WM_KEYDOWN = 256;
     const u32 WM_CHAR = 258;
     const u32 WM_MOUSEMOVE = 512;
+    const u32 WM_MOUSEWHEEL = 522;
     const u32 WM_LBUTTONDOWN = 513;
     const u32 WM_LBUTTONUP = 514;
     const u32 WS_OVERLAPPEDWINDOW = 13565952;
@@ -78,31 +79,6 @@ struct WinHost {
         void* window = CreateWindowExA(0, "DjinnUiWindow", title.data, WinHost.WS_OVERLAPPEDWINDOW | WinHost.WS_VISIBLE,
             100, 100, (i32)width, (i32)height, (void*)0, (void*)0, module, (void*)0);
         return window;
-    }
-
-    // The deepest box under a point; later siblings paint on top, so they win.
-    static unsafe u32 hit(u32 id, f32 x, f32 y) {
-        if (Dom.kind(id) != DomKind.ELEMENT) {
-            return 0;
-        }
-        Style* style = Styles.of(id);
-        if (style.display == Display.NONE) {
-            return 0;
-        }
-        LayoutBox* box = Layout.box(id);
-        mut u32 found = 0;
-        if (x >= box.left && x < box.left + box.width && y >= box.top && y < box.top + box.height) {
-            found = id;
-        }
-        mut u32 child = Dom.first_child(id);
-        while (child != 0) {
-            u32 deeper = WinHost.hit(child, x, y);
-            if (deeper != 0) {
-                found = deeper;
-            }
-            child = Dom.next_sibling(child);
-        }
-        return found;
     }
 
     // Copies an RGBA canvas to the window as BGRA.
@@ -183,7 +159,7 @@ struct WinHost {
             s.gpu_height = h;
             s.dirty = true;
         }
-        if (s.dirty || Dom.stamp() + Animation.version() != s.stamp || Dom.epoch() != s.epoch) {
+        if (s.dirty || Dom.stamp() + Animation.version() + Scroll.version() != s.stamp || Dom.epoch() != s.epoch) {
             mut u64 t0 = WinHost.ticks(s);
             Painter.frame(&s.list, (f32)w, (f32)h);
             u64 t1 = WinHost.ticks(s);
@@ -212,7 +188,7 @@ struct WinHost {
                 }
                 s.dirty = false;
             }
-            s.stamp = Dom.stamp() + Animation.version();
+            s.stamp = Dom.stamp() + Animation.version() + Scroll.version();
             s.epoch = Dom.epoch();
         }
     }
@@ -249,6 +225,8 @@ struct WinHost {
         mut u32 pressed = 0;
         mut u32 editing = 0;
         mut u32 high = 0;
+        mut f32 pointer_x = (f32)0.0;
+        mut f32 pointer_y = (f32)0.0;
         mut bool running = true;
         while (running) {
             mut bool busy = false;
@@ -262,7 +240,7 @@ struct WinHost {
                 if (kind == WinHost.WM_QUIT) {
                     running = false;
                 } else if (kind == WinHost.WM_LBUTTONDOWN) {
-                    pressed = WinHost.hit(Dom.document(), x, y);
+                    pressed = Hit.at(x, y);
                     u32 control = Focus.owner(pressed);
                     editing = 0;
                     if (control != 0) {
@@ -276,7 +254,7 @@ struct WinHost {
                     }
                     WinHost.announce(pressed, "mousedown");
                 } else if (kind == WinHost.WM_LBUTTONUP) {
-                    u32 target = WinHost.hit(Dom.document(), x, y);
+                    u32 target = Hit.at(x, y);
                     WinHost.announce(target, "mouseup");
                     if (target != 0 && target == pressed) {
                         WinHost.announce(target, "click");
@@ -284,10 +262,19 @@ struct WinHost {
                     pressed = 0;
                     editing = 0;
                 } else if (kind == WinHost.WM_MOUSEMOVE) {
+                    pointer_x = x;
+                    pointer_y = y;
                     if (editing != 0) {
                         Edit.drag(editing, x);
                     }
-                    WinHost.announce(WinHost.hit(Dom.document(), x, y), "mousemove");
+                    WinHost.announce(Hit.at(x, y), "mousemove");
+                } else if (kind == WinHost.WM_MOUSEWHEEL) {
+                    // the wheel delta is the signed high word of wParam (120 per notch); the position is on screen
+                    mut i32 notches = (i32)((key >> 16) & 0xFFFF);
+                    if (notches >= 32768) {
+                        notches = notches - 65536;
+                    }
+                    Scroll.wheel(pointer_x, pointer_y, (f32)0.0 - (f32)notches * (f32)0.4);
                 } else if (kind == WinHost.WM_KEYDOWN) {
                     Input.press((i32)(key & 0xFFFF), WinHost.modifiers());
                 } else if (kind == WinHost.WM_CHAR) {
@@ -317,10 +304,10 @@ struct WinHost {
                 busy = true;
             }
             if (running) {
-                u32 before = state.stamp + state.epoch + Animation.version();
+                u32 before = state.stamp + state.epoch + Animation.version() + Scroll.version();
                 bool was_dirty = state.dirty;
                 WinHost.render(state);
-                if (was_dirty || before != state.stamp + state.epoch + Animation.version()) {
+                if (was_dirty || before != state.stamp + state.epoch + Animation.version() + Scroll.version()) {
                     busy = true;
                 }
             }
@@ -346,7 +333,7 @@ struct WinHost {
         mut DisplayList list = DisplayList.create();
         Painter.frame(&list, (f32)width, (f32)height);
         if (click_x >= (f32)0.0) {
-            WinHost.announce(WinHost.hit(Dom.document(), click_x, click_y), "click");
+            WinHost.announce(Hit.at(click_x, click_y), "click");
             Painter.frame(&list, (f32)width, (f32)height);
         }
         mut Canvas canvas = Canvas.create(width, height);

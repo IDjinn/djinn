@@ -1,0 +1,61 @@
+namespace ui;
+
+import testing;
+import std::types;
+
+struct ScrollTests {
+    static unsafe Node tall() {
+        Styles.add(".sc1 { width: 20px; height: 20px; overflow: auto; }");
+        Styles.add(".sc-red { height: 60px; background: #ff0000; }");
+        Styles.add(".sc-blue { height: 40px; background: #0000ff; }");
+        return Node.element("div").attr("class", "sc1")
+            .child(Node.element("div").attr("class", "sc-red"))
+            .child(Node.element("div").attr("class", "sc-blue"));
+    }
+
+    [Test]
+    unsafe void a_container_scrolls_its_content_within_the_limits() {
+        Scroll.reset();
+        Node box = ScrollTests.tall();
+        Layout.compute(box.id, (f32)100.0, (f32)100.0);
+        Expect.is_true(Scroll.container(box.id));
+        Expect.equal(80, (i64)Scroll.max_y(box.id), "100px of content in a 20px view");
+        Expect.is_true(Scroll.by(box.id, (f32)0.0, (f32)30.0));
+        Expect.equal(30, (i64)Scroll.top(box.id));
+        Scroll.by(box.id, (f32)0.0, (f32)500.0);
+        Expect.equal(80, (i64)Scroll.top(box.id), "clamped at the end");
+        Expect.is_true(!Scroll.by(box.id, (f32)0.0, (f32)10.0), "already at the end");
+        Scroll.by(box.id, (f32)0.0, (f32)-500.0);
+        Expect.equal(0, (i64)Scroll.top(box.id), "clamped at the start");
+    }
+
+    [Test]
+    unsafe void the_painter_moves_the_content_and_clips_it() {
+        Scroll.reset();
+        Node box = ScrollTests.tall();
+        mut Canvas before = Shot.take(box, 40, 40);
+        Expect.equal(0xFF0000FF, (i64)before.at(5, 5), "red at the top");
+        Expect.equal(0xFFFFFFFF, (i64)before.at(5, 30), "nothing outside the view");
+        before.release();
+        Scroll.set(box.id, (f32)0.0, (f32)70.0);
+        mut Canvas after = Shot.take(box, 40, 40);
+        Expect.equal(0x0000FFFF, (i64)after.at(5, 5), "the blue part is in view after scrolling 70px");
+        Expect.equal(0xFFFFFFFF, (i64)after.at(5, 25), "still clipped below the view");
+        after.release();
+        Scroll.reset();
+    }
+
+    [Test]
+    unsafe void keys_scroll_the_nearest_container() {
+        Scroll.reset();
+        Node box = ScrollTests.tall();
+        Layout.compute(box.id, (f32)100.0, (f32)100.0);
+        Expect.is_true(Scroll.key(box.id, Key.DOWN));
+        Expect.equal(40, (i64)Scroll.top(box.id));
+        Expect.is_true(Scroll.key(box.id, Key.END));
+        Expect.equal(80, (i64)Scroll.top(box.id));
+        Expect.is_true(Scroll.key(box.id, Key.HOME));
+        Expect.equal(0, (i64)Scroll.top(box.id));
+        Scroll.reset();
+    }
+}

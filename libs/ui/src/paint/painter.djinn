@@ -15,21 +15,27 @@ struct Painter {
         u32 document = Dom.document();
         Layout.compute(document, width, height);
         list.clear();
+        f32 total = Layout.box(document).height;
+        Scroll.page_limit(total - height, height);
         Painter.paint(list, document, width, height);
-        return Layout.box(document).height;
+        return total;
     }
 
     // Only what can reach the viewport is turned into triangles: a node whose box (plus the reach of its outline)
     // lies outside the current clip draws nothing, its children are still visited since they may overflow it.
     public static unsafe void paint(DisplayList* list, u32 root, f32 width, f32 height) {
         list.clip_to((f32)0.0, (f32)0.0, width, height);
+        list.shift((f32)0.0, (f32)0.0 - Scroll.page_top());
         Painter.node(list, root, (f32)1.0);
+        list.shift((f32)0.0, Scroll.page_top());
         list.restore_clip();
     }
 
     static unsafe bool outside(DisplayList* list, f32 left, f32 top, f32 width, f32 height, f32 reach) {
-        return left - reach >= list.clip_right || left + width + reach <= list.clip_left
-            || top - reach >= list.clip_bottom || top + height + reach <= list.clip_top;
+        f32 x = left + list.shift_x;
+        f32 y = top + list.shift_y;
+        return x - reach >= list.clip_right || x + width + reach <= list.clip_left
+            || y - reach >= list.clip_bottom || y + height + reach <= list.clip_top;
     }
 
     static unsafe bool is_hidden_tag(str tag) {
@@ -80,15 +86,59 @@ struct Painter {
                 box.top + box.height - box.border.bottom);
             clipped = true;
         }
+        mut f32 moved_x = (f32)0.0;
+        mut f32 moved_y = (f32)0.0;
+        if (clipped && Scroll.container(id)) {
+            moved_x = Scroll.left(id);
+            moved_y = Scroll.top(id);
+        }
+        list.shift((f32)0.0 - moved_x, (f32)0.0 - moved_y);
         Painter.children(list, id, faded);
         if (visible && style.visibility != Keyword.HIDDEN && faded > (f32)0.0) {
             Painter.field(list, id, box, style, faded);
+        }
+        list.shift(moved_x, moved_y);
+        if (clipped && visible && Scroll.container(id)) {
+            Painter.scrollbars(list, id, box, style);
         }
         if (clipped) {
             list.restore_clip();
         }
         if (visible && style.visibility != Keyword.HIDDEN && faded > (f32)0.0) {
             Painter.outline(list, box, style, faded);
+        }
+    }
+
+    // The overlay scroll thumbs of a container: a rounded bar on the right (and bottom) edge, only when there is
+    // something to scroll.
+    static unsafe void scrollbars(DisplayList* list, u32 id, LayoutBox* box, Style* style) {
+        f32 thickness = (f32)6.0;
+        f32 inset = (f32)2.0;
+        f32 view_height = box.height - box.border.vertical();
+        f32 view_width = box.width - box.border.horizontal();
+        f32 limit_y = Scroll.max_y(id);
+        if (limit_y > (f32)0.0 && view_height > (f32)16.0) {
+            f32 full = view_height + limit_y;
+            f32 track = view_height - inset * (f32)2.0;
+            mut f32 length = track * view_height / full;
+            if (length < (f32)24.0) {
+                length = (f32)24.0;
+            }
+            f32 offset = (track - length) * Scroll.top(id) / limit_y;
+            list.rounded(box.left + box.width - box.border.right - thickness - inset, box.top + box.border.top + inset + offset,
+                thickness, length, thickness / (f32)2.0, DisplayList.gpu_color(0x7f7f7fff, (f32)0.55));
+        }
+        f32 limit_x = Scroll.max_x(id);
+        if (limit_x > (f32)0.0 && view_width > (f32)16.0) {
+            f32 full = view_width + limit_x;
+            f32 track = view_width - inset * (f32)2.0;
+            mut f32 length = track * view_width / full;
+            if (length < (f32)24.0) {
+                length = (f32)24.0;
+            }
+            f32 offset = (track - length) * Scroll.left(id) / limit_x;
+            list.rounded(box.left + box.border.left + inset + offset, box.top + box.height - box.border.bottom - thickness - inset,
+                length, thickness, thickness / (f32)2.0, DisplayList.gpu_color(0x7f7f7fff, (f32)0.55));
         }
     }
 

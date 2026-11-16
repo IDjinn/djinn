@@ -1,0 +1,262 @@
+import std::types;
+import std::libc;
+
+namespace ui;
+
+unsafe static mut ptr scroll_system = null;
+
+struct ScrollEntry {
+    mut u32 id;
+    mut f32 x;
+    mut f32 y;
+}
+
+struct ScrollSystem {
+    mut ScrollEntry* items;
+    mut u32 count;
+    mut u32 capacity;
+    mut u32 version;
+    mut f32 page_x;
+    mut f32 page_y;
+    mut f32 page_limit;
+    mut f32 viewport;
+}
+
+// Scrolling. An element whose overflow is auto or scroll scrolls its content when it is taller (or wider) than
+// its padding box; the viewport itself scrolls when the document is taller than the window. Offsets are drawn by
+// the painter as a translation of the content (no relayout) and hit-testing follows them. The host feeds
+// Scroll.wheel with the wheel delta and the pointer position; Scroll.key handles PageUp / PageDown / Home / End /
+// arrows for the focused element.
+struct Scroll {
+    static unsafe ScrollSystem* system() {
+        if (scroll_system == null) {
+            scroll_system = (ptr)__djinn_alloc_zeroed((size_long)sizeof(ScrollSystem));
+        }
+        return (ScrollSystem*)scroll_system;
+    }
+
+    // Changes whenever any offset moves, so a host knows to draw again.
+    public static unsafe u32 version() {
+        return Scroll.system().version;
+    }
+
+    // Forgets every offset (tests, or when a new app is mounted).
+    public static unsafe void reset() {
+        ScrollSystem* system = Scroll.system();
+        system.count = 0;
+        system.page_x = (f32)0.0;
+        system.page_y = (f32)0.0;
+        system.version = system.version + 1;
+    }
+
+    static unsafe ScrollEntry* find(u32 id, bool create) {
+        ScrollSystem* system = Scroll.system();
+        mut u32 i = 0;
+        while (i < system.count) {
+            if (system.items[i].id == id) {
+                return &system.items[i];
+            }
+            i = i + 1;
+        }
+        if (!create) {
+            return (ScrollEntry*)0;
+        }
+        if (system.count == system.capacity) {
+            u32 grown = system.capacity * 2 + 8;
+            ScrollEntry* items = (ScrollEntry*)__djinn_alloc_zeroed((size_long)(grown * (u32)sizeof(ScrollEntry)));
+            if (system.count > 0) {
+                memcpy((void*)items, (void*)system.items, (size_long)(system.count * (u32)sizeof(ScrollEntry)));
+            }
+            if (system.items != (ScrollEntry*)0) {
+                __djinn_free((void*)system.items);
+            }
+            system.items = items;
+            system.capacity = grown;
+        }
+        ScrollEntry* entry = &system.items[system.count];
+        entry.id = id;
+        entry.x = (f32)0.0;
+        entry.y = (f32)0.0;
+        system.count = system.count + 1;
+        return entry;
+    }
+
+    // An element that scrolls its own content.
+    public static unsafe bool container(u32 id) {
+        if (id == 0 || Dom.kind(id) != DomKind.ELEMENT) {
+            return false;
+        }
+        Style* style = Styles.of(id);
+        return style.display != Display.NONE && (style.overflow == Keyword.SCROLL || style.overflow == Keyword.AUTO);
+    }
+
+    // How far the content can move up / left (0 when it fits).
+    public static unsafe f32 max_y(u32 id) {
+        LayoutBox* box = Layout.box(id);
+        f32 inner = box.height - box.border.vertical();
+        f32 reach = box.content_height + box.padding.vertical();
+        if (reach > inner) {
+            return reach - inner;
+        }
+        return (f32)0.0;
+    }
+
+    public static unsafe f32 max_x(u32 id) {
+        LayoutBox* box = Layout.box(id);
+        f32 inner = box.width - box.border.horizontal();
+        f32 reach = box.content_width + box.padding.horizontal();
+        if (reach > inner) {
+            return reach - inner;
+        }
+        return (f32)0.0;
+    }
+
+    public static unsafe f32 top(u32 id) {
+        ScrollEntry* entry = Scroll.find(id, false);
+        if (entry == (ScrollEntry*)0) {
+            return (f32)0.0;
+        }
+        return Px.min(entry.y, Scroll.max_y(id));
+    }
+
+    public static unsafe f32 left(u32 id) {
+        ScrollEntry* entry = Scroll.find(id, false);
+        if (entry == (ScrollEntry*)0) {
+            return (f32)0.0;
+        }
+        return Px.min(entry.x, Scroll.max_x(id));
+    }
+
+    static f32 clamp(f32 value, f32 limit) {
+        if (value > limit) {
+            return limit;
+        }
+        if (value < (f32)0.0) {
+            return (f32)0.0;
+        }
+        return value;
+    }
+
+    // Moves an element content to an absolute offset (clamped). True when it moved.
+    public static unsafe bool set(u32 id, f32 x, f32 y) {
+        if (!Scroll.container(id)) {
+            return false;
+        }
+        ScrollEntry* entry = Scroll.find(id, true);
+        f32 nx = Scroll.clamp(x, Scroll.max_x(id));
+        f32 ny = Scroll.clamp(y, Scroll.max_y(id));
+        if (nx == entry.x && ny == entry.y) {
+            return false;
+        }
+        entry.x = nx;
+        entry.y = ny;
+        Scroll.system().version = Scroll.system().version + 1;
+        return true;
+    }
+
+    // Moves an element content by a delta. True when it moved.
+    public static unsafe bool by(u32 id, f32 dx, f32 dy) {
+        return Scroll.set(id, Scroll.left(id) + dx, Scroll.top(id) + dy);
+    }
+
+    // Scrolls the containers around an element so that it is fully visible (the minimum movement).
+    public static unsafe void into_view(u32 id) {
+        mut u32 holder = Dom.parent(id);
+        while (holder != 0) {
+            if (Scroll.container(holder)) {
+                LayoutBox* box = Layout.box(id);
+                LayoutBox* outer = Layout.box(holder);
+                f32 view_top = outer.top + outer.border.top;
+                f32 view_bottom = outer.top + outer.height - outer.border.bottom;
+                f32 shown_top = box.top - Scroll.top(holder);
+                mut f32 dy = (f32)0.0;
+                if (shown_top < view_top) {
+                    dy = shown_top - view_top;
+                } else if (shown_top + box.height > view_bottom) {
+                    dy = shown_top + box.height - view_bottom;
+                }
+                if (dy != (f32)0.0) {
+                    Scroll.by(holder, (f32)0.0, dy);
+                }
+            }
+            holder = Dom.parent(holder);
+        }
+    }
+
+    // The viewport own scroll (the document is taller than the window).
+    public static unsafe f32 page_top() {
+        ScrollSystem* system = Scroll.system();
+        return Px.min(system.page_y, system.page_limit);
+    }
+
+    // Called by the painter each frame with how far the document can scroll.
+    public static unsafe void page_limit(f32 limit, f32 viewport) {
+        ScrollSystem* system = Scroll.system();
+        system.viewport = viewport;
+        mut f32 value = limit;
+        if (value < (f32)0.0) {
+            value = (f32)0.0;
+        }
+        system.page_limit = value;
+        if (system.page_y > value) {
+            system.page_y = value;
+        }
+    }
+
+    public static unsafe bool page_by(f32 dy) {
+        ScrollSystem* system = Scroll.system();
+        f32 next = Scroll.clamp(system.page_y + dy, system.page_limit);
+        if (next == system.page_y) {
+            return false;
+        }
+        system.page_y = next;
+        system.version = system.version + 1;
+        return true;
+    }
+
+    // The mouse wheel at a point of the window (client pixels): the innermost scroll container under it that can
+    // still move takes the delta, then the ones around it, then the page. Positive is down.
+    public static unsafe bool wheel(f32 x, f32 y, f32 dy) {
+        u32 target = Hit.at(x, y);
+        mut u32 holder = target;
+        while (holder != 0) {
+            if (Scroll.container(holder)) {
+                bool down = dy > (f32)0.0;
+                bool room = (down && Scroll.top(holder) < Scroll.max_y(holder)) || (!down && Scroll.top(holder) > (f32)0.0);
+                if (room && Scroll.by(holder, (f32)0.0, dy)) {
+                    return true;
+                }
+            }
+            holder = Dom.parent(holder);
+        }
+        return Scroll.page_by(dy);
+    }
+
+    // A key that scrolls: the nearest scroll container above the focused element (or the page). The viewport
+    // height is the page step. Returns true when it scrolled.
+    public static unsafe bool key(u32 focused, i32 key) {
+        f32 viewport = Scroll.system().viewport;
+        mut f32 dy = (f32)0.0;
+        mut bool top = false;
+        mut bool end = false;
+        if (key == 33) { dy = (f32)0.0 - viewport * (f32)0.9; }
+        else if (key == 34) { dy = viewport * (f32)0.9; }
+        else if (key == Key.UP) { dy = (f32)-40.0; }
+        else if (key == Key.DOWN) { dy = (f32)40.0; }
+        else if (key == Key.HOME) { top = true; }
+        else if (key == Key.END) { end = true; }
+        else { return false; }
+        mut u32 holder = focused;
+        while (holder != 0) {
+            if (Scroll.container(holder) && Scroll.max_y(holder) > (f32)0.0) {
+                if (top) { return Scroll.set(holder, Scroll.left(holder), (f32)0.0); }
+                if (end) { return Scroll.set(holder, Scroll.left(holder), Scroll.max_y(holder)); }
+                return Scroll.by(holder, (f32)0.0, dy);
+            }
+            holder = Dom.parent(holder);
+        }
+        if (top) { return Scroll.page_by((f32)-1000000.0); }
+        if (end) { return Scroll.page_by((f32)1000000.0); }
+        return Scroll.page_by(dy);
+    }
+}

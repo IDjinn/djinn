@@ -27,10 +27,13 @@ struct DisplayList {
     mut f32* scratch;
     mut f32* clip_stack;
     mut u32 clip_depth;
+    mut f32 shift_x;
+    mut f32 shift_y;
 
     public static unsafe DisplayList create() {
         DisplayList list = { .vertices = (Vertex*)0, .count = 0, .capacity = 0, .clip_left = (f32)-1000000.0, .clip_top = (f32)-1000000.0,
-            .clip_right = (f32)1000000.0, .clip_bottom = (f32)1000000.0, .scratch = (f32*)0, .clip_stack = (f32*)0, .clip_depth = 0 };
+            .clip_right = (f32)1000000.0, .clip_bottom = (f32)1000000.0, .scratch = (f32*)0, .clip_stack = (f32*)0, .clip_depth = 0,
+            .shift_x = (f32)0.0, .shift_y = (f32)0.0 };
         list.scratch = (f32*)__djinn_alloc_zeroed((size_long)(4096 * sizeof(f32)));
         list.clip_stack = (f32*)__djinn_alloc_zeroed((size_long)(4 * DisplayList.MAX_CLIPS * sizeof(f32)));
         return list;
@@ -53,6 +56,15 @@ struct DisplayList {
         this.clip_top = (f32)-1000000.0;
         this.clip_right = (f32)1000000.0;
         this.clip_bottom = (f32)1000000.0;
+        this.shift_x = (f32)0.0;
+        this.shift_y = (f32)0.0;
+    }
+
+    // Everything drawn after this moves by (dx, dy): how a scroll container moves its content. Clips set before it
+    // stay where they are; unshift undoes it.
+    public unsafe void shift(f32 dx, f32 dy) {
+        this.shift_x = this.shift_x + dx;
+        this.shift_y = this.shift_y + dy;
     }
 
     unsafe void reserve(u32 extra) {
@@ -114,10 +126,14 @@ struct DisplayList {
     const u32 MAX_CLIPS = 64;
 
     // Narrows the clip rectangle to the given one (and the old clip); restore_clip undoes it after the subtree.
-    public unsafe void clip_to(f32 left, f32 top, f32 right, f32 bottom) {
+    public unsafe void clip_to(f32 x0, f32 y0, f32 x1, f32 y1) {
         if (this.clip_depth >= DisplayList.MAX_CLIPS) {
             return;
         }
+        f32 left = x0 + this.shift_x;
+        f32 top = y0 + this.shift_y;
+        f32 right = x1 + this.shift_x;
+        f32 bottom = y1 + this.shift_y;
         f32* saved = &this.clip_stack[this.clip_depth * 4];
         this.clip_depth = this.clip_depth + 1;
         saved[0] = this.clip_left;
@@ -153,6 +169,10 @@ struct DisplayList {
     // Two triangles for the rectangle [x0,x1] x [y0,y1] sampling the atlas rectangle [u0,u1] x [v0,v1], cut to the
     // clip rectangle (the atlas coordinates are cut with it).
     public unsafe void quad(f32 x0, f32 y0, f32 x1, f32 y1, f32 u0, f32 v0, f32 u1, f32 v1, u32 color) {
+        this.quad_at(x0 + this.shift_x, y0 + this.shift_y, x1 + this.shift_x, y1 + this.shift_y, u0, v0, u1, v1, color);
+    }
+
+    unsafe void quad_at(f32 x0, f32 y0, f32 x1, f32 y1, f32 u0, f32 v0, f32 u1, f32 v1, u32 color) {
         mut f32 left = x0;
         mut f32 top = y0;
         mut f32 right = x1;
@@ -204,7 +224,7 @@ struct DisplayList {
         f32 y0 = Math.round(y);
         f32 x1 = Math.round(x + width);
         f32 y1 = Math.round(y + height);
-        this.quad(x0, y0, x1, y1, u, u, u, u, color);
+        this.quad_at(x0 + this.shift_x, y0 + this.shift_y, x1 + this.shift_x, y1 + this.shift_y, u, u, u, u, color);
     }
 
     // One point of a rounded rectangle outline moved 'grow' px outward, walking clockwise from the top-left corner;
@@ -243,7 +263,7 @@ struct DisplayList {
     const u32 SEGMENTS = 8;
 
     // A rounded rectangle with a one pixel soft edge: the inside is opaque, the last half pixel on each side fades out.
-    public unsafe void rounded(f32 x, f32 y, f32 width, f32 height, f32 radius, u32 color) {
+    public unsafe void rounded(f32 px, f32 py, f32 width, f32 height, f32 radius, u32 color) {
         if ((color >> 24) == 0 || width <= (f32)0.0 || height <= (f32)0.0) {
             return;
         }
@@ -253,9 +273,11 @@ struct DisplayList {
             r = limit;
         }
         if (r <= (f32)0.0) {
-            this.fill(x, y, width, height, color);
+            this.fill(px, py, width, height, color);
             return;
         }
+        f32 x = px + this.shift_x;
+        f32 y = py + this.shift_y;
         if (x + width < this.clip_left || x > this.clip_right || y + height < this.clip_top || y > this.clip_bottom) {
             return;
         }
@@ -286,7 +308,7 @@ struct DisplayList {
     }
 
     // A border of 'thickness' px inside a rounded rectangle, soft on both edges.
-    public unsafe void ring(f32 x, f32 y, f32 width, f32 height, f32 radius, f32 thickness, u32 color) {
+    public unsafe void ring(f32 px, f32 py, f32 width, f32 height, f32 radius, f32 thickness, u32 color) {
         if ((color >> 24) == 0 || thickness <= (f32)0.0 || width <= (f32)0.0 || height <= (f32)0.0) {
             return;
         }
@@ -295,6 +317,8 @@ struct DisplayList {
         if (r > limit) {
             r = limit;
         }
+        f32 x = px + this.shift_x;
+        f32 y = py + this.shift_y;
         mut f32 t = thickness;
         if (t > limit) {
             t = limit;

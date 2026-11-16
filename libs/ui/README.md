@@ -271,6 +271,16 @@ leaves it); the empty scope is global. `Input.press` offers every press to the b
 and before the default actions; a match runs the handler (as one reactive batch) and consumes the press. Shortcuts
 without Ctrl, Alt or Meta are ignored while a text field has focus, and Ctrl+A / C / X / V stay with the field.
 
+## Scrolling
+
+An element with `overflow: auto` or `scroll` scrolls its content when it does not fit; the window scrolls when the
+document is taller than it. Offsets live in `Scroll` (`libs/ui/src/input/scroll.djinn`): `Scroll.top(id)` /
+`left(id)`, `set`, `by`, `max_y` / `max_x`, `into_view(id)` (the minimum movement that shows an element), `wheel(x, y,
+dy)` (the innermost container under the point that can still move takes the delta, then the ones around it, then the
+page) and `key(focused, key)` for PageUp / PageDown / Home / End / Up / Down. The painter draws the content shifted
+(no relayout), clips it and draws overlay thumbs; `Hit.at(x, y)` finds the element under a point following every
+offset. Tab scrolls the newly focused element into view. The Windows host feeds the mouse wheel.
+
 ## Output safety
 
 The HTML writer (`view/html.djinn`, `view/html_safety.djinn`) treats every value as untrusted:
