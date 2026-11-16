@@ -8,6 +8,7 @@
 - `(i16s)x`: a saturating integer cast clamps to the range of the target (the `w` suffix already truncated), at run time and in constant evaluation.
 - `--windowed` (and `windowed: true` in `djinn.proj`): links a Windows GUI program with no console window. `-l<name>` and `-L<dir>` on the command line, with the same mapping as the manifest.
 - `std::libc`: `atoi`, `atoll`, `strtoll`, `strtoull`. `Math` has `f32` versions of the error and gamma functions.
+- `[Abi(C)]` marks a function as callable from C (`Stdcall`, `Fastcall`, `SysV` and `Win64` select other conventions): its signature is checked (E3067) and `&function` can be given to the system as a callback.
 - `Point[n]` allocates `n` structs on the stack (like `i8[n]`) and gives a `Point*`.
 - A library records the system libraries its manifest names (`'-luser32'`) in the `.djlib`; a program that imports it links them once and is told when an import library cannot be found (it looks next to the library, in `../native`, in the `-L` directories and in `LIB`). `ui`, `win32` and `vulkan` declare theirs, so `--link-arg` is no longer needed.
 

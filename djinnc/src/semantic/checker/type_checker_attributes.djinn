@@ -1,6 +1,48 @@
 namespace djinnc;
 
 impl TypeChecker {
+    // A parameter or result a C caller can pass: integers, floats, pointers and void (no strings, structs or closures).
+    bool abi_compatible(u32 type) {
+        return Types.is_integer(type) || Types.is_float(type) || Types.is_pointer(type) || Types.is_void(type) || type == Types.bool_type() || type == Types.char_type();
+    }
+
+    // [Abi(C)] hands a function to foreign code (a window procedure, a qsort comparator): its signature must be one a
+    // C caller can use, and the function is kept in the binary under its own name.
+    unsafe void check_abi_functions() {
+        SymbolTable* symbols = this.symbols;
+        PointerList* uses = Attributes.all();
+        for (mut i32 i = 0; i < uses.length; i = i + 1) {
+            AttributeUse* use = (AttributeUse*)uses.get(i);
+            if (!Strings.same(use.name, "Abi") || use.target == null) {
+                continue;
+            }
+            PointerList* functions = symbols.functions;
+            for (mut i32 f = 0; f < functions.length; f = f + 1) {
+                FunctionInfo* info = (FunctionInfo*)functions.get(f);
+                if (info.node != use.target || info.is_extern) {
+                    continue;
+                }
+                Node* at = info.node;
+                if (Attributes.abi_convention(use.text_arg) < 0) {
+                    this.error_code(at, DiagnosticErrors.INVALID_ABI, "unknown ABI: use Abi(C), Abi(Stdcall), Abi(Fastcall), Abi(SysV) or Abi(Win64)");
+                } else if (info.is_async || info.is_template || info.is_instance || info.has_throws || info.is_variadic) {
+                    this.error_code(at, DiagnosticErrors.INVALID_ABI, "an Abi function must be a plain function: not async, generic, throwing, variadic or an instance method");
+                } else {
+                    mut bool fits = this.abi_compatible(info.return_type);
+                    IdList* params = info.param_types;
+                    for (mut i32 p = 0; p < params.length; p = p + 1) {
+                        if (!this.abi_compatible(params.get(p))) {
+                            fits = false;
+                        }
+                    }
+                    if (!fits) {
+                        this.error_code(at, DiagnosticErrors.INVALID_ABI, "an Abi function can only take and return integers, floats, bool, char, pointers and void");
+                    }
+                }
+            }
+        }
+    }
+
     unsafe void check_attribute_payloads() {
         PointerList* uses = Attributes.all();
         for (mut i32 i = 0; i < uses.length; i = i + 1) {

@@ -376,7 +376,10 @@ argument             = [ IDENTIFIER ":" ] expression ;
 
 - `p?.m` yields a nullable pointer (null when `p` is null); `p!.m` unwraps (error on a value that is not nullable); `a ?? b`
   falls back when `a` is null; `a ??= b` assigns when null.
-- `&function` is the address of a plain, non-generic function as `ptr`.
+- `&function` is the address of a plain, non-generic function as `ptr`. `[Abi(C)]` on a function (also `Stdcall`,
+  `Fastcall`, `SysV`, `Win64`) makes it safe to hand that pointer to C code (a window procedure, a `qsort` comparator):
+  the function keeps the named calling convention and stays in the binary, and its signature may only use integers,
+  floats, `bool`, `char`, pointers and `void` (E3067); not async, generic, throwing, variadic or an instance method.
 - `(a, b) => a + b` and `(i32 v) => { ... }` are lambdas. Untyped parameters take their types from the expected `fn`
   type; the return type comes from it or from the body. Locals used inside are captured: copied when trivial, moved when
   they are values (the variable is then moved), and read-only inside the lambda (E3064). A captured value cannot be moved
