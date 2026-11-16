@@ -1,0 +1,74 @@
+namespace ui;
+
+import testing;
+import std::types;
+
+// CSS transitions on colors and the present / dismiss motion of dialogs and popups.
+struct MotionTests {
+    static unsafe u32 red_of(Node box) {
+        mut Canvas canvas = Shot.take(box, 40, 40);
+        u32 pixel = canvas.at(5, 5);
+        canvas.release();
+        return pixel >> 24;
+    }
+
+    [Test]
+    unsafe void transition_reads_its_duration() {
+        Styles.add(".m1 { transition: color 150ms ease-in; } .m2 { transition: opacity 0.2s cubic-bezier(0.2, 0, 0, 1); } .m3 { transition: none; }");
+        Node a = Page.attach(Node.element("div").attr("class", "m1"));
+        Node b = Page.attach(Node.element("div").attr("class", "m2"));
+        Node c = Page.attach(Node.element("div").attr("class", "m3"));
+        Expect.equal(150, (i64)Styles.of(a.id).transition_ms);
+        Expect.equal(200, (i64)Styles.of(b.id).transition_ms);
+        Expect.equal(0, (i64)Styles.of(c.id).transition_ms);
+    }
+
+    [Test]
+    unsafe void a_color_change_eases_over_the_duration() {
+        Styles.set_reduced_motion(false);
+        Styles.add(".m4 { width: 20px; height: 10px; background-color: #000000; transition: background-color 100ms; } .m4[data-on=\"true\"] { background-color: #ffffff; }");
+        Node box = Page.attach(Node.element("div").attr("class", "m4"));
+        Animation.advance(50000);
+        Expect.equal(0, (i64)MotionTests.red_of(box), "starts black");
+        Dom.set_attr(box.id, "data-on", "true", 4);
+        Expect.equal(0, (i64)MotionTests.red_of(box), "the change starts from where it was");
+        Expect.is_true(Transitions.active());
+        Expect.is_true(Animation.advance(50050), "the host keeps drawing");
+        u32 half = MotionTests.red_of(box);
+        Expect.is_true(half > 32 && half < 250, "part of the way");
+        Animation.advance(50200);
+        Expect.equal(255, (i64)MotionTests.red_of(box), "arrived");
+        Expect.is_false(Transitions.active());
+        Expect.is_false(Animation.advance(50300), "and idle");
+    }
+
+    [Test]
+    unsafe void reduced_motion_changes_colors_at_once() {
+        Styles.set_reduced_motion(true);
+        Styles.add(".m5 { width: 20px; height: 10px; background-color: #000000; transition: background-color 100ms; } .m5[data-on=\"true\"] { background-color: #ffffff; }");
+        Node box = Page.attach(Node.element("div").attr("class", "m5"));
+        Animation.advance(60000);
+        MotionTests.red_of(box);
+        Dom.set_attr(box.id, "data-on", "true", 4);
+        Expect.equal(255, (i64)MotionTests.red_of(box));
+        Expect.is_false(Transitions.active());
+        Styles.set_reduced_motion(false);
+    }
+
+    [Test]
+    unsafe void data_open_presents_and_dismisses() {
+        Styles.set_reduced_motion(false);
+        Node panel = Page.attach(Node.element("div").attr("data-open", "false"));
+        Expect.is_true(Texts.same(Dom.attr(panel.id, "data-gone"), "true"), "closed from the start");
+        Dom.set_attr(panel.id, "data-open", "true", 4);
+        Expect.is_true(Texts.same(Dom.attr(panel.id, "data-gone"), "false"), "shown at once, fading in");
+        Expect.is_true(Animation.active());
+        Animation.advance(70000);
+        Animation.advance(70300);
+        Dom.set_attr(panel.id, "data-open", "false", 5);
+        Expect.is_true(Texts.same(Dom.attr(panel.id, "data-gone"), "false"), "still there while it fades out");
+        Animation.advance(71000);
+        Animation.advance(71300);
+        Expect.is_true(Texts.same(Dom.attr(panel.id, "data-gone"), "true"), "hidden when the fade ends");
+    }
+}

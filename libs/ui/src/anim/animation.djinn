@@ -28,6 +28,10 @@ struct AnimationSystem {
 // The host calls Animation.advance(milliseconds) once per loop iteration and keeps drawing while it returns true.
 // Animations are skipped (the end value applies at once) when the user asked for reduced motion.
 struct Animation {
+    // The default durations (milliseconds): things appear a little slower than they leave.
+    const u32 ENTER = 200;
+    const u32 EXIT = 140;
+
     static unsafe AnimationSystem* system() {
         if (animation_system == null) {
             animation_system = (ptr)__djinn_alloc_zeroed((size_long)sizeof(AnimationSystem));
@@ -38,6 +42,34 @@ struct Animation {
     // Fades an element in from transparent over 'duration' milliseconds.
     public static unsafe void fade_in(u32 id, u32 duration) {
         Animation.fade(id, (f32)0.0, (f32)1.0, duration);
+    }
+
+    // Shows or hides an element the way the system does: it fades in, or fades out and is then hidden (data-gone,
+    // see fade_out). The first call only sets the starting state.
+    public static unsafe void present(u32 id, bool on) {
+        if (!Dom.has_attr(id, "data-gone")) {
+            if (on) {
+                Dom.set_attr(id, "data-gone", "false", 5);
+            } else {
+                Dom.set_attr(id, "data-gone", "true", 4);
+            }
+            return;
+        }
+        if (on) {
+            Animation.fade_in(id, Animation.ENTER);
+        } else {
+            Animation.fade_out(id, Animation.EXIT);
+        }
+    }
+
+    // The attributes that move an element: data-open (dialogs, popups) presents or dismisses it, and a panel that
+    // becomes data-active fades in. Called by the tree when an attribute is set.
+    static unsafe void attribute(u32 id, str name, u32 length, bool existed) {
+        if (Texts.same(name, "data-open")) {
+            Animation.present(id, length == 4);
+        } else if (existed && length == 4 && Texts.same(name, "data-active")) {
+            Animation.fade_in(id, Animation.ENTER);
+        }
     }
 
     // Fades an element out over 'duration' milliseconds and then hides it (data-gone="true", which the theme turns
@@ -145,8 +177,12 @@ struct Animation {
     public static unsafe bool advance(u32 now) {
         AnimationSystem* system = Animation.system();
         system.now = now;
+        bool moving = Transitions.active();
         if (system.count == 0) {
-            return false;
+            if (moving) {
+                system.version = system.version + 1;
+            }
+            return moving;
         }
         mut u32 i = 0;
         while (i < system.count) {
@@ -166,6 +202,6 @@ struct Animation {
             }
         }
         system.version = system.version + 1;
-        return system.count > 0;
+        return system.count > 0 || moving;
     }
 }
