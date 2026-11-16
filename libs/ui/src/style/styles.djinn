@@ -17,6 +17,9 @@ struct StyleEnvironment {
     mut bool more_contrast;
     mut bool forced_colors;
     mut f64 text_scale;
+    // Physical pixels per CSS pixel (the screen scale: 1.5 at 150%). px and pt lengths and the root font size
+    // are multiplied by it; media queries still see the width in CSS pixels.
+    mut f64 device_scale;
 }
 
 // One matched declaration and the keys that order it in the cascade.
@@ -53,6 +56,7 @@ struct Styles {
             engine.environment.viewport_height = 800.0;
             engine.environment.root_font_size = 16.0;
             engine.environment.text_scale = 1.0;
+            engine.environment.device_scale = 1.0;
             engine.environment.hover = true;
             style_engine = (ptr)engine;
             Styles.install(CssParser.parse(BrowserStyles.css(), StyleOrigin.BROWSER));
@@ -114,6 +118,19 @@ struct Styles {
         }
     }
 
+    // The screen scale (physical pixels per CSS pixel); the host sets it from the OS before the first frame.
+    public static unsafe void set_device_scale(f64 scale) {
+        StyleEnvironment* environment = Styles.environment();
+        if (scale > 0.0 && environment.device_scale != scale) {
+            environment.device_scale = scale;
+            Dom.touch();
+        }
+    }
+
+    public static unsafe f64 device_scale() {
+        return Styles.environment().device_scale;
+    }
+
     // The primary pointer is a finger or another imprecise device ('pointer: coarse'); it then also cannot hover.
     public static unsafe void set_coarse_pointer(bool coarse) {
         StyleEnvironment* environment = Styles.environment();
@@ -154,10 +171,10 @@ struct Styles {
         if (kind == MediaKind.ALWAYS) { result = true; }
         else if (kind == MediaKind.DARK) { result = environment.prefers_dark; }
         else if (kind == MediaKind.LIGHT) { result = !environment.prefers_dark; }
-        else if (kind == MediaKind.MIN_WIDTH) { result = environment.viewport_width >= Styles.width_of(feature, environment); }
-        else if (kind == MediaKind.MAX_WIDTH) { result = environment.viewport_width <= Styles.width_of(feature, environment); }
-        else if (kind == MediaKind.ABOVE_WIDTH) { result = environment.viewport_width > Styles.width_of(feature, environment); }
-        else if (kind == MediaKind.BELOW_WIDTH) { result = environment.viewport_width < Styles.width_of(feature, environment); }
+        else if (kind == MediaKind.MIN_WIDTH) { result = (environment.viewport_width / environment.device_scale) >= Styles.width_of(feature, environment); }
+        else if (kind == MediaKind.MAX_WIDTH) { result = (environment.viewport_width / environment.device_scale) <= Styles.width_of(feature, environment); }
+        else if (kind == MediaKind.ABOVE_WIDTH) { result = (environment.viewport_width / environment.device_scale) > Styles.width_of(feature, environment); }
+        else if (kind == MediaKind.BELOW_WIDTH) { result = (environment.viewport_width / environment.device_scale) < Styles.width_of(feature, environment); }
         else if (kind == MediaKind.COARSE) { result = environment.coarse_pointer; }
         else if (kind == MediaKind.FINE) { result = !environment.coarse_pointer; }
         else if (kind == MediaKind.MORE_CONTRAST) { result = environment.more_contrast; }
@@ -461,7 +478,7 @@ struct Styles {
             return &engine.styles[element];
         }
         mut Style parent = Style.initial();
-        parent.font_size = (f32)(16.0 * engine.environment.text_scale);
+        parent.font_size = (f32)(16.0 * engine.environment.text_scale * engine.environment.device_scale);
         mut u32 above = SelectorMatcher.parent_element(element);
         if (above == 0 && element != Dom.document()) {
             above = Dom.document();
@@ -514,7 +531,8 @@ struct Styles {
             style.own_vars = style.own_vars + 1;
         }
         mut ValueContext context = { .font_size = (f64)parent.font_size, .root_font_size = engine.environment.root_font_size,
-            .viewport_width = engine.environment.viewport_width, .viewport_height = engine.environment.viewport_height, .dark = parent.dark_scheme };
+            .viewport_width = engine.environment.viewport_width, .viewport_height = engine.environment.viewport_height, .dark = parent.dark_scheme,
+            .device_scale = engine.environment.device_scale };
         if (id == Dom.document()) {
             context.root_font_size = (f64)parent.font_size;
         }

@@ -65,6 +65,27 @@ struct WinHost {
     const u32 WS_OVERLAPPEDWINDOW = 13565952;
     const u32 WS_VISIBLE = 268435456;
 
+    // The screen scale (1.5 at 150%): the system DPI over 96, or DJINN_UI_SCALE in percent (to test a scale).
+    public static unsafe f64 scale() {
+        i8* forced = getenv("DJINN_UI_SCALE");
+        if (forced != (i8*)0) {
+            mut i32 percent = 0;
+            mut u32 at = 0;
+            while (forced[at] >= (i8)48 && forced[at] <= (i8)57) {
+                percent = percent * 10 + ((i32)forced[at] - 48);
+                at = at + 1;
+            }
+            if (percent >= 50 && percent <= 400) {
+                return (f64)percent / 100.0;
+            }
+        }
+        u32 dpi = GetDpiForSystem();
+        if (dpi < 96) {
+            return 1.0;
+        }
+        return (f64)dpi / 96.0;
+    }
+
     static unsafe void* open(str title, u32 width, u32 height) {
         void* module = GetModuleHandleA((i8*)0);
         void* class_info = Raw.make(80);
@@ -206,7 +227,12 @@ struct WinHost {
         GdiFonts.install();
         WinClipboard.install();
         Mounted mounted = App.mount<T>(app);
-        void* window = WinHost.open(title, width, height);
+        // the window size is given in CSS pixels
+        f64 device = WinHost.scale();
+        Styles.set_device_scale(device);
+        u32 scaled_width = (u32)((f64)width * device);
+        u32 scaled_height = (u32)((f64)height * device);
+        void* window = WinHost.open(title, scaled_width, scaled_height);
         if (window == (void*)0) {
             return 1;
         }
@@ -219,7 +245,7 @@ struct WinHost {
         // Vulkan is the default; the software rasterizer is used only when no Vulkan device is available (or when
         // DJINN_UI_CPU is set, to compare or debug).
         if (getenv("DJINN_UI_CPU") == (i8*)0) {
-            state.gpu = VulkanRenderer.create(GetModuleHandleA((i8*)0), window, width, height);
+            state.gpu = VulkanRenderer.create(GetModuleHandleA((i8*)0), window, scaled_width, scaled_height);
             if (state.gpu == (VulkanRenderer*)0) {
                 printf("win32: Vulkan is not available, drawing with the software rasterizer
 ");
@@ -341,20 +367,25 @@ struct WinHost {
     public static unsafe i32 shot<T>(T app, u32 width, u32 height, i8* path, f32 click_x, f32 click_y) {
         GdiFonts.install();
         WinClipboard.install();
+        f64 device = WinHost.scale();
+        Styles.set_device_scale(device);
+        // the image is in physical pixels: the size given is in CSS pixels
+        u32 pixel_width = (u32)((f64)width * device);
+        u32 pixel_height = (u32)((f64)height * device);
         Mounted mounted = App.mount<T>(app);
         mut DisplayList list = DisplayList.create();
-        Painter.frame(&list, (f32)width, (f32)height);
+        Painter.frame(&list, (f32)pixel_width, (f32)pixel_height);
         // a still image shows every animation finished: the first advance starts them, the second ends them
         WinHost.settle();
-        Painter.frame(&list, (f32)width, (f32)height);
+        Painter.frame(&list, (f32)pixel_width, (f32)pixel_height);
         if (click_x >= (f32)0.0) {
             u32 target = Hit.at(click_x, click_y);
             WinHost.announce(target, "click");
-            Painter.frame(&list, (f32)width, (f32)height);
+            Painter.frame(&list, (f32)pixel_width, (f32)pixel_height);
             WinHost.settle();
-            Painter.frame(&list, (f32)width, (f32)height);
+            Painter.frame(&list, (f32)pixel_width, (f32)pixel_height);
         }
-        mut Canvas canvas = Canvas.create(width, height);
+        mut Canvas canvas = Canvas.create(pixel_width, pixel_height);
         canvas.clear(0xFFFFFFFF);
         SoftRaster.draw(&canvas, &list);
         bool saved = canvas.save_ppm(path);
