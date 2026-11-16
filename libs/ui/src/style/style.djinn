@@ -82,6 +82,11 @@ struct Style {
     mut f32 transform_scale;
     mut f32 translate_x;
     mut f32 translate_y;
+    mut f32 transform_rotate;
+    mut f32 origin_x;
+    mut f32 origin_y;
+    mut f32 origin_x_px;
+    mut f32 origin_y_px;
     mut f32 font_size;
     mut u16 font_weight;
     mut u8 font_style;
@@ -161,6 +166,8 @@ struct Style {
         style.background = 0;
         style.opacity = (f32)1.0;
         style.transform_scale = (f32)1.0;
+        style.origin_x = (f32)0.5;
+        style.origin_y = (f32)0.5;
         style.font_size = (f32)16.0;
         style.font_weight = 400;
         style.font_style = Keyword.NORMAL;
@@ -735,6 +742,7 @@ struct Props {
             mut f32 scale = (f32)1.0;
             mut f32 across = (f32)0.0;
             mut f32 down = (f32)0.0;
+            mut f32 turn = (f32)0.0;
             while (!reader.done()) {
                 CssToken word = reader.next();
                 if (word.kind != CssKind.FUNCTION) {
@@ -764,6 +772,11 @@ struct Props {
                             down = y.value;
                         }
                     }
+                } else if (CssNames.equal(word.text, "rotate")) {
+                    Numeric angle = CssNumbers.read(&inner, context);
+                    if (angle.unit == Unit.DEGREES) {
+                        turn = (f32)angle.value;
+                    }
                 } else if (CssNames.equal(word.text, "translatey")) {
                     Length y = CssNumbers.length(&inner, context);
                     if (y.unit == Unit.PX) {
@@ -774,6 +787,69 @@ struct Props {
             style.transform_scale = scale;
             style.translate_x = across;
             style.translate_y = down;
+            style.transform_rotate = turn;
+            return true;
+        }
+        if (CssNames.equal(name, "transform-origin")) {
+            // one or two of: left | center | right | top | bottom | <percentage> | <length>
+            mut f32 first_pct = (f32)0.5;
+            mut f32 first_px = (f32)0.0;
+            mut f32 second_pct = (f32)0.5;
+            mut f32 second_px = (f32)0.0;
+            mut bool first_vertical = false;
+            mut u32 count = 0;
+            while (!reader.done() && count < 2) {
+                CssToken word = reader.peek();
+                mut f32 pct = (f32)0.5;
+                mut f32 px = (f32)0.0;
+                mut bool vertical = false;
+                if (word.kind == CssKind.IDENT) {
+                    reader.next();
+                    if (CssNames.equal(word.text, "left")) { pct = (f32)0.0; }
+                    else if (CssNames.equal(word.text, "right")) { pct = (f32)1.0; }
+                    else if (CssNames.equal(word.text, "top")) { pct = (f32)0.0; vertical = true; }
+                    else if (CssNames.equal(word.text, "bottom")) { pct = (f32)1.0; vertical = true; }
+                    else if (!CssNames.equal(word.text, "center")) { return false; }
+                } else {
+                    Length part = CssNumbers.length(reader, context);
+                    if (part.unit == Unit.PERCENT) {
+                        pct = part.value / (f32)100.0;
+                    } else if (part.unit == Unit.PX) {
+                        pct = (f32)0.0;
+                        px = part.value;
+                    } else {
+                        return false;
+                    }
+                }
+                if (count == 0) {
+                    first_pct = pct;
+                    first_px = px;
+                    first_vertical = vertical;
+                } else {
+                    second_pct = pct;
+                    second_px = px;
+                }
+                count = count + 1;
+            }
+            if (count == 0) {
+                return false;
+            }
+            if (first_vertical && count == 2) {
+                style.origin_x = second_pct;
+                style.origin_x_px = second_px;
+                style.origin_y = first_pct;
+                style.origin_y_px = first_px;
+            } else if (first_vertical) {
+                style.origin_x = (f32)0.5;
+                style.origin_x_px = (f32)0.0;
+                style.origin_y = first_pct;
+                style.origin_y_px = first_px;
+            } else {
+                style.origin_x = first_pct;
+                style.origin_x_px = first_px;
+                style.origin_y = second_pct;
+                style.origin_y_px = second_px;
+            }
             return true;
         }
         if (CssNames.equal(name, "opacity")) {
