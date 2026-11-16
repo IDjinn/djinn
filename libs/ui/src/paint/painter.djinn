@@ -9,27 +9,112 @@ unsafe static mut u32 painter_line_capacity = 0;
 // Turns the laid out tree into a display list: backgrounds, borders, text and outlines in tree order, with clipping
 // for overflow. It reads the boxes from Layout and the computed styles from Styles, so the caller runs
 // Layout.compute first (Painter.frame does).
+unsafe static mut ptr raised_items = null;
+unsafe static mut u32 raised_count = 0;
+unsafe static mut u32 raised_capacity = 0;
+unsafe static mut u32 raised_now = 0;
+
+// A positioned element with a positive z-index waiting to be drawn above the normal flow.
+struct Raised {
+    mut u32 id;
+    mut f32 dx;
+    mut f32 dy;
+    mut i32 z;
+    mut bool done;
+}
+
 struct Painter {
+    static unsafe bool is_raised(u32 id) {
+        if (Dom.kind(id) != DomKind.ELEMENT || id == raised_now) {
+            return false;
+        }
+        Style* style = Styles.of(id);
+        return style.z_index > 0 && style.position != Keyword.STATIC && style.position != Keyword.FIXED
+            && style.display != Display.NONE;
+    }
+
+    static unsafe void defer(DisplayList* list, u32 id) {
+        if (raised_count == raised_capacity) {
+            u32 grown = raised_capacity * 2 + 8;
+            ptr items = (ptr)__djinn_alloc_zeroed((size_long)(grown * (u32)sizeof(Raised)));
+            if (raised_count > 0) {
+                memcpy((void*)items, (void*)raised_items, (size_long)(raised_count * (u32)sizeof(Raised)));
+            }
+            if (raised_items != null) {
+                __djinn_free((void*)raised_items);
+            }
+            raised_items = items;
+            raised_capacity = grown;
+        }
+        Raised* slot = &((Raised*)raised_items)[raised_count];
+        slot.id = id;
+        slot.dx = list.shift_x;
+        slot.dy = list.shift_y;
+        slot.z = Styles.of(id).z_index;
+        slot.done = false;
+        raised_count = raised_count + 1;
+    }
+
+    // Draws the deferred elements, lowest z-index first (document order among equals); drawing one may defer more.
+    static unsafe void flush_raised(DisplayList* list) {
+        mut bool more = true;
+        while (more) {
+            more = false;
+            mut u32 pick = raised_count;
+            mut u32 i = 0;
+            while (i < raised_count) {
+                Raised* slot = &((Raised*)raised_items)[i];
+                if (!slot.done) {
+                    if (pick == raised_count || slot.z < ((Raised*)raised_items)[pick].z) {
+                        pick = i;
+                    }
+                }
+                i = i + 1;
+            }
+            if (pick < raised_count) {
+                more = true;
+                ((Raised*)raised_items)[pick].done = true;
+                Raised item = ((Raised*)raised_items)[pick];
+                f32 keep_x = list.shift_x;
+                f32 keep_y = list.shift_y;
+                list.shift(item.dx - keep_x, item.dy - keep_y);
+                raised_now = item.id;
+                Painter.body(list, item.id, (f32)1.0);
+                raised_now = 0;
+                list.shift(keep_x - item.dx, keep_y - item.dy);
+            }
+        }
+        raised_count = 0;
+    }
+
     // One whole frame: layout for the viewport, then paint. Returns the document height (what a page scrolls).
     public static unsafe f32 frame(DisplayList* list, f32 width, f32 height) {
         u32 document = Dom.document();
         Layout.compute(document, width, height);
         list.clear();
+        f32 total = Layout.box(document).height;
+        Scroll.page_limit(total - height, height);
         Painter.paint(list, document, width, height);
-        return Layout.box(document).height;
+        return total;
     }
 
     // Only what can reach the viewport is turned into triangles: a node whose box (plus the reach of its outline)
     // lies outside the current clip draws nothing, its children are still visited since they may overflow it.
     public static unsafe void paint(DisplayList* list, u32 root, f32 width, f32 height) {
         list.clip_to((f32)0.0, (f32)0.0, width, height);
+        list.shift((f32)0.0, (f32)0.0 - Scroll.page_top());
+        raised_count = 0;
         Painter.node(list, root, (f32)1.0);
+        Painter.flush_raised(list);
+        list.shift((f32)0.0, Scroll.page_top());
         list.restore_clip();
     }
 
     static unsafe bool outside(DisplayList* list, f32 left, f32 top, f32 width, f32 height, f32 reach) {
-        return left - reach >= list.clip_right || left + width + reach <= list.clip_left
-            || top - reach >= list.clip_bottom || top + height + reach <= list.clip_top;
+        f32 x = left + list.shift_x;
+        f32 y = top + list.shift_y;
+        return x - reach >= list.clip_right || x + width + reach <= list.clip_left
+            || y - reach >= list.clip_bottom || y + height + reach <= list.clip_top;
     }
 
     static unsafe bool is_hidden_tag(str tag) {
@@ -46,6 +131,22 @@ struct Painter {
     }
 
     static unsafe void node(DisplayList* list, u32 id, f32 opacity) {
+        if (Dom.kind(id) == DomKind.ELEMENT && Styles.of(id).position == Keyword.FIXED && Styles.of(id).display != Display.NONE) {
+            // fixed boxes stay put in the window while the page scrolls
+            f32 page = Scroll.page_top();
+            list.shift((f32)0.0, page);
+            Painter.body(list, id, opacity);
+            list.shift((f32)0.0, (f32)0.0 - page);
+            return;
+        }
+        if (Painter.is_raised(id)) {
+            Painter.defer(list, id);
+            return;
+        }
+        Painter.body(list, id, opacity);
+    }
+
+    static unsafe void body(DisplayList* list, u32 id, f32 opacity) {
         u8 kind = Dom.kind(id);
         if (kind == DomKind.TEXT) {
             Painter.text(list, id, opacity);
@@ -67,7 +168,7 @@ struct Painter {
             return;
         }
         LayoutBox* box = Layout.box(id);
-        f32 faded = opacity * style.opacity;
+        f32 faded = opacity * style.opacity * Animation.opacity(id);
         f32 reach = style.outline_offset + style.outline_width + (f32)2.0;
         bool visible = !Painter.outside(list, box.left, box.top, box.width, box.height, reach);
         if (visible && style.visibility != Keyword.HIDDEN && faded > (f32)0.0) {
@@ -80,12 +181,59 @@ struct Painter {
                 box.top + box.height - box.border.bottom);
             clipped = true;
         }
+        mut f32 moved_x = (f32)0.0;
+        mut f32 moved_y = (f32)0.0;
+        if (clipped && Scroll.container(id)) {
+            moved_x = Scroll.left(id);
+            moved_y = Scroll.top(id);
+        }
+        list.shift((f32)0.0 - moved_x, (f32)0.0 - moved_y);
         Painter.children(list, id, faded);
+        if (visible && style.visibility != Keyword.HIDDEN && faded > (f32)0.0) {
+            Painter.field(list, id, box, style, faded);
+        }
+        list.shift(moved_x, moved_y);
+        if (clipped && visible && Scroll.container(id)) {
+            Painter.scrollbars(list, id, box, style);
+        }
         if (clipped) {
             list.restore_clip();
         }
         if (visible && style.visibility != Keyword.HIDDEN && faded > (f32)0.0) {
             Painter.outline(list, box, style, faded);
+        }
+    }
+
+    // The overlay scroll thumbs of a container: a rounded bar on the right (and bottom) edge, only when there is
+    // something to scroll.
+    static unsafe void scrollbars(DisplayList* list, u32 id, LayoutBox* box, Style* style) {
+        f32 thickness = (f32)6.0;
+        f32 inset = (f32)2.0;
+        f32 view_height = box.height - box.border.vertical();
+        f32 view_width = box.width - box.border.horizontal();
+        f32 limit_y = Scroll.max_y(id);
+        if (limit_y > (f32)0.0 && view_height > (f32)16.0) {
+            f32 full = view_height + limit_y;
+            f32 track = view_height - inset * (f32)2.0;
+            mut f32 length = track * view_height / full;
+            if (length < (f32)24.0) {
+                length = (f32)24.0;
+            }
+            f32 offset = (track - length) * Scroll.top(id) / limit_y;
+            list.rounded(box.left + box.width - box.border.right - thickness - inset, box.top + box.border.top + inset + offset,
+                thickness, length, thickness / (f32)2.0, DisplayList.gpu_color(0x7f7f7fff, (f32)0.55));
+        }
+        f32 limit_x = Scroll.max_x(id);
+        if (limit_x > (f32)0.0 && view_width > (f32)16.0) {
+            f32 full = view_width + limit_x;
+            f32 track = view_width - inset * (f32)2.0;
+            mut f32 length = track * view_width / full;
+            if (length < (f32)24.0) {
+                length = (f32)24.0;
+            }
+            f32 offset = (track - length) * Scroll.left(id) / limit_x;
+            list.rounded(box.left + box.border.left + inset + offset, box.top + box.height - box.border.bottom - thickness - inset,
+                length, thickness, thickness / (f32)2.0, DisplayList.gpu_color(0x7f7f7fff, (f32)0.55));
         }
     }
 
@@ -143,6 +291,106 @@ struct Painter {
         return (TextLine*)painter_lines;
     }
 
+    // One glyph at a pen position: the whole pixels place the bitmap, the quarter pixels pick the sub-pixel variant.
+    static unsafe void glyph(DisplayList* list, u32 code, f32 pen, f32 baseline, f32 size, bool bold, u32 color) {
+        f32 atlas = (f32)Fonts.ATLAS;
+        mut i32 quarters = 0;
+        if (pen > (f32)0.0) {
+            quarters = (i32)(pen * (f32)4.0 + (f32)0.5);
+        }
+        u32 phase = (u32)(quarters & 3);
+        Glyph* found = Fonts.glyph(code, size, bold, phase);
+        if (found != (Glyph*)0) {
+            f32 x = (f32)(quarters >> 2) + (f32)found.bearing_x;
+            f32 y = Math.round(baseline - (f32)found.bearing_y);
+            list.quad(x, y, x + (f32)found.width, y + (f32)found.height, (f32)found.atlas_x / atlas,
+                (f32)found.atlas_y / atlas, (f32)(found.atlas_x + found.width) / atlas,
+                (f32)(found.atlas_y + found.height) / atlas, color);
+        }
+    }
+
+    // What a text field shows: its value (bullets for a password), or the placeholder in a fainter color when it is
+    // empty, kept inside the content box and scrolled so the end (where the caret is) stays visible.
+    static unsafe void field(DisplayList* list, u32 id, LayoutBox* box, Style* style, f32 opacity) {
+        if (!Fonts.active() || !Input.editable(id)) {
+            return;
+        }
+        bool focused = (Dom.state(id) & NodeState.FOCUS) != 0;
+        str value = Dom.attr(id, "value");
+        mut str shown = value;
+        mut bool placeholder = false;
+        if (value.length == 0) {
+            shown = Dom.attr(id, "placeholder");
+            placeholder = true;
+        }
+        if (shown.length == 0 && !focused) {
+            return;
+        }
+        bool secret = !placeholder && Texts.same(Dom.attr(id, "type"), "password");
+        f32 left = box.left + box.border.left + box.padding.left;
+        f32 right = box.left + box.width - box.border.right - box.padding.right;
+        f32 inner_top = box.top + box.border.top;
+        f32 inner_bottom = box.top + box.height - box.border.bottom;
+        f32 size = style.font_size;
+        bool bold = style.font_weight >= 600;
+        mut f32 ascent = (f32)0.0;
+        mut f32 descent = (f32)0.0;
+        Fonts.line_metrics(size, bold, &ascent, &descent);
+        f32 baseline = (inner_top + inner_bottom) / (f32)2.0 - (ascent + descent) / (f32)2.0 + ascent;
+        u32 length = (u32)shown.length;
+        mut f32 total = (f32)0.0;
+        mut u32 i = 0;
+        while (i < length) {
+            mut u32 step = 1;
+            mut u32 code = Codepoints.decode(shown.data, length, i, &step);
+            i = i + step;
+            if (secret) {
+                code = 8226;
+            }
+            total = total + TextLines.advance(code, style, true, bold);
+        }
+        mut f32 shift = (f32)0.0;
+        if (!placeholder && focused) {
+            shift = Edit.shift(id);
+        } else if (total > right - left - (f32)2.0 && !placeholder) {
+            shift = total - (right - left - (f32)2.0);
+        }
+        mut f32 alpha = opacity;
+        if (placeholder) {
+            alpha = opacity * (f32)0.55;
+        }
+        u32 color = DisplayList.gpu_color(style.color, alpha);
+        list.clip_to(left, inner_top, right, inner_bottom);
+        if (focused && !placeholder && Edit.has_selection(id)) {
+            f32 from = left - shift + Edit.width_to(id, Edit.low(id));
+            f32 to = left - shift + Edit.width_to(id, Edit.high(id));
+            list.fill(Math.round(from), baseline - ascent, Math.round(to) - Math.round(from), ascent + descent,
+                DisplayList.gpu_color(0x4f8cffff, opacity * (f32)0.45));
+        }
+        mut f32 pen = Math.round(left - shift);
+        i = 0;
+        while (i < length) {
+            mut u32 step = 1;
+            mut u32 code = Codepoints.decode(shown.data, length, i, &step);
+            i = i + step;
+            if (secret) {
+                code = 8226;
+            }
+            if (!TextLines.is_blank(code)) {
+                Painter.glyph(list, code, pen, baseline, size, bold, color);
+            }
+            pen = pen + TextLines.advance(code, style, true, bold);
+        }
+        if (focused) {
+            mut f32 caret = left - shift;
+            if (!placeholder) {
+                caret = left - shift + Edit.width_to(id, Edit.caret(id));
+            }
+            list.fill(Math.round(caret), baseline - ascent, (f32)1.0, ascent + descent, DisplayList.gpu_color(style.color, opacity));
+        }
+        list.restore_clip();
+    }
+
     static unsafe void text(DisplayList* list, u32 id, f32 opacity) {
         if (!Fonts.active() || opacity <= (f32)0.0) {
             return;
@@ -183,6 +431,9 @@ struct Painter {
             } else if (style.text_align == Keyword.END || style.text_align == Keyword.RIGHT) {
                 pen = box.left + box.width - line.width;
             }
+            // the line starts on a whole pixel, so moving or resizing the box never changes how its glyphs are
+            // positioned relative to each other (no shimmer); only the advances inside the line are fractional
+            pen = Math.round(pen);
             f32 line_left = pen;
             mut bool gap = false;
             mut u32 i = line.start;
@@ -198,14 +449,7 @@ struct Painter {
                     pen = pen + space;
                     gap = false;
                 }
-                Glyph* glyph = Fonts.glyph(code, size, bold);
-                if (glyph != (Glyph*)0) {
-                    f32 x = Math.round(pen + (f32)glyph.bearing_x);
-                    f32 y = Math.round(baseline - (f32)glyph.bearing_y);
-                    list.quad(x, y, x + (f32)glyph.width, y + (f32)glyph.height, (f32)glyph.atlas_x / atlas,
-                        (f32)glyph.atlas_y / atlas, (f32)(glyph.atlas_x + glyph.width) / atlas,
-                        (f32)(glyph.atlas_y + glyph.height) / atlas, color);
-                }
+                Painter.glyph(list, code, pen, baseline, size, bold, color);
                 pen = pen + TextLines.advance(code, style, true, bold);
             }
             f32 thickness = Px.max((f32)1.0, size / (f32)14.0);

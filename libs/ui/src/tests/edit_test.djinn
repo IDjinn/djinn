@@ -1,0 +1,111 @@
+namespace ui;
+
+import testing;
+import std::types;
+
+struct Line {
+    i32 unused;
+
+    public unsafe Node render() {
+        return Node.element("main").child(Node.element("input").attr("id", "f").attr("value", "hello"));
+    }
+}
+
+struct EditTests {
+    static Line line() {
+        Line value = { .unused = 0 };
+        return value;
+    }
+
+    static unsafe bool holds(u32 id, str expected) {
+        return Texts.same(Dom.attr(id, "value"), expected);
+    }
+
+    [Test]
+    unsafe void arrows_move_the_caret_and_typing_inserts_there() {
+        Focus.reset();
+        Mounted app = App.mount<Line>(EditTests.line());
+        u32 field = Dom.find(app.node.id, "f");
+        Focus.set(field, true);
+        Expect.equal(5, (i64)Edit.caret(field), "focus starts at the end");
+        Input.press(Key.LEFT, 0);
+        Input.press(Key.LEFT, 0);
+        Input.typed(88);
+        Expect.is_true(EditTests.holds(field, "helXlo"));
+        Input.press(Key.HOME, 0);
+        Input.typed(89);
+        Expect.is_true(EditTests.holds(field, "YhelXlo"));
+        Input.press(Key.END, 0);
+        Input.press(Key.BACKSPACE, 0);
+        Expect.is_true(EditTests.holds(field, "YhelXl"));
+        Input.press(Key.HOME, 0);
+        Input.press(Key.DELETE, 0);
+        Expect.is_true(EditTests.holds(field, "helXl"));
+        app.unmount();
+        Focus.reset();
+    }
+
+    [Test]
+    unsafe void shift_selects_and_typing_replaces_the_selection() {
+        Focus.reset();
+        Mounted app = App.mount<Line>(EditTests.line());
+        u32 field = Dom.find(app.node.id, "f");
+        Focus.set(field, true);
+        Input.press(Key.LEFT, Mod.SHIFT);
+        Input.press(Key.LEFT, Mod.SHIFT);
+        Expect.is_true(Edit.has_selection(field));
+        Expect.equal(3, (i64)Edit.low(field));
+        Expect.equal(5, (i64)Edit.high(field));
+        Input.typed(33);
+        Expect.is_true(EditTests.holds(field, "hel!"));
+        Input.press(65, Mod.CTRL);
+        Expect.equal(0, (i64)Edit.low(field));
+        Expect.equal(4, (i64)Edit.high(field));
+        Input.press(Key.BACKSPACE, 0);
+        Expect.is_true(EditTests.holds(field, ""));
+        app.unmount();
+        Focus.reset();
+    }
+
+    [Test]
+    unsafe void cut_copy_and_paste_go_through_the_clipboard() {
+        Focus.reset();
+        Mounted app = App.mount<Line>(EditTests.line());
+        u32 field = Dom.find(app.node.id, "f");
+        Focus.set(field, true);
+        Input.press(Key.HOME, 0);
+        Input.press(Key.RIGHT, Mod.SHIFT);
+        Input.press(Key.RIGHT, Mod.SHIFT);
+        Input.press(67, Mod.CTRL);
+        Input.press(Key.END, 0);
+        Input.press(86, Mod.CTRL);
+        Expect.is_true(EditTests.holds(field, "hellohe"), "copy then paste at the end");
+        Input.press(Key.HOME, 0);
+        Input.press(Key.RIGHT, Mod.SHIFT);
+        Input.press(88, Mod.CTRL);
+        Expect.is_true(EditTests.holds(field, "ellohe"), "cut removes the selection");
+        Input.press(86, Mod.CTRL);
+        Expect.is_true(EditTests.holds(field, "hellohe"), "and the clipboard has it");
+        app.unmount();
+        Focus.reset();
+    }
+
+    [Test]
+    unsafe void the_caret_never_lands_inside_a_multi_byte_character() {
+        Focus.reset();
+        Mounted app = App.mount<Line>(EditTests.line());
+        u32 field = Dom.find(app.node.id, "f");
+        Focus.set(field, true);
+        Input.typed(233);
+        Input.typed(8364);
+        Expect.equal(10, (i64)Edit.caret(field));
+        Input.press(Key.LEFT, 0);
+        Expect.equal(7, (i64)Edit.caret(field), "over the three-byte character");
+        Input.press(Key.LEFT, 0);
+        Expect.equal(5, (i64)Edit.caret(field), "over the two-byte character");
+        Input.press(Key.DELETE, 0);
+        Expect.equal(8, (i64)Dom.attr(field, "value").length);
+        app.unmount();
+        Focus.reset();
+    }
+}

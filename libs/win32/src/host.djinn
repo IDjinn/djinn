@@ -5,18 +5,61 @@ import vulkan;
 
 namespace win32;
 
+// Everything a frame needs, shared by the message loop and the window procedure: while the user drags a window edge
+// Windows runs its own loop and only calls the window procedure, so the frame has to be drawn from there too.
+struct HostState {
+    void* window;
+    void* rect;
+    mut VulkanRenderer* gpu;
+    mut DisplayList list;
+    mut Canvas canvas;
+    mut u32 stamp;
+    mut u32 epoch;
+    mut u32 gpu_width;
+    mut u32 gpu_height;
+    mut bool dirty;
+}
+
+unsafe static mut u64 host_state_address = 0;
+
+// What the system calls for every message of the window: 2 is WM_DESTROY, 5 is WM_SIZE, 15 is WM_PAINT and 20 is
+// WM_ERASEBKGND. A size or paint message draws the frame right away, so a resize follows the mouse instead of
+// stretching the old frame until the drag ends.
+[Abi(C)]
+unsafe i64 djinn_window_proc(void* window, u32 message, u64 param, i64 extra) {
+    if ((message == 5 || message == 15) && host_state_address != 0) {
+        HostState* current = (HostState*)host_state_address;
+        // a software frame must be repainted when the window is exposed; a GPU frame stays on screen by itself, so a
+        // paint message only draws if something changed (drawing it twice per size step doubled the resize cost)
+        if (message == 5 || current.gpu == (VulkanRenderer*)0) {
+            current.dirty = true;
+        }
+        WinHost.render(current);
+    }
+    if (message == 2) {
+        PostQuitMessage(0);
+        return 0;
+    }
+    if (message == 20) {
+        return 1;
+    }
+    return DefWindowProcA(window, message, param, extra);
+}
+
 // The native Windows host: a window, the message pump, the GDI fonts and a software present of the frame. Mouse
 // and key messages become DOM events (click, mousedown, mouseup, mousemove, keydown), found by hit-testing the
 // layout boxes, so the same handlers run here as in any other host.
 //
-// The window class uses the system window procedure (DefWindowProc, taken with GetProcAddress): Djinn has no way yet
-// to hand a C-callable function to the system, so messages are read from the queue (PeekMessage) instead of being
-// pushed into a callback.
+// The window class has a window procedure of its own, a [Abi(C)] function the system calls: it ends the message loop
+// when the window is destroyed and keeps the system from erasing the background (the frame covers the whole client
+// area). Everything else goes to DefWindowProc. Input is still read from the queue (PeekMessage) in the loop below.
 struct WinHost {
     const u32 WM_QUIT = 18;
     const u32 WM_PAINT = 15;
     const u32 WM_KEYDOWN = 256;
+    const u32 WM_CHAR = 258;
     const u32 WM_MOUSEMOVE = 512;
+    const u32 WM_MOUSEWHEEL = 522;
     const u32 WM_LBUTTONDOWN = 513;
     const u32 WM_LBUTTONUP = 514;
     const u32 WS_OVERLAPPEDWINDOW = 13565952;
@@ -24,11 +67,10 @@ struct WinHost {
 
     static unsafe void* open(str title, u32 width, u32 height) {
         void* module = GetModuleHandleA((i8*)0);
-        void* user32 = GetModuleHandleA("user32.dll");
         void* class_info = Raw.make(80);
         Raw.put_u32(class_info, 0, 80);
         Raw.put_u32(class_info, 4, 3);
-        Raw.put_ptr(class_info, 8, GetProcAddress(user32, "DefWindowProcA"));
+        Raw.put_ptr(class_info, 8, (void*)&djinn_window_proc);
         Raw.put_ptr(class_info, 24, module);
         Raw.put_ptr(class_info, 40, LoadCursorA((void*)0, (void*)32512));
         Raw.put_ptr(class_info, 64, (void*)"DjinnUiWindow");
@@ -39,41 +81,16 @@ struct WinHost {
         return window;
     }
 
-    // The deepest box under a point; later siblings paint on top, so they win.
-    static unsafe u32 hit(u32 id, f32 x, f32 y) {
-        if (Dom.kind(id) != DomKind.ELEMENT) {
-            return 0;
-        }
-        Style* style = Styles.of(id);
-        if (style.display == Display.NONE) {
-            return 0;
-        }
-        LayoutBox* box = Layout.box(id);
-        mut u32 found = 0;
-        if (x >= box.left && x < box.left + box.width && y >= box.top && y < box.top + box.height) {
-            found = id;
-        }
-        mut u32 child = Dom.first_child(id);
-        while (child != 0) {
-            u32 deeper = WinHost.hit(child, x, y);
-            if (deeper != 0) {
-                found = deeper;
-            }
-            child = Dom.next_sibling(child);
-        }
-        return found;
-    }
-
     // Copies an RGBA canvas to the window as BGRA.
     static unsafe void present(void* window, Canvas* canvas) {
         void* dc = GetDC(window);
         u32 count = canvas.width * canvas.height;
         u8* bgra = (u8*)__djinn_alloc((size_long)(count * 4));
+        u32* source = (u32*)canvas.pixels;
+        u32* target = (u32*)bgra;
         for (mut u32 i = 0; i < count; i = i + 1) {
-            bgra[i * 4] = canvas.pixels[i * 4 + 2];
-            bgra[i * 4 + 1] = canvas.pixels[i * 4 + 1];
-            bgra[i * 4 + 2] = canvas.pixels[i * 4];
-            bgra[i * 4 + 3] = 255;
+            u32 p = source[i];
+            target[i] = 0xFF000000 | ((p & 0xFF) << 16) | (p & 0xFF00) | ((p >> 16) & 0xFF);
         }
         void* info = Raw.make(44);
         Raw.put_u32(info, 0, 40);
@@ -97,9 +114,89 @@ struct WinHost {
         return (f32)word;
     }
 
+    // Shift, Control and Alt as the input layer's modifier bits (the high bit of GetKeyState is "down").
+    static unsafe u32 modifiers() {
+        mut u32 mods = 0;
+        if (GetKeyState(16) < 0) {
+            mods = mods | Mod.SHIFT;
+        }
+        if (GetKeyState(17) < 0) {
+            mods = mods | Mod.CTRL;
+        }
+        if (GetKeyState(18) < 0) {
+            mods = mods | Mod.ALT;
+        }
+        return mods;
+    }
+
+    // Runs every animation to its end (headless shots).
+    static unsafe void settle() {
+        u32 start = Animation.clock() + 1;
+        Animation.advance(start);
+        Animation.advance(start + 1000000);
+    }
+
     static unsafe void announce(u32 id, str event) {
         if (id != 0) {
             Dom.dispatch(id, event);
+        }
+    }
+
+    // Microseconds from the performance counter (it ticks at 10 MHz on current Windows).
+    static unsafe u64 ticks(HostState* s) {
+        QueryPerformanceCounter((void*)((u8*)s.rect + 16));
+        return Raw.get_u64(s.rect, 16) / 10;
+    }
+
+    // Draws a frame when something changed: the size, the DOM or an explicit request (dirty).
+    static unsafe void render(HostState* s) {
+        GetClientRect(s.window, s.rect);
+        u32 w = (u32)Raw.get_i32(s.rect, 8);
+        u32 h = (u32)Raw.get_i32(s.rect, 12);
+        if (w == 0 || h == 0) {
+            return;
+        }
+        if (s.gpu == (VulkanRenderer*)0 && (w != s.canvas.width || h != s.canvas.height)) {
+            s.canvas.release();
+            s.canvas = Canvas.create(w, h);
+            s.dirty = true;
+        }
+        if (s.gpu != (VulkanRenderer*)0 && (w != s.gpu_width || h != s.gpu_height)) {
+            s.gpu_width = w;
+            s.gpu_height = h;
+            s.dirty = true;
+        }
+        if (s.dirty || Dom.stamp() + Animation.version() + Scroll.version() != s.stamp || Dom.epoch() != s.epoch) {
+            mut u64 t0 = WinHost.ticks(s);
+            Painter.frame(&s.list, (f32)w, (f32)h);
+            u64 t1 = WinHost.ticks(s);
+            if (s.gpu != (VulkanRenderer*)0) {
+                // a size change makes the first attempt rebuild the swapchain; drawing again at once keeps the window
+                // from showing a stale or stretched frame while the edge is dragged
+                s.dirty = !VulkanRenderer.draw(s.gpu, &s.list, w, h);
+                mut u32 attempts = 1;
+                if (s.dirty) {
+                    s.dirty = !VulkanRenderer.draw(s.gpu, &s.list, w, h);
+                    attempts = 2;
+                }
+                if (getenv("DJINN_UI_TRACE") != (i8*)0) {
+                    printf("gpu client %ux%u swapchain %ux%u attempts %u shown %d vertices %u
+", w, h, s.gpu.width, s.gpu.height, attempts, (i32)(!s.dirty), s.list.count);
+                }
+            } else {
+                s.canvas.clear(0xFFFFFFFF);
+                SoftRaster.draw(&s.canvas, &s.list);
+                u64 t2 = WinHost.ticks(s);
+                WinHost.present(s.window, &s.canvas);
+                u64 t3 = WinHost.ticks(s);
+                if (getenv("DJINN_UI_TRACE") != (i8*)0) {
+                    printf("frame %ux%u layout+paint %llu raster %llu present %llu (us)
+", w, h, t1 - t0, t2 - t1, t3 - t2);
+                }
+                s.dirty = false;
+            }
+            s.stamp = Dom.stamp() + Animation.version() + Scroll.version();
+            s.epoch = Dom.epoch();
         }
     }
 
@@ -107,30 +204,37 @@ struct WinHost {
     public static unsafe i32 run<T>(T app, str title, u32 width, u32 height) {
         SetProcessDPIAware();
         GdiFonts.install();
+        WinClipboard.install();
         Mounted mounted = App.mount<T>(app);
         void* window = WinHost.open(title, width, height);
         if (window == (void*)0) {
             return 1;
         }
-        // The GPU path is opt-in (DJINN_UI_GPU=1) until it has had more miles; any failure keeps the software path.
-        mut VulkanRenderer* gpu = (VulkanRenderer*)0;
-        if (getenv("DJINN_UI_GPU") != (i8*)0) {
-            gpu = VulkanRenderer.create(GetModuleHandleA((i8*)0), window, width, height);
-            if (gpu == (VulkanRenderer*)0) {
-                printf("win32: Vulkan is not available, drawing with the software rasterizer\n");
+        HostState* state = (HostState*)__djinn_alloc_zeroed((size_long)sizeof(HostState));
+        state.window = window;
+        state.rect = Raw.make(32);
+        state.list = DisplayList.create();
+        state.canvas = Canvas.create(1, 1);
+        state.dirty = true;
+        // Vulkan is the default; the software rasterizer is used only when no Vulkan device is available (or when
+        // DJINN_UI_CPU is set, to compare or debug).
+        if (getenv("DJINN_UI_CPU") == (i8*)0) {
+            state.gpu = VulkanRenderer.create(GetModuleHandleA((i8*)0), window, width, height);
+            if (state.gpu == (VulkanRenderer*)0) {
+                printf("win32: Vulkan is not available, drawing with the software rasterizer
+");
             } else {
-                printf("win32: drawing with Vulkan\n");
+                printf("win32: drawing with Vulkan
+");
             }
         }
+        host_state_address = (u64)state;
         void* message = Raw.make(64);
-        void* rect = Raw.make(16);
-        mut DisplayList list = DisplayList.create();
-        mut Canvas canvas = Canvas.create(1, 1);
-        mut u32 stamp = 0;
-        mut u32 gpu_width = 0;
-        mut u32 gpu_height = 0;
         mut u32 pressed = 0;
-        mut bool dirty = true;
+        mut u32 editing = 0;
+        mut u32 high = 0;
+        mut f32 pointer_x = (f32)0.0;
+        mut f32 pointer_y = (f32)0.0;
         mut bool running = true;
         while (running) {
             mut bool busy = false;
@@ -138,26 +242,69 @@ struct WinHost {
                 busy = true;
                 u32 kind = Raw.get_u32(message, 8);
                 u64 param = Raw.get_u64(message, 24);
+                u64 key = Raw.get_u64(message, 16);
                 f32 x = WinHost.low_word(param);
                 f32 y = WinHost.low_word(param >> 16);
                 if (kind == WinHost.WM_QUIT) {
                     running = false;
                 } else if (kind == WinHost.WM_LBUTTONDOWN) {
-                    pressed = WinHost.hit(Dom.document(), x, y);
+                    pressed = Hit.at(x, y);
+                    u32 control = Focus.owner(pressed);
+                    editing = 0;
+                    if (control != 0) {
+                        Focus.set(control, false);
+                        if (Input.editable(control)) {
+                            editing = control;
+                            Edit.click(control, x, (WinHost.modifiers() & Mod.SHIFT) != 0);
+                        }
+                    } else {
+                        Focus.clear();
+                    }
+                    Pointer.press(pressed);
                     WinHost.announce(pressed, "mousedown");
                 } else if (kind == WinHost.WM_LBUTTONUP) {
-                    u32 target = WinHost.hit(Dom.document(), x, y);
+                    u32 target = Hit.at(x, y);
+                    Pointer.release();
                     WinHost.announce(target, "mouseup");
                     if (target != 0 && target == pressed) {
                         WinHost.announce(target, "click");
                     }
                     pressed = 0;
+                    editing = 0;
                 } else if (kind == WinHost.WM_MOUSEMOVE) {
-                    WinHost.announce(WinHost.hit(Dom.document(), x, y), "mousemove");
+                    pointer_x = x;
+                    pointer_y = y;
+                    if (editing != 0) {
+                        Edit.drag(editing, x);
+                    }
+                    u32 over = Hit.at(x, y);
+                    Pointer.move(over);
+                    WinHost.announce(over, "mousemove");
+                } else if (kind == WinHost.WM_MOUSEWHEEL) {
+                    // the wheel delta is the signed high word of wParam (120 per notch); the position is on screen
+                    mut i32 notches = (i32)((key >> 16) & 0xFFFF);
+                    if (notches >= 32768) {
+                        notches = notches - 65536;
+                    }
+                    Scroll.wheel(pointer_x, pointer_y, (f32)0.0 - (f32)notches * (f32)0.4);
                 } else if (kind == WinHost.WM_KEYDOWN) {
-                    WinHost.announce(Dom.document(), "keydown");
+                    Input.press((i32)(key & 0xFFFF), WinHost.modifiers());
+                } else if (kind == WinHost.WM_CHAR) {
+                    // UTF-16 units: a high surrogate waits for its low half
+                    u32 unit = (u32)(key & 0xFFFF);
+                    if (unit >= 55296 && unit < 56320) {
+                        high = unit;
+                    } else if (unit >= 56320 && unit < 57344) {
+                        if (high != 0) {
+                            Input.typed(65536 + ((high - 55296) << 10) + (unit - 56320));
+                        }
+                        high = 0;
+                    } else {
+                        high = 0;
+                        Input.typed(unit);
+                    }
                 } else if (kind == WinHost.WM_PAINT) {
-                    dirty = true;
+                    state.dirty = true;
                 }
                 TranslateMessage(message);
                 DispatchMessageA(message);
@@ -165,45 +312,27 @@ struct WinHost {
             if (IsWindow(window) == 0) {
                 running = false;
             }
+            if (Animation.advance((u32)(WinHost.ticks(state) / 1000))) {
+                busy = true;
+            }
             if (running) {
-                GetClientRect(window, rect);
-                u32 w = (u32)Raw.get_i32(rect, 8);
-                u32 h = (u32)Raw.get_i32(rect, 12);
-                if (w > 0 && h > 0) {
-                    if (gpu == (VulkanRenderer*)0 && (w != canvas.width || h != canvas.height)) {
-                        canvas.release();
-                        canvas = Canvas.create(w, h);
-                        dirty = true;
-                    }
-                    if (gpu != (VulkanRenderer*)0 && (w != gpu_width || h != gpu_height)) {
-                        gpu_width = w;
-                        gpu_height = h;
-                        dirty = true;
-                    }
-                    if (dirty || Dom.stamp() != stamp) {
-                        Painter.frame(&list, (f32)w, (f32)h);
-                        if (gpu != (VulkanRenderer*)0) {
-                            dirty = !VulkanRenderer.draw(gpu, &list, w, h);
-                        } else {
-                            canvas.clear(0xFFFFFFFF);
-                            SoftRaster.draw(&canvas, &list);
-                            WinHost.present(window, &canvas);
-                            dirty = false;
-                        }
-                        stamp = Dom.stamp();
-                        busy = true;
-                    }
+                u32 before = state.stamp + state.epoch + Animation.version() + Scroll.version();
+                bool was_dirty = state.dirty;
+                WinHost.render(state);
+                if (was_dirty || before != state.stamp + state.epoch + Animation.version() + Scroll.version()) {
+                    busy = true;
                 }
             }
             if (!busy) {
                 Sleep(8);
             }
         }
-        if (gpu != (VulkanRenderer*)0) {
-            VulkanRenderer.release(gpu);
+        host_state_address = 0;
+        if (state.gpu != (VulkanRenderer*)0) {
+            VulkanRenderer.release(state.gpu);
         }
-        list.release();
-        canvas.release();
+        state.list.release();
+        state.canvas.release();
         mounted.unmount();
         return 0;
     }
@@ -211,11 +340,18 @@ struct WinHost {
     // One frame to a PPM file, no window: what a test or a screenshot of the showcase uses.
     public static unsafe i32 shot<T>(T app, u32 width, u32 height, i8* path, f32 click_x, f32 click_y) {
         GdiFonts.install();
+        WinClipboard.install();
         Mounted mounted = App.mount<T>(app);
         mut DisplayList list = DisplayList.create();
         Painter.frame(&list, (f32)width, (f32)height);
+        // a still image shows every animation finished: the first advance starts them, the second ends them
+        WinHost.settle();
+        Painter.frame(&list, (f32)width, (f32)height);
         if (click_x >= (f32)0.0) {
-            WinHost.announce(WinHost.hit(Dom.document(), click_x, click_y), "click");
+            u32 target = Hit.at(click_x, click_y);
+            WinHost.announce(target, "click");
+            Painter.frame(&list, (f32)width, (f32)height);
+            WinHost.settle();
             Painter.frame(&list, (f32)width, (f32)height);
         }
         mut Canvas canvas = Canvas.create(width, height);

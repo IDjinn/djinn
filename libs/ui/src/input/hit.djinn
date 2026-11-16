@@ -1,0 +1,111 @@
+import std::types;
+
+namespace ui;
+
+// Finds the element under a point of the window, following the page scroll and the scroll of every container
+// (a scrolled-out part of a container is not hit).
+unsafe static mut u32 hit_best = 0;
+unsafe static mut i32 hit_best_z = 0;
+
+struct Hit {
+    // The topmost element under the point: a raised (positive z-index) element wins over the normal flow, and
+    // among equals the later one in document order.
+    public static unsafe u32 at(f32 x, f32 y) {
+        hit_best = 0;
+        hit_best_z = 0;
+        Hit.search(Dom.document(), x, y + Scroll.page_top(), 0);
+        return hit_best;
+    }
+
+    static unsafe void search(u32 id, f32 x, f32 line, i32 z) {
+        if (Dom.kind(id) != DomKind.ELEMENT) {
+            // a fragment or a region marker has no box: its children sit in the parent
+            mut u32 member = Dom.first_child(id);
+            while (member != 0) {
+                Hit.search(member, x, line, z);
+                member = Dom.next_sibling(member);
+            }
+            return;
+        }
+        Style* style = Styles.of(id);
+        if (style.display == Display.NONE) {
+            return;
+        }
+        mut i32 layer = z;
+        if (style.z_index > 0 && style.position != Keyword.STATIC) {
+            layer = style.z_index;
+        }
+        mut f32 y = line;
+        if (style.position == Keyword.FIXED) {
+            y = line - Scroll.page_top();
+        }
+        LayoutBox* box = Layout.box(id);
+        bool inside = x >= box.left && x < box.left + box.width && y >= box.top && y < box.top + box.height;
+        mut f32 cx = x;
+        mut f32 cy = y;
+        if (Scroll.container(id)) {
+            cx = x + Scroll.left(id);
+            cy = y + Scroll.top(id);
+        }
+        bool clips = style.overflow == Keyword.HIDDEN || style.overflow == Keyword.SCROLL || style.overflow == Keyword.AUTO;
+        if (clips && !inside) {
+            return;
+        }
+        if (inside && layer >= hit_best_z) {
+            hit_best = id;
+            hit_best_z = layer;
+        }
+        mut u32 child = Dom.first_child(id);
+        while (child != 0) {
+            Hit.search(child, cx, cy, layer);
+            child = Dom.next_sibling(child);
+        }
+    }
+}
+
+unsafe static mut u32 hovered_node = 0;
+unsafe static mut u32 pressed_node = 0;
+
+// The pointer state of the tree: :hover on the element under the pointer and every ancestor, :active while the
+// primary button is down on one. The host calls move / press / release as the pointer does.
+struct Pointer {
+    static unsafe void mark(u32 id, u8 flag, bool on) {
+        mut u32 node = id;
+        while (node != 0) {
+            if (Dom.kind(node) == DomKind.ELEMENT) {
+                Dom.set_state(node, flag, on);
+            }
+            node = Dom.parent(node);
+        }
+    }
+
+    public static unsafe void move(u32 id) {
+        if (id == hovered_node) {
+            return;
+        }
+        Pointer.mark(hovered_node, NodeState.HOVER, false);
+        hovered_node = id;
+        Pointer.mark(id, NodeState.HOVER, true);
+    }
+
+    public static unsafe void press(u32 id) {
+        Pointer.mark(pressed_node, NodeState.ACTIVE, false);
+        pressed_node = id;
+        Pointer.mark(id, NodeState.ACTIVE, true);
+    }
+
+    public static unsafe void release() {
+        Pointer.mark(pressed_node, NodeState.ACTIVE, false);
+        pressed_node = 0;
+    }
+
+    // The pointer left the window.
+    public static unsafe void leave() {
+        Pointer.move(0);
+        Pointer.release();
+    }
+
+    public static unsafe u32 hovered() {
+        return hovered_node;
+    }
+}

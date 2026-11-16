@@ -213,6 +213,83 @@ Not covered yet: text flowing across inline boxes (an inline box wraps inside it
 collapsing between a parent and its first or last child, floats, tables, named grid lines and areas, subgrid,
 `position: sticky` offsets, vertical and right-to-left writing, and container queries.
 
+## Focus and keyboard (`src/input`)
+
+Host independent: a host calls `Focus.set(Focus.owner(hit), false)` when the pointer presses and `Input.press(key, mods)`
+for each key (key codes are the Windows virtual-key values, `Key.*`; modifiers are `Mod.SHIFT | CTRL | ALT`).
+
+- Focusable: `button`, `select`, `textarea`, `input` (not hidden), `a[href]` and anything with `tabindex`; never a
+  `disabled` control or a box under `display: none`. `tabindex="-1"` takes focus by pointer or `Focus.set` but Tab
+  skips it. Tab order is tree order and wraps.
+- `Focus.set(node, by_keyboard)` sets `:focus` and `:focus-visible` (a pointer press on a button shows no ring; Tab
+  does; text fields always do) and fires `blur` / `focus`. A focused element that leaves the tree loses focus.
+- `Input.press` fires `keydown` at the focused element (or the document), bubbling; a listener reads `Input.key()`,
+  `Input.shift()`, ... and may call `Input.prevent()`. Defaults: Tab / Shift+Tab move focus, Enter and Space click a
+  focused button, Enter follows a focused link, Escape blurs.
+- Text fields: a host calls `Input.typed(code_point)` for every character the keyboard produces (Windows: `WM_CHAR`).
+  The focused `input` / `textarea` (not disabled or readonly, not a checkbox, radio, button, ...) inserts it into its
+  `value` attribute at the caret, replacing the selection, and fires `input`. `Edit` (`libs/ui/src/input/edit.djinn`)
+  keeps a caret and a selection (byte offsets on character boundaries): Left / Right / Home / End move it (Shift
+  extends the selection), Backspace and Delete remove, Ctrl+A selects all, Ctrl+C / X / V use the clipboard (a newline
+  in pasted text becomes a space; fields are single line). A host places the caret from a pointer press with
+  `Edit.click(id, x, extend)` and extends it while dragging with `Edit.drag(id, x)`. The painter draws the value
+  (bullets for `type="password"`), the selection, the `placeholder` when empty, and the caret while focused.
+- Clipboard: `Clipboard.install(provider)` connects the system clipboard (`win32` does it in `WinClipboard.install`,
+  UTF-16 text converted to UTF-8). Without a provider the text lives in the process only.
+
+## Kit
+
+`libs/ui/src/kit/kit.djinn` holds ready-made components, styled by the default theme (same look on every platform):
+`Button` (`variant` "primary" / "danger"), `Switch` and `Checkbox` (bound to a `signal<bool>`), `Tab` + `TabPanel` (a
+`signal<i32>` holds the selected index), `Dialog` (a `signal<bool>` shows it) and `Field` (label, hint, placeholder,
+`type`). They are plain structs with props as fields, used from `html!{}` like any component, and their state is
+exposed through `aria-checked`, `aria-selected`, `data-active` and `data-open`, which the theme styles. Not yet: a
+select / menu, tooltip, tables, and two-way binding of a field's value to a signal.
+
+## More kit components
+
+`Select` (`label`, `options="One|Two|Three"`, `index` signal), `Menu` (`label`, `items="Open|Save"`, `on_pick(i32)`),
+`Tooltip` (`text`, children; shows on hover or focus), `List` / `Item`, `Table` / `Row` (`header`; cells share the
+width) and `Navigator` (`routes="/=Home|/settings=Settings"`, marks the current page with `aria-current`). The popups
+close when you choose and on Escape; `List` and `Table` scroll past 16rem (the `.scroll` class). `Pointer`
+(`libs/ui/src/input/hit.djinn`) keeps `:hover` and `:active` on the tree: the host calls `Pointer.move(id)`,
+`press(id)` and `release()` as the mouse does, which is also what the tooltip and the hover colors use.
+
+## Router and animation
+
+`Router` (`libs/ui/src/router/router.djinn`) keeps a history of paths: `Router.start(path)`, `navigate`, `back`,
+`forward`, `peek()` and the reactive `path()`, plus `Router.matches("/users/:id", path)` (`:name` segments, a trailing
+`*`, query and fragment ignored) and `Router.param(pattern, path, "id")`. `Outlet` rebuilds its page from
+`view(path)` after every navigation and `Link` navigates without leaving the app (Enter or a click).
+
+`Animation` (`libs/ui/src/anim/animation.djinn`) is a small tween clock: `Animation.fade_in(id, ms)` /
+`fade(id, from, to, ms)` animate the opacity of an element (cubic ease-out, no relayout); the host calls
+`Animation.advance(ms)` each loop iteration and draws while it returns true (the Windows host does). With
+`prefers-reduced-motion` they are skipped. The `Outlet` fades each new page in over 220 ms. Not yet: exit
+animations, slide / shared-element transitions (there is no transform support), CSS `transition` / `@keyframes`.
+
+## Hotkeys
+
+`Hotkeys.on("Mod+Shift+P", scope, handler)` binds a shortcut and returns its id (0 when the combo is not valid or is
+already taken in an overlapping scope; `Hotkeys.conflicts(combo, scope)` asks first); `Hotkeys.off(id)` removes it.
+Combos are modifiers joined by `+` and a key (`Ctrl`, `Shift`, `Alt`, `Meta` / `Cmd`, and `Mod`, which is Ctrl or, after
+`Hotkeys.use_command(true)`, Command; keys are letters, digits, `F1`..`F12`, `Enter`, `Escape`, `Space`, `Tab`,
+`Backspace`, `Delete`, `Home`, `End`, arrows, `,` `.` `/` `-` `=`). Spaces make a sequence, `"g i"`: each key within one
+second of the last. A binding with a scope fires only while `Hotkeys.push_scope(name)` has that scope on top (`pop_scope`
+leaves it); the empty scope is global. `Input.press` offers every press to the bindings after the `keydown` listeners
+and before the default actions; a match runs the handler (as one reactive batch) and consumes the press. Shortcuts
+without Ctrl, Alt or Meta are ignored while a text field has focus, and Ctrl+A / C / X / V stay with the field.
+
+## Scrolling
+
+An element with `overflow: auto` or `scroll` scrolls its content when it does not fit; the window scrolls when the
+document is taller than it. Offsets live in `Scroll` (`libs/ui/src/input/scroll.djinn`): `Scroll.top(id)` /
+`left(id)`, `set`, `by`, `max_y` / `max_x`, `into_view(id)` (the minimum movement that shows an element), `wheel(x, y,
+dy)` (the innermost container under the point that can still move takes the delta, then the ones around it, then the
+page) and `key(focused, key)` for PageUp / PageDown / Home / End / Up / Down. The painter draws the content shifted
+(no relayout), clips it and draws overlay thumbs; `Hit.at(x, y)` finds the element under a point following every
+offset. Tab scrolls the newly focused element into view. The Windows host feeds the mouse wheel.
+
 ## Output safety
 
 The HTML writer (`view/html.djinn`, `view/html_safety.djinn`) treats every value as untrusted:
@@ -239,6 +316,7 @@ libs/ui/src
   layout/            layout (boxes, cache, flow, positioning, text metrics), flex, grid
   view/              dom (retained tree + HostTest log, change stamps), node (builder),
                      view (show/each/range/mount/islands), html (writer), html_safety, text_buffer
+  input/             focus (Tab order, :focus state), input (keydown, key codes, default actions)
   app/               app (RenderMode, App.mount/render_to_string/run), static_pages
   tests/             reactive, view, html, safety, style, theme and layout tests (djinnc test libs/ui)
 ```

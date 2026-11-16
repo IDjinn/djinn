@@ -1,0 +1,190 @@
+namespace ui;
+
+import testing;
+import std::types;
+
+// Five controls in a row: a button, a disabled button, a link, a tabindex=-1 div and an input.
+struct Form {
+    i32 unused;
+
+    public unsafe Node render() {
+        return Node.element("main")
+            .child(Node.element("button").attr("id", "a").add("A"))
+            .child(Node.element("button").attr("id", "off").attr("disabled", "").add("Off"))
+            .child(Node.element("a").attr("id", "link").attr("href", "/x").add("Link"))
+            .child(Node.element("div").attr("id", "skip").attr("tabindex", "-1").add("Skip"))
+            .child(Node.element("input").attr("id", "field"));
+    }
+}
+
+struct FocusTests {
+    static Form form() {
+        Form value = { .unused = 0 };
+        return value;
+    }
+
+    static unsafe u32 at(Mounted app, str name) {
+        return Dom.find(app.node.id, name);
+    }
+
+    [Test]
+    unsafe void tab_walks_the_tree_in_order_and_wraps() {
+        Focus.reset();
+        Mounted app = App.mount<Form>(FocusTests.form());
+        Expect.equal(0, (i64)Focus.current());
+        Input.press(Key.TAB, 0);
+        Expect.equal((i64)FocusTests.at(app, "a"), (i64)Focus.current());
+        Input.press(Key.TAB, 0);
+        Expect.equal((i64)FocusTests.at(app, "link"), (i64)Focus.current(), "the disabled button is skipped");
+        Input.press(Key.TAB, 0);
+        Expect.equal((i64)FocusTests.at(app, "field"), (i64)Focus.current(), "tabindex -1 is skipped");
+        Input.press(Key.TAB, 0);
+        Expect.equal((i64)FocusTests.at(app, "a"), (i64)Focus.current(), "wraps to the first");
+        app.unmount();
+        Focus.reset();
+    }
+
+    [Test]
+    unsafe void shift_tab_goes_back_and_wraps() {
+        Focus.reset();
+        Mounted app = App.mount<Form>(FocusTests.form());
+        Input.press(Key.TAB, Mod.SHIFT);
+        Expect.equal((i64)FocusTests.at(app, "field"), (i64)Focus.current(), "from nothing, the last");
+        Input.press(Key.TAB, Mod.SHIFT);
+        Expect.equal((i64)FocusTests.at(app, "link"), (i64)Focus.current());
+        app.unmount();
+        Focus.reset();
+    }
+
+    [Test]
+    unsafe void focus_ring_shows_for_keyboard_but_not_for_a_pointer_press_on_a_button() {
+        Focus.reset();
+        Mounted app = App.mount<Form>(FocusTests.form());
+        u32 button = FocusTests.at(app, "a");
+        Focus.set(button, false);
+        Expect.equal(2, (i64)(Dom.state(button) & 10), "focused, no ring");
+        Focus.set(FocusTests.at(app, "field"), false);
+        Expect.equal(0, (i64)(Dom.state(button) & 10), "blur clears both flags");
+        Expect.equal(10, (i64)(Dom.state(FocusTests.at(app, "field")) & 10), "a text field always shows it");
+        Input.press(Key.TAB, 0);
+        Expect.equal(10, (i64)(Dom.state(button) & 10), "Tab shows the ring");
+        app.unmount();
+        Focus.reset();
+    }
+
+    [Test]
+    unsafe void focus_follows_what_each_element_allows() {
+        Focus.reset();
+        Mounted app = App.mount<Form>(FocusTests.form());
+        Expect.is_false(Focus.set(FocusTests.at(app, "off"), false), "a disabled button cannot be focused");
+        Expect.is_true(Focus.set(FocusTests.at(app, "skip"), false), "tabindex -1 can be focused by script or pointer");
+        app.unmount();
+        Focus.reset();
+    }
+
+    [Test]
+    unsafe void enter_and_space_click_the_focused_button() {
+        Focus.reset();
+        signal<i32> clicks = state(0);
+        u32 root = Reactive.root(() => {
+            Node page = Node.element("main")
+                .child(Node.element("button").attr("id", "b").on("click", () => clicks.set(clicks.get() + 1)).add("B"))
+                .child(Node.element("a").attr("id", "l").attr("href", "/y").on("click", () => clicks.set(clicks.get() + 10)).add("L"));
+            Dom.append(Dom.document(), page.id);
+            Focus.set(Dom.find(page.id, "b"), true);
+            Input.press(Key.ENTER, 0);
+            Expect.equal(1, (i64)clicks.peek());
+            Input.press(Key.SPACE, 0);
+            Expect.equal(2, (i64)clicks.peek());
+            Focus.set(Dom.find(page.id, "l"), true);
+            Input.press(Key.SPACE, 0);
+            Expect.equal(2, (i64)clicks.peek(), "Space does not follow a link");
+            Input.press(Key.ENTER, 0);
+            Expect.equal(12, (i64)clicks.peek(), "Enter does");
+            Dom.remove(page.id);
+        });
+        Reactive.dispose(root);
+        Focus.reset();
+    }
+
+    [Test]
+    unsafe void keydown_listeners_see_the_key_and_can_cancel_the_default() {
+        Focus.reset();
+        signal<i32> seen = state(0);
+        u32 root = Reactive.root(() => {
+            Node page = Node.element("main")
+                .on("keydown", () => {
+                    mut i32 code = Input.key() * 10;
+                    if (Input.shift()) {
+                        code = code + 1;
+                    }
+                    seen.set(code);
+                    Input.prevent();
+                })
+                .child(Node.element("button").attr("id", "b").add("B"));
+            Dom.append(Dom.document(), page.id);
+            Focus.set(Dom.find(page.id, "b"), true);
+            Input.press(Key.TAB, Mod.SHIFT);
+            Expect.equal(91, (i64)seen.peek(), "the listener read Tab with Shift");
+            Expect.equal((i64)Dom.find(page.id, "b"), (i64)Focus.current(), "prevent() kept the focus where it was");
+            Expect.equal(0, (i64)Input.key(), "nothing is left set after the press");
+            Dom.remove(page.id);
+        });
+        Reactive.dispose(root);
+        Focus.reset();
+    }
+
+    [Test]
+    unsafe void focus_and_blur_events_fire_and_escape_blurs() {
+        Focus.reset();
+        signal<i32> log = state(0);
+        u32 root = Reactive.root(() => {
+            Node page = Node.element("main")
+                .child(Node.element("button").attr("id", "x")
+                    .on("focus", () => log.set(log.get() * 10 + 1))
+                    .on("blur", () => log.set(log.get() * 10 + 2)).add("X"))
+                .child(Node.element("button").attr("id", "y").add("Y"));
+            Dom.append(Dom.document(), page.id);
+            Focus.set(Dom.find(page.id, "x"), true);
+            Expect.equal(1, (i64)log.peek());
+            Focus.set(Dom.find(page.id, "y"), true);
+            Expect.equal(12, (i64)log.peek(), "x was blurred when y took focus");
+            Focus.set(Dom.find(page.id, "x"), true);
+            Input.press(Key.ESCAPE, 0);
+            Expect.equal(0, (i64)Focus.current());
+            Expect.equal(1212, (i64)log.peek());
+            Dom.remove(page.id);
+        });
+        Reactive.dispose(root);
+        Focus.reset();
+    }
+
+    [Test]
+    unsafe void a_removed_element_loses_focus() {
+        Focus.reset();
+        Mounted app = App.mount<Form>(FocusTests.form());
+        Focus.set(FocusTests.at(app, "a"), true);
+        app.unmount();
+        Expect.equal(0, (i64)Focus.current());
+        Focus.reset();
+    }
+
+    [Test]
+    unsafe void typing_edits_the_value_of_the_focused_field() {
+        Focus.reset();
+        Mounted app = App.mount<Form>(FocusTests.form());
+        u32 field = FocusTests.at(app, "field");
+        Expect.is_false(Input.typed(97), "nothing is focused");
+        Focus.set(field, true);
+        Expect.is_true(Input.typed(104));
+        Expect.is_true(Input.typed(105));
+        Expect.is_true(Input.typed(233));
+        Expect.equal(4, (i64)Dom.attr(field, "value").length, "h, i and a two-byte character");
+        Input.press(Key.BACKSPACE, 0);
+        Expect.equal(2, (i64)Dom.attr(field, "value").length, "Backspace removes a whole character");
+        Focus.set(FocusTests.at(app, "a"), true);
+        Expect.is_false(Input.typed(120), "a button takes no text");
+        app.unmount();
+        Focus.reset();
+    }
+}

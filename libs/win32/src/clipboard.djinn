@@ -1,0 +1,91 @@
+import std::types;
+import std::libc;
+import ui;
+
+namespace win32;
+
+unsafe static mut u64 clipboard_text = 0;
+
+// The system clipboard for the text fields of the ui library: UTF-16 text (CF_UNICODETEXT) converted to and from UTF-8.
+struct WinClipboard : ClipboardBackend {
+    i32 unused;
+
+    const u32 CF_UNICODETEXT = 13;
+    const u32 CP_UTF8 = 65001;
+    const u32 GMEM_MOVEABLE = 2;
+
+    public unsafe void write(i8* data, u32 length) {
+        if (length == 0) {
+            return;
+        }
+        i32 count = MultiByteToWideChar(WinClipboard.CP_UTF8, 0, data, (i32)length, (void*)0, 0);
+        if (count <= 0) {
+            return;
+        }
+        void* memory = GlobalAlloc(WinClipboard.GMEM_MOVEABLE, (size_long)(((u32)count + 1) * 2));
+        if (memory == (void*)0) {
+            return;
+        }
+        void* wide = GlobalLock(memory);
+        MultiByteToWideChar(WinClipboard.CP_UTF8, 0, data, (i32)length, wide, count);
+        u16* units = (u16*)wide;
+        units[count] = (u16)0;
+        GlobalUnlock(memory);
+        if (OpenClipboard((void*)0) == 0) {
+            return;
+        }
+        EmptyClipboard();
+        SetClipboardData(WinClipboard.CF_UNICODETEXT, memory);
+        CloseClipboard();
+    }
+
+    // The clipboard text as UTF-8, or null when it holds no text. The buffer lives until the next read.
+    public unsafe i8* read(u32* length) {
+        if (OpenClipboard((void*)0) == 0) {
+            return (i8*)0;
+        }
+        void* memory = GetClipboardData(WinClipboard.CF_UNICODETEXT);
+        if (memory == (void*)0) {
+            CloseClipboard();
+            return (i8*)0;
+        }
+        void* wide = GlobalLock(memory);
+        i32 bytes = WideCharToMultiByte(WinClipboard.CP_UTF8, 0, wide, 0 - 1, (i8*)0, 0, (i8*)0, (i8*)0);
+        if (bytes <= 1) {
+            GlobalUnlock(memory);
+            CloseClipboard();
+            *length = 0;
+            return (i8*)0;
+        }
+        if (clipboard_text != 0) {
+            __djinn_free((void*)clipboard_text);
+        }
+        i8* text = (i8*)__djinn_alloc_zeroed((size_long)bytes);
+        WideCharToMultiByte(WinClipboard.CP_UTF8, 0, wide, 0 - 1, text, bytes, (i8*)0, (i8*)0);
+        clipboard_text = (u64)text;
+        GlobalUnlock(memory);
+        CloseClipboard();
+        *length = (u32)(bytes - 1);
+        return text;
+    }
+
+    // Installs this backend. The provider is built here (not through Clipboard.use<T>): a generic of the ui library
+    // instantiated with a type of another library is not emitted into the final link yet.
+    public static unsafe void install() {
+        ClipboardProvider provider = {
+            .write = (i8* data, u32 length) => WinClipboard.put(data, length),
+            .read = (u32* length) => WinClipboard.get(length)
+        };
+        Clipboard.install(provider);
+    }
+
+    static unsafe void put(i8* data, u32 length) {
+        WinClipboard backend = { .unused = 0 };
+        backend.write(data, length);
+    }
+
+    static unsafe i8* get(u32* length) {
+        WinClipboard backend = { .unused = 0 };
+        return backend.read(length);
+    }
+}

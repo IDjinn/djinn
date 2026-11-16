@@ -1,0 +1,245 @@
+import std::types;
+import std::libc;
+
+namespace ui;
+
+unsafe static mut ptr router_state = null;
+
+struct RouterState {
+    mut i8** paths;
+    mut u32* lengths;
+    mut u32 count;
+    mut u32 index;
+    mut u32 owner;
+    mut signal<u32> version;
+}
+
+// Client-side routing: a history of paths (what the address bar would hold), reactive reads of the current one, and
+// pattern matching with ':name' segments. The Outlet component below shows the view for the current path and fades
+// each new page in. Paths are copied, so any string can be passed.
+struct Router {
+    const u32 LIMIT = 64;
+
+    static unsafe RouterState* state() {
+        if (router_state == null) {
+            RouterState* made = (RouterState*)__djinn_alloc_zeroed((size_long)sizeof(RouterState));
+            made.paths = (i8**)__djinn_alloc_zeroed((size_long)(Router.LIMIT * 8));
+            made.lengths = (u32*)__djinn_alloc_zeroed((size_long)(Router.LIMIT * 4));
+            made.owner = Reactive.create_root(0);
+            Scope saved = Reactive.enter(made.owner);
+            made.version = state(0);
+            Reactive.leave(saved);
+            router_state = (ptr)made;
+            made.paths[0] = (i8*)__djinn_alloc_zeroed(2);
+            made.paths[0][0] = (i8)47;
+            made.lengths[0] = 1;
+            made.count = 1;
+        }
+        return (RouterState*)router_state;
+    }
+
+    static unsafe void changed(RouterState* s) {
+        s.version.set(s.version.peek() + 1);
+    }
+
+    static unsafe i8* copy(str path) {
+        i8* made = (i8*)__djinn_alloc_zeroed((size_long)(path.length + 1));
+        if (path.length > 0) {
+            memcpy((void*)made, (void*)path.data, (size_long)path.length);
+        }
+        return made;
+    }
+
+    // Forgets the history and starts at 'path'.
+    public static unsafe void start(str path) {
+        RouterState* s = Router.state();
+        mut u32 i = 0;
+        while (i < s.count) {
+            __djinn_free((void*)s.paths[i]);
+            i = i + 1;
+        }
+        s.paths[0] = Router.copy(path);
+        s.lengths[0] = (u32)path.length;
+        s.count = 1;
+        s.index = 0;
+        Router.changed(s);
+    }
+
+    // Goes to a new path (dropping any forward history). Navigating to the current path does nothing.
+    public static unsafe void navigate(str path) {
+        RouterState* s = Router.state();
+        if (Texts.same(Router.peek(), path)) {
+            return;
+        }
+        mut u32 i = s.index + 1;
+        while (i < s.count) {
+            __djinn_free((void*)s.paths[i]);
+            i = i + 1;
+        }
+        s.count = s.index + 1;
+        if (s.count == Router.LIMIT) {
+            __djinn_free((void*)s.paths[0]);
+            mut u32 k = 1;
+            while (k < s.count) {
+                s.paths[k - 1] = s.paths[k];
+                s.lengths[k - 1] = s.lengths[k];
+                k = k + 1;
+            }
+            s.count = s.count - 1;
+        }
+        s.paths[s.count] = Router.copy(path);
+        s.lengths[s.count] = (u32)path.length;
+        s.count = s.count + 1;
+        s.index = s.count - 1;
+        Router.changed(s);
+    }
+
+    public static unsafe bool can_go_back() {
+        return Router.state().index > 0;
+    }
+
+    public static unsafe bool can_go_forward() {
+        RouterState* s = Router.state();
+        return s.index + 1 < s.count;
+    }
+
+    public static unsafe void back() {
+        RouterState* s = Router.state();
+        if (s.index > 0) {
+            s.index = s.index - 1;
+            Router.changed(s);
+        }
+    }
+
+    public static unsafe void forward() {
+        RouterState* s = Router.state();
+        if (s.index + 1 < s.count) {
+            s.index = s.index + 1;
+            Router.changed(s);
+        }
+    }
+
+    // The current path without subscribing.
+    public static unsafe str peek() {
+        RouterState* s = Router.state();
+        str now = { .data = s.paths[s.index], .length = (size)s.lengths[s.index] };
+        return now;
+    }
+
+    // The current path; an effect that calls this runs again after every navigation.
+    public static unsafe str path() {
+        RouterState* s = Router.state();
+        s.version.get();
+        return Router.peek();
+    }
+
+    // The next '/'-separated segment of 'text' from 'at'; returns its length and moves 'at' past it ('from' is where
+    // it starts).
+    static unsafe u32 segment(str text, u32* at, u32* from) {
+        mut u32 i = *at;
+        u32 length = (u32)text.length;
+        while (i < length && text.data[i] == (i8)47) {
+            i = i + 1;
+        }
+        *from = i;
+        while (i < length && text.data[i] != (i8)47) {
+            i = i + 1;
+        }
+        *at = i;
+        return i - *from;
+    }
+
+    static unsafe str without_query(str path) {
+        mut u32 end = (u32)path.length;
+        mut u32 i = 0;
+        while (i < end) {
+            if (path.data[i] == (i8)63 || path.data[i] == (i8)35) {
+                end = i;
+            } else {
+                i = i + 1;
+            }
+        }
+        str bare = { .data = path.data, .length = (size)end };
+        return bare;
+    }
+
+    // Does 'path' fit 'pattern'? Segments written ':name' match anything; a trailing '*' matches the rest.
+    // Query strings and fragments are ignored.
+    public static unsafe bool matches(str pattern, str path) {
+        mut u32 p = 0;
+        mut u32 q = 0;
+        mut u32 pf = 0;
+        mut u32 qf = 0;
+        str bare = Router.without_query(path);
+        while (true) {
+            u32 plen = Router.segment(pattern, &p, &pf);
+            u32 qlen = Router.segment(bare, &q, &qf);
+            if (plen == 0 && qlen == 0) {
+                return true;
+            }
+            if (plen == 1 && pattern.data[pf] == (i8)42) {
+                return true;
+            }
+            if (plen == 0 || qlen == 0) {
+                return false;
+            }
+            if (pattern.data[pf] != (i8)58) {
+                if (plen != qlen
+                    || memcmp((void*)(pattern.data + (size_long)pf), (void*)(bare.data + (size_long)qf), (size_long)plen) != 0) {
+                    return false;
+                }
+            }
+        }
+        return false;
+    }
+
+    // The part of 'path' that the segment ':name' of 'pattern' matched ("" when there is none).
+    public static unsafe str param(str pattern, str path, str name) {
+        mut u32 p = 0;
+        mut u32 q = 0;
+        mut u32 pf = 0;
+        mut u32 qf = 0;
+        str bare = Router.without_query(path);
+        while (true) {
+            u32 plen = Router.segment(pattern, &p, &pf);
+            u32 qlen = Router.segment(bare, &q, &qf);
+            if (plen == 0 || qlen == 0) {
+                str none = { .data = path.data, .length = 0 };
+                return none;
+            }
+            if (plen == name.length + 1 && pattern.data[pf] == (i8)58
+                && memcmp((void*)(pattern.data + (size_long)(pf + 1)), (void*)name.data, (size_long)name.length) == 0) {
+                str found = { .data = bare.data + (size_long)qf, .length = (size)qlen };
+                return found;
+            }
+        }
+        str nothing = { .data = path.data, .length = 0 };
+        return nothing;
+    }
+}
+
+// Shows the view for the current path, rebuilt after every navigation; each new page fades in. 'view' maps a path to
+// the page (usually a chain of Router.matches).
+struct Outlet {
+    fn(str) -> Node view;
+
+    public unsafe Node render() {
+        return Node.element("div").attr("class", "outlet").insert(() => {
+            str path = Router.path();
+            Node inner = this.view(path);
+            Node page = Node.element("div").attr("class", "route").child(inner);
+            Animation.fade_in(page.id, 220);
+            return page;
+        });
+    }
+}
+
+// A link that navigates inside the app: Enter or a click on it goes to 'to' without leaving the page.
+struct Link {
+    str to;
+    str label;
+
+    public unsafe Node render() {
+        return html!{ <a href={this.to} on_click={() => Router.navigate(this.to)}>{this.label}</a> };
+    }
+}

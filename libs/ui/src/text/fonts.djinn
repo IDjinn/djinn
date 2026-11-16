@@ -18,10 +18,11 @@ struct GlyphBitmap {
 
 // What a platform provides to turn text into pixels (the Windows host uses GDI; a later one can ship its own
 // rasterizer). 'advance' is the pen movement of a code point in px, 'rasterize' fills a GlyphBitmap, 'metrics' gives
-// the ascent and descent of a line of that size in px.
+// the ascent and descent of a line of that size in px. 'rasterize' also takes a sub-pixel phase 0..3: the glyph is
+// drawn shifted right by phase/4 of a pixel, so text can sit at fractional pen positions.
 struct FontProvider {
     fn(u32, f32, bool) -> f32 advance;
-    fn(u32, f32, bool, GlyphBitmap*) -> bool rasterize;
+    fn(u32, f32, bool, u32, GlyphBitmap*) -> bool rasterize;
     fn(f32, bool, f32*, f32*) -> void metrics;
 }
 
@@ -184,12 +185,12 @@ struct Fonts {
 
     // The glyph of a code point, rasterized into the atlas the first time. Null when it has no pixels (a space) or
     // the atlas is full; spaces still advance.
-    public static unsafe Glyph* glyph(u32 code, f32 size, bool bold) {
+    public static unsafe Glyph* glyph(u32 code, f32 size, bool bold, u32 phase) {
         FontSystem* system = Fonts.system();
         if (!system.active) {
             return (Glyph*)0;
         }
-        u32 shape = Fonts.shape_of(size, bold);
+        u32 shape = Fonts.shape_of(size, bold) | ((phase & 3) << 24);
         Glyph* glyph = Fonts.find(system, code, shape);
         if (glyph == (Glyph*)0) {
             return (Glyph*)0;
@@ -201,7 +202,7 @@ struct Fonts {
             return (Glyph*)0;
         }
         GlyphBitmap bitmap = { .width = 0, .height = 0, .bearing_x = 0, .bearing_y = 0, .pixels = (u8*)0 };
-        bool ok = system.provider.rasterize(code, Fonts.size_of(shape), bold, &bitmap);
+        bool ok = system.provider.rasterize(code, Fonts.size_of(shape), bold, phase & 3, &bitmap);
         glyph.advance = system.provider.advance(code, Fonts.size_of(shape), bold);
         glyph.width = -1;
         if (!ok || bitmap.width <= 0 || bitmap.height <= 0 || bitmap.pixels == (u8*)0) {
