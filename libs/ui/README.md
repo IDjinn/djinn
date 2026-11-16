@@ -274,6 +274,8 @@ display: none); `Transition` (a `signal<bool>` shows it) wraps content with that
 (about 5% overshoot, interruptible) over its own time: `transition: transform 360ms` (the theme's `--ui-spring`). It is applied to
 the geometry the element drew, so it never relayouts (and hit testing still uses the untransformed box). The theme uses it for
 the press feedback on buttons (scale .97) and the sliding switch thumb; dialogs and popups also pop in from 96% with a spring.
+Scroll thumbs can be dragged with the pointer (a thumb gets a little margin to grab and darkens while held).
+
 Not yet: rotate / skew, `transform-origin`, shared-element page transitions, `@keyframes`.
 
 Scrolling glides like the system's: in the native host the wheel, the arrow / Page / Home / End keys and focus changes move a

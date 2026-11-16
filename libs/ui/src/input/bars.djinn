@@ -1,0 +1,129 @@
+import std::types;
+
+namespace ui;
+
+unsafe static mut u32 bar_id = 0;
+unsafe static mut bool bar_vertical = true;
+unsafe static mut f32 bar_start = (f32)0.0;
+unsafe static mut f32 bar_origin = (f32)0.0;
+unsafe static mut f32 bar_free = (f32)0.0;
+unsafe static mut f32 bar_limit = (f32)0.0;
+
+struct BarRect {
+    mut f32 x;
+    mut f32 y;
+    mut f32 w;
+    mut f32 h;
+    mut f32 free;
+}
+
+// The overlay scroll thumbs of the scroll containers: where they sit and dragging them. The painter draws what
+// 'rect' describes; the host grabs a thumb with 'begin' when the pointer goes down on one (Hit.bar says which),
+// moves it with 'drag' and lets go with 'end'.
+struct Bars {
+    // The rect of a container's thumb in the space of its box: left, top, width, height, free = how far the
+    // thumb can travel along its track. False when the container has nothing to scroll on that axis.
+    public static unsafe bool rect(u32 id, bool vertical, BarRect* r) {
+        LayoutBox* box = Layout.box(id);
+        f32 pixel = (f32)Styles.device_scale();
+        f32 thickness = (f32)6.0 * pixel;
+        f32 inset = (f32)2.0 * pixel;
+        mut f32 view = box.width - box.border.horizontal();
+        mut f32 limit = Scroll.max_x(id);
+        mut f32 at = Scroll.left(id);
+        if (vertical) {
+            view = box.height - box.border.vertical();
+            limit = Scroll.max_y(id);
+            at = Scroll.top(id);
+        }
+        if (limit <= (f32)0.0 || view <= (f32)16.0 * pixel) {
+            return false;
+        }
+        f32 track = view - inset * (f32)2.0;
+        mut f32 length = track * view / (view + limit);
+        if (length < (f32)24.0 * pixel) {
+            length = (f32)24.0 * pixel;
+        }
+        if (length > track) {
+            length = track;
+        }
+        f32 free = track - length;
+        f32 offset = free * at / limit;
+        r.free = free;
+        if (vertical) {
+            r.x = box.left + box.width - box.border.right - thickness - inset;
+            r.y = box.top + box.border.top + inset + offset;
+            r.w = thickness;
+            r.h = length;
+        } else {
+            r.x = box.left + box.border.left + inset + offset;
+            r.y = box.top + box.height - box.border.bottom - thickness - inset;
+            r.w = length;
+            r.h = thickness;
+        }
+        return true;
+    }
+
+    // True when (x, y), in the space of the container's box, is on its thumb (a little margin makes it easier to hit).
+    public static unsafe bool over(u32 id, bool vertical, f32 x, f32 y) {
+        mut BarRect r = { .x = (f32)0.0, .y = (f32)0.0, .w = (f32)0.0, .h = (f32)0.0, .free = (f32)0.0 };
+        if (!Bars.rect(id, vertical, &r)) {
+            return false;
+        }
+        f32 slop = (f32)4.0 * (f32)Styles.device_scale();
+        return x >= r.x - slop && x < r.x + r.w + slop && y >= r.y - slop && y < r.y + r.h + slop;
+    }
+
+    // Starts dragging the thumb of 'id' with the pointer at (x, y) in window pixels.
+    public static unsafe void begin(u32 id, bool vertical, f32 x, f32 y) {
+        mut BarRect r = { .x = (f32)0.0, .y = (f32)0.0, .w = (f32)0.0, .h = (f32)0.0, .free = (f32)0.0 };
+        if (!Bars.rect(id, vertical, &r)) {
+            return;
+        }
+        bar_id = id;
+        bar_vertical = vertical;
+        bar_free = r.free;
+        if (vertical) {
+            bar_start = y;
+            bar_origin = Scroll.top(id);
+            bar_limit = Scroll.max_y(id);
+        } else {
+            bar_start = x;
+            bar_origin = Scroll.left(id);
+            bar_limit = Scroll.max_x(id);
+        }
+        Scroll.touch();
+    }
+
+    public static unsafe bool dragging() {
+        return bar_id != 0;
+    }
+
+    public static unsafe u32 grabbed() {
+        return bar_id;
+    }
+
+    // The pointer moved to (x, y): the container scrolls by the same share of its length as the thumb travelled.
+    public static unsafe void drag(f32 x, f32 y) {
+        if (bar_id == 0 || bar_free <= (f32)0.0) {
+            return;
+        }
+        mut f32 moved = x - bar_start;
+        if (bar_vertical) {
+            moved = y - bar_start;
+        }
+        f32 goal = bar_origin + moved * bar_limit / bar_free;
+        if (bar_vertical) {
+            Scroll.set(bar_id, Scroll.left(bar_id), goal);
+        } else {
+            Scroll.set(bar_id, goal, Scroll.top(bar_id));
+        }
+    }
+
+    public static unsafe void end() {
+        if (bar_id != 0) {
+            bar_id = 0;
+            Scroll.touch();
+        }
+    }
+}
