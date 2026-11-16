@@ -246,6 +246,19 @@ for each key (key codes are the Windows virtual-key values, `Key.*`; modifiers a
 exposed through `aria-checked`, `aria-selected`, `data-active` and `data-open`, which the theme styles. Not yet: a
 select / menu, tooltip, tables, and two-way binding of a field's value to a signal.
 
+## Router and animation
+
+`Router` (`libs/ui/src/router/router.djinn`) keeps a history of paths: `Router.start(path)`, `navigate`, `back`,
+`forward`, `peek()` and the reactive `path()`, plus `Router.matches("/users/:id", path)` (`:name` segments, a trailing
+`*`, query and fragment ignored) and `Router.param(pattern, path, "id")`. `Outlet` rebuilds its page from
+`view(path)` after every navigation and `Link` navigates without leaving the app (Enter or a click).
+
+`Animation` (`libs/ui/src/anim/animation.djinn`) is a small tween clock: `Animation.fade_in(id, ms)` /
+`fade(id, from, to, ms)` animate the opacity of an element (cubic ease-out, no relayout); the host calls
+`Animation.advance(ms)` each loop iteration and draws while it returns true (the Windows host does). With
+`prefers-reduced-motion` they are skipped. The `Outlet` fades each new page in over 220 ms. Not yet: exit
+animations, slide / shared-element transitions (there is no transform support), CSS `transition` / `@keyframes`.
+
 ## Output safety
 
 The HTML writer (`view/html.djinn`, `view/html_safety.djinn`) treats every value as untrusted:

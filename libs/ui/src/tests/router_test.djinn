@@ -1,0 +1,103 @@
+namespace ui;
+
+import testing;
+import std::types;
+
+struct Pages {
+    i32 unused;
+
+    public unsafe Node render() {
+        return html!{
+            <main>
+                <Link to="/about" label="About"/>
+                <Outlet view={(str path) => Pages.page(path)}/>
+            </main>
+        };
+    }
+
+    static unsafe Node page(str path) {
+        if (Router.matches("/users/:id", path)) {
+            return Node.element("p").attr("id", "user").add("user");
+        }
+        if (Router.matches("/about", path)) {
+            return Node.element("p").attr("id", "about").add("about");
+        }
+        return Node.element("p").attr("id", "home").add("home");
+    }
+}
+
+struct RouterTests {
+    static Pages pages() {
+        Pages value = { .unused = 0 };
+        return value;
+    }
+
+    [Test]
+    unsafe void patterns_match_segments_and_params() {
+        Expect.is_true(Router.matches("/", "/"));
+        Expect.is_true(Router.matches("/users/:id", "/users/42"));
+        Expect.is_false(Router.matches("/users/:id", "/users"));
+        Expect.is_false(Router.matches("/users/:id", "/users/42/edit"));
+        Expect.is_true(Router.matches("/docs/*", "/docs/a/b/c"));
+        Expect.is_true(Router.matches("/about", "/about?x=1#top"), "query and fragment are ignored");
+        Expect.is_false(Router.matches("/about", "/abouts"));
+        Expect.is_true(Texts.same(Router.param("/users/:id/posts/:post", "/users/42/posts/7?x=1", "post"), "7"));
+        Expect.is_true(Texts.same(Router.param("/users/:id", "/users/42", "id"), "42"));
+        Expect.equal(0, (i64)Router.param("/users/:id", "/users/42", "nope").length);
+    }
+
+    [Test]
+    unsafe void history_goes_back_and_forward() {
+        Router.start("/");
+        Router.navigate("/a");
+        Router.navigate("/b");
+        Expect.is_true(Texts.same(Router.peek(), "/b"));
+        Router.back();
+        Expect.is_true(Texts.same(Router.peek(), "/a"));
+        Expect.is_true(Router.can_go_forward());
+        Router.navigate("/c");
+        Expect.is_false(Router.can_go_forward(), "navigating drops the forward history");
+        Router.back();
+        Router.back();
+        Expect.is_true(Texts.same(Router.peek(), "/"));
+        Expect.is_false(Router.can_go_back());
+        Router.start("/");
+    }
+
+    [Test]
+    unsafe void the_outlet_swaps_the_page_and_fades_it_in() {
+        Router.start("/");
+        Styles.set_reduced_motion(false);
+        Mounted app = App.mount<Pages>(RouterTests.pages());
+        Expect.is_true(Dom.find(app.node.id, "home") != 0);
+        Router.navigate("/users/9");
+        Expect.is_true(Dom.find(app.node.id, "user") != 0);
+        Expect.equal(0, (i64)Dom.find(app.node.id, "home"), "the old page is gone");
+        u32 page = Dom.parent(Dom.find(app.node.id, "user"));
+        Expect.is_true(Animation.active());
+        Expect.is_true(Animation.opacity(page) < (f32)0.05, "starts transparent");
+        Animation.advance(1000);
+        Animation.advance(1110);
+        mut f32 half = Animation.opacity(page);
+        Expect.is_true(half > (f32)0.5 && half < (f32)1.0, "part of the way");
+        Animation.advance(1400);
+        Expect.is_false(Animation.active(), "finished and retired");
+        Expect.is_true(Animation.opacity(page) > (f32)0.99);
+        Dom.dispatch(Dom.first_child(app.node.id), "click");
+        Expect.is_true(Dom.find(app.node.id, "about") != 0, "a link navigates");
+        app.unmount();
+        Router.start("/");
+    }
+
+    [Test]
+    unsafe void reduced_motion_skips_the_fade() {
+        Router.start("/");
+        Styles.set_reduced_motion(true);
+        Mounted app = App.mount<Pages>(RouterTests.pages());
+        Router.navigate("/about");
+        Expect.is_false(Animation.active());
+        app.unmount();
+        Styles.set_reduced_motion(false);
+        Router.start("/");
+    }
+}

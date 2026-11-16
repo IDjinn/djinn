@@ -1,0 +1,145 @@
+import std::types;
+import std::libc;
+
+namespace ui;
+
+unsafe static mut ptr animation_system = null;
+
+struct Tween {
+    mut u32 id;
+    mut f32 from;
+    mut f32 to;
+    mut u32 start;
+    mut u32 duration;
+    mut bool started;
+}
+
+struct AnimationSystem {
+    mut Tween* items;
+    mut u32 count;
+    mut u32 capacity;
+    mut u32 now;
+    mut u32 version;
+}
+
+// Time-driven animations on top of the retained tree. For now the animated property is the opacity of an element
+// (multiplied into whatever the style says): enough for page and dialog transitions, drawn without a relayout.
+// The host calls Animation.advance(milliseconds) once per loop iteration and keeps drawing while it returns true.
+// Animations are skipped (the end value applies at once) when the user asked for reduced motion.
+struct Animation {
+    static unsafe AnimationSystem* system() {
+        if (animation_system == null) {
+            animation_system = (ptr)__djinn_alloc_zeroed((size_long)sizeof(AnimationSystem));
+        }
+        return (AnimationSystem*)animation_system;
+    }
+
+    // Fades an element in from transparent over 'duration' milliseconds.
+    public static unsafe void fade_in(u32 id, u32 duration) {
+        Animation.fade(id, (f32)0.0, (f32)1.0, duration);
+    }
+
+    public static unsafe void fade(u32 id, f32 from, f32 to, u32 duration) {
+        Animation.cancel(id);
+        if (Styles.prefers_reduced_motion() || duration == 0) {
+            return;
+        }
+        AnimationSystem* system = Animation.system();
+        if (system.count == system.capacity) {
+            u32 grown = system.capacity * 2 + 8;
+            Tween* items = (Tween*)__djinn_alloc_zeroed((size_long)(grown * (u32)sizeof(Tween)));
+            if (system.count > 0) {
+                memcpy((void*)items, (void*)system.items, (size_long)(system.count * (u32)sizeof(Tween)));
+            }
+            if (system.items != (Tween*)0) {
+                __djinn_free((void*)system.items);
+            }
+            system.items = items;
+            system.capacity = grown;
+        }
+        Tween* tween = &system.items[system.count];
+        tween.id = id;
+        tween.from = from;
+        tween.to = to;
+        tween.duration = duration;
+        tween.start = 0;
+        tween.started = false;
+        system.count = system.count + 1;
+        system.version = system.version + 1;
+    }
+
+    public static unsafe void cancel(u32 id) {
+        AnimationSystem* system = Animation.system();
+        mut u32 i = 0;
+        while (i < system.count) {
+            if (system.items[i].id == id) {
+                system.items[i] = system.items[system.count - 1];
+                system.count = system.count - 1;
+                system.version = system.version + 1;
+            } else {
+                i = i + 1;
+            }
+        }
+    }
+
+    static f32 ease(f32 t) {
+        f32 left = (f32)1.0 - t;
+        return (f32)1.0 - left * left * left;
+    }
+
+    // The opacity factor an animation gives an element right now (1 when it has none).
+    public static unsafe f32 opacity(u32 id) {
+        AnimationSystem* system = Animation.system();
+        mut u32 i = 0;
+        while (i < system.count) {
+            Tween* tween = &system.items[i];
+            if (tween.id == id) {
+                if (!tween.started) {
+                    return tween.from;
+                }
+                u32 elapsed = system.now - tween.start;
+                if (elapsed >= tween.duration) {
+                    return tween.to;
+                }
+                f32 t = Animation.ease((f32)elapsed / (f32)tween.duration);
+                return tween.from + (tween.to - tween.from) * t;
+            }
+            i = i + 1;
+        }
+        return (f32)1.0;
+    }
+
+    public static unsafe bool active() {
+        return Animation.system().count > 0;
+    }
+
+    // Changes whenever an animation moves, so a host knows to draw again.
+    public static unsafe u32 version() {
+        return Animation.system().version;
+    }
+
+    // Moves the clock to 'now' (milliseconds, any origin) and retires finished animations. True while any is running.
+    public static unsafe bool advance(u32 now) {
+        AnimationSystem* system = Animation.system();
+        system.now = now;
+        if (system.count == 0) {
+            return false;
+        }
+        mut u32 i = 0;
+        while (i < system.count) {
+            Tween* tween = &system.items[i];
+            if (!tween.started) {
+                tween.started = true;
+                tween.start = now;
+            }
+            if (now - tween.start >= tween.duration) {
+                system.items[i] = system.items[system.count - 1];
+                system.count = system.count - 1;
+            } else {
+                i = i + 1;
+            }
+        }
+        system.version = system.version + 1;
+        return system.count > 0;
+    }
+}
