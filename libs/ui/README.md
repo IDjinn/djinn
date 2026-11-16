@@ -237,6 +237,15 @@ for each key (key codes are the Windows virtual-key values, `Key.*`; modifiers a
 - Clipboard: `Clipboard.install(provider)` connects the system clipboard (`win32` does it in `WinClipboard.install`,
   UTF-16 text converted to UTF-8). Without a provider the text lives in the process only.
 
+## Kit
+
+`libs/ui/src/kit/kit.djinn` holds ready-made components, styled by the default theme (same look on every platform):
+`Button` (`variant` "primary" / "danger"), `Switch` and `Checkbox` (bound to a `signal<bool>`), `Tab` + `TabPanel` (a
+`signal<i32>` holds the selected index), `Dialog` (a `signal<bool>` shows it) and `Field` (label, hint, placeholder,
+`type`). They are plain structs with props as fields, used from `html!{}` like any component, and their state is
+exposed through `aria-checked`, `aria-selected`, `data-active` and `data-open`, which the theme styles. Not yet: a
+select / menu, tooltip, tables, and two-way binding of a field's value to a signal.
+
 ## Output safety
 
 The HTML writer (`view/html.djinn`, `view/html_safety.djinn`) treats every value as untrusted:

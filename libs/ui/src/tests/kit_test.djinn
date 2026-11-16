@@ -1,0 +1,102 @@
+namespace ui;
+
+import testing;
+import std::types;
+
+unsafe static mut i32 kit_clicks = 0;
+
+struct KitPage {
+    i32 unused;
+
+    public unsafe Node render() {
+        signal<bool> on = state(false);
+        signal<bool> agreed = state(true);
+        signal<i32> tab = state(0);
+        signal<bool> open = state(false);
+        return html!{
+            <main>
+                <Button label="Save" variant="primary" on_click={() => kit_clicks = kit_clicks + 1}/>
+                <Switch label="Wi-Fi" on={on}/>
+                <Checkbox label="Agree" checked={agreed}/>
+                <div role="tablist">
+                    <Tab label="One" index={0} active={tab}/>
+                    <Tab label="Two" index={1} active={tab}/>
+                </div>
+                <TabPanel index={0} active={tab}><p>first</p></TabPanel>
+                <TabPanel index={1} active={tab}><p>second</p></TabPanel>
+                <button id="open" on_click={() => open.set(true)}>open</button>
+                <Dialog title="Sure?" open={open}><p>text</p></Dialog>
+                <Field label="Name" hint="Your name" placeholder="Ada" kind="text"/>
+            </main>
+        };
+    }
+}
+
+struct KitTests {
+    static KitPage page() {
+        KitPage value = { .unused = 0 };
+        return value;
+    }
+
+    // The first element under 'root' (in tree order) with this tag and, when 'attr' is not empty, this attribute value.
+    static unsafe u32 search(u32 root, str tag, str attr, str value) {
+        if (Dom.kind(root) == DomKind.ELEMENT && Texts.same(Dom.tag(root), tag)
+            && (attr.length == 0 || (Dom.has_attr(root, attr) && Texts.same(Dom.attr(root, attr), value)))) {
+            return root;
+        }
+        mut u32 child = Dom.first_child(root);
+        while (child != 0) {
+            u32 found = KitTests.search(child, tag, attr, value);
+            if (found != 0) {
+                return found;
+            }
+            child = Dom.next_sibling(child);
+        }
+        return 0;
+    }
+
+    static unsafe u32 nth(Mounted app, str tag, str attr, str value) {
+        return KitTests.search(app.node.id, tag, attr, value);
+    }
+
+    [Test]
+    unsafe void button_runs_its_handler() {
+        kit_clicks = 0;
+        Mounted app = App.mount<KitPage>(KitTests.page());
+        u32 button = KitTests.nth(app, "button", "", "");
+        Expect.is_true(Texts.same(Dom.attr(button, "class"), "primary"));
+        Dom.dispatch(button, "click");
+        Dom.dispatch(button, "click");
+        Expect.equal(2, (i64)kit_clicks);
+        app.unmount();
+    }
+
+    [Test]
+    unsafe void switch_checkbox_and_tabs_follow_their_signals() {
+        Mounted app = App.mount<KitPage>(KitTests.page());
+        u32 toggle = KitTests.nth(app, "button", "role", "switch");
+        Expect.is_true(Texts.same(Dom.attr(toggle, "aria-checked"), "false"));
+        Dom.dispatch(toggle, "click");
+        Expect.is_true(Texts.same(Dom.attr(toggle, "aria-checked"), "true"));
+        u32 check = KitTests.nth(app, "button", "role", "checkbox");
+        Expect.is_true(Texts.same(Dom.attr(check, "aria-checked"), "true"));
+        Dom.dispatch(check, "click");
+        Expect.is_true(Texts.same(Dom.attr(check, "aria-checked"), "false"));
+        u32 second = KitTests.nth(app, "div", "data-active", "false");
+        Expect.is_true(second != 0, "the second panel starts hidden");
+        u32 tab = KitTests.nth(app, "button", "aria-selected", "false");
+        Dom.dispatch(tab, "click");
+        Expect.is_true(Texts.same(Dom.attr(tab, "aria-selected"), "true"));
+        app.unmount();
+    }
+
+    [Test]
+    unsafe void dialog_opens_and_closes() {
+        Mounted app = App.mount<KitPage>(KitTests.page());
+        u32 backdrop = KitTests.nth(app, "div", "data-open", "false");
+        Expect.is_true(backdrop != 0, "closed at first");
+        Dom.dispatch(Dom.find(app.node.id, "open"), "click");
+        Expect.is_true(Texts.same(Dom.attr(backdrop, "data-open"), "true"));
+        app.unmount();
+    }
+}
