@@ -14,6 +14,7 @@ struct Tween {
     mut bool started;
     mut bool hide;
     mut bool pop;
+    mut f32 slide;
 }
 
 struct AnimationSystem {
@@ -43,6 +44,19 @@ struct Animation {
     // Fades an element in from transparent over 'duration' milliseconds.
     public static unsafe void fade_in(u32 id, u32 duration) {
         Animation.fade(id, (f32)0.0, (f32)1.0, duration);
+    }
+
+    // A page entering: it fades in while sliding 'from' pixels (CSS pixels, either side) to its place with a spring.
+    public static unsafe void enter(u32 id, u32 duration, f32 from) {
+        Animation.fade_with(id, (f32)0.0, (f32)1.0, duration, false, false);
+        AnimationSystem* system = Animation.system();
+        mut u32 i = 0;
+        while (i < system.count) {
+            if (system.items[i].id == id) {
+                system.items[i].slide = from;
+            }
+            i = i + 1;
+        }
     }
 
     // Shows or hides an element the way the system does: it fades in, or fades out and is then hidden (data-gone,
@@ -116,6 +130,7 @@ struct Animation {
         tween.started = false;
         tween.hide = hide;
         tween.pop = pop;
+        tween.slide = (f32)0.0;
         system.count = system.count + 1;
         system.version = system.version + 1;
     }
@@ -197,6 +212,29 @@ struct Animation {
             i = i + 1;
         }
         return (f32)1.0;
+    }
+
+    // How far an entering page still has to slide (device pixels; 0 when it has none).
+    public static unsafe f32 slide_offset(u32 id) {
+        AnimationSystem* system = Animation.system();
+        mut u32 i = 0;
+        while (i < system.count) {
+            Tween* tween = &system.items[i];
+            if (tween.id == id && tween.slide != (f32)0.0) {
+                f32 scale = (f32)Styles.device_scale();
+                if (!tween.started) {
+                    return tween.slide * scale;
+                }
+                u32 elapsed = system.now - tween.start;
+                if (elapsed >= tween.duration) {
+                    return (f32)0.0;
+                }
+                f32 t = (f32)elapsed / (f32)tween.duration;
+                return tween.slide * scale * ((f32)1.0 - Animation.spring(t));
+            }
+            i = i + 1;
+        }
+        return (f32)0.0;
     }
 
     // The clock the host last set with advance (milliseconds).
