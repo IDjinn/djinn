@@ -71,4 +71,73 @@ struct MotionTests {
         Animation.advance(71300);
         Expect.is_true(Texts.same(Dom.attr(panel.id, "data-gone"), "true"), "hidden when the fade ends");
     }
+
+    static unsafe u32 red_at(Node box, u32 x, u32 y) {
+        mut Canvas canvas = Shot.take(box, 40, 40);
+        u32 pixel = canvas.at(x, y);
+        canvas.release();
+        return pixel >> 24;
+    }
+
+    [Test]
+    unsafe void transform_reads_scale_and_translate() {
+        Styles.add(".t1 { transform: scale(0.5) translate(4px, 6px); transition: transform 300ms, color 100ms; } .t2 { transform: translateY(-3px); transition: opacity 90ms; }");
+        Node a = Page.attach(Node.element("div").attr("class", "t1"));
+        Node b = Page.attach(Node.element("div").attr("class", "t2"));
+        Style* one = Styles.of(a.id);
+        Expect.equal(50, (i64)(one.transform_scale * (f32)100.0));
+        Expect.equal(4, (i64)one.translate_x);
+        Expect.equal(6, (i64)one.translate_y);
+        Expect.equal(300, (i64)one.transform_ms);
+        Expect.equal(100, (i64)one.transition_ms);
+        Style* two = Styles.of(b.id);
+        Expect.equal(100, (i64)(two.transform_scale * (f32)100.0));
+        Expect.equal(-3, (i64)two.translate_y);
+        Expect.equal(0, (i64)two.transform_ms);
+        Expect.equal(90, (i64)two.transition_ms);
+    }
+
+    [Test]
+    unsafe void a_scale_springs_to_its_target() {
+        Styles.set_reduced_motion(false);
+        Styles.add(".t3 { width: 20px; height: 20px; background-color: #000000; transition: transform 300ms; } .t3[data-big=\"true\"] { transform: scale(2); }");
+        Node box = Page.attach(Node.element("div").attr("class", "t3"));
+        Animation.advance(80000);
+        Expect.equal(255, (i64)MotionTests.red_at(box, 28, 28), "not scaled yet");
+        Dom.set_attr(box.id, "data-big", "true", 4);
+        Expect.equal(255, (i64)MotionTests.red_at(box, 28, 28), "starts from where it was");
+        Expect.is_true(Animation.advance(80040), "the host keeps drawing");
+        Expect.is_true(MotionTests.red_at(box, 22, 22) < 128, "growing");
+        Expect.equal(255, (i64)MotionTests.red_at(box, 28, 28), "not there yet");
+        Animation.advance(80400);
+        Expect.equal(0, (i64)MotionTests.red_at(box, 28, 28), "arrived");
+        Expect.is_false(Animation.advance(80500), "and idle");
+    }
+
+    [Test]
+    unsafe void reduced_motion_scales_at_once() {
+        Styles.set_reduced_motion(true);
+        Styles.add(".t4 { width: 20px; height: 20px; background-color: #000000; transition: transform 300ms; } .t4[data-big=\"true\"] { transform: scale(2); }");
+        Node box = Page.attach(Node.element("div").attr("class", "t4"));
+        Animation.advance(85000);
+        MotionTests.red_at(box, 28, 28);
+        Dom.set_attr(box.id, "data-big", "true", 4);
+        Expect.equal(0, (i64)MotionTests.red_at(box, 28, 28));
+        Styles.set_reduced_motion(false);
+    }
+
+    [Test]
+    unsafe void presenting_pops_the_element() {
+        Styles.set_reduced_motion(false);
+        Node panel = Page.attach(Node.element("div").attr("data-open", "false"));
+        Expect.equal(100, (i64)(Animation.pop_scale(panel.id) * (f32)100.0), "nothing moving yet");
+        Dom.set_attr(panel.id, "data-open", "true", 4);
+        Expect.equal(96, (i64)(Animation.pop_scale(panel.id) * (f32)100.0), "enters small");
+        Animation.advance(90000);
+        Animation.advance(90060);
+        f32 part = Animation.pop_scale(panel.id);
+        Expect.is_true(part > (f32)0.96 && part < (f32)1.05, "on its way");
+        Animation.advance(90400);
+        Expect.equal(100, (i64)(Animation.pop_scale(panel.id) * (f32)100.0), "settled");
+    }
 }

@@ -22,6 +22,15 @@ struct Transit {
     mut f32 opacity_from;
     mut f32 opacity_to;
     mut u32 color_now;
+    mut bool moving;
+    mut u32 move_start;
+    mut u32 move_duration;
+    mut f32 scale_from;
+    mut f32 scale_to;
+    mut f32 x_from;
+    mut f32 x_to;
+    mut f32 y_from;
+    mut f32 y_to;
 }
 
 // CSS 'transition' for the properties that never change the layout: background-color, border-color, color and
@@ -91,13 +100,36 @@ struct Transitions {
         return Animation.ease((f32)elapsed / (f32)t.duration);
     }
 
+    // Where the transform is between its ends: a spring, so it may overshoot a little before it settles.
+    static unsafe f32 spring_progress(Transit* t, u32 now) {
+        if (!t.moving) {
+            return (f32)1.0;
+        }
+        u32 elapsed = now - t.move_start;
+        if (elapsed >= t.move_duration) {
+            return (f32)1.0;
+        }
+        return Animation.spring((f32)elapsed / (f32)t.move_duration);
+    }
+
+    static unsafe void take_targets(Transit* t, Style* style) {
+        t.bg_to = style.background;
+        t.border_to = style.border_color;
+        t.color_to = style.color;
+        t.opacity_to = style.opacity;
+        t.scale_to = style.transform_scale;
+        t.x_to = style.translate_x;
+        t.y_to = style.translate_y;
+    }
+
     // Writes into 'out' (a copy of 'style') the values to draw right now for element 'id'; false when the style
     // is shown as it is.
     static unsafe bool apply(u32 id, Style* style, Style* out) {
         Transit* t = Transitions.entry(id);
-        if (Styles.prefers_reduced_motion() || style.transition_ms == 0) {
+        if (Styles.prefers_reduced_motion() || (style.transition_ms == 0 && style.transform_ms == 0)) {
             t.seen = false;
             t.running = false;
+            t.moving = false;
             t.color_now = style.color;
             return false;
         }
@@ -105,14 +137,18 @@ struct Transitions {
         if (!t.seen) {
             t.seen = true;
             t.running = false;
+            t.moving = false;
+            Transitions.take_targets(t, style);
+            t.color_now = style.color;
+            return false;
+        }
+        if (style.transition_ms == 0) {
+            t.running = false;
             t.bg_to = style.background;
             t.border_to = style.border_color;
             t.color_to = style.color;
             t.opacity_to = style.opacity;
-            t.color_now = style.color;
-            return false;
-        }
-        if (t.bg_to != style.background || t.border_to != style.border_color || t.color_to != style.color
+        } else if (t.bg_to != style.background || t.border_to != style.border_color || t.color_to != style.color
             || t.opacity_to != style.opacity) {
             f32 before = Transitions.progress(t, now);
             t.bg_from = Transitions.blend(t.bg_from, t.bg_to, before);
@@ -133,19 +169,55 @@ struct Transitions {
             t.duration = style.transition_ms;
             t.running = true;
         }
-        if (!t.running || now - t.start >= t.duration) {
-            t.running = false;
-            t.color_now = style.color;
-            return false;
+        if (style.transform_ms == 0) {
+            t.moving = false;
+            t.scale_to = style.transform_scale;
+            t.x_to = style.translate_x;
+            t.y_to = style.translate_y;
+        } else if (t.scale_to != style.transform_scale || t.x_to != style.translate_x || t.y_to != style.translate_y) {
+            f32 before = Transitions.spring_progress(t, now);
+            t.scale_from = Transitions.mix(t.scale_from, t.scale_to, before);
+            t.x_from = Transitions.mix(t.x_from, t.x_to, before);
+            t.y_from = Transitions.mix(t.y_from, t.y_to, before);
+            if (!t.moving) {
+                t.scale_from = t.scale_to;
+                t.x_from = t.x_to;
+                t.y_from = t.y_to;
+            }
+            t.scale_to = style.transform_scale;
+            t.x_to = style.translate_x;
+            t.y_to = style.translate_y;
+            t.move_start = now;
+            t.move_duration = style.transform_ms;
+            t.moving = true;
         }
-        f32 p = Transitions.progress(t, now);
-        transit_active = transit_active + 1;
-        out.background = Transitions.blend(t.bg_from, t.bg_to, p);
-        out.border_color = Transitions.blend(t.border_from, t.border_to, p);
-        out.color = Transitions.blend(t.color_from, t.color_to, p);
-        out.opacity = Transitions.mix(t.opacity_from, t.opacity_to, p);
-        t.color_now = out.color;
-        return true;
+        mut bool changed = false;
+        if (t.running && now - t.start >= t.duration) {
+            t.running = false;
+        }
+        if (t.moving && now - t.move_start >= t.move_duration) {
+            t.moving = false;
+        }
+        t.color_now = style.color;
+        if (t.running) {
+            f32 p = Transitions.progress(t, now);
+            transit_active = transit_active + 1;
+            out.background = Transitions.blend(t.bg_from, t.bg_to, p);
+            out.border_color = Transitions.blend(t.border_from, t.border_to, p);
+            out.color = Transitions.blend(t.color_from, t.color_to, p);
+            out.opacity = Transitions.mix(t.opacity_from, t.opacity_to, p);
+            t.color_now = out.color;
+            changed = true;
+        }
+        if (t.moving) {
+            f32 p = Transitions.spring_progress(t, now);
+            transit_active = transit_active + 1;
+            out.transform_scale = Transitions.mix(t.scale_from, t.scale_to, p);
+            out.translate_x = Transitions.mix(t.x_from, t.x_to, p);
+            out.translate_y = Transitions.mix(t.y_from, t.y_to, p);
+            changed = true;
+        }
+        return changed;
     }
 
     // The color text inside 'owner' is drawn with this frame.

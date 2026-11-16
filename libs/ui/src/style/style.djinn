@@ -78,6 +78,10 @@ struct Style {
     mut u32 background;
     mut f32 opacity;
     mut u32 transition_ms;
+    mut u32 transform_ms;
+    mut f32 transform_scale;
+    mut f32 translate_x;
+    mut f32 translate_y;
     mut f32 font_size;
     mut u16 font_weight;
     mut u8 font_style;
@@ -156,6 +160,7 @@ struct Style {
         style.color = 255;
         style.background = 0;
         style.opacity = (f32)1.0;
+        style.transform_scale = (f32)1.0;
         style.font_size = (f32)16.0;
         style.font_weight = 400;
         style.font_style = Keyword.NORMAL;
@@ -676,24 +681,99 @@ struct Props {
             return true;
         }
         if (CssNames.equal(name, "transition") || CssNames.equal(name, "transition-duration")) {
-            // only the time matters: the color properties and the opacity move over the first duration found
-            mut u32 time = 0;
+            // The first duration of each comma separated item goes to the property it names: 'transform' has its own
+            // time (it moves with a spring), everything else (colors, opacity, all) shares the other one.
+            mut u32 colors = 0;
+            mut u32 moves = 0;
+            mut bool for_colors = true;
+            mut bool for_moves = true;
             while (!reader.done()) {
                 u32 before = reader.pos;
                 CssToken word = reader.peek();
+                if (word.kind == CssKind.COMMA) {
+                    reader.next();
+                    for_colors = true;
+                    for_moves = true;
+                    continue;
+                }
                 if (word.kind == CssKind.IDENT) {
                     reader.next();
+                    if (CssNames.equal(word.text, "transform")) {
+                        for_colors = false;
+                        for_moves = true;
+                    } else if (CssNames.equal(word.text, "all")) {
+                        for_colors = true;
+                        for_moves = true;
+                    } else if (!(CssNames.equal(word.text, "ease") || CssNames.equal(word.text, "ease-in")
+                        || CssNames.equal(word.text, "ease-out") || CssNames.equal(word.text, "ease-in-out")
+                        || CssNames.equal(word.text, "linear") || CssNames.equal(word.text, "spring")
+                        || CssNames.equal(word.text, "none"))) {
+                        for_colors = true;
+                        for_moves = false;
+                    }
                     continue;
                 }
                 Numeric amount = CssNumbers.read(reader, context);
-                if (amount.unit == Unit.NUMBER && amount.value > 0.0 && time == 0) {
-                    time = (u32)amount.value;
+                if (amount.unit == Unit.NUMBER && amount.value > 0.0) {
+                    if (for_colors && colors == 0) {
+                        colors = (u32)amount.value;
+                    }
+                    if (for_moves && moves == 0) {
+                        moves = (u32)amount.value;
+                    }
                 }
                 if (reader.pos == before) {
                     reader.next();
                 }
             }
-            style.transition_ms = time;
+            style.transition_ms = colors;
+            style.transform_ms = moves;
+            return true;
+        }
+        if (CssNames.equal(name, "transform")) {
+            // scale(n), scale(x, y) (the larger counts), translate(x, y), translateX(x), translateY(y); 'none' resets
+            mut f32 scale = (f32)1.0;
+            mut f32 across = (f32)0.0;
+            mut f32 down = (f32)0.0;
+            while (!reader.done()) {
+                CssToken word = reader.next();
+                if (word.kind != CssKind.FUNCTION) {
+                    continue;
+                }
+                u32 close = reader.closing();
+                mut ValueReader inner = ValueReader.over(reader.tokens, reader.pos, close);
+                reader.pos = close + 1;
+                if (CssNames.equal(word.text, "scale")) {
+                    Numeric amount = CssNumbers.read(&inner, context);
+                    if (amount.unit == Unit.NUMBER) {
+                        scale = (f32)amount.value;
+                    } else if (amount.unit == Unit.PERCENT) {
+                        scale = (f32)(amount.value / 100.0);
+                    }
+                } else if (CssNames.equal(word.text, "translate") || CssNames.equal(word.text, "translatex")) {
+                    Length x = CssNumbers.length(&inner, context);
+                    if (x.unit == Unit.PX) {
+                        across = x.value;
+                    }
+                    if (inner.peek().kind == CssKind.COMMA) {
+                        inner.next();
+                    }
+                    if (!inner.done()) {
+                        Length y = CssNumbers.length(&inner, context);
+                        if (y.unit == Unit.PX) {
+                            down = y.value;
+                        }
+                    }
+                } else if (CssNames.equal(word.text, "translatey")) {
+                    Length y = CssNumbers.length(&inner, context);
+                    if (y.unit == Unit.PX) {
+                        down = y.value;
+                    }
+                }
+            }
+            style.transform_scale = scale;
+            style.translate_x = across;
+            style.translate_y = down;
             return true;
         }
         if (CssNames.equal(name, "opacity")) {

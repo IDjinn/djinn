@@ -270,7 +270,11 @@ close when you choose and on Escape; `List` and `Table` scroll past 16rem (the `
 instead of jumping (`transition: <props> <time>` is supported for those colors and opacity; the time is what counts).
 Dialogs and popups (`data-open`) fade in and fade out, then hide (`data-gone`); a tab panel fades in. All of it
 is skipped under reduced motion. `Animation.fade_out(id, ms)` fades an element out and then sets `data-gone="true"` (the theme hides it with
-display: none); `Transition` (a `signal<bool>` shows it) wraps content with that. Not yet: slide / shared-element transitions (there is no transform support), CSS `transition` / `@keyframes`.
+display: none); `Transition` (a `signal<bool>` shows it) wraps content with that. `transform` is supported (`scale(n)`, `translate(x, y)`, `translateX/Y`, around the element's center) and moves with a damped spring
+(about 5% overshoot, interruptible) over its own time: `transition: transform 360ms` (the theme's `--ui-spring`). It is applied to
+the geometry the element drew, so it never relayouts (and hit testing still uses the untransformed box). The theme uses it for
+the press feedback on buttons (scale .97) and the sliding switch thumb; dialogs and popups also pop in from 96% with a spring.
+Not yet: rotate / skew, `transform-origin`, slide / shared-element page transitions, `@keyframes`.
 
 ## Hotkeys
 

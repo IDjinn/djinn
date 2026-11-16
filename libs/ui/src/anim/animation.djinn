@@ -13,6 +13,7 @@ struct Tween {
     mut u32 duration;
     mut bool started;
     mut bool hide;
+    mut bool pop;
 }
 
 struct AnimationSystem {
@@ -56,9 +57,9 @@ struct Animation {
             return;
         }
         if (on) {
-            Animation.fade_in(id, Animation.ENTER);
+            Animation.fade_with(id, (f32)0.0, (f32)1.0, Animation.ENTER, false, true);
         } else {
-            Animation.fade_out(id, Animation.EXIT);
+            Animation.fade_with(id, (f32)1.0, (f32)0.0, Animation.EXIT, true, true);
         }
     }
 
@@ -75,14 +76,14 @@ struct Animation {
     // Fades an element out over 'duration' milliseconds and then hides it (data-gone="true", which the theme turns
     // into display: none); fade_in shows it again. With reduced motion it is hidden at once.
     public static unsafe void fade_out(u32 id, u32 duration) {
-        Animation.fade_with(id, (f32)1.0, (f32)0.0, duration, true);
+        Animation.fade_with(id, (f32)1.0, (f32)0.0, duration, true, false);
     }
 
     public static unsafe void fade(u32 id, f32 from, f32 to, u32 duration) {
-        Animation.fade_with(id, from, to, duration, false);
+        Animation.fade_with(id, from, to, duration, false, false);
     }
 
-    static unsafe void fade_with(u32 id, f32 from, f32 to, u32 duration, bool hide) {
+    static unsafe void fade_with(u32 id, f32 from, f32 to, u32 duration, bool hide, bool pop) {
         Animation.cancel(id);
         if (!hide && Dom.has_attr(id, "data-gone")) {
             Dom.set_attr(id, "data-gone", "false", 5);
@@ -114,6 +115,7 @@ struct Animation {
         tween.start = 0;
         tween.started = false;
         tween.hide = hide;
+        tween.pop = pop;
         system.count = system.count + 1;
         system.version = system.version + 1;
     }
@@ -137,6 +139,14 @@ struct Animation {
         return (f32)1.0 - left * left * left;
     }
 
+    // A damped spring from 0 to 1 over t in 0..1: it leaves quickly, overshoots by about five percent and settles.
+    static f32 spring(f32 t) {
+        if (t >= (f32)1.0) {
+            return (f32)1.0;
+        }
+        return (f32)1.0 - Math.exp((f32)-5.5 * t) * Math.cos((f32)7.0 * t);
+    }
+
     // The opacity factor an animation gives an element right now (1 when it has none).
     public static unsafe f32 opacity(u32 id) {
         AnimationSystem* system = Animation.system();
@@ -153,6 +163,36 @@ struct Animation {
                 }
                 f32 t = Animation.ease((f32)elapsed / (f32)tween.duration);
                 return tween.from + (tween.to - tween.from) * t;
+            }
+            i = i + 1;
+        }
+        return (f32)1.0;
+    }
+
+    // The scale an entrance or exit gives an element that was shown or hidden with 'present': it grows from 96% with a
+    // spring when it appears and shrinks back to 96% when it leaves (1 when it has none).
+    public static unsafe f32 pop_scale(u32 id) {
+        AnimationSystem* system = Animation.system();
+        mut u32 i = 0;
+        while (i < system.count) {
+            Tween* tween = &system.items[i];
+            if (tween.id == id && tween.pop) {
+                bool entering = tween.to > tween.from;
+                if (!tween.started) {
+                    if (entering) {
+                        return (f32)0.96;
+                    }
+                    return (f32)1.0;
+                }
+                u32 elapsed = system.now - tween.start;
+                if (elapsed >= tween.duration) {
+                    return (f32)1.0;
+                }
+                f32 t = (f32)elapsed / (f32)tween.duration;
+                if (entering) {
+                    return (f32)0.96 + (f32)0.04 * Animation.spring(t);
+                }
+                return (f32)1.0 - (f32)0.04 * Animation.ease(t);
             }
             i = i + 1;
         }
