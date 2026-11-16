@@ -94,5 +94,5 @@ if "$nm_tool" "$out/inl_app$exe.obj" | grep -q "inlib"; then
     fail "small library functions must be inlined into the consumer"
 fi
 "$compiler" "$out/inl_lib.djinn" --library -o "$out/inlib_o0.djlib" "${flags[@]}" > /dev/null 2>&1
-"$compiler" --inspect-lib "$out/inlib_o0.djlib" | grep -q "bitcode:" && fail "an unoptimized library must not carry bitcode"
+"$compiler" --inspect-lib "$out/inlib_o0.djlib" | grep -q "bitcode: *[1-9]" || fail "an unoptimized library must carry bitcode too"
 echo "PASS llvm_opt"
