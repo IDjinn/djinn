@@ -1,0 +1,172 @@
+namespace ui;
+
+import testing;
+import std::types;
+import std::libc;
+
+extern "C" {
+    void* GetCurrentProcess();
+    i32 K32GetProcessMemoryInfo(void* process, void* counters, u32 size);
+}
+
+unsafe static mut u32 memory_signal = 0;
+unsafe static mut u32 motion_signal = 0;
+
+struct MemoryPage {
+    i32 unused;
+
+    static str cls(i32 phase) {
+        if (phase % 2 == 0) {
+            return "ma";
+        }
+        return "ma mb";
+    }
+
+    public unsafe Node render() {
+        signal<i32> phase = state(0);
+        memory_signal = phase.id;
+        return html!{
+            <section class="card stack">
+                <div class={MemoryPage.cls(phase.get())}></div>
+                <p>Phase {phase}</p>
+                <button>Go</button><input value="x" /><a href="#x">link</a>
+            </section>
+        };
+    }
+}
+
+// The Motion demo of the native example: transitions on several elements whose classes change on every step.
+struct MotionPage {
+    i32 unused;
+
+    static str orb(i32 phase) {
+        if (phase % 2 == 0) {
+            return "mo";
+        }
+        return "mo mob";
+    }
+
+    static str bar(i32 phase, i32 index) {
+        if (phase % 5 == index) {
+            return "mbar on";
+        }
+        return "mbar";
+    }
+
+    public unsafe Node render() {
+        signal<i32> phase = state(0);
+        motion_signal = phase.id;
+        return html!{
+            <section class="card stack">
+                <div class="track"><div class={MotionPage.orb(phase.get())}></div></div>
+                <div class="cluster">
+                    <div class={MotionPage.bar(phase.get(), 0)}></div><div class={MotionPage.bar(phase.get(), 1)}></div><div class={MotionPage.bar(phase.get(), 2)}></div><div class={MotionPage.bar(phase.get(), 3)}></div><div class={MotionPage.bar(phase.get(), 4)}></div>
+                </div>
+            </section>
+        };
+    }
+}
+
+// Styling and drawing again and again must not grow the process: a restyle once leaked the token array of every
+// declaration it applied (about 90 KB per frame of an animated page).
+[Platform(windows)]
+struct MemoryTests {
+    static unsafe u64 working_set() {
+        u64* info = (u64*)__djinn_alloc_zeroed((size_long)72);
+        info[0] = 72;
+        K32GetProcessMemoryInfo(GetCurrentProcess(), (void*)info, 72);
+        u64 bytes = info[2];
+        __djinn_free((void*)info);
+        return bytes;
+    }
+
+    [Test]
+    unsafe void restyling_and_painting_do_not_leak() {
+        Styles.set_reduced_motion(true);
+        Styles.add(".ma { width: 20px; height: 20px; background-color: color-mix(in oklab, #3b82f6 50%, white); } .mb { background-color: #ec4899; }");
+        Mounted app = App.mount<MemoryPage>(MemoryPage { .unused = 0 });
+        DisplayList list = DisplayList.create();
+        Painter.frame(&list, (f32)400.0, (f32)300.0);
+        u64 before = MemoryTests.working_set();
+        signal<i32> phase = { .id = memory_signal };
+        mut u32 i = 0;
+        while (i < 1500) {
+            phase.set(phase.peek() + 1);
+            Painter.frame(&list, (f32)400.0, (f32)300.0);
+            i = i + 1;
+        }
+        u64 grown = MemoryTests.working_set() - before;
+        Expect.is_true(grown < (u64)(16 * 1024 * 1024), "1500 restyled frames grew the process by less than 16 MB");
+        app.unmount();
+        Styles.set_reduced_motion(false);
+    }
+
+    [Test]
+    unsafe void stepping_a_transition_demo_does_not_leak() {
+        Styles.set_reduced_motion(true);
+        Styles.add(".mo { width: 36px; height: 36px; background-color: #3b82f6; transform: translateX(0px) scale(1); transition: transform 500ms, background-color 600ms; } .mo.mob { background-color: #ec4899; transform: translateX(240px) scale(1.4); } .mbar { width: 16px; height: 48px; opacity: 0.3; transform: scale(1); transition: transform 400ms, opacity 400ms; } .mbar.on { opacity: 1; transform: scale(1.3); }");
+        Mounted app = App.mount<MotionPage>(MotionPage { .unused = 0 });
+        DisplayList list = DisplayList.create();
+        mut u32 now = 100000;
+        Animation.advance(now);
+        Painter.frame(&list, (f32)400.0, (f32)300.0);
+        mut u32 warm = 0;
+        signal<i32> phase = { .id = motion_signal };
+        while (warm < 200) {
+            phase.set(phase.peek() + 1);
+            now = now + 16;
+            Animation.advance(now);
+            Painter.frame(&list, (f32)400.0, (f32)300.0);
+            warm = warm + 1;
+        }
+        u64 before = MemoryTests.working_set();
+        mut u32 i = 0;
+        while (i < 1000) {
+            phase.set(phase.peek() + 1);
+            
+            now = now + 16;
+            Animation.advance(now);
+            Painter.frame(&list, (f32)400.0, (f32)300.0);
+            i = i + 1;
+        }
+        u64 grown = MemoryTests.working_set() - before;
+        Expect.is_true(grown < (u64)(512 * 1024), "1000 steps of the transition demo grew the process by less than 512 KB");
+        app.unmount();
+        Styles.set_reduced_motion(false);
+    }
+
+    // A light/dark button pressed again and again: the whole page is restyled each time, and the memory in use after
+    // the first few switches must stay where it is.
+    [Test]
+    unsafe void switching_the_theme_ten_thousand_times_does_not_grow() {
+        Styles.set_reduced_motion(false);
+        Styles.add(Theme.css());
+        Styles.add(".ma { width: 20px; height: 20px; background-color: var(--surface); } .mb { background-color: var(--accent); }");
+        Mounted app = App.mount<MemoryPage>(MemoryPage { .unused = 0 });
+        DisplayList list = DisplayList.create();
+        Painter.frame(&list, (f32)400.0, (f32)300.0);
+        mut u32 now = 100000;
+        Animation.advance(now);
+        mut u32 warm = 0;
+        while (warm < 50) {
+            Theme.toggle();
+            now = now + 16;
+            Animation.advance(now);
+            Painter.frame(&list, (f32)400.0, (f32)300.0);
+            warm = warm + 1;
+        }
+        u64 before = MemoryTests.working_set();
+        mut u32 i = 0;
+        while (i < 10000) {
+            Theme.toggle();
+            now = now + 16;
+            Animation.advance(now);
+            Painter.frame(&list, (f32)400.0, (f32)300.0);
+            i = i + 1;
+        }
+        u64 grown = MemoryTests.working_set() - before;
+        Expect.is_true(grown < (u64)(65536), "10000 theme switches grew the process by less than 64 KB");
+        app.unmount();
+        Styles.set_reduced_motion(false);
+    }
+}

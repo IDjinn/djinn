@@ -3,6 +3,7 @@ import std::libc;
 
 namespace ui;
 
+
 unsafe static mut ptr style_engine = null;
 
 // What media queries and relative units are evaluated against; the host updates it (window size, OS theme).
@@ -17,6 +18,9 @@ struct StyleEnvironment {
     mut bool more_contrast;
     mut bool forced_colors;
     mut f64 text_scale;
+    // Physical pixels per CSS pixel (the screen scale: 1.5 at 150%). px and pt lengths and the root font size
+    // are multiplied by it; media queries still see the width in CSS pixels.
+    mut f64 device_scale;
 }
 
 // One matched declaration and the keys that order it in the cascade.
@@ -29,7 +33,18 @@ struct CascadeEntry {
     mut u32 declaration;
 }
 
+// A computed style kept by the hash of everything that produced it (see Styles.signature).
+struct StyleSlot {
+    mut u64 key;
+    mut Style style;
+}
+
 struct StyleEngine {
+    mut u64* keys;
+    mut ptr slots;
+    mut u32 slots_epoch;
+    mut u64 last_key;
+    mut u32 shared;
     mut Growable<StyleSheet*> sheets;
     mut StyleEnvironment environment;
     mut Style* styles;
@@ -53,6 +68,7 @@ struct Styles {
             engine.environment.viewport_height = 800.0;
             engine.environment.root_font_size = 16.0;
             engine.environment.text_scale = 1.0;
+            engine.environment.device_scale = 1.0;
             engine.environment.hover = true;
             style_engine = (ptr)engine;
             Styles.install(CssParser.parse(BrowserStyles.css(), StyleOrigin.BROWSER));
@@ -114,6 +130,19 @@ struct Styles {
         }
     }
 
+    // The screen scale (physical pixels per CSS pixel); the host sets it from the OS before the first frame.
+    public static unsafe void set_device_scale(f64 scale) {
+        StyleEnvironment* environment = Styles.environment();
+        if (scale > 0.0 && environment.device_scale != scale) {
+            environment.device_scale = scale;
+            Dom.touch();
+        }
+    }
+
+    public static unsafe f64 device_scale() {
+        return Styles.environment().device_scale;
+    }
+
     // The primary pointer is a finger or another imprecise device ('pointer: coarse'); it then also cannot hover.
     public static unsafe void set_coarse_pointer(bool coarse) {
         StyleEnvironment* environment = Styles.environment();
@@ -154,10 +183,10 @@ struct Styles {
         if (kind == MediaKind.ALWAYS) { result = true; }
         else if (kind == MediaKind.DARK) { result = environment.prefers_dark; }
         else if (kind == MediaKind.LIGHT) { result = !environment.prefers_dark; }
-        else if (kind == MediaKind.MIN_WIDTH) { result = environment.viewport_width >= Styles.width_of(feature, environment); }
-        else if (kind == MediaKind.MAX_WIDTH) { result = environment.viewport_width <= Styles.width_of(feature, environment); }
-        else if (kind == MediaKind.ABOVE_WIDTH) { result = environment.viewport_width > Styles.width_of(feature, environment); }
-        else if (kind == MediaKind.BELOW_WIDTH) { result = environment.viewport_width < Styles.width_of(feature, environment); }
+        else if (kind == MediaKind.MIN_WIDTH) { result = (environment.viewport_width / environment.device_scale) >= Styles.width_of(feature, environment); }
+        else if (kind == MediaKind.MAX_WIDTH) { result = (environment.viewport_width / environment.device_scale) <= Styles.width_of(feature, environment); }
+        else if (kind == MediaKind.ABOVE_WIDTH) { result = (environment.viewport_width / environment.device_scale) > Styles.width_of(feature, environment); }
+        else if (kind == MediaKind.BELOW_WIDTH) { result = (environment.viewport_width / environment.device_scale) < Styles.width_of(feature, environment); }
         else if (kind == MediaKind.COARSE) { result = environment.coarse_pointer; }
         else if (kind == MediaKind.FINE) { result = !environment.coarse_pointer; }
         else if (kind == MediaKind.MORE_CONTRAST) { result = environment.more_contrast; }
@@ -232,11 +261,170 @@ struct Styles {
         return b.declaration > a.declaration;
     }
 
+    static unsafe u64 name_key(u8 kind, i8* data, u32 length, bool lower) {
+        mut u64w hash = (u64w)14695981039346656037;
+        u64w prime = (u64w)1099511628211;
+        hash = (hash ^ (u64w)kind) * prime;
+        for (mut u32 i = 0; i < length; i = i + 1) {
+            mut i8 c = data[i];
+            if (lower && c >= 65 && c <= 90) {
+                c = c + 32;
+            }
+            hash = (hash ^ (u64w)(u8)c) * prime;
+        }
+        return (u64)hash;
+    }
+
+    // The keys a selector can be found by: from its last compound, its id, else a class, else its tag; a compound
+    // made only of ':is()' or ':where()' lists is found by the keys of every selector inside. False when it has none
+    // (it can match anything).
+    static unsafe bool selector_keys(StyleSheet* sheet, Selector selector, Growable<u64>* out) {
+        u32 end = selector.first + selector.count;
+        mut u32 start = end;
+        while (start > selector.first && sheet.selectors.parts.get(start - 1).kind != PartKind.COMBINATOR) {
+            start = start - 1;
+        }
+        mut u64 found = 0;
+        mut u32 rank = 0;
+        mut u32 list = 0;
+        mut bool has_list = false;
+        for (mut u32 i = start; i < end; i = i + 1) {
+            SelectorPart part = sheet.selectors.parts.get(i);
+            if (part.kind == PartKind.ID && rank < 3) {
+                found = Styles.name_key(2, part.name.data, (u32)part.name.length, false);
+                rank = 3;
+            } else if (part.kind == PartKind.CLASS && rank < 2) {
+                found = Styles.name_key(3, part.name.data, (u32)part.name.length, false);
+                rank = 2;
+            } else if (part.kind == PartKind.TYPE && rank < 1) {
+                found = Styles.name_key(1, part.name.data, (u32)part.name.length, true);
+                rank = 1;
+            } else if (part.kind == PartKind.IS && !has_list) {
+                list = i;
+                has_list = true;
+            }
+        }
+        if (rank > 0) {
+            out.push(found);
+            return true;
+        }
+        if (!has_list) {
+            return false;
+        }
+        SelectorPart group = sheet.selectors.parts.get(list);
+        if (group.list_count == 0) {
+            return false;
+        }
+        for (mut u32 k = 0; k < group.list_count; k = k + 1) {
+            if (!Styles.selector_keys(sheet, sheet.selectors.selectors.get(group.list_first + k), out)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // Orders the index by key, so the rules for an element's id, classes and tag are found by search.
+    static unsafe void build_index(StyleSheet* sheet) {
+        sheet.indexed = true;
+        mut Growable<u64> keys = Growable<u64>();
+        for (mut u32 r = 0; r < sheet.rules.count; r = r + 1) {
+            CssRule rule = sheet.rules.get(r);
+            keys.count = 0;
+            mut bool keyed = rule.selector_count > 0;
+            for (mut u32 k = 0; k < rule.selector_count && keyed; k = k + 1) {
+                if (!Styles.selector_keys(sheet, sheet.selectors.selectors.get(rule.selector_first + k), &keys)) {
+                    keyed = false;
+                }
+            }
+            if (!keyed) {
+                sheet.always.push(r);
+                continue;
+            }
+            for (mut u32 k = 0; k < keys.count; k = k + 1) {
+                RuleKey item = { .key = keys.get(k), .rule = r };
+                sheet.index.push(item);
+            }
+        }
+        keys.release();
+        for (mut u32 i = 1; i < sheet.index.count; i = i + 1) {
+            RuleKey item = sheet.index.get(i);
+            mut u32 j = i;
+            while (j > 0 && sheet.index.get(j - 1).key > item.key) {
+                sheet.index.data[j] = sheet.index.data[j - 1];
+                j = j - 1;
+            }
+            sheet.index.data[j] = item;
+        }
+    }
+
+    static unsafe void candidates(StyleSheet* sheet, u64 key, Growable<u32>* out) {
+        mut u32 low = 0;
+        mut u32 high = sheet.index.count;
+        while (low < high) {
+            u32 middle = (low + high) / 2;
+            if (sheet.index.get(middle).key < key) {
+                low = middle + 1;
+            } else {
+                high = middle;
+            }
+        }
+        while (low < sheet.index.count && sheet.index.get(low).key == key) {
+            out.push(sheet.index.get(low).rule);
+            low = low + 1;
+        }
+    }
+
     static unsafe void collect(u32 id, Growable<CascadeEntry>* entries) {
         StyleEngine* engine = (StyleEngine*)style_engine;
+        mut Growable<u32> rules = Growable<u32>();
         for (mut u32 s = 0; s < engine.sheets.count; s = s + 1) {
             StyleSheet* sheet = engine.sheets.get(s);
-            for (mut u32 r = 0; r < sheet.rules.count; r = r + 1) {
+            if (!sheet.indexed) {
+                Styles.build_index(sheet);
+            }
+            // only the rules that name this element's tag, id or a class of it (or none of them) can match
+            rules.count = 0;
+            for (mut u32 i = 0; i < sheet.always.count; i = i + 1) {
+                rules.push(sheet.always.get(i));
+            }
+            str tag = Dom.tag(id);
+            Styles.candidates(sheet, Styles.name_key(1, tag.data, (u32)tag.length, true), &rules);
+            if (Dom.has_attr(id, "id")) {
+                str name = Dom.attr(id, "id");
+                Styles.candidates(sheet, Styles.name_key(2, name.data, (u32)name.length, false), &rules);
+            }
+            if (Dom.has_attr(id, "class")) {
+                str classes = Dom.attr(id, "class");
+                u32 length = (u32)classes.length;
+                mut u32 at = 0;
+                while (at < length) {
+                    while (at < length && (classes.data[at] == 32 || classes.data[at] == 9 || classes.data[at] == 10)) {
+                        at = at + 1;
+                    }
+                    u32 begin = at;
+                    while (at < length && classes.data[at] != 32 && classes.data[at] != 9 && classes.data[at] != 10) {
+                        at = at + 1;
+                    }
+                    if (at > begin) {
+                        Styles.candidates(sheet, Styles.name_key(3, classes.data + begin, at - begin, false), &rules);
+                    }
+                }
+            }
+            // in source order, each rule once
+            for (mut u32 i = 1; i < rules.count; i = i + 1) {
+                u32 item = rules.get(i);
+                mut u32 j = i;
+                while (j > 0 && rules.get(j - 1) > item) {
+                    rules.data[j] = rules.data[j - 1];
+                    j = j - 1;
+                }
+                rules.data[j] = item;
+            }
+            for (mut u32 n = 0; n < rules.count; n = n + 1) {
+                if (n > 0 && rules.get(n) == rules.get(n - 1)) {
+                    continue;
+                }
+                u32 r = rules.get(n);
                 CssRule rule = sheet.rules.get(r);
                 mut u32 specificity = 0;
                 mut bool matched = false;
@@ -260,6 +448,7 @@ struct Styles {
                 }
             }
         }
+        rules.release();
         for (mut u32 i = 1; i < entries.count; i = i + 1) {
             CascadeEntry item = entries.get(i);
             mut u32 j = i;
@@ -370,6 +559,9 @@ struct Styles {
                 return invalid;
             }
             out.append(resolved);
+            if (resolved.data != replacement.data) {
+                Blocks.give((void*)resolved.data, (u64)resolved.length + 1);
+            }
             i = j + 1;
         }
         return out.view();
@@ -378,17 +570,26 @@ struct Styles {
     // Applies a declaration to 'style'; an invalid value behaves like 'unset'.
     static unsafe void apply(Style* style, CssDeclaration declaration, Style* parent, ValueContext* context) {
         str value = Styles.substitute(declaration.value, style, 0);
-        Style initial = Style.initial();
         if (value.data == (i8*)0) {
             if (Props.is_inherited(declaration.property)) {
                 Props.copy(style, declaration.property, parent);
             } else {
+                Style initial = Style.initial();
                 Props.copy(style, declaration.property, &initial);
             }
             return;
         }
         mut CssTokens tokens = CssLexer.tokenize(value);
-        mut ValueReader reader = ValueReader.over(&tokens, 0, tokens.count);
+        Styles.apply_tokens(style, declaration, parent, context, &tokens, value);
+        tokens.release();
+        if (value.data != declaration.value.data) {
+            // var() produced a new text (a pool block)
+            Blocks.give((void*)value.data, (u64)value.length + 1);
+        }
+    }
+
+    static unsafe void apply_tokens(Style* style, CssDeclaration declaration, Style* parent, ValueContext* context, CssTokens* tokens, str value) {
+        mut ValueReader reader = ValueReader.over(tokens, 0, tokens.count);
         reader.text = value.data;
         CssToken first = reader.peek();
         if (first.kind == CssKind.IDENT && reader.tokens.count > 0) {
@@ -398,6 +599,7 @@ struct Styles {
                 return;
             }
             if (only && CssNames.equal(first.text, "initial")) {
+                Style initial = Style.initial();
                 Props.copy(style, declaration.property, &initial);
                 return;
             }
@@ -405,6 +607,7 @@ struct Styles {
                 if (Props.is_inherited(declaration.property)) {
                     Props.copy(style, declaration.property, parent);
                 } else {
+                    Style initial = Style.initial();
                     Props.copy(style, declaration.property, &initial);
                 }
                 return;
@@ -414,6 +617,7 @@ struct Styles {
             if (Props.is_inherited(declaration.property)) {
                 Props.copy(style, declaration.property, parent);
             } else {
+                Style initial = Style.initial();
                 Props.copy(style, declaration.property, &initial);
             }
         }
@@ -427,6 +631,7 @@ struct Styles {
         engine.styles = (Style*)Dom.resize((void*)engine.styles, engine.capacity, wanted, sizeof(Style));
         engine.epochs = (u32*)Dom.resize((void*)engine.epochs, engine.capacity, wanted, 4);
         engine.stamps = (u32*)Dom.resize((void*)engine.stamps, engine.capacity, wanted, 4);
+        engine.keys = (u64*)Dom.resize((void*)engine.keys, engine.capacity, wanted, 8);
         engine.capacity = wanted;
     }
 
@@ -461,7 +666,8 @@ struct Styles {
             return &engine.styles[element];
         }
         mut Style parent = Style.initial();
-        parent.font_size = (f32)(16.0 * engine.environment.text_scale);
+        mut u64 parent_key = 1;
+        parent.font_size = (f32)(16.0 * engine.environment.text_scale * engine.environment.device_scale);
         mut u32 above = SelectorMatcher.parent_element(element);
         if (above == 0 && element != Dom.document()) {
             above = Dom.document();
@@ -469,12 +675,14 @@ struct Styles {
         if (above != 0) {
             parent = *Styles.of(above);
             Styles.reserve(engine);
+            parent_key = engine.keys[above];
         }
         if (engine.epochs[element] != 0) {
             Styles.release(&engine.styles[element]);
         }
-        Style computed = Styles.compute(element, &parent);
+        Style computed = Styles.compute(element, &parent, parent_key);
         engine.styles[element] = computed;
+        engine.keys[element] = engine.last_key;
         engine.epochs[element] = epoch;
         engine.stamps[element] = Dom.stamp();
         engine.computed = engine.computed + 1;
@@ -486,7 +694,7 @@ struct Styles {
         mut CssVar* item = style.vars;
         for (mut u32 i = 0; i < style.own_vars && item != (CssVar*)0; i = i + 1) {
             CssVar* next = item.next;
-            __djinn_free((void*)item);
+            Blocks.give((void*)item, (u64)sizeof(CssVar));
             item = next;
         }
         style.own_vars = 0;
@@ -496,17 +704,115 @@ struct Styles {
         return CssNames.equal(property, "font-size") || CssNames.equal(property, "color-scheme");
     }
 
-    static unsafe Style compute(u32 id, Style* parent) {
+    // The style attribute: "name: value; name: value" declarations that win over the sheets. Custom properties are
+    // not read from it. The values are slices of the attribute text, so nothing is allocated.
+    static unsafe void inline(u32 id, Style* style, Style* parent, ValueContext* context) {
+        if (!Dom.has_attr(id, "style")) {
+            return;
+        }
+        str text = Dom.attr(id, "style");
+        u32 end = (u32)text.length;
+        mut u32 at = 0;
+        while (at < end) {
+            mut u32 stop = at;
+            while (stop < end && text.data[stop] != 59) {
+                stop = stop + 1;
+            }
+            mut u32 colon = at;
+            while (colon < stop && text.data[colon] != 58) {
+                colon = colon + 1;
+            }
+            if (colon < stop) {
+                mut u32 name_start = at;
+                mut u32 name_end = colon;
+                mut u32 value_start = colon + 1;
+                mut u32 value_end = stop;
+                while (name_start < name_end && text.data[name_start] <= 32) {
+                    name_start = name_start + 1;
+                }
+                while (name_end > name_start && text.data[name_end - 1] <= 32) {
+                    name_end = name_end - 1;
+                }
+                while (value_start < value_end && text.data[value_start] <= 32) {
+                    value_start = value_start + 1;
+                }
+                while (value_end > value_start && text.data[value_end - 1] <= 32) {
+                    value_end = value_end - 1;
+                }
+                str property = { .data = &text.data[name_start], .length = (size)(name_end - name_start) };
+                str value = { .data = &text.data[value_start], .length = (size)(value_end - value_start) };
+                if (property.length > 0 && value.length > 0 && !Styles.is_custom(property)) {
+                    CssDeclaration declaration = { .property = property, .value = value, .important = false };
+                    Styles.apply(style, declaration, parent, context);
+                }
+            }
+            at = stop + 1;
+        }
+    }
+
+    static u64 mix(u64 hash, u64 word) {
+        u64w mixed = (u64w)(hash ^ word);
+        u64w prime = (u64w)1099511628211;
+        return (u64)(mixed * prime);
+    }
+
+    // Everything a computed style depends on, as one hash: the declarations that matched (in cascade order), the
+    // style attribute and the style of the parent (by its own hash). Two elements with the same hash get the same
+    // style, so the hundreds of rows of a list are styled once. 'plain' is false when the element declares custom
+    // properties (their entries are allocated per element, so its style is not shared).
+    static unsafe u64 signature(u32 id, Growable<CascadeEntry>* entries, u64 parent_key, bool* plain) {
+        mut u64 hash = Styles.mix((u64)14695981039346656037, parent_key);
+        for (mut u32 i = 0; i < entries.count; i = i + 1) {
+            CascadeEntry entry = entries.get(i);
+            hash = Styles.mix(hash, (u64)entry.sheet * (u64)4294967296 + (u64)entry.declaration);
+            if (Styles.is_custom(Styles.declaration_of(entry).property)) {
+                plain[0] = false;
+            }
+        }
+        if (Dom.has_attr(id, "style")) {
+            str text = Dom.attr(id, "style");
+            hash = Styles.mix(hash, (u64)text.length + (u64)7919);
+            for (mut u32 i = 0; i < (u32)text.length; i = i + 1) {
+                hash = Styles.mix(hash, (u64)text.data[i]);
+            }
+        }
+        return hash;
+    }
+
+    static unsafe Style compute(u32 id, Style* parent, u64 parent_key) {
         StyleEngine* engine = (StyleEngine*)style_engine;
         mut Style style = Style.inheriting(parent);
         mut Growable<CascadeEntry> entries = Growable<CascadeEntry>();
         Styles.collect(id, &entries);
+        mut bool plain = id != Dom.document();
+        u64 key = Styles.signature(id, &entries, parent_key, &plain);
+        engine.last_key = key;
+        mut StyleSlot* slot = (StyleSlot*)0;
+        if (plain) {
+            u32 epoch = Dom.epoch() + 1;
+            if (engine.slots == null) {
+                engine.slots = (ptr)__djinn_alloc_zeroed((size_long)(1024 * sizeof(StyleSlot)));
+                engine.slots_epoch = epoch;
+            } else if (engine.slots_epoch != epoch) {
+                memset((void*)engine.slots, 0, (size_long)(1024 * sizeof(StyleSlot)));
+                engine.slots_epoch = epoch;
+            }
+            slot = &((StyleSlot*)engine.slots)[(u32)(key % 1024)];
+            if (slot.key == key) {
+                style = slot.style;
+                style.vars = parent.vars;
+                style.own_vars = 0;
+                engine.shared = engine.shared + 1;
+                entries.release();
+                return style;
+            }
+        }
         for (mut u32 i = 0; i < entries.count; i = i + 1) {
             CssDeclaration declaration = Styles.declaration_of(entries.get(i));
             if (!Styles.is_custom(declaration.property)) {
                 continue;
             }
-            CssVar* item = (CssVar*)__djinn_alloc((size_long)sizeof(CssVar));
+            CssVar* item = (CssVar*)Blocks.take((u64)sizeof(CssVar));
             item.name = declaration.property;
             item.value = declaration.value;
             item.next = style.vars;
@@ -514,7 +820,8 @@ struct Styles {
             style.own_vars = style.own_vars + 1;
         }
         mut ValueContext context = { .font_size = (f64)parent.font_size, .root_font_size = engine.environment.root_font_size,
-            .viewport_width = engine.environment.viewport_width, .viewport_height = engine.environment.viewport_height, .dark = parent.dark_scheme };
+            .viewport_width = engine.environment.viewport_width, .viewport_height = engine.environment.viewport_height, .dark = parent.dark_scheme,
+            .device_scale = engine.environment.device_scale };
         if (id == Dom.document()) {
             context.root_font_size = (f64)parent.font_size;
         }
@@ -539,8 +846,11 @@ struct Styles {
             }
             Styles.apply(&style, declaration, parent, &context);
         }
-        if (entries.data != (CascadeEntry*)0) {
-            __djinn_free((void*)entries.data);
+        Styles.inline(id, &style, parent, &context);
+        entries.release();
+        if (slot != (StyleSlot*)0 && style.own_vars == 0) {
+            slot.key = key;
+            slot.style = style;
         }
         return style;
     }

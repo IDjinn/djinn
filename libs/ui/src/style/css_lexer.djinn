@@ -52,11 +52,29 @@ struct CssTokens {
             if (grown < 64) {
                 grown = 64;
             }
-            this.data = (CssToken*)__djinn_realloc((void*)this.data, (size_long)((u64)grown * sizeof(CssToken)));
-            this.capacity = grown;
+            u32 k = Blocks.class_of((u64)grown * sizeof(CssToken));
+            CssToken* fresh = (CssToken*)Blocks.take((u64)grown * sizeof(CssToken));
+            if (this.count > 0) {
+                memcpy((void*)fresh, (void*)this.data, (size_long)((u64)this.count * sizeof(CssToken)));
+            }
+            if (this.data != (CssToken*)0) {
+                Blocks.give((void*)this.data, (u64)this.capacity * sizeof(CssToken));
+            }
+            this.data = fresh;
+            this.capacity = (u32)(Blocks.size_of(k) / sizeof(CssToken));
         }
         this.data[this.count] = token;
         this.count = this.count + 1;
+    }
+
+    // Hands the memory back to the block pool; the list is empty again.
+    public unsafe void release() {
+        if (this.data != (CssToken*)0) {
+            Blocks.give((void*)this.data, (u64)this.capacity * sizeof(CssToken));
+        }
+        this.data = (CssToken*)0;
+        this.count = 0;
+        this.capacity = 0;
     }
 
     public unsafe CssToken get(u32 index) {
@@ -132,6 +150,16 @@ struct CssLexer {
 
     // Reads a name with escapes ('\:' or '\31 ' as in '.md\:flex', '.\31 0'); 'cursor' is left after it.
     static unsafe str name(i8* data, u32 length, u32* cursor) {
+        // Without an escape the name is a slice of the source: nothing to allocate (or to leak) per token.
+        mut u32 run = cursor[0];
+        while (run < length && CssLexer.is_name(data[run])) {
+            run = run + 1;
+        }
+        if (run >= length || data[run] != 92) {
+            str plain = { .data = data + cursor[0], .length = (size)(run - cursor[0]) };
+            cursor[0] = run;
+            return plain;
+        }
         mut TextBuffer out = TextBuffer.create();
         mut u32 i = cursor[0];
         while (i < length) {
@@ -289,6 +317,19 @@ struct CssLexer {
             }
             if (c == 34 || c == 39) {
                 i = i + 1;
+                mut u32 plain_end = i;
+                while (plain_end < length && data[plain_end] != c && data[plain_end] != 10 && data[plain_end] != 92) {
+                    plain_end = plain_end + 1;
+                }
+                if (plain_end >= length || data[plain_end] != 92) {
+                    str plain = { .data = data + i, .length = (size)(plain_end - i) };
+                    i = plain_end;
+                    if (i < length && data[i] == c) {
+                        i = i + 1;
+                    }
+                    tokens.push(CssLexer.make(CssKind.STRING, plain, 0.0, start, i));
+                    continue;
+                }
                 mut TextBuffer text = TextBuffer.create();
                 while (i < length && data[i] != c && data[i] != 10) {
                     if (data[i] == 92 && i + 1 < length) {

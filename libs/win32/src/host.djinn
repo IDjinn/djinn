@@ -18,6 +18,7 @@ struct HostState {
     mut u32 gpu_width;
     mut u32 gpu_height;
     mut bool dirty;
+    mut u32 tint;
 }
 
 unsafe static mut u64 host_state_address = 0;
@@ -60,10 +61,33 @@ struct WinHost {
     const u32 WM_CHAR = 258;
     const u32 WM_MOUSEMOVE = 512;
     const u32 WM_MOUSEWHEEL = 522;
+    const u32 WM_MOUSEHWHEEL = 526;
+    const u32 WM_XBUTTONUP = 524;
     const u32 WM_LBUTTONDOWN = 513;
     const u32 WM_LBUTTONUP = 514;
     const u32 WS_OVERLAPPEDWINDOW = 13565952;
     const u32 WS_VISIBLE = 268435456;
+
+    // The screen scale (1.5 at 150%): the system DPI over 96, or DJINN_UI_SCALE in percent (to test a scale).
+    public static unsafe f64 scale() {
+        i8* forced = getenv("DJINN_UI_SCALE");
+        if (forced != (i8*)0) {
+            mut i32 percent = 0;
+            mut u32 at = 0;
+            while (forced[at] >= (i8)48 && forced[at] <= (i8)57) {
+                percent = percent * 10 + ((i32)forced[at] - 48);
+                at = at + 1;
+            }
+            if (percent >= 50 && percent <= 400) {
+                return (f64)percent / 100.0;
+            }
+        }
+        u32 dpi = GetDpiForSystem();
+        if (dpi < 96) {
+            return 1.0;
+        }
+        return (f64)dpi / 96.0;
+    }
 
     static unsafe void* open(str title, u32 width, u32 height) {
         void* module = GetModuleHandleA((i8*)0);
@@ -142,10 +166,72 @@ struct WinHost {
         }
     }
 
+    // How far a wheel movement scrolls, following the system settings: the lines per notch the user chose in the mouse
+    // settings (3 by default; "one screen at a time" scrolls a page), 16 pixels a line, scaled by the display. 'raw' is
+    // the signed wheel delta (120 per notch, less on precision wheels and touchpads).
+    static unsafe f32 wheel_amount(i32 raw, bool sideways) {
+        mut u32 action = 104;
+        mut u32 fallback = 3;
+        if (sideways) {
+            action = 108;
+        }
+        u32* setting = (u32*)__djinn_alloc_zeroed((size_long)8);
+        setting[0] = fallback;
+        SystemParametersInfoA(action, 0, (void*)setting, 0);
+        u32 lines = setting[0];
+        __djinn_free((void*)setting);
+        f32 notches = (f32)raw / (f32)120.0;
+        if (lines == 4294967295) {
+            mut f32 page = Scroll.page_size() * (f32)0.9;
+            if (page < (f32)100.0) {
+                page = (f32)100.0;
+            }
+            return notches * page;
+        }
+        return notches * (f32)lines * (f32)16.0 * (f32)Styles.device_scale();
+    }
+
     // Microseconds from the performance counter (it ticks at 10 MHz on current Windows).
     static unsafe u64 ticks(HostState* s) {
         QueryPerformanceCounter((void*)((u8*)s.rect + 16));
         return Raw.get_u64(s.rect, 16) / 10;
+    }
+
+    // The title bar takes the page's own colors, so the window reads as one surface and follows the theme: the caption
+    // is the page background, its text and the dark mode flag follow how light that background is. Windows before 11
+    // keep the default bar (they ignore the colors, and 10 only honors the dark flag).
+    static unsafe void tint_title(HostState* s) {
+        u32 page = Painter.canvas_color(Dom.document());
+        if ((page & 255) == 0) {
+            return;
+        }
+        u32 key = page | 0xFF000000;
+        if (key == s.tint) {
+            return;
+        }
+        s.tint = key;
+        u32 red = page & 255;
+        u32 green = (page >> 8) & 255;
+        u32 blue = (page >> 16) & 255;
+        bool dark = (red * 299 + green * 587 + blue * 114) / 1000 < 128;
+        void* value = Raw.make(4);
+        mut u32 flag = 0;
+        if (dark) {
+            flag = 1;
+        }
+        Raw.put_u32(value, 0, flag);
+        DwmSetWindowAttribute(s.window, 20, value, 4);
+        // COLORREF is 0x00BBGGRR, the same byte order as the canvas colors
+        Raw.put_u32(value, 0, page & 0x00FFFFFF);
+        DwmSetWindowAttribute(s.window, 35, value, 4);
+        DwmSetWindowAttribute(s.window, 34, value, 4);
+        mut u32 ink = 0x00202020;
+        if (dark) {
+            ink = 0x00F2F2F2;
+        }
+        Raw.put_u32(value, 0, ink);
+        DwmSetWindowAttribute(s.window, 36, value, 4);
+        __djinn_free(value);
     }
 
     // Draws a frame when something changed: the size, the DOM or an explicit request (dirty).
@@ -169,6 +255,7 @@ struct WinHost {
         if (s.dirty || Dom.stamp() + Animation.version() + Scroll.version() != s.stamp || Dom.epoch() != s.epoch) {
             mut u64 t0 = WinHost.ticks(s);
             Painter.frame(&s.list, (f32)w, (f32)h);
+            WinHost.tint_title(s);
             u64 t1 = WinHost.ticks(s);
             if (s.gpu != (VulkanRenderer*)0) {
                 // a size change makes the first attempt rebuild the swapchain; drawing again at once keeps the window
@@ -205,8 +292,14 @@ struct WinHost {
         SetProcessDPIAware();
         GdiFonts.install();
         WinClipboard.install();
+        Scroll.set_smooth(true);
         Mounted mounted = App.mount<T>(app);
-        void* window = WinHost.open(title, width, height);
+        // the window size is given in CSS pixels
+        f64 device = WinHost.scale();
+        Styles.set_device_scale(device);
+        u32 scaled_width = (u32)((f64)width * device);
+        u32 scaled_height = (u32)((f64)height * device);
+        void* window = WinHost.open(title, scaled_width, scaled_height);
         if (window == (void*)0) {
             return 1;
         }
@@ -219,7 +312,7 @@ struct WinHost {
         // Vulkan is the default; the software rasterizer is used only when no Vulkan device is available (or when
         // DJINN_UI_CPU is set, to compare or debug).
         if (getenv("DJINN_UI_CPU") == (i8*)0) {
-            state.gpu = VulkanRenderer.create(GetModuleHandleA((i8*)0), window, width, height);
+            state.gpu = VulkanRenderer.create(GetModuleHandleA((i8*)0), window, scaled_width, scaled_height);
             if (state.gpu == (VulkanRenderer*)0) {
                 printf("win32: Vulkan is not available, drawing with the software rasterizer
 ");
@@ -249,6 +342,13 @@ struct WinHost {
                     running = false;
                 } else if (kind == WinHost.WM_LBUTTONDOWN) {
                     pressed = Hit.at(x, y);
+                    if (Hit.bar() != 0) {
+                        Bars.begin(Hit.bar(), Hit.bar_vertical(), x, y);
+                        pressed = 0;
+                    } else if (Hit.track() != 0) {
+                        Bars.page(Hit.track(), Hit.bar_vertical(), Hit.track_before());
+                        pressed = 0;
+                    }
                     u32 control = Focus.owner(pressed);
                     editing = 0;
                     if (control != 0) {
@@ -263,6 +363,7 @@ struct WinHost {
                     Pointer.press(pressed);
                     WinHost.announce(pressed, "mousedown");
                 } else if (kind == WinHost.WM_LBUTTONUP) {
+                    Bars.end();
                     u32 target = Hit.at(x, y);
                     Pointer.release();
                     WinHost.announce(target, "mouseup");
@@ -277,6 +378,12 @@ struct WinHost {
                     if (editing != 0) {
                         Edit.drag(editing, x);
                     }
+                    if (Bars.dragging() && (key & 1) == 0) {
+                        Bars.end();
+                    }
+                    if (Bars.dragging()) {
+                        Bars.drag(x, y);
+                    }
                     u32 over = Hit.at(x, y);
                     Pointer.move(over);
                     WinHost.announce(over, "mousemove");
@@ -286,7 +393,25 @@ struct WinHost {
                     if (notches >= 32768) {
                         notches = notches - 65536;
                     }
-                    Scroll.wheel(pointer_x, pointer_y, (f32)0.0 - (f32)notches * (f32)0.4);
+                    if ((WinHost.modifiers() & Mod.SHIFT) != 0) {
+                        Scroll.wheel_x(pointer_x, pointer_y, (f32)0.0 - WinHost.wheel_amount(notches, true));
+                    } else {
+                        Scroll.wheel(pointer_x, pointer_y, (f32)0.0 - WinHost.wheel_amount(notches, false));
+                    }
+                } else if (kind == WinHost.WM_MOUSEHWHEEL) {
+                    mut i32 side = (i32)((key >> 16) & 0xFFFF);
+                    if (side >= 32768) {
+                        side = side - 65536;
+                    }
+                    Scroll.wheel_x(pointer_x, pointer_y, WinHost.wheel_amount(side, true));
+                } else if (kind == WinHost.WM_XBUTTONUP) {
+                    // the extra mouse buttons go back (1) and forward (2) through the pages, like a browser
+                    u32 button = (u32)((key >> 16) & 0xFFFF);
+                    if (button == 1) {
+                        Router.back();
+                    } else if (button == 2) {
+                        Router.forward();
+                    }
                 } else if (kind == WinHost.WM_KEYDOWN) {
                     Input.press((i32)(key & 0xFFFF), WinHost.modifiers());
                 } else if (kind == WinHost.WM_CHAR) {
@@ -341,20 +466,25 @@ struct WinHost {
     public static unsafe i32 shot<T>(T app, u32 width, u32 height, i8* path, f32 click_x, f32 click_y) {
         GdiFonts.install();
         WinClipboard.install();
+        f64 device = WinHost.scale();
+        Styles.set_device_scale(device);
+        // the image is in physical pixels: the size given is in CSS pixels
+        u32 pixel_width = (u32)((f64)width * device);
+        u32 pixel_height = (u32)((f64)height * device);
         Mounted mounted = App.mount<T>(app);
         mut DisplayList list = DisplayList.create();
-        Painter.frame(&list, (f32)width, (f32)height);
+        Painter.frame(&list, (f32)pixel_width, (f32)pixel_height);
         // a still image shows every animation finished: the first advance starts them, the second ends them
         WinHost.settle();
-        Painter.frame(&list, (f32)width, (f32)height);
+        Painter.frame(&list, (f32)pixel_width, (f32)pixel_height);
         if (click_x >= (f32)0.0) {
             u32 target = Hit.at(click_x, click_y);
             WinHost.announce(target, "click");
-            Painter.frame(&list, (f32)width, (f32)height);
+            Painter.frame(&list, (f32)pixel_width, (f32)pixel_height);
             WinHost.settle();
-            Painter.frame(&list, (f32)width, (f32)height);
+            Painter.frame(&list, (f32)pixel_width, (f32)pixel_height);
         }
-        mut Canvas canvas = Canvas.create(width, height);
+        mut Canvas canvas = Canvas.create(pixel_width, pixel_height);
         canvas.clear(0xFFFFFFFF);
         SoftRaster.draw(&canvas, &list);
         bool saved = canvas.save_ppm(path);

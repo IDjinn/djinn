@@ -1,0 +1,172 @@
+import std::types;
+import std::libc;
+
+namespace ui;
+
+unsafe static mut ptr kf_sets = null;
+unsafe static mut u32 kf_set_count = 0;
+unsafe static mut u32 kf_set_capacity = 0;
+unsafe static mut ptr kf_stops = null;
+unsafe static mut u32 kf_stop_count = 0;
+unsafe static mut u32 kf_stop_capacity = 0;
+
+// One keyframe: where it sits (0..1 of the animation) and the values it sets. 'mask' says which: 1 opacity,
+// 2 scale, 4 move across, 8 move down, 16 turn. Moves are in CSS pixels (they are scaled when drawn).
+struct KfStop {
+    mut f32 at;
+    mut u32 mask;
+    mut f32 opacity;
+    mut f32 scale;
+    mut f32 x;
+    mut f32 y;
+    mut f32 turn;
+}
+
+struct KfSet {
+    mut str name;
+    mut u32 first;
+    mut u32 count;
+}
+
+// CSS '@keyframes' and the 'animation' property, for the properties that never change the layout: opacity and
+// transform (scale, translate, rotate). The sheets register their keyframes while they are parsed; the painter asks
+// for the values to draw, so a running animation never reruns the layout. A property a keyframe leaves out keeps the
+// element's own value at that end. Skipped under prefers-reduced-motion.
+struct Keyframes {
+    // Starts the keyframes called 'name'; the stops that follow belong to it. A later set of the same name wins.
+    public static unsafe void begin(str name) {
+        if (kf_set_count == kf_set_capacity) {
+            u32 wanted = kf_set_capacity * 2 + 8;
+            kf_sets = (ptr)Dom.resize((void*)kf_sets, kf_set_capacity, wanted, (u64)sizeof(KfSet));
+            kf_set_capacity = wanted;
+        }
+        KfSet* set = &((KfSet*)kf_sets)[kf_set_count];
+        set.name = name;
+        set.first = kf_stop_count;
+        set.count = 0;
+        kf_set_count = kf_set_count + 1;
+    }
+
+    // Adds a stop to the set 'begin' started last.
+    public static unsafe void stop(KfStop* made) {
+        if (kf_set_count == 0) {
+            return;
+        }
+        if (kf_stop_count == kf_stop_capacity) {
+            u32 wanted = kf_stop_capacity * 2 + 16;
+            kf_stops = (ptr)Dom.resize((void*)kf_stops, kf_stop_capacity, wanted, (u64)sizeof(KfStop));
+            kf_stop_capacity = wanted;
+        }
+        KfStop* stops = (KfStop*)kf_stops;
+        KfSet* set = &((KfSet*)kf_sets)[kf_set_count - 1];
+        // keep the stops of the set ordered by position
+        mut u32 at = kf_stop_count;
+        while (at > set.first && stops[at - 1].at > made.at) {
+            stops[at] = stops[at - 1];
+            at = at - 1;
+        }
+        stops[at] = *made;
+        kf_stop_count = kf_stop_count + 1;
+        set.count = set.count + 1;
+    }
+
+    // The newest set called 'name', or -1.
+    public static unsafe i32 find(str name) {
+        mut u32 i = kf_set_count;
+        while (i > 0) {
+            i = i - 1;
+            KfSet* set = &((KfSet*)kf_sets)[i];
+            if (Texts.same(set.name, name)) {
+                return (i32)i;
+            }
+        }
+        return -1;
+    }
+
+    static f32 smooth(f32 t) {
+        return t * t * ((f32)3.0 - (f32)2.0 * t);
+    }
+
+    static unsafe f32 value(KfStop* stop, u32 which) {
+        if (which == 0) { return stop.opacity; }
+        if (which == 1) { return stop.scale; }
+        if (which == 2) { return stop.x * (f32)Styles.device_scale(); }
+        if (which == 3) { return stop.y * (f32)Styles.device_scale(); }
+        return stop.turn;
+    }
+
+    // One property at position 'p' (0..1): between the stops that set it, with the element's own value 'base' at
+    // either end when no stop sits there.
+    static unsafe f32 channel(KfSet* set, u32 which, f32 base, f32 p, bool linear) {
+        KfStop* stops = &((KfStop*)kf_stops)[set.first];
+        u32 bit = 1 << which;
+        mut f32 before_at = (f32)0.0;
+        mut f32 before_value = base;
+        mut f32 after_at = (f32)1.0;
+        mut f32 after_value = base;
+        mut u32 i = 0;
+        while (i < set.count) {
+            KfStop* stop = &stops[i];
+            if ((stop.mask & bit) != 0) {
+                if (stop.at <= p) {
+                    before_at = stop.at;
+                    before_value = Keyframes.value(stop, which);
+                } else {
+                    after_at = stop.at;
+                    after_value = Keyframes.value(stop, which);
+                    break;
+                }
+            }
+            i = i + 1;
+        }
+        f32 span = after_at - before_at;
+        if (span <= (f32)0.0) {
+            return before_value;
+        }
+        mut f32 t = (p - before_at) / span;
+        if (!linear) {
+            t = Keyframes.smooth(t);
+        }
+        return before_value + (after_value - before_value) * t;
+    }
+
+    // Writes into 'out' (the style to draw) what the running animation of element 'id' gives; false when it has none
+    // or it is over (and does not hold its end).
+    public static unsafe bool apply(u32 id, Style* out) {
+        if (out.anim_ms == 0 || out.anim_name.length == 0 || Styles.prefers_reduced_motion()) {
+            return false;
+        }
+        i32 index = Keyframes.find(out.anim_name);
+        if (index < 0) {
+            return false;
+        }
+        Transit* t = Transitions.entry(id);
+        u32 now = Animation.clock();
+        if (t.kf_name != out.anim_name.data) {
+            t.kf_name = out.anim_name.data;
+            t.kf_start = now;
+        }
+        f32 cycles = (f32)(now - t.kf_start) / (f32)out.anim_ms;
+        mut u32 round = (u32)cycles;
+        mut f32 p = cycles - (f32)round;
+        if (out.anim_count != 0 && cycles >= (f32)out.anim_count) {
+            if (!out.anim_forwards) {
+                return false;
+            }
+            round = out.anim_count - 1;
+            p = (f32)1.0;
+        } else {
+            Transitions.busy();
+        }
+        if (out.anim_alternate && (round % 2) == 1) {
+            p = (f32)1.0 - p;
+        }
+        KfSet* set = &((KfSet*)kf_sets)[(u32)index];
+        out.opacity = Keyframes.channel(set, 0, out.opacity, p, out.anim_linear);
+        out.transform_scale = Keyframes.channel(set, 1, out.transform_scale, p, out.anim_linear);
+        out.translate_x = Keyframes.channel(set, 2, out.translate_x, p, out.anim_linear);
+        out.translate_y = Keyframes.channel(set, 3, out.translate_y, p, out.anim_linear);
+        out.transform_rotate = Keyframes.channel(set, 4, out.transform_rotate, p, out.anim_linear);
+        return true;
+    }
+}

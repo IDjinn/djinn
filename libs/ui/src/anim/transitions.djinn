@@ -1,0 +1,250 @@
+import std::types;
+import std::libc;
+
+namespace ui;
+
+unsafe static mut ptr transit_items = null;
+unsafe static mut u32 transit_capacity = 0;
+unsafe static mut u32 transit_active = 0;
+
+// What one element shows while its colors and opacity move to a new style value.
+struct Transit {
+    mut bool seen;
+    mut bool running;
+    mut u32 start;
+    mut u32 duration;
+    mut u32 bg_from;
+    mut u32 bg_to;
+    mut u32 border_from;
+    mut u32 border_to;
+    mut u32 color_from;
+    mut u32 color_to;
+    mut f32 opacity_from;
+    mut f32 opacity_to;
+    mut u32 color_now;
+    mut bool moving;
+    mut u32 move_start;
+    mut u32 move_duration;
+    mut f32 scale_from;
+    mut f32 scale_to;
+    mut f32 x_from;
+    mut f32 x_to;
+    mut f32 y_from;
+    mut f32 y_to;
+    mut f32 turn_from;
+    mut f32 turn_to;
+    mut i8* kf_name;
+    mut u32 kf_start;
+}
+
+// CSS 'transition' for the properties that never change the layout: background-color, border-color, color and
+// opacity. An element whose style says 'transition: ... <time>' no longer jumps to the new value when :hover,
+// :active, :focus, an attribute or a class changes it; it moves there over that time (cubic ease-out) and, when the
+// target changes again midway, starts from wherever it is, so it is always interruptible. The painter asks for the
+// values to draw, so the layout never reruns. Skipped under prefers-reduced-motion.
+struct Transitions {
+    static unsafe Transit* entry(u32 id) {
+        if (id >= transit_capacity) {
+            u32 wanted = id + 64;
+            transit_items = (ptr)Dom.resize((void*)transit_items, transit_capacity, wanted, (u64)sizeof(Transit));
+            transit_capacity = wanted;
+        }
+        return &((Transit*)transit_items)[id];
+    }
+
+    // Whether any element was still moving in the last frame: the host keeps drawing while it is.
+    public static unsafe bool active() {
+        return transit_active > 0;
+    }
+
+    // Something moves this frame (a running animation): the host keeps drawing.
+    static unsafe void busy() {
+        transit_active = transit_active + 1;
+    }
+
+    // Called at the start of every frame.
+    static unsafe void begin() {
+        transit_active = 0;
+    }
+
+    static f32 mix(f32 from, f32 to, f32 t) {
+        return from + (to - from) * t;
+    }
+
+    static u32 channel(u32 from, u32 to, u32 shift, f32 t) {
+        f32 a = (f32)((from >> shift) & 255);
+        f32 b = (f32)((to >> shift) & 255);
+        return (u32)(a + (b - a) * t + (f32)0.5) & 255;
+    }
+
+    // Colors are 0xRRGGBBAA. A fully transparent end takes the other end's hue, so a fade to or from 'transparent'
+    // does not pass through black.
+    static u32 blend(u32 from, u32 to, f32 t) {
+        if (from == to) {
+            return to;
+        }
+        mut u32 start = from;
+        mut u32 end = to;
+        if ((from & 255) == 0) {
+            start = to & 0xFFFFFF00;
+        }
+        if ((to & 255) == 0) {
+            end = from & 0xFFFFFF00;
+        }
+        u32 red = Transitions.channel(start, end, 24, t);
+        u32 green = Transitions.channel(start, end, 16, t);
+        u32 blue = Transitions.channel(start, end, 8, t);
+        u32 alpha = Transitions.channel(from, to, 0, t);
+        return (red << 24) | (green << 16) | (blue << 8) | alpha;
+    }
+
+    static unsafe f32 progress(Transit* t, u32 now) {
+        if (!t.running) {
+            return (f32)1.0;
+        }
+        u32 elapsed = now - t.start;
+        if (elapsed >= t.duration) {
+            return (f32)1.0;
+        }
+        return Animation.ease((f32)elapsed / (f32)t.duration);
+    }
+
+    // Where the transform is between its ends: a spring, so it may overshoot a little before it settles.
+    static unsafe f32 spring_progress(Transit* t, u32 now) {
+        if (!t.moving) {
+            return (f32)1.0;
+        }
+        u32 elapsed = now - t.move_start;
+        if (elapsed >= t.move_duration) {
+            return (f32)1.0;
+        }
+        return Animation.spring((f32)elapsed / (f32)t.move_duration);
+    }
+
+    static unsafe void take_targets(Transit* t, Style* style) {
+        t.bg_to = style.background;
+        t.border_to = style.border_color;
+        t.color_to = style.color;
+        t.opacity_to = style.opacity;
+        t.scale_to = style.transform_scale;
+        t.x_to = style.translate_x;
+        t.y_to = style.translate_y;
+        t.turn_to = style.transform_rotate;
+    }
+
+    // Writes into 'out' (a copy of 'style') the values to draw right now for element 'id'; false when the style
+    // is shown as it is.
+    static unsafe bool apply(u32 id, Style* style, Style* out) {
+        Transit* t = Transitions.entry(id);
+        if (Styles.prefers_reduced_motion() || (style.transition_ms == 0 && style.transform_ms == 0)) {
+            t.seen = false;
+            t.running = false;
+            t.moving = false;
+            t.color_now = style.color;
+            return false;
+        }
+        u32 now = Animation.clock();
+        if (!t.seen) {
+            t.seen = true;
+            t.running = false;
+            t.moving = false;
+            Transitions.take_targets(t, style);
+            t.color_now = style.color;
+            return false;
+        }
+        if (style.transition_ms == 0) {
+            t.running = false;
+            t.bg_to = style.background;
+            t.border_to = style.border_color;
+            t.color_to = style.color;
+            t.opacity_to = style.opacity;
+        } else if (t.bg_to != style.background || t.border_to != style.border_color || t.color_to != style.color
+            || t.opacity_to != style.opacity) {
+            f32 before = Transitions.progress(t, now);
+            t.bg_from = Transitions.blend(t.bg_from, t.bg_to, before);
+            t.border_from = Transitions.blend(t.border_from, t.border_to, before);
+            t.color_from = Transitions.blend(t.color_from, t.color_to, before);
+            t.opacity_from = Transitions.mix(t.opacity_from, t.opacity_to, before);
+            if (!t.running) {
+                t.bg_from = t.bg_to;
+                t.border_from = t.border_to;
+                t.color_from = t.color_to;
+                t.opacity_from = t.opacity_to;
+            }
+            t.bg_to = style.background;
+            t.border_to = style.border_color;
+            t.color_to = style.color;
+            t.opacity_to = style.opacity;
+            t.start = now;
+            t.duration = style.transition_ms;
+            t.running = true;
+        }
+        if (style.transform_ms == 0) {
+            t.moving = false;
+            t.scale_to = style.transform_scale;
+            t.x_to = style.translate_x;
+            t.y_to = style.translate_y;
+            t.turn_to = style.transform_rotate;
+        } else if (t.scale_to != style.transform_scale || t.x_to != style.translate_x || t.y_to != style.translate_y
+            || t.turn_to != style.transform_rotate) {
+            f32 before = Transitions.spring_progress(t, now);
+            t.scale_from = Transitions.mix(t.scale_from, t.scale_to, before);
+            t.x_from = Transitions.mix(t.x_from, t.x_to, before);
+            t.y_from = Transitions.mix(t.y_from, t.y_to, before);
+            t.turn_from = Transitions.mix(t.turn_from, t.turn_to, before);
+            if (!t.moving) {
+                t.scale_from = t.scale_to;
+                t.x_from = t.x_to;
+                t.y_from = t.y_to;
+                t.turn_from = t.turn_to;
+            }
+            t.scale_to = style.transform_scale;
+            t.x_to = style.translate_x;
+            t.y_to = style.translate_y;
+            t.turn_to = style.transform_rotate;
+            t.move_start = now;
+            t.move_duration = style.transform_ms;
+            t.moving = true;
+        }
+        mut bool changed = false;
+        if (t.running && now - t.start >= t.duration) {
+            t.running = false;
+        }
+        if (t.moving && now - t.move_start >= t.move_duration) {
+            t.moving = false;
+        }
+        t.color_now = style.color;
+        if (t.running) {
+            f32 p = Transitions.progress(t, now);
+            transit_active = transit_active + 1;
+            out.background = Transitions.blend(t.bg_from, t.bg_to, p);
+            out.border_color = Transitions.blend(t.border_from, t.border_to, p);
+            out.color = Transitions.blend(t.color_from, t.color_to, p);
+            out.opacity = Transitions.mix(t.opacity_from, t.opacity_to, p);
+            t.color_now = out.color;
+            changed = true;
+        }
+        if (t.moving) {
+            f32 p = Transitions.spring_progress(t, now);
+            transit_active = transit_active + 1;
+            out.transform_scale = Transitions.mix(t.scale_from, t.scale_to, p);
+            out.translate_x = Transitions.mix(t.x_from, t.x_to, p);
+            out.translate_y = Transitions.mix(t.y_from, t.y_to, p);
+            out.transform_rotate = Transitions.mix(t.turn_from, t.turn_to, p);
+            changed = true;
+        }
+        return changed;
+    }
+
+    // The color text inside 'owner' is drawn with this frame.
+    static unsafe u32 shown_color(u32 owner, u32 target) {
+        if (owner >= transit_capacity) {
+            return target;
+        }
+        Transit* t = &((Transit*)transit_items)[owner];
+        if (!t.seen) {
+            return target;
+        }
+        return t.color_now;
+    }
+}

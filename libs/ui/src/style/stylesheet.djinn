@@ -77,7 +77,16 @@ struct StyleOrigin {
     const u8 AUTHOR = 2;
 }
 
+// One entry of a sheet's rule index: a rule whose selector needs this id, class or tag on the element it styles.
+struct RuleKey {
+    mut u64 key;
+    mut u32 rule;
+}
+
 struct StyleSheet {
+    mut bool indexed;
+    mut Growable<RuleKey> index;
+    mut Growable<u32> always;
     mut u8 origin;
     mut u32 order;
     mut str source;
@@ -455,6 +464,10 @@ struct CssParser {
             CssParser.contents(sheet, stop + 1, close, rank, media, parent);
             return close + 1;
         }
+        if (CssNames.equal(name, "keyframes") && has_block) {
+            CssParser.keyframes(sheet, at + 1, stop, close);
+            return close + 1;
+        }
         if (CssNames.equal(name, "property") && has_block) {
             CssParser.property(sheet, at + 1, stop, close);
             return close + 1;
@@ -569,6 +582,77 @@ struct CssParser {
         } else {
             CssParser.block(sheet, start, end, parent, layer, media);
         }
+    }
+
+    // '@keyframes name { from { ... } 50% { ... } to { ... } }': each block gives its stops the opacity and the
+    // transform it declares.
+    static unsafe void keyframes(StyleSheet* sheet, u32 start, u32 brace, u32 close) {
+        mut u32 pos = start;
+        while (pos < brace && CssParser.token(sheet, pos).kind == CssKind.SPACE) {
+            pos = pos + 1;
+        }
+        CssToken name = CssParser.token(sheet, pos);
+        if (name.kind != CssKind.IDENT && name.kind != CssKind.STRING) {
+            return;
+        }
+        Keyframes.begin(name.text);
+        pos = brace + 1;
+        while (pos < close) {
+            u32 open = CssParser.stop(sheet, pos, close);
+            if (open >= close || CssParser.token(sheet, open).kind != CssKind.OPEN_CURLY) {
+                return;
+            }
+            u32 block_end = CssParser.matching(sheet, open, close);
+            mut KfStop made = { .at = (f32)0.0, .mask = 0, .opacity = (f32)1.0, .scale = (f32)1.0, .x = (f32)0.0,
+                .y = (f32)0.0, .turn = (f32)0.0 };
+            CssParser.keyframe_values(sheet, open + 1, block_end, &made);
+            mut u32 item = pos;
+            while (item < open) {
+                CssToken selector = CssParser.token(sheet, item);
+                if (selector.kind == CssKind.PERCENT) {
+                    made.at = (f32)(selector.number / 100.0);
+                    Keyframes.stop(&made);
+                } else if (selector.kind == CssKind.IDENT && CssNames.equal(selector.text, "from")) {
+                    made.at = (f32)0.0;
+                    Keyframes.stop(&made);
+                } else if (selector.kind == CssKind.IDENT && CssNames.equal(selector.text, "to")) {
+                    made.at = (f32)1.0;
+                    Keyframes.stop(&made);
+                }
+                item = item + 1;
+            }
+            pos = block_end + 1;
+        }
+    }
+
+    static unsafe void keyframe_values(StyleSheet* sheet, u32 start, u32 end, KfStop* made) {
+        u32 before = sheet.declarations.count;
+        mut u32 item = start;
+        while (item < end) {
+            u32 stop = CssParser.stop(sheet, item, end);
+            CssParser.declaration(sheet, item, stop);
+            item = stop + 1;
+        }
+        mut Style parent = Style.initial();
+        mut Style read = Style.initial();
+        mut ValueContext context = { .font_size = 16.0, .root_font_size = 16.0, .viewport_width = 1280.0,
+            .viewport_height = 800.0, .dark = false, .device_scale = 1.0 };
+        for (mut u32 i = before; i < sheet.declarations.count; i = i + 1) {
+            CssDeclaration found = sheet.declarations.get(i);
+            if (CssNames.equal(found.property, "opacity")) {
+                Styles.apply(&read, found, &parent, &context);
+                made.opacity = read.opacity;
+                made.mask = made.mask | 1;
+            } else if (CssNames.equal(found.property, "transform")) {
+                Styles.apply(&read, found, &parent, &context);
+                made.scale = read.transform_scale;
+                made.x = read.translate_x;
+                made.y = read.translate_y;
+                made.turn = read.transform_rotate;
+                made.mask = made.mask | 30;
+            }
+        }
+        sheet.declarations.count = before;
     }
 
     static unsafe void property(StyleSheet* sheet, u32 start, u32 brace, u32 close) {

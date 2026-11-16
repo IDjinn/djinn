@@ -5,6 +5,35 @@ import std::types;
 
 unsafe static mut i32 kit_clicks = 0;
 
+struct FadePage {
+    i32 unused;
+
+    public unsafe Node render() {
+        signal<bool> note = state(true);
+        return html!{
+            <main>
+                <button id="toggle" on_click={() => note.set(!note.get())}>toggle</button>
+                <Transition show={note}><p id="note">hi</p></Transition>
+            </main>
+        };
+    }
+}
+
+struct BoundPage {
+    i32 unused;
+
+    public unsafe Node render() {
+        signal<str> name = state("Ada");
+        return html!{
+            <main>
+                <Field label="Name" hint="" placeholder="" kind="text" value={name}/>
+                <output id="echo">{name.get()}</output>
+                <button id="reset" on_click={() => name.set("Zed")}>reset</button>
+            </main>
+        };
+    }
+}
+
 struct KitPage {
     i32 unused;
 
@@ -33,6 +62,14 @@ struct KitPage {
 }
 
 struct KitTests {
+    static unsafe u32 wrapper(u32 id) {
+        mut u32 up = Dom.parent(id);
+        while (up != 0 && Dom.kind(up) != DomKind.ELEMENT) {
+            up = Dom.parent(up);
+        }
+        return up;
+    }
+
     static KitPage page() {
         KitPage value = { .unused = 0 };
         return value;
@@ -97,6 +134,68 @@ struct KitTests {
         Expect.is_true(backdrop != 0, "closed at first");
         Dom.dispatch(Dom.find(app.node.id, "open"), "click");
         Expect.is_true(Texts.same(Dom.attr(backdrop, "data-open"), "true"));
+        app.unmount();
+    }
+
+    [Test]
+    unsafe void escape_closes_the_dialog() {
+        Styles.set_reduced_motion(true);
+        Mounted app = App.mount<KitPage>(KitTests.page());
+        u32 backdrop = KitTests.nth(app, "div", "data-open", "false");
+        Dom.dispatch(Dom.find(app.node.id, "open"), "click");
+        Expect.is_true(Texts.same(Dom.attr(backdrop, "data-open"), "true"));
+        Input.press(Key.ESCAPE, 0);
+        Expect.is_true(Texts.same(Dom.attr(backdrop, "data-open"), "false"), "Escape closes it");
+        app.unmount();
+        Styles.set_reduced_motion(false);
+    }
+
+    [Test]
+    unsafe void transition_fades_out_then_hides() {
+        Styles.set_reduced_motion(false);
+        Mounted app = App.mount<FadePage>(FadePage { .unused = 0 });
+        u32 box = KitTests.wrapper(Dom.find(app.node.id, "note"));
+        Expect.is_true(Texts.same(Dom.attr(box, "data-gone"), "false"), "shown at first");
+        Dom.dispatch(Dom.find(app.node.id, "toggle"), "click");
+        Expect.is_true(Animation.active());
+        Expect.is_true(Texts.same(Dom.attr(box, "data-gone"), "false"), "still there while fading");
+        Animation.advance(1000);
+        Animation.advance(1300);
+        Expect.is_false(Animation.active());
+        Expect.is_true(Texts.same(Dom.attr(box, "data-gone"), "true"), "hidden after the fade");
+        Dom.dispatch(Dom.find(app.node.id, "toggle"), "click");
+        Expect.is_true(Texts.same(Dom.attr(box, "data-gone"), "false"), "shown again");
+        Animation.advance(2000);
+        Animation.advance(2300);
+        app.unmount();
+    }
+
+    [Test]
+    unsafe void transition_with_reduced_motion_hides_at_once() {
+        Styles.set_reduced_motion(true);
+        Mounted app = App.mount<FadePage>(FadePage { .unused = 0 });
+        u32 box = KitTests.wrapper(Dom.find(app.node.id, "note"));
+        Dom.dispatch(Dom.find(app.node.id, "toggle"), "click");
+        Expect.is_true(Texts.same(Dom.attr(box, "data-gone"), "true"));
+        Expect.is_false(Animation.active());
+        app.unmount();
+        Styles.set_reduced_motion(false);
+    }
+
+    [Test]
+    unsafe void a_field_binds_its_signal_both_ways() {
+        Mounted app = App.mount<BoundPage>(BoundPage { .unused = 0 });
+        u32 input = Field.first_tag(app.node.id, "input");
+        Expect.is_true(input != 0);
+        Expect.is_true(Texts.same(Dom.attr(input, "value"), "Ada"), "starts with the signal");
+        Dom.set_attr(input, "value", "Bob", 3);
+        Dom.dispatch(input, "input");
+        Expect.is_true(Texts.same(Dom.text_of(Dom.first_child(Dom.find(app.node.id, "echo"))), "Bob"), "typing sets the signal");
+        Dom.set_attr(input, "value", "Bobby", 5);
+        Dom.dispatch(input, "input");
+        Expect.is_true(Texts.same(Dom.text_of(Dom.first_child(Dom.find(app.node.id, "echo"))), "Bobby"));
+        Dom.dispatch(Dom.find(app.node.id, "reset"), "click");
+        Expect.is_true(Texts.same(Dom.attr(input, "value"), "Zed"), "the signal rewrites the field");
         app.unmount();
     }
 }

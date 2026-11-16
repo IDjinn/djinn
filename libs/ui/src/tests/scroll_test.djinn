@@ -3,6 +3,8 @@ namespace ui;
 import testing;
 import std::types;
 
+unsafe static mut i32 scroll_ticks = 0;
+
 struct ScrollTests {
     static unsafe Node tall() {
         Styles.add(".sc1 { width: 20px; height: 20px; overflow: auto; }");
@@ -46,6 +48,98 @@ struct ScrollTests {
     }
 
     [Test]
+    unsafe void dragging_the_thumb_scrolls_in_proportion() {
+        Scroll.reset();
+        Styles.add(".sc2 { width: 50px; height: 100px; overflow: auto; }");
+        Styles.add(".sc-long { height: 300px; background: #00ff00; }");
+        Node box = Node.element("div").attr("class", "sc2").child(Node.element("div").attr("class", "sc-long"));
+        Layout.compute(box.id, (f32)100.0, (f32)200.0);
+        mut BarRect r = { .x = (f32)0.0, .y = (f32)0.0, .w = (f32)0.0, .h = (f32)0.0, .free = (f32)0.0 };
+        Expect.is_true(Bars.rect(box.id, true, &r));
+        Expect.is_true(!Bars.rect(box.id, false, &r), "nothing to scroll sideways");
+        Bars.rect(box.id, true, &r);
+        Expect.equal(64, (i64)r.free, "the thumb travels the track minus its own length");
+        Expect.is_true(Bars.over(box.id, true, r.x + (f32)1.0, r.y + (f32)1.0));
+        Expect.is_true(!Bars.over(box.id, true, r.x - (f32)30.0, r.y + (f32)1.0));
+        Expect.is_true(Bars.on_track(box.id, true, r.x + (f32)1.0, r.y + (f32)60.0), "the track below the thumb");
+        Expect.is_true(!Bars.before(box.id, true, r.x + (f32)1.0, r.y + (f32)60.0));
+        Bars.begin(box.id, true, r.x, (f32)10.0);
+        Expect.is_true(Bars.dragging());
+        Bars.drag(r.x, (f32)42.0);
+        Expect.equal(100, (i64)Scroll.top(box.id), "32px of 64 free is half of the 200px limit");
+        Bars.drag(r.x, (f32)5000.0);
+        Expect.equal(200, (i64)Scroll.top(box.id), "clamped at the end");
+        Bars.end();
+        Expect.is_true(!Bars.dragging());
+        Scroll.set(box.id, (f32)0.0, (f32)0.0);
+        Bars.page(box.id, true, false);
+        Expect.equal(90, (i64)Scroll.top(box.id), "a click on the track pages by 90% of the view");
+        Scroll.reset();
+    }
+
+    [Test]
+    unsafe void the_wheel_past_the_end_stretches_and_springs_back() {
+        Scroll.reset();
+        Styles.set_reduced_motion(false);
+        Scroll.set_smooth(true);
+        Node box = ScrollTests.tall();
+        Layout.compute(box.id, (f32)100.0, (f32)100.0);
+        Scroll.set(box.id, (f32)0.0, (f32)80.0);
+        Expect.is_true(Scroll.stretch_by(box.id, (f32)40.0));
+        Expect.is_true(Scroll.top(box.id) > (f32)80.0, "pulled past the end");
+        Expect.is_true(Scroll.top(box.id) < (f32)120.0, "but never as far as the wheel asked");
+        mut u32 now = 1000;
+        Animation.advance(now);
+        while (now < 2000) {
+            now = now + 16;
+            Animation.advance(now);
+        }
+        Expect.equal(80, (i64)Scroll.top(box.id), "it settles back on the end");
+        Scroll.set_smooth(false);
+        Scroll.reset();
+    }
+
+    // Pulling the page past its start uncovers a strip: it shows the page background, not the window's clear color.
+    [Test]
+    unsafe void the_strip_a_pulled_page_uncovers_shows_the_page_background() {
+        Scroll.reset();
+        Styles.set_reduced_motion(false);
+        Scroll.set_smooth(true);
+        Styles.add(".pl { width: 40px; height: 200px; background: #00ff00; }");
+        Node page = Node.element("div").attr("class", "pl");
+        Dom.append(Dom.document(), page.id);
+        DisplayList list = DisplayList.create();
+
+        Painter.frame(&list, (f32)40.0, (f32)40.0);
+        u32 resting = list.count;
+        Expect.is_true(Scroll.wheel((f32)5.0, (f32)5.0, (f32)-30.0), "the wheel pulls the page past its start");
+        Painter.frame(&list, (f32)40.0, (f32)40.0);
+        Expect.is_true(Scroll.page_top() < (f32)0.0, "the page is past its start");
+        Expect.is_true(list.count > resting, "a fill of the page background goes under the page");
+        Dom.remove(page.id);
+        Scroll.set_smooth(false);
+        Scroll.reset();
+        list.release();
+    }
+
+    [Test]
+    unsafe void the_wheel_sideways_past_the_end_stretches_too() {
+        Scroll.reset();
+        Styles.set_reduced_motion(false);
+        Scroll.set_smooth(true);
+        Styles.add(".sc3 { width: 20px; height: 20px; overflow: auto; }");
+        Styles.add(".sc-wide { width: 100px; height: 10px; background: #ff0000; }");
+        Node box = Node.element("div").attr("class", "sc3").child(Node.element("div").attr("class", "sc-wide"));
+        Layout.compute(box.id, (f32)100.0, (f32)100.0);
+        Expect.is_true(Scroll.max_x(box.id) > (f32)0.0);
+        Scroll.set(box.id, Scroll.max_x(box.id), (f32)0.0);
+        Scroll.stretch_x_by(box.id, (f32)30.0);
+        Expect.is_true(Scroll.left(box.id) > Scroll.max_x(box.id), "pulled past the right end");
+        Scroll.set_smooth(false);
+        Scroll.reset();
+    }
+
+    [Test]
     unsafe void keys_scroll_the_nearest_container() {
         Scroll.reset();
         Node box = ScrollTests.tall();
@@ -57,5 +151,61 @@ struct ScrollTests {
         Expect.is_true(Scroll.key(box.id, Key.HOME));
         Expect.equal(0, (i64)Scroll.top(box.id));
         Scroll.reset();
+    }
+
+    [Test]
+    unsafe void smooth_scrolling_glides_to_its_goal() {
+        Scroll.reset();
+        Styles.set_reduced_motion(false);
+        Node box = ScrollTests.tall();
+        Layout.compute(box.id, (f32)100.0, (f32)100.0);
+        Scroll.set_smooth(true);
+        Expect.is_true(Scroll.glide_by(box.id, (f32)0.0, (f32)60.0));
+        Expect.equal(0, (i64)Scroll.top(box.id), "nothing moves until the clock runs");
+        Expect.is_true(Scroll.advance(1000));
+        Scroll.advance(1016);
+        f32 part = Scroll.top(box.id);
+        Expect.is_true(part > (f32)0.0 && part < (f32)60.0, "on its way");
+        mut u32 now = 1016;
+        mut u32 guard = 0;
+        while (Scroll.advance(now) && guard < 200) {
+            now = now + 16;
+            guard = guard + 1;
+        }
+        Expect.equal(60, (i64)Scroll.top(box.id), "it lands on the goal");
+        Scroll.set_smooth(false);
+        Expect.is_true(Scroll.glide_by(box.id, (f32)0.0, (f32)-20.0));
+        Expect.equal(40, (i64)Scroll.top(box.id), "without smooth scrolling it lands at once");
+    }
+
+    [Test]
+    unsafe void a_page_wider_than_the_window_scrolls_sideways() {
+        Scroll.reset();
+        Scroll.set_smooth(false);
+        Scroll.page_limit_x((f32)200.0, (f32)100.0);
+        Expect.is_true(Scroll.page_by_x((f32)50.0));
+        Expect.equal(50, (i64)Scroll.page_left());
+        Scroll.page_by_x((f32)900.0);
+        Expect.equal(200, (i64)Scroll.page_left(), "clamped at the end");
+        Scroll.page_limit_x((f32)0.0, (f32)100.0);
+        Expect.equal(0, (i64)Scroll.page_left(), "it fits again");
+        Expect.is_true(!Scroll.page_by_x((f32)10.0));
+    }
+
+    [Test]
+    unsafe void timers_fire_on_the_clock_until_cancelled() {
+        scroll_ticks = 0;
+        u32 id = Timers.every(100, () => scroll_ticks = scroll_ticks + 1);
+        Animation.advance(5000);
+        Expect.equal(0, (i64)scroll_ticks, "armed on the first turn");
+        Animation.advance(5050);
+        Expect.equal(0, (i64)scroll_ticks);
+        Animation.advance(5100);
+        Expect.equal(1, (i64)scroll_ticks);
+        Animation.advance(5200);
+        Expect.equal(2, (i64)scroll_ticks);
+        Timers.cancel(id);
+        Animation.advance(5400);
+        Expect.equal(2, (i64)scroll_ticks, "cancelled");
     }
 }

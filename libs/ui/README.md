@@ -241,7 +241,7 @@ for each key (key codes are the Windows virtual-key values, `Key.*`; modifiers a
 
 `libs/ui/src/kit/kit.djinn` holds ready-made components, styled by the default theme (same look on every platform):
 `Button` (`variant` "primary" / "danger"), `Switch` and `Checkbox` (bound to a `signal<bool>`), `Tab` + `TabPanel` (a
-`signal<i32>` holds the selected index), `Dialog` (a `signal<bool>` shows it) and `Field` (label, hint, placeholder,
+`signal<i32>` holds the selected index), `Dialog` (a `signal<bool>` shows it) and `Field` (binds a `signal<str>` both ways with `value={sig}`; label, hint, placeholder,
 `type`). They are plain structs with props as fields, used from `html!{}` like any component, and their state is
 exposed through `aria-checked`, `aria-selected`, `data-active` and `data-open`, which the theme styles. Not yet: a
 select / menu, tooltip, tables, and two-way binding of a field's value to a signal.
@@ -265,8 +265,31 @@ close when you choose and on Escape; `List` and `Table` scroll past 16rem (the `
 `Animation` (`libs/ui/src/anim/animation.djinn`) is a small tween clock: `Animation.fade_in(id, ms)` /
 `fade(id, from, to, ms)` animate the opacity of an element (cubic ease-out, no relayout); the host calls
 `Animation.advance(ms)` each loop iteration and draws while it returns true (the Windows host does). With
-`prefers-reduced-motion` they are skipped. The `Outlet` fades each new page in over 220 ms. Not yet: exit
-animations, slide / shared-element transitions (there is no transform support), CSS `transition` / `@keyframes`.
+`prefers-reduced-motion` they are skipped. The `Outlet` fades each new page in over 280 ms while it slides in 28 px from the side it came from (right going forward, left going back) with a spring, and the page it replaces fades out underneath it. Motion is on by default: the theme gives buttons, links, inputs, switches, checkboxes and rows a CSS
+`transition` of `--ui-motion` (160 ms) on background-color, border-color and color, so hover, press and selection ease
+instead of jumping (`transition: <props> <time>` is supported for those colors and opacity; the time is what counts).
+Dialogs and popups (`data-open`) fade in and fade out, then hide (`data-gone`); a tab panel fades in. All of it
+is skipped under reduced motion. `Animation.fade_out(id, ms)` fades an element out and then sets `data-gone="true"` (the theme hides it with
+display: none); `Transition` (a `signal<bool>` shows it) wraps content with that. `transform` is supported (`scale(n)`, `translate(x, y)`, `translateX/Y`, `rotate(angle)`, around `transform-origin`, the center by default) and moves with a damped spring
+(about 5% overshoot, interruptible) over its own time: `transition: transform 360ms` (the theme's `--ui-spring`). It is applied to
+the geometry the element drew, so it never relayouts (hit testing follows the scale, rotation and translation). The theme uses it for
+the press feedback on buttons (scale .97) and the sliding switch thumb; dialogs and popups also pop in from 96% with a spring.
+`VirtualList` (`count`, `item_height`, `height` in CSS px, `row` builds the row for an index) mounts only the rows in view plus three of overscan above and below, so a list of 100 000 rows costs a dozen nodes; rows are positioned with the `style` attribute, which the style engine now reads ("name: value; ..." declarations that win over the sheets; no custom properties). A container tells its listeners when it scrolls (the `scroll` event).
+
+Scroll thumbs can be dragged with the pointer (a thumb gets a little margin to grab and darkens while held).
+
+`@keyframes` and `animation` (`name duration [linear] [infinite | n] [alternate] [forwards]`) animate `opacity` and `transform`
+without relayout; a property a keyframe omits keeps the element's own value, and `prefers-reduced-motion` skips them.
+
+Not yet: skew, shared-element page transitions, keyframes for other properties, hit testing through a running animation.
+
+Scrolling glides like the system's: in the native host the wheel, the arrow / Page / Home / End keys and focus changes move a
+goal and the offset eases to it (`Scroll.set_smooth(true)`, advanced by `Animation.advance`); it lands at once without that and
+under reduced motion. A page wider than the window scrolls sideways by default (horizontal wheel, Shift + wheel, Left / Right).
+In the Windows host the extra mouse buttons go back / forward through the router, and Escape closes a `Dialog`.
+`Timers.every(ms, handler)` / `Timers.every_mounted` run a handler on the host clock (a handler that sets a signal drives
+looping transitions; see the Motion page of `examples/ui-native`). Not yet: rubber-band overscroll, draggable scrollbar thumbs,
+an inline `style` attribute.
 
 ## Hotkeys
 

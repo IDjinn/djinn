@@ -1,0 +1,254 @@
+namespace ui;
+
+import testing;
+import std::types;
+
+// CSS transitions on colors and the present / dismiss motion of dialogs and popups.
+struct MotionTests {
+    static unsafe u32 red_of(Node box) {
+        mut Canvas canvas = Shot.take(box, 40, 40);
+        u32 pixel = canvas.at(5, 5);
+        canvas.release();
+        return pixel >> 24;
+    }
+
+    [Test]
+    unsafe void transition_reads_its_duration() {
+        Styles.add(".m1 { transition: color 150ms ease-in; } .m2 { transition: opacity 0.2s cubic-bezier(0.2, 0, 0, 1); } .m3 { transition: none; }");
+        Node a = Page.attach(Node.element("div").attr("class", "m1"));
+        Node b = Page.attach(Node.element("div").attr("class", "m2"));
+        Node c = Page.attach(Node.element("div").attr("class", "m3"));
+        Expect.equal(150, (i64)Styles.of(a.id).transition_ms);
+        Expect.equal(200, (i64)Styles.of(b.id).transition_ms);
+        Expect.equal(0, (i64)Styles.of(c.id).transition_ms);
+    }
+
+    [Test]
+    unsafe void a_color_change_eases_over_the_duration() {
+        Styles.set_reduced_motion(false);
+        Styles.add(".m4 { width: 20px; height: 10px; background-color: #000000; transition: background-color 100ms; } .m4[data-on=\"true\"] { background-color: #ffffff; }");
+        Node box = Page.attach(Node.element("div").attr("class", "m4"));
+        Animation.advance(50000);
+        Expect.equal(0, (i64)MotionTests.red_of(box), "starts black");
+        Dom.set_attr(box.id, "data-on", "true", 4);
+        Expect.equal(0, (i64)MotionTests.red_of(box), "the change starts from where it was");
+        Expect.is_true(Transitions.active());
+        Expect.is_true(Animation.advance(50050), "the host keeps drawing");
+        u32 half = MotionTests.red_of(box);
+        Expect.is_true(half > 32 && half < 250, "part of the way");
+        Animation.advance(50200);
+        Expect.equal(255, (i64)MotionTests.red_of(box), "arrived");
+        Expect.is_false(Transitions.active());
+        Expect.is_false(Animation.advance(50300), "and idle");
+    }
+
+    [Test]
+    unsafe void reduced_motion_changes_colors_at_once() {
+        Styles.set_reduced_motion(true);
+        Styles.add(".m5 { width: 20px; height: 10px; background-color: #000000; transition: background-color 100ms; } .m5[data-on=\"true\"] { background-color: #ffffff; }");
+        Node box = Page.attach(Node.element("div").attr("class", "m5"));
+        Animation.advance(60000);
+        MotionTests.red_of(box);
+        Dom.set_attr(box.id, "data-on", "true", 4);
+        Expect.equal(255, (i64)MotionTests.red_of(box));
+        Expect.is_false(Transitions.active());
+        Styles.set_reduced_motion(false);
+    }
+
+    [Test]
+    unsafe void data_open_presents_and_dismisses() {
+        Styles.set_reduced_motion(false);
+        Node panel = Page.attach(Node.element("div").attr("data-open", "false"));
+        Expect.is_true(Texts.same(Dom.attr(panel.id, "data-gone"), "true"), "closed from the start");
+        Dom.set_attr(panel.id, "data-open", "true", 4);
+        Expect.is_true(Texts.same(Dom.attr(panel.id, "data-gone"), "false"), "shown at once, fading in");
+        Expect.is_true(Animation.active());
+        Animation.advance(70000);
+        Animation.advance(70300);
+        Dom.set_attr(panel.id, "data-open", "false", 5);
+        Expect.is_true(Texts.same(Dom.attr(panel.id, "data-gone"), "false"), "still there while it fades out");
+        Animation.advance(71000);
+        Animation.advance(71300);
+        Expect.is_true(Texts.same(Dom.attr(panel.id, "data-gone"), "true"), "hidden when the fade ends");
+    }
+
+    static unsafe u32 red_at(Node box, u32 x, u32 y) {
+        mut Canvas canvas = Shot.take(box, 40, 40);
+        u32 pixel = canvas.at(x, y);
+        canvas.release();
+        return pixel >> 24;
+    }
+
+    [Test]
+    unsafe void transform_reads_rotation_and_origin() {
+        Styles.add(".t3 { transform: rotate(90deg); transform-origin: left top; } .t4 { transform: rotate(0.25turn); transform-origin: 25% 10px; } .t5 { transform-origin: bottom; }");
+        Node a = Page.attach(Node.element("div").attr("class", "t3"));
+        Node b = Page.attach(Node.element("div").attr("class", "t4"));
+        Node c = Page.attach(Node.element("div").attr("class", "t5"));
+        Style* one = Styles.of(a.id);
+        Expect.equal(90, (i64)one.transform_rotate);
+        Expect.equal(0, (i64)(one.origin_x * (f32)100.0));
+        Expect.equal(0, (i64)(one.origin_y * (f32)100.0));
+        Style* two = Styles.of(b.id);
+        Expect.equal(90, (i64)two.transform_rotate);
+        Expect.equal(25, (i64)(two.origin_x * (f32)100.0));
+        Expect.equal(10, (i64)two.origin_y_px);
+        Style* three = Styles.of(c.id);
+        Expect.equal(50, (i64)(three.origin_x * (f32)100.0));
+        Expect.equal(100, (i64)(three.origin_y * (f32)100.0));
+    }
+
+    [Test]
+    unsafe void hits_follow_the_transform() {
+        Styles.add(".t7 { position: absolute; left: 0px; top: 15px; width: 40px; height: 100px; transform: rotate(90deg); }");
+        Node box = Page.attach(Node.element("div").attr("class", "t7"));
+        Layout.compute(Dom.document(), (f32)200.0, (f32)200.0);
+        LayoutBox* at = Layout.box(box.id);
+        f32 mx = at.left + at.width / (f32)2.0;
+        f32 my = at.top + at.height / (f32)2.0;
+        // turned a quarter, the 40x100 box lies 100 wide and 40 tall around its center
+        Expect.equal((i64)box.id, (i64)Hit.at(mx + (f32)35.0, my), "the turned box reaches sideways");
+        Expect.is_true(Hit.at(mx, my + (f32)35.0) != box.id, "and no longer downwards");
+    }
+
+    [Test]
+    unsafe void keyframes_drive_the_transform_and_opacity() {
+        Styles.set_reduced_motion(false);
+        Styles.add("@keyframes kf-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } } @keyframes kf-fade { 0% { opacity: 0; } 50% { opacity: 1; } 100% { opacity: 0.5; } }");
+        Styles.add(".k1 { animation: kf-spin 1s linear infinite; } .k2 { animation: kf-fade 400ms 1 forwards; }");
+        Node a = Page.attach(Node.element("div").attr("class", "k1"));
+        Node b = Page.attach(Node.element("div").attr("class", "k2"));
+        Style* one = Styles.of(a.id);
+        Expect.equal(1000, (i64)one.anim_ms);
+        Expect.equal(0, (i64)one.anim_count, "infinite");
+        Expect.is_true(one.anim_linear);
+        Expect.equal(1, (i64)Styles.of(b.id).anim_count);
+        Animation.advance(10000);
+        mut Style shown = *Styles.of(a.id);
+        Expect.is_true(Keyframes.apply(a.id, &shown));
+        Expect.equal(0, (i64)shown.transform_rotate, "it starts turned by nothing");
+        mut Style fade = *Styles.of(b.id);
+        Keyframes.apply(b.id, &fade);
+        Animation.advance(10200);
+        fade = *Styles.of(b.id);
+        Expect.is_true(Keyframes.apply(b.id, &fade));
+        Expect.equal(100, (i64)(fade.opacity * (f32)100.0), "full opacity in the middle");
+        Animation.advance(10250);
+        shown = *Styles.of(a.id);
+        Expect.is_true(Keyframes.apply(a.id, &shown));
+        Expect.equal(90, (i64)shown.transform_rotate, "a quarter of the way is a quarter turn");
+        Animation.advance(11500);
+        shown = *Styles.of(a.id);
+        Keyframes.apply(a.id, &shown);
+        Expect.equal(180, (i64)shown.transform_rotate, "it loops");
+        fade = *Styles.of(b.id);
+        Expect.is_true(Keyframes.apply(b.id, &fade), "'forwards' holds the end");
+        Expect.equal(50, (i64)(fade.opacity * (f32)100.0));
+    }
+
+    [Test]
+    unsafe void a_rotated_box_turns_its_pixels() {
+        Styles.add(".t6 { position: absolute; left: 0px; top: 15px; width: 40px; height: 10px; background: #ff0000; transform: rotate(90deg); }");
+        Node box = Node.element("div").attr("class", "t6");
+        mut Canvas canvas = Shot.take(box, 40, 40);
+        Expect.equal(0xFF0000FF, (i64)canvas.at(20, 5), "the bar now stands upright above the center");
+        Expect.equal(0xFFFFFFFF, (i64)canvas.at(5, 20), "and no longer lies on its old place");
+        canvas.release();
+    }
+
+    [Test]
+    unsafe void transform_reads_scale_and_translate() {
+        Styles.add(".t1 { transform: scale(0.5) translate(4px, 6px); transition: transform 300ms, color 100ms; } .t2 { transform: translateY(-3px); transition: opacity 90ms; }");
+        Node a = Page.attach(Node.element("div").attr("class", "t1"));
+        Node b = Page.attach(Node.element("div").attr("class", "t2"));
+        Style* one = Styles.of(a.id);
+        Expect.equal(50, (i64)(one.transform_scale * (f32)100.0));
+        Expect.equal(4, (i64)one.translate_x);
+        Expect.equal(6, (i64)one.translate_y);
+        Expect.equal(300, (i64)one.transform_ms);
+        Expect.equal(100, (i64)one.transition_ms);
+        Style* two = Styles.of(b.id);
+        Expect.equal(100, (i64)(two.transform_scale * (f32)100.0));
+        Expect.equal(-3, (i64)two.translate_y);
+        Expect.equal(0, (i64)two.transform_ms);
+        Expect.equal(90, (i64)two.transition_ms);
+    }
+
+    [Test]
+    unsafe void a_scale_springs_to_its_target() {
+        Styles.set_reduced_motion(false);
+        Styles.add(".t3 { width: 20px; height: 20px; background-color: #000000; transition: transform 300ms; } .t3[data-big=\"true\"] { transform: scale(2); }");
+        Node box = Page.attach(Node.element("div").attr("class", "t3"));
+        Animation.advance(80000);
+        Expect.equal(255, (i64)MotionTests.red_at(box, 28, 28), "not scaled yet");
+        Dom.set_attr(box.id, "data-big", "true", 4);
+        Expect.equal(255, (i64)MotionTests.red_at(box, 28, 28), "starts from where it was");
+        Expect.is_true(Animation.advance(80040), "the host keeps drawing");
+        Expect.is_true(MotionTests.red_at(box, 22, 22) < 128, "growing");
+        Expect.equal(255, (i64)MotionTests.red_at(box, 28, 28), "not there yet");
+        Animation.advance(80400);
+        Expect.equal(0, (i64)MotionTests.red_at(box, 28, 28), "arrived");
+        Expect.is_false(Animation.advance(80500), "and idle");
+    }
+
+    [Test]
+    unsafe void reduced_motion_scales_at_once() {
+        Styles.set_reduced_motion(true);
+        Styles.add(".t4 { width: 20px; height: 20px; background-color: #000000; transition: transform 300ms; } .t4[data-big=\"true\"] { transform: scale(2); }");
+        Node box = Page.attach(Node.element("div").attr("class", "t4"));
+        Animation.advance(85000);
+        MotionTests.red_at(box, 28, 28);
+        Dom.set_attr(box.id, "data-big", "true", 4);
+        Expect.equal(0, (i64)MotionTests.red_at(box, 28, 28));
+        Styles.set_reduced_motion(false);
+    }
+
+    [Test]
+    unsafe void presenting_pops_the_element() {
+        Styles.set_reduced_motion(false);
+        Node panel = Page.attach(Node.element("div").attr("data-open", "false"));
+        Expect.equal(100, (i64)(Animation.pop_scale(panel.id) * (f32)100.0), "nothing moving yet");
+        Dom.set_attr(panel.id, "data-open", "true", 4);
+        Expect.equal(96, (i64)(Animation.pop_scale(panel.id) * (f32)100.0), "enters small");
+        Animation.advance(90000);
+        Animation.advance(90060);
+        f32 part = Animation.pop_scale(panel.id);
+        Expect.is_true(part > (f32)0.96 && part < (f32)1.05, "on its way");
+        Animation.advance(90400);
+        Expect.equal(100, (i64)(Animation.pop_scale(panel.id) * (f32)100.0), "settled");
+    }
+
+    [Test]
+    unsafe void a_fixed_overlay_with_a_z_index_covers_later_siblings() {
+        Styles.add(".z1 { position: fixed; left: 0px; top: 0px; width: 40px; height: 40px; background-color: #000000; z-index: 10; } .z2 { width: 40px; height: 40px; background-color: #ffffff; }");
+        Node page = Page.attach(Node.element("div")
+            .child(Node.element("div").attr("class", "z1"))
+            .child(Node.element("div").attr("class", "z2")));
+        Expect.equal(0, (i64)MotionTests.red_at(page, 5, 5), "the overlay is on top");
+    }
+
+    [Test]
+    unsafe void an_entering_page_slides_in_from_its_side_and_settles() {
+        Styles.set_reduced_motion(false);
+        Node page = Page.attach(Node.element("div"));
+        Animation.enter(page.id, 300, (f32)-28.0);
+        Expect.is_true(Animation.slide_offset(page.id) < (f32)0.0, "starts to the left");
+        Animation.advance(10000);
+        Animation.advance(10150);
+        f32 part = Animation.slide_offset(page.id);
+        Expect.is_true(part > (f32)-28.0 && part <= (f32)0.0 || part > (f32)0.0, "on its way");
+        Animation.advance(10400);
+        Expect.equal(0, (i64)Animation.slide_offset(page.id), "in place");
+    }
+
+    [Test]
+    unsafe void navigation_remembers_its_direction() {
+        Router.start("/one");
+        Router.navigate("/two");
+        Expect.equal(1, (i64)Router.direction());
+        Router.back();
+        Expect.equal(-1, (i64)Router.direction());
+        Router.forward();
+        Expect.equal(1, (i64)Router.direction());
+    }
+}

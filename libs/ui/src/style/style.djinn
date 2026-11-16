@@ -77,6 +77,22 @@ struct Style {
     mut u32 color;
     mut u32 background;
     mut f32 opacity;
+    mut u32 transition_ms;
+    mut u32 transform_ms;
+    mut f32 transform_scale;
+    mut f32 translate_x;
+    mut f32 translate_y;
+    mut f32 transform_rotate;
+    mut str anim_name;
+    mut u32 anim_ms;
+    mut u32 anim_count;
+    mut bool anim_alternate;
+    mut bool anim_forwards;
+    mut bool anim_linear;
+    mut f32 origin_x;
+    mut f32 origin_y;
+    mut f32 origin_x_px;
+    mut f32 origin_y_px;
     mut f32 font_size;
     mut u16 font_weight;
     mut u8 font_style;
@@ -155,6 +171,10 @@ struct Style {
         style.color = 255;
         style.background = 0;
         style.opacity = (f32)1.0;
+        style.transform_scale = (f32)1.0;
+        style.anim_count = 1;
+        style.origin_x = (f32)0.5;
+        style.origin_y = (f32)0.5;
         style.font_size = (f32)16.0;
         style.font_weight = 400;
         style.font_style = Keyword.NORMAL;
@@ -365,6 +385,16 @@ struct Props {
         else if (CssNames.equal(name, "color")) { style.color = from.color; }
         else if (CssNames.equal(name, "background-color") || CssNames.equal(name, "background")) { style.background = from.background; }
         else if (CssNames.equal(name, "opacity")) { style.opacity = from.opacity; }
+        else if (CssNames.equal(name, "animation") || CssNames.equal(name, "animation-name")
+            || CssNames.equal(name, "animation-duration") || CssNames.equal(name, "animation-iteration-count")
+            || CssNames.equal(name, "animation-timing-function")) {
+            style.anim_name = from.anim_name;
+            style.anim_ms = from.anim_ms;
+            style.anim_count = from.anim_count;
+            style.anim_alternate = from.anim_alternate;
+            style.anim_forwards = from.anim_forwards;
+            style.anim_linear = from.anim_linear;
+        }
         else if (CssNames.equal(name, "font-size")) { style.font_size = from.font_size; }
         else if (CssNames.equal(name, "font-weight")) { style.font_weight = from.font_weight; }
         else if (CssNames.equal(name, "font-style")) { style.font_style = from.font_style; }
@@ -549,9 +579,7 @@ struct Props {
         mut ValueContext context = { .font_size = 16.0, .root_font_size = 16.0, .viewport_width = 1280.0, .viewport_height = 800.0, .dark = false };
         mut bool known = true;
         bool valid = Props.apply_named(&scratch, Props.physical(name), &reader, &context, &parent, &known);
-        if (tokens.data != (CssToken*)0) {
-            __djinn_free((void*)tokens.data);
-        }
+        tokens.release();
         return known && valid;
     }
 
@@ -671,6 +699,254 @@ struct Props {
                 if (reader.pos == before) {
                     reader.next();
                 }
+            }
+            return true;
+        }
+        if (CssNames.equal(name, "transition") || CssNames.equal(name, "transition-duration")) {
+            // The first duration of each comma separated item goes to the property it names: 'transform' has its own
+            // time (it moves with a spring), everything else (colors, opacity, all) shares the other one.
+            mut u32 colors = 0;
+            mut u32 moves = 0;
+            mut bool for_colors = true;
+            mut bool for_moves = true;
+            while (!reader.done()) {
+                u32 before = reader.pos;
+                CssToken word = reader.peek();
+                if (word.kind == CssKind.COMMA) {
+                    reader.next();
+                    for_colors = true;
+                    for_moves = true;
+                    continue;
+                }
+                if (word.kind == CssKind.IDENT) {
+                    reader.next();
+                    if (CssNames.equal(word.text, "transform")) {
+                        for_colors = false;
+                        for_moves = true;
+                    } else if (CssNames.equal(word.text, "all")) {
+                        for_colors = true;
+                        for_moves = true;
+                    } else if (!(CssNames.equal(word.text, "ease") || CssNames.equal(word.text, "ease-in")
+                        || CssNames.equal(word.text, "ease-out") || CssNames.equal(word.text, "ease-in-out")
+                        || CssNames.equal(word.text, "linear") || CssNames.equal(word.text, "spring")
+                        || CssNames.equal(word.text, "none"))) {
+                        for_colors = true;
+                        for_moves = false;
+                    }
+                    continue;
+                }
+                Numeric amount = CssNumbers.read(reader, context);
+                if (amount.unit == Unit.NUMBER && amount.value > 0.0) {
+                    if (for_colors && colors == 0) {
+                        colors = (u32)amount.value;
+                    }
+                    if (for_moves && moves == 0) {
+                        moves = (u32)amount.value;
+                    }
+                }
+                if (reader.pos == before) {
+                    reader.next();
+                }
+            }
+            style.transition_ms = colors;
+            style.transform_ms = moves;
+            return true;
+        }
+        if (CssNames.equal(name, "transform")) {
+            // scale(n), scale(x, y) (the larger counts), translate(x, y), translateX(x), translateY(y); 'none' resets
+            mut f32 scale = (f32)1.0;
+            mut f32 across = (f32)0.0;
+            mut f32 down = (f32)0.0;
+            mut f32 turn = (f32)0.0;
+            while (!reader.done()) {
+                CssToken word = reader.next();
+                if (word.kind != CssKind.FUNCTION) {
+                    continue;
+                }
+                u32 close = reader.closing();
+                mut ValueReader inner = ValueReader.over(reader.tokens, reader.pos, close);
+                reader.pos = close + 1;
+                if (CssNames.equal(word.text, "scale")) {
+                    Numeric amount = CssNumbers.read(&inner, context);
+                    if (amount.unit == Unit.NUMBER) {
+                        scale = (f32)amount.value;
+                    } else if (amount.unit == Unit.PERCENT) {
+                        scale = (f32)(amount.value / 100.0);
+                    }
+                } else if (CssNames.equal(word.text, "translate") || CssNames.equal(word.text, "translatex")) {
+                    Length x = CssNumbers.length(&inner, context);
+                    if (x.unit == Unit.PX) {
+                        across = x.value;
+                    }
+                    if (inner.peek().kind == CssKind.COMMA) {
+                        inner.next();
+                    }
+                    if (!inner.done()) {
+                        Length y = CssNumbers.length(&inner, context);
+                        if (y.unit == Unit.PX) {
+                            down = y.value;
+                        }
+                    }
+                } else if (CssNames.equal(word.text, "rotate")) {
+                    Numeric angle = CssNumbers.read(&inner, context);
+                    if (angle.unit == Unit.DEGREES) {
+                        turn = (f32)angle.value;
+                    }
+                } else if (CssNames.equal(word.text, "translatey")) {
+                    Length y = CssNumbers.length(&inner, context);
+                    if (y.unit == Unit.PX) {
+                        down = y.value;
+                    }
+                }
+            }
+            style.transform_scale = scale;
+            style.translate_x = across;
+            style.translate_y = down;
+            style.transform_rotate = turn;
+            return true;
+        }
+        if (CssNames.equal(name, "animation-name")) {
+            if (first.kind != CssKind.IDENT) {
+                return false;
+            }
+            str empty = "";
+            style.anim_name = first.text;
+            if (CssNames.equal(first.text, "none")) {
+                style.anim_name = empty;
+            }
+            return true;
+        }
+        if (CssNames.equal(name, "animation-duration")) {
+            Numeric amount = CssNumbers.read(reader, context);
+            if (amount.unit == Unit.NUMBER && amount.value >= 0.0) {
+                style.anim_ms = (u32)amount.value;
+                return true;
+            }
+            return false;
+        }
+        if (CssNames.equal(name, "animation-iteration-count")) {
+            if (first.kind == CssKind.IDENT && CssNames.equal(first.text, "infinite")) {
+                style.anim_count = 0;
+                return true;
+            }
+            if (first.kind == CssKind.NUMBER && first.number >= 1.0) {
+                style.anim_count = (u32)first.number;
+                return true;
+            }
+            return false;
+        }
+        if (CssNames.equal(name, "animation-timing-function")) {
+            style.anim_linear = first.kind == CssKind.IDENT && CssNames.equal(first.text, "linear");
+            return true;
+        }
+        if (CssNames.equal(name, "animation")) {
+            // name, duration, 'infinite' or a count, 'alternate', 'linear', 'forwards' (the rest is accepted and ignored)
+            str empty = "";
+            mut str label = empty;
+            mut u32 ms = 0;
+            mut u32 count = 1;
+            mut bool alternate = false;
+            mut bool forwards = false;
+            mut bool linear = false;
+            while (!reader.done()) {
+                u32 before = reader.pos;
+                CssToken word = reader.peek();
+                if (word.kind == CssKind.IDENT) {
+                    reader.next();
+                    if (CssNames.equal(word.text, "infinite")) { count = 0; }
+                    else if (CssNames.equal(word.text, "alternate") || CssNames.equal(word.text, "alternate-reverse")) { alternate = true; }
+                    else if (CssNames.equal(word.text, "forwards") || CssNames.equal(word.text, "both")) { forwards = true; }
+                    else if (CssNames.equal(word.text, "linear")) { linear = true; }
+                    else if (CssNames.equal(word.text, "none")) { label = empty; }
+                    else if (!(CssNames.equal(word.text, "ease") || CssNames.equal(word.text, "ease-in")
+                        || CssNames.equal(word.text, "ease-out") || CssNames.equal(word.text, "ease-in-out")
+                        || CssNames.equal(word.text, "normal") || CssNames.equal(word.text, "reverse")
+                        || CssNames.equal(word.text, "backwards") || CssNames.equal(word.text, "running")
+                        || CssNames.equal(word.text, "paused"))) {
+                        label = word.text;
+                    }
+                } else if (word.kind == CssKind.NUMBER) {
+                    reader.next();
+                    if (word.number >= 1.0) {
+                        count = (u32)word.number;
+                    }
+                } else {
+                    Numeric amount = CssNumbers.read(reader, context);
+                    if (amount.unit == Unit.NUMBER && amount.value > 0.0 && ms == 0) {
+                        ms = (u32)amount.value;
+                    }
+                }
+                if (reader.pos == before) {
+                    reader.next();
+                }
+            }
+            style.anim_name = label;
+            style.anim_ms = ms;
+            style.anim_count = count;
+            style.anim_alternate = alternate;
+            style.anim_forwards = forwards;
+            style.anim_linear = linear;
+            return true;
+        }
+        if (CssNames.equal(name, "transform-origin")) {
+            // one or two of: left | center | right | top | bottom | <percentage> | <length>
+            mut f32 first_pct = (f32)0.5;
+            mut f32 first_px = (f32)0.0;
+            mut f32 second_pct = (f32)0.5;
+            mut f32 second_px = (f32)0.0;
+            mut bool first_vertical = false;
+            mut u32 count = 0;
+            while (!reader.done() && count < 2) {
+                CssToken word = reader.peek();
+                mut f32 pct = (f32)0.5;
+                mut f32 px = (f32)0.0;
+                mut bool vertical = false;
+                if (word.kind == CssKind.IDENT) {
+                    reader.next();
+                    if (CssNames.equal(word.text, "left")) { pct = (f32)0.0; }
+                    else if (CssNames.equal(word.text, "right")) { pct = (f32)1.0; }
+                    else if (CssNames.equal(word.text, "top")) { pct = (f32)0.0; vertical = true; }
+                    else if (CssNames.equal(word.text, "bottom")) { pct = (f32)1.0; vertical = true; }
+                    else if (!CssNames.equal(word.text, "center")) { return false; }
+                } else {
+                    Length part = CssNumbers.length(reader, context);
+                    if (part.unit == Unit.PERCENT) {
+                        pct = part.value / (f32)100.0;
+                    } else if (part.unit == Unit.PX) {
+                        pct = (f32)0.0;
+                        px = part.value;
+                    } else {
+                        return false;
+                    }
+                }
+                if (count == 0) {
+                    first_pct = pct;
+                    first_px = px;
+                    first_vertical = vertical;
+                } else {
+                    second_pct = pct;
+                    second_px = px;
+                }
+                count = count + 1;
+            }
+            if (count == 0) {
+                return false;
+            }
+            if (first_vertical && count == 2) {
+                style.origin_x = second_pct;
+                style.origin_x_px = second_px;
+                style.origin_y = first_pct;
+                style.origin_y_px = first_px;
+            } else if (first_vertical) {
+                style.origin_x = (f32)0.5;
+                style.origin_x_px = (f32)0.0;
+                style.origin_y = first_pct;
+                style.origin_y_px = first_px;
+            } else {
+                style.origin_x = first_pct;
+                style.origin_x_px = first_px;
+                style.origin_y = second_pct;
+                style.origin_y_px = second_px;
             }
             return true;
         }
