@@ -1,0 +1,310 @@
+import std::types;
+import std::libc;
+
+namespace ui;
+
+unsafe static mut ptr font_system = null;
+
+// One rasterized glyph as a host hands it over: an 8-bit coverage bitmap (row after row, 'width' bytes each) and its
+// placement. 'bearing_x' is the distance from the pen to the left edge of the bitmap, 'bearing_y' the distance from
+// the baseline up to its top edge. The pixels belong to the host and stay valid until its next call.
+struct GlyphBitmap {
+    mut i32 width;
+    mut i32 height;
+    mut i32 bearing_x;
+    mut i32 bearing_y;
+    mut u8* pixels;
+}
+
+// What a platform provides to turn text into pixels (the Windows host uses GDI; a later one can ship its own
+// rasterizer). 'advance' is the pen movement of a code point in px, 'rasterize' fills a GlyphBitmap, 'metrics' gives
+// the ascent and descent of a line of that size in px.
+struct FontProvider {
+    fn(u32, f32, bool) -> f32 advance;
+    fn(u32, f32, bool, GlyphBitmap*) -> bool rasterize;
+    fn(f32, bool, f32*, f32*) -> void metrics;
+}
+
+// A cached glyph: where it sits in the atlas and how it is placed. Slots are found by (code point, size, weight).
+struct Glyph {
+    mut u32 code;
+    mut u32 shape;
+    mut f32 advance;
+    mut i32 width;
+    mut i32 height;
+    mut i32 bearing_x;
+    mut i32 bearing_y;
+    mut i32 atlas_x;
+    mut i32 atlas_y;
+    mut bool used;
+    mut bool drawable;
+}
+
+// The glyph atlas: one 8-bit coverage image shared by every glyph. The pixel block at (0, 0) is solid, so a plain
+// rectangle samples it and goes through the same pipeline as text. 'version' grows with every upload.
+struct Atlas {
+    mut u8* pixels;
+    mut u32 width;
+    mut u32 height;
+    mut u32 version;
+    mut u32 cursor_x;
+    mut u32 cursor_y;
+    mut u32 shelf;
+    mut u32 glyphs;
+}
+
+struct FontSystem {
+    mut bool active;
+    mut FontProvider provider;
+    mut Glyph* table;
+    mut u32 table_size;
+    mut Atlas atlas;
+}
+
+struct Fonts {
+    const u32 TABLE = 16384;
+    const u32 ATLAS = 1024;
+
+    static unsafe FontSystem* system() {
+        if (font_system == null) {
+            font_system = (ptr)__djinn_alloc_zeroed((size_long)sizeof(FontSystem));
+            FontSystem* created = (FontSystem*)font_system;
+            created.table_size = Fonts.TABLE;
+            created.table = (Glyph*)__djinn_alloc_zeroed((size_long)(Fonts.TABLE * sizeof(Glyph)));
+            created.atlas.width = Fonts.ATLAS;
+            created.atlas.height = Fonts.ATLAS;
+            created.atlas.pixels = (u8*)__djinn_alloc_zeroed((size_long)(Fonts.ATLAS * Fonts.ATLAS));
+            Fonts.reset_atlas(created);
+        }
+        return (FontSystem*)font_system;
+    }
+
+    static unsafe void reset_atlas(FontSystem* system) {
+        Atlas* atlas = &system.atlas;
+        memset((void*)atlas.pixels, 0, (size_long)(atlas.width * atlas.height));
+        // the solid block that rectangles sample
+        memset((void*)atlas.pixels, 255, 2);
+        memset((void*)(atlas.pixels + (size_long)atlas.width), 255, 2);
+        atlas.cursor_x = 3;
+        atlas.cursor_y = 0;
+        atlas.shelf = 0;
+        atlas.glyphs = 0;
+        atlas.version = atlas.version + 1;
+        memset((void*)system.table, 0, (size_long)(system.table_size * sizeof(Glyph)));
+    }
+
+    // Installs a provider. Text is measured and drawn with it from now on; layout caches built with the placeholder
+    // metrics are stale, so the caller marks the tree changed (Dom.touch) after switching.
+    public static unsafe void set_provider(FontProvider provider) {
+        FontSystem* system = Fonts.system();
+        system.provider = provider;
+        system.active = true;
+        Fonts.reset_atlas(system);
+    }
+
+    public static unsafe void clear_provider() {
+        FontSystem* system = Fonts.system();
+        system.active = false;
+        Fonts.reset_atlas(system);
+    }
+
+    public static unsafe bool active() {
+        return Fonts.system().active;
+    }
+
+    public static unsafe Atlas* atlas() {
+        return &Fonts.system().atlas;
+    }
+
+    // Size in 1/16 px with the weight in the top bit: what two glyphs must share to be the same glyph.
+    static u32 shape_of(f32 size, bool bold) {
+        mut u32 quantized = (u32)(size * (f32)16.0 + (f32)0.5);
+        if (quantized > 65535) {
+            quantized = 65535;
+        }
+        if (bold) {
+            return quantized | 0x80000000;
+        }
+        return quantized;
+    }
+
+    static f32 size_of(u32 shape) {
+        return (f32)(shape & 0xFFFF) / (f32)16.0;
+    }
+
+    static u32 slot_of(u32 code, u32 shape, u32 size) {
+        mut u32w h = (u32w)code * (u32w)2654435761 + (u32w)shape * (u32w)40503;
+        h = h ^ (h >> 15);
+        return (u32)h % size;
+    }
+
+    static unsafe Glyph* find(FontSystem* system, u32 code, u32 shape) {
+        mut u32 slot = Fonts.slot_of(code, shape, system.table_size);
+        for (mut u32 probe = 0; probe < 64; probe = probe + 1) {
+            Glyph* glyph = &system.table[slot];
+            if (!glyph.used) {
+                glyph.code = code;
+                glyph.shape = shape;
+                glyph.used = true;
+                glyph.advance = (f32)-1.0;
+                return glyph;
+            }
+            if (glyph.code == code && glyph.shape == shape) {
+                return glyph;
+            }
+            slot = (slot + 1) % system.table_size;
+        }
+        return (Glyph*)0;
+    }
+
+    // The pen movement of a code point in px, cached. Only meaningful while a provider is installed.
+    public static unsafe f32 advance(u32 code, f32 size, bool bold) {
+        FontSystem* system = Fonts.system();
+        u32 shape = Fonts.shape_of(size, bold);
+        Glyph* glyph = Fonts.find(system, code, shape);
+        if (glyph == (Glyph*)0) {
+            return system.provider.advance(code, size, bold);
+        }
+        if (glyph.advance < (f32)0.0) {
+            glyph.advance = system.provider.advance(code, Fonts.size_of(shape), bold);
+        }
+        return glyph.advance;
+    }
+
+    // Ascent and descent of a line of text of this size.
+    public static unsafe void line_metrics(f32 size, bool bold, f32* ascent, f32* descent) {
+        FontSystem* system = Fonts.system();
+        if (!system.active) {
+            *ascent = size * (f32)0.8;
+            *descent = size * (f32)0.2;
+            return;
+        }
+        system.provider.metrics(size, bold, ascent, descent);
+    }
+
+    // The glyph of a code point, rasterized into the atlas the first time. Null when it has no pixels (a space) or
+    // the atlas is full; spaces still advance.
+    public static unsafe Glyph* glyph(u32 code, f32 size, bool bold) {
+        FontSystem* system = Fonts.system();
+        if (!system.active) {
+            return (Glyph*)0;
+        }
+        u32 shape = Fonts.shape_of(size, bold);
+        Glyph* glyph = Fonts.find(system, code, shape);
+        if (glyph == (Glyph*)0) {
+            return (Glyph*)0;
+        }
+        if (glyph.advance >= (f32)0.0 && (glyph.drawable || glyph.width < 0)) {
+            if (glyph.drawable) {
+                return glyph;
+            }
+            return (Glyph*)0;
+        }
+        GlyphBitmap bitmap = { .width = 0, .height = 0, .bearing_x = 0, .bearing_y = 0, .pixels = (u8*)0 };
+        bool ok = system.provider.rasterize(code, Fonts.size_of(shape), bold, &bitmap);
+        glyph.advance = system.provider.advance(code, Fonts.size_of(shape), bold);
+        glyph.width = -1;
+        if (!ok || bitmap.width <= 0 || bitmap.height <= 0 || bitmap.pixels == (u8*)0) {
+            return (Glyph*)0;
+        }
+        if (!Fonts.place(&system.atlas, (u32)bitmap.width, (u32)bitmap.height, glyph)) {
+            return (Glyph*)0;
+        }
+        Atlas* atlas = &system.atlas;
+        for (mut i32 row = 0; row < bitmap.height; row = row + 1) {
+            u8* from = bitmap.pixels + (size_long)(row * bitmap.width);
+            u8* to = atlas.pixels + (size_long)((u32)(glyph.atlas_y + row) * atlas.width + (u32)glyph.atlas_x);
+            memcpy((void*)to, (void*)from, (size_long)bitmap.width);
+        }
+        glyph.width = bitmap.width;
+        glyph.height = bitmap.height;
+        glyph.bearing_x = bitmap.bearing_x;
+        glyph.bearing_y = bitmap.bearing_y;
+        glyph.drawable = true;
+        atlas.glyphs = atlas.glyphs + 1;
+        atlas.version = atlas.version + 1;
+        return glyph;
+    }
+
+    // Shelf packing with a one pixel gutter, so linear sampling never bleeds a neighbour in.
+    static unsafe bool place(Atlas* atlas, u32 width, u32 height, Glyph* glyph) {
+        u32 w = width + 1;
+        u32 h = height + 1;
+        if (w > atlas.width || h > atlas.height) {
+            return false;
+        }
+        if (atlas.cursor_x + w > atlas.width) {
+            atlas.cursor_y = atlas.cursor_y + atlas.shelf;
+            atlas.cursor_x = 0;
+            atlas.shelf = 0;
+        }
+        if (atlas.cursor_y + h > atlas.height) {
+            return false;
+        }
+        glyph.atlas_x = (i32)atlas.cursor_x;
+        glyph.atlas_y = (i32)atlas.cursor_y;
+        atlas.cursor_x = atlas.cursor_x + w;
+        if (h > atlas.shelf) {
+            atlas.shelf = h;
+        }
+        return true;
+    }
+}
+
+// Decoding of the UTF-8 the tree holds (it was validated when it entered the tree, but a stray byte is never trusted).
+struct Codepoints {
+    // The code point that starts at 'index' and how many bytes it takes; a bad sequence is U+FFFD, one byte long.
+    public static unsafe u32 decode(i8* data, u32 length, u32 index, u32* step) {
+        u32 b0 = (u32)(u8)data[index];
+        *step = 1;
+        if (b0 < 128) {
+            return b0;
+        }
+        mut u32 need = 0;
+        mut u32 code = 0;
+        if (b0 >= 240 && b0 < 245) {
+            need = 3;
+            code = b0 & 7;
+        } else if (b0 >= 224) {
+            if (b0 >= 245) {
+                return 65533;
+            }
+            need = 2;
+            code = b0 & 15;
+        } else if (b0 >= 194) {
+            need = 1;
+            code = b0 & 31;
+        } else {
+            return 65533;
+        }
+        if (index + need >= length) {
+            return 65533;
+        }
+        for (mut u32 i = 1; i <= need; i = i + 1) {
+            u32 next = (u32)(u8)data[index + i];
+            if ((next & 192) != 128) {
+                return 65533;
+            }
+            code = (code << 6) | (next & 63);
+        }
+        *step = need + 1;
+        return code;
+    }
+
+    // True for the code points that take two columns (CJK, full width forms, most emoji).
+    public static bool is_wide(u32 code) {
+        if (code < 4352) {
+            return false;
+        }
+        return (code >= 4352 && code <= 4447) || (code >= 11904 && code <= 42191) || (code >= 44032 && code <= 55203)
+            || (code >= 63744 && code <= 64255) || (code >= 65281 && code <= 65376) || (code >= 65504 && code <= 65510)
+            || (code >= 127744 && code <= 129791) || (code >= 131072 && code <= 262141);
+    }
+
+    // True for combining marks and zero-width code points: they never advance the pen.
+    public static bool is_zero_width(u32 code) {
+        return (code >= 768 && code <= 879) || (code >= 6832 && code <= 6911) || (code >= 7616 && code <= 7679)
+            || (code >= 8203 && code <= 8207) || (code >= 8400 && code <= 8447) || (code >= 65024 && code <= 65039)
+            || (code >= 65056 && code <= 65071) || code == 65279;
+    }
+}

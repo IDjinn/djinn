@@ -1,0 +1,233 @@
+import std::types;
+import std::libc;
+import ui;
+import vulkan;
+
+namespace win32;
+
+// The native Windows host: a window, the message pump, the GDI fonts and a software present of the frame. Mouse
+// and key messages become DOM events (click, mousedown, mouseup, mousemove, keydown), found by hit-testing the
+// layout boxes, so the same handlers run here as in any other host.
+//
+// The window class uses the system window procedure (DefWindowProc, taken with GetProcAddress): Djinn has no way yet
+// to hand a C-callable function to the system, so messages are read from the queue (PeekMessage) instead of being
+// pushed into a callback.
+struct WinHost {
+    const u32 WM_QUIT = 18;
+    const u32 WM_PAINT = 15;
+    const u32 WM_KEYDOWN = 256;
+    const u32 WM_MOUSEMOVE = 512;
+    const u32 WM_LBUTTONDOWN = 513;
+    const u32 WM_LBUTTONUP = 514;
+    const u32 WS_OVERLAPPEDWINDOW = 13565952;
+    const u32 WS_VISIBLE = 268435456;
+
+    static unsafe void* open(str title, u32 width, u32 height) {
+        void* module = GetModuleHandleA((i8*)0);
+        void* user32 = GetModuleHandleA("user32.dll");
+        void* class_info = Raw.make(80);
+        Raw.put_u32(class_info, 0, 80);
+        Raw.put_u32(class_info, 4, 3);
+        Raw.put_ptr(class_info, 8, GetProcAddress(user32, "DefWindowProcA"));
+        Raw.put_ptr(class_info, 24, module);
+        Raw.put_ptr(class_info, 40, LoadCursorA((void*)0, (void*)32512));
+        Raw.put_ptr(class_info, 64, (void*)"DjinnUiWindow");
+        RegisterClassExA(class_info);
+        __djinn_free(class_info);
+        void* window = CreateWindowExA(0, "DjinnUiWindow", title.data, WinHost.WS_OVERLAPPEDWINDOW | WinHost.WS_VISIBLE,
+            100, 100, (i32)width, (i32)height, (void*)0, (void*)0, module, (void*)0);
+        return window;
+    }
+
+    // The deepest box under a point; later siblings paint on top, so they win.
+    static unsafe u32 hit(u32 id, f32 x, f32 y) {
+        if (Dom.kind(id) != DomKind.ELEMENT) {
+            return 0;
+        }
+        Style* style = Styles.of(id);
+        if (style.display == Display.NONE) {
+            return 0;
+        }
+        LayoutBox* box = Layout.box(id);
+        mut u32 found = 0;
+        if (x >= box.left && x < box.left + box.width && y >= box.top && y < box.top + box.height) {
+            found = id;
+        }
+        mut u32 child = Dom.first_child(id);
+        while (child != 0) {
+            u32 deeper = WinHost.hit(child, x, y);
+            if (deeper != 0) {
+                found = deeper;
+            }
+            child = Dom.next_sibling(child);
+        }
+        return found;
+    }
+
+    // Copies an RGBA canvas to the window as BGRA.
+    static unsafe void present(void* window, Canvas* canvas) {
+        void* dc = GetDC(window);
+        u32 count = canvas.width * canvas.height;
+        u8* bgra = (u8*)__djinn_alloc((size_long)(count * 4));
+        for (mut u32 i = 0; i < count; i = i + 1) {
+            bgra[i * 4] = canvas.pixels[i * 4 + 2];
+            bgra[i * 4 + 1] = canvas.pixels[i * 4 + 1];
+            bgra[i * 4 + 2] = canvas.pixels[i * 4];
+            bgra[i * 4 + 3] = 255;
+        }
+        void* info = Raw.make(44);
+        Raw.put_u32(info, 0, 40);
+        Raw.put_i32(info, 4, (i32)canvas.width);
+        Raw.put_i32(info, 8, -(i32)canvas.height);
+        Raw.put_u16(info, 12, 1);
+        Raw.put_u16(info, 14, 32);
+        StretchDIBits(dc, 0, 0, (i32)canvas.width, (i32)canvas.height, 0, 0, (i32)canvas.width, (i32)canvas.height,
+            (void*)bgra, info, 0, 13369376);
+        __djinn_free(info);
+        __djinn_free((void*)bgra);
+        ReleaseDC(window, dc);
+    }
+
+    // The lowest 16 bits of a message parameter as a signed coordinate (a cast to i16 would trap on 32768 and up).
+    static f32 low_word(u64 value) {
+        mut i32 word = (i32)(value & 0xFFFF);
+        if (word >= 32768) {
+            word = word - 65536;
+        }
+        return (f32)word;
+    }
+
+    static unsafe void announce(u32 id, str event) {
+        if (id != 0) {
+            Dom.dispatch(id, event);
+        }
+    }
+
+    // Runs one app in a window until it is closed. Returns the exit code.
+    public static unsafe i32 run<T>(T app, str title, u32 width, u32 height) {
+        SetProcessDPIAware();
+        GdiFonts.install();
+        Mounted mounted = App.mount<T>(app);
+        void* window = WinHost.open(title, width, height);
+        if (window == (void*)0) {
+            return 1;
+        }
+        // The GPU path is opt-in (DJINN_UI_GPU=1) until it has had more miles; any failure keeps the software path.
+        mut VulkanRenderer* gpu = (VulkanRenderer*)0;
+        if (getenv("DJINN_UI_GPU") != (i8*)0) {
+            gpu = VulkanRenderer.create(GetModuleHandleA((i8*)0), window, width, height);
+            if (gpu == (VulkanRenderer*)0) {
+                printf("win32: Vulkan is not available, drawing with the software rasterizer\n");
+            } else {
+                printf("win32: drawing with Vulkan\n");
+            }
+        }
+        void* message = Raw.make(64);
+        void* rect = Raw.make(16);
+        mut DisplayList list = DisplayList.create();
+        mut Canvas canvas = Canvas.create(1, 1);
+        mut u32 stamp = 0;
+        mut u32 gpu_width = 0;
+        mut u32 gpu_height = 0;
+        mut u32 pressed = 0;
+        mut bool dirty = true;
+        mut bool running = true;
+        while (running) {
+            mut bool busy = false;
+            while (PeekMessageA(message, (void*)0, 0, 0, 1) != 0) {
+                busy = true;
+                u32 kind = Raw.get_u32(message, 8);
+                u64 param = Raw.get_u64(message, 24);
+                f32 x = WinHost.low_word(param);
+                f32 y = WinHost.low_word(param >> 16);
+                if (kind == WinHost.WM_QUIT) {
+                    running = false;
+                } else if (kind == WinHost.WM_LBUTTONDOWN) {
+                    pressed = WinHost.hit(Dom.document(), x, y);
+                    WinHost.announce(pressed, "mousedown");
+                } else if (kind == WinHost.WM_LBUTTONUP) {
+                    u32 target = WinHost.hit(Dom.document(), x, y);
+                    WinHost.announce(target, "mouseup");
+                    if (target != 0 && target == pressed) {
+                        WinHost.announce(target, "click");
+                    }
+                    pressed = 0;
+                } else if (kind == WinHost.WM_MOUSEMOVE) {
+                    WinHost.announce(WinHost.hit(Dom.document(), x, y), "mousemove");
+                } else if (kind == WinHost.WM_KEYDOWN) {
+                    WinHost.announce(Dom.document(), "keydown");
+                } else if (kind == WinHost.WM_PAINT) {
+                    dirty = true;
+                }
+                TranslateMessage(message);
+                DispatchMessageA(message);
+            }
+            if (IsWindow(window) == 0) {
+                running = false;
+            }
+            if (running) {
+                GetClientRect(window, rect);
+                u32 w = (u32)Raw.get_i32(rect, 8);
+                u32 h = (u32)Raw.get_i32(rect, 12);
+                if (w > 0 && h > 0) {
+                    if (gpu == (VulkanRenderer*)0 && (w != canvas.width || h != canvas.height)) {
+                        canvas.release();
+                        canvas = Canvas.create(w, h);
+                        dirty = true;
+                    }
+                    if (gpu != (VulkanRenderer*)0 && (w != gpu_width || h != gpu_height)) {
+                        gpu_width = w;
+                        gpu_height = h;
+                        dirty = true;
+                    }
+                    if (dirty || Dom.stamp() != stamp) {
+                        Painter.frame(&list, (f32)w, (f32)h);
+                        if (gpu != (VulkanRenderer*)0) {
+                            dirty = !VulkanRenderer.draw(gpu, &list, w, h);
+                        } else {
+                            canvas.clear(0xFFFFFFFF);
+                            SoftRaster.draw(&canvas, &list);
+                            WinHost.present(window, &canvas);
+                            dirty = false;
+                        }
+                        stamp = Dom.stamp();
+                        busy = true;
+                    }
+                }
+            }
+            if (!busy) {
+                Sleep(8);
+            }
+        }
+        if (gpu != (VulkanRenderer*)0) {
+            VulkanRenderer.release(gpu);
+        }
+        list.release();
+        canvas.release();
+        mounted.unmount();
+        return 0;
+    }
+
+    // One frame to a PPM file, no window: what a test or a screenshot of the showcase uses.
+    public static unsafe i32 shot<T>(T app, u32 width, u32 height, i8* path, f32 click_x, f32 click_y) {
+        GdiFonts.install();
+        Mounted mounted = App.mount<T>(app);
+        mut DisplayList list = DisplayList.create();
+        Painter.frame(&list, (f32)width, (f32)height);
+        if (click_x >= (f32)0.0) {
+            WinHost.announce(WinHost.hit(Dom.document(), click_x, click_y), "click");
+            Painter.frame(&list, (f32)width, (f32)height);
+        }
+        mut Canvas canvas = Canvas.create(width, height);
+        canvas.clear(0xFFFFFFFF);
+        SoftRaster.draw(&canvas, &list);
+        bool saved = canvas.save_ppm(path);
+        list.release();
+        canvas.release();
+        mounted.unmount();
+        if (saved) {
+            return 0;
+        }
+        return 1;
+    }
+}

@@ -1,0 +1,47 @@
+import std::meta;
+import std::types;
+import std::libc;
+import spirv::assembler;
+
+namespace spirv;
+
+// The words of an assembled SPIR-V module.
+struct Words {
+    mut u32* data;
+    mut u32 count;
+}
+
+struct Spirv {
+    static u32 digit(i8 c) {
+        if (c >= 48 && c <= 57) {
+            return (u32)c - 48;
+        }
+        return (u32)c - 87;
+    }
+
+    // Reads the hex text the spirv!{} macro produced (8 digits per word, separated by spaces) into a heap array the
+    // caller owns. Decoding is the only work left at run time; the assembly happened in the compiler.
+    public static unsafe Words decode(str text) {
+        u32 count = ((u32)text.length + 1) / 9;
+        u32* data = (u32*)__djinn_alloc((size_long)(count * 4));
+        for (mut u32 word = 0; word < count; word = word + 1) {
+            mut u32 value = 0;
+            for (mut u32 i = 0; i < 8; i = i + 1) {
+                value = (value << 4) | Spirv.digit(text.data[word * 9 + i]);
+            }
+            data[word] = value;
+        }
+        Words words = { .data = data, .count = count };
+        return words;
+    }
+}
+
+TokenStream expand_spirv(TokenStream input) {
+    unsafe {
+        return SpirvAssembler.expand(input);
+    }
+}
+
+// spirv!{ ... }: SPIR-V assembly (the operand order of the specification, ids written %name, statements ended by
+// ';') assembled by the compiler into the module's words. The expression has type spirv::Words.
+proc macro spirv => expand_spirv;

@@ -1,0 +1,824 @@
+import std::types;
+import std::libc;
+import spirv;
+import ui;
+
+namespace vulkan;
+
+// The GPU renderer of the UI: it draws the DisplayList (triangles with a position, an atlas coordinate and a color) in
+// one draw call over the swapchain of a window. The pipeline is a single one: pixel = color * atlas(u, v) with straight
+// alpha blending, so rectangles (the solid block of the atlas), rounded corners and text all go through it.
+//
+// One frame is in flight at a time: the vertices are copied into a persistently mapped host-visible buffer, the atlas is
+// uploaded through a staging buffer only when its version changed, and the window is presented with FIFO (vsync).
+struct VulkanRenderer {
+    const u32 MAX_IMAGES = 8;
+    const u32 VERTEX_BYTES = 20;
+
+    mut u64 instance;
+    mut u64 surface;
+    mut u64 physical;
+    mut u64 device;
+    mut u64 queue;
+    mut u32 family;
+    mut u32 memory_kinds;
+    mut void* memory_properties;
+
+    mut u64 swapchain;
+    mut u32 width;
+    mut u32 height;
+    mut u32 image_count;
+    mut u64* images;
+    mut u64* views;
+    mut u64* framebuffers;
+    mut u64* finished;
+
+    mut u64 render_pass;
+    mut u64 set_layout;
+    mut u64 pipeline_layout;
+    mut u64 pipeline;
+    mut u64 pool;
+    mut u64 set;
+    mut u64 sampler;
+    mut u64 command_pool;
+    mut u64 command_buffer;
+    mut u64 image_ready;
+    mut u64 in_flight;
+
+    mut u64 atlas_image;
+    mut u64 atlas_memory;
+    mut u64 atlas_view;
+    mut u64 staging;
+    mut u64 staging_memory;
+    mut void* staging_mapped;
+    mut u32 atlas_version;
+
+    mut u64 vertex_buffer;
+    mut u64 vertex_memory;
+    mut void* vertex_mapped;
+    mut u32 vertex_capacity;
+
+    static unsafe bool ok(i32 result, str what) {
+        if (result < 0) {
+            printf("vulkan: %s failed (%d)\n", what.data, result);
+            return false;
+        }
+        return true;
+    }
+
+    static unsafe u32 memory_type(VulkanRenderer* self, u32 bits, u32 wanted) {
+        for (mut u32 i = 0; i < self.memory_kinds; i = i + 1) {
+            u32 flags = VkBuf.get_u32(self.memory_properties, 4 + i * 8);
+            if (((bits >> i) & 1) == 1 && (flags & wanted) == wanted) {
+                return i;
+            }
+        }
+        return 4294967295;
+    }
+
+    // A buffer with its own memory; 'mapped' (when not null) receives a persistent mapping.
+    static unsafe bool buffer(VulkanRenderer* self, u64 bytes, u32 usage, u64* buffer, u64* memory, void** mapped) {
+        void* info = VkBuf.info(56, 12);
+        VkBuf.u64_at(info, 24, bytes);
+        VkBuf.u32_at(info, 32, usage);
+        mut bool made = VulkanRenderer.ok(vkCreateBuffer(self.device, info, (void*)0, buffer), "vkCreateBuffer");
+        __djinn_free(info);
+        if (!made) {
+            return false;
+        }
+        void* requirements = VkBuf.make(24);
+        vkGetBufferMemoryRequirements(self.device, *buffer, requirements);
+        u32 kind = VulkanRenderer.memory_type(self, VkBuf.get_u32(requirements, 16), 6);
+        void* allocation = VkBuf.info(32, 5);
+        VkBuf.u64_at(allocation, 16, VkBuf.get_u64(requirements, 0));
+        VkBuf.u32_at(allocation, 24, kind);
+        __djinn_free(requirements);
+        bool allocated = kind != 4294967295 && VulkanRenderer.ok(vkAllocateMemory(self.device, allocation, (void*)0, memory), "vkAllocateMemory");
+        __djinn_free(allocation);
+        if (!allocated) {
+            return false;
+        }
+        if (!VulkanRenderer.ok(vkBindBufferMemory(self.device, *buffer, *memory, 0), "vkBindBufferMemory")) {
+            return false;
+        }
+        if (mapped != (void**)0) {
+            return VulkanRenderer.ok(vkMapMemory(self.device, *memory, 0, bytes, 0, mapped), "vkMapMemory");
+        }
+        return true;
+    }
+
+    static unsafe u64 shader(VulkanRenderer* self, Words code) {
+        void* info = VkBuf.info(40, 16);
+        VkBuf.u64_at(info, 24, (u64)(code.count * 4));
+        VkBuf.ptr_at(info, 32, (void*)code.data);
+        mut u64 module = 0;
+        mut bool made = VulkanRenderer.ok(vkCreateShaderModule(self.device, info, (void*)0, &module), "vkCreateShaderModule");
+        __djinn_free(info);
+        if (!made) {
+            return 0;
+        }
+        return module;
+    }
+
+    static unsafe bool create_device(VulkanRenderer* self, void* module, void* window) {
+        // the instance, with the surface extensions of Windows
+        void* extensions = VkBuf.make(16);
+        VkBuf.ptr_at(extensions, 0, (void*)"VK_KHR_surface");
+        VkBuf.ptr_at(extensions, 8, (void*)"VK_KHR_win32_surface");
+        void* instance_info = VkBuf.info(64, 1);
+        VkBuf.u32_at(instance_info, 48, 2);
+        VkBuf.ptr_at(instance_info, 56, extensions);
+        mut bool made = VulkanRenderer.ok(vkCreateInstance(instance_info, (void*)0, &self.instance), "vkCreateInstance");
+        __djinn_free(instance_info);
+        __djinn_free(extensions);
+        if (!made) {
+            return false;
+        }
+        void* surface_info = VkBuf.info(40, 1000009000);
+        VkBuf.ptr_at(surface_info, 24, module);
+        VkBuf.ptr_at(surface_info, 32, window);
+        made = VulkanRenderer.ok(vkCreateWin32SurfaceKHR(self.instance, surface_info, (void*)0, &self.surface), "vkCreateWin32SurfaceKHR");
+        __djinn_free(surface_info);
+        if (!made) {
+            return false;
+        }
+        // the first device with a queue family that draws and presents
+        mut u32 count = 0;
+        vkEnumeratePhysicalDevices(self.instance, &count, (u64*)0);
+        if (count == 0) {
+            printf("vulkan: no device\n");
+            return false;
+        }
+        u64* devices = (u64*)__djinn_alloc_zeroed((size_long)(count * 8));
+        vkEnumeratePhysicalDevices(self.instance, &count, devices);
+        mut bool found = false;
+        for (mut u32 d = 0; d < count && !found; d = d + 1) {
+            mut u32 families = 0;
+            vkGetPhysicalDeviceQueueFamilyProperties(devices[d], &families, (void*)0);
+            void* properties = VkBuf.make(families * 24);
+            vkGetPhysicalDeviceQueueFamilyProperties(devices[d], &families, properties);
+            for (mut u32 f = 0; f < families && !found; f = f + 1) {
+                mut u32 supported = 0;
+                vkGetPhysicalDeviceSurfaceSupportKHR(devices[d], f, self.surface, &supported);
+                if ((VkBuf.get_u32(properties, f * 24) & 1) != 0 && supported != 0) {
+                    self.physical = devices[d];
+                    self.family = f;
+                    found = true;
+                }
+            }
+            __djinn_free(properties);
+        }
+        __djinn_free((void*)devices);
+        if (!found) {
+            printf("vulkan: no queue family draws and presents\n");
+            return false;
+        }
+        self.memory_properties = VkBuf.make(520);
+        vkGetPhysicalDeviceMemoryProperties(self.physical, self.memory_properties);
+        self.memory_kinds = VkBuf.get_u32(self.memory_properties, 0);
+        // the logical device with a swapchain
+        void* priority = VkBuf.make(4);
+        VkBuf.f32_at(priority, 0, (f32)1.0);
+        void* queue_info = VkBuf.info(40, 2);
+        VkBuf.u32_at(queue_info, 20, self.family);
+        VkBuf.u32_at(queue_info, 24, 1);
+        VkBuf.ptr_at(queue_info, 32, priority);
+        void* device_extensions = VkBuf.make(8);
+        VkBuf.ptr_at(device_extensions, 0, (void*)"VK_KHR_swapchain");
+        void* device_info = VkBuf.info(72, 3);
+        VkBuf.u32_at(device_info, 20, 1);
+        VkBuf.ptr_at(device_info, 24, queue_info);
+        VkBuf.u32_at(device_info, 48, 1);
+        VkBuf.ptr_at(device_info, 56, device_extensions);
+        made = VulkanRenderer.ok(vkCreateDevice(self.physical, device_info, (void*)0, &self.device), "vkCreateDevice");
+        __djinn_free(device_info);
+        __djinn_free(device_extensions);
+        __djinn_free(queue_info);
+        __djinn_free(priority);
+        if (!made) {
+            return false;
+        }
+        vkGetDeviceQueue(self.device, self.family, 0, &self.queue);
+        return true;
+    }
+
+    static unsafe bool create_render_pass(VulkanRenderer* self) {
+        void* attachment = VkBuf.make(36);
+        VkBuf.u32_at(attachment, 4, 44);
+        VkBuf.u32_at(attachment, 8, 1);
+        VkBuf.u32_at(attachment, 12, 1);
+        VkBuf.u32_at(attachment, 16, 0);
+        VkBuf.u32_at(attachment, 20, 2);
+        VkBuf.u32_at(attachment, 24, 2);
+        VkBuf.u32_at(attachment, 28, 0);
+        VkBuf.u32_at(attachment, 32, 1000001002);
+        void* reference = VkBuf.make(8);
+        VkBuf.u32_at(reference, 0, 0);
+        VkBuf.u32_at(reference, 4, 2);
+        void* subpass = VkBuf.make(72);
+        VkBuf.u32_at(subpass, 24, 1);
+        VkBuf.ptr_at(subpass, 32, reference);
+        void* dependency = VkBuf.make(28);
+        VkBuf.u32_at(dependency, 0, 4294967295);
+        VkBuf.u32_at(dependency, 4, 0);
+        VkBuf.u32_at(dependency, 8, 1024);
+        VkBuf.u32_at(dependency, 12, 1024);
+        VkBuf.u32_at(dependency, 20, 256);
+        void* info = VkBuf.info(64, 38);
+        VkBuf.u32_at(info, 20, 1);
+        VkBuf.ptr_at(info, 24, attachment);
+        VkBuf.u32_at(info, 32, 1);
+        VkBuf.ptr_at(info, 40, subpass);
+        VkBuf.u32_at(info, 48, 1);
+        VkBuf.ptr_at(info, 56, dependency);
+        mut bool made = VulkanRenderer.ok(vkCreateRenderPass(self.device, info, (void*)0, &self.render_pass), "vkCreateRenderPass");
+        __djinn_free(info);
+        __djinn_free(dependency);
+        __djinn_free(subpass);
+        __djinn_free(reference);
+        __djinn_free(attachment);
+        return made;
+    }
+
+    static unsafe bool create_pipeline(VulkanRenderer* self) {
+        // descriptor set layout: the atlas, combined image sampler at binding 0 for the fragment stage
+        void* binding = VkBuf.make(24);
+        VkBuf.u32_at(binding, 0, 0);
+        VkBuf.u32_at(binding, 4, 1);
+        VkBuf.u32_at(binding, 8, 1);
+        VkBuf.u32_at(binding, 12, 16);
+        void* layout_info = VkBuf.info(32, 32);
+        VkBuf.u32_at(layout_info, 20, 1);
+        VkBuf.ptr_at(layout_info, 24, binding);
+        mut bool made = VulkanRenderer.ok(vkCreateDescriptorSetLayout(self.device, layout_info, (void*)0, &self.set_layout), "vkCreateDescriptorSetLayout");
+        __djinn_free(layout_info);
+        __djinn_free(binding);
+        if (!made) {
+            return false;
+        }
+        // pipeline layout: that set and the viewport size as a push constant of the vertex stage
+        void* range = VkBuf.make(12);
+        VkBuf.u32_at(range, 0, 1);
+        VkBuf.u32_at(range, 4, 0);
+        VkBuf.u32_at(range, 8, 8);
+        void* sets = VkBuf.make(8);
+        VkBuf.u64_at(sets, 0, self.set_layout);
+        void* pipeline_layout_info = VkBuf.info(48, 30);
+        VkBuf.u32_at(pipeline_layout_info, 20, 1);
+        VkBuf.ptr_at(pipeline_layout_info, 24, sets);
+        VkBuf.u32_at(pipeline_layout_info, 32, 1);
+        VkBuf.ptr_at(pipeline_layout_info, 40, range);
+        made = VulkanRenderer.ok(vkCreatePipelineLayout(self.device, pipeline_layout_info, (void*)0, &self.pipeline_layout), "vkCreatePipelineLayout");
+        __djinn_free(pipeline_layout_info);
+        __djinn_free(sets);
+        __djinn_free(range);
+        if (!made) {
+            return false;
+        }
+        Words vertex_code = Shaders.vertex();
+        Words fragment_code = Shaders.fragment();
+        u64 vertex_module = VulkanRenderer.shader(self, vertex_code);
+        u64 fragment_module = VulkanRenderer.shader(self, fragment_code);
+        __djinn_free((void*)vertex_code.data);
+        __djinn_free((void*)fragment_code.data);
+        if (vertex_module == 0 || fragment_module == 0) {
+            return false;
+        }
+        void* stages = VkBuf.make(96);
+        VkBuf.u32_at(stages, 0, 18);
+        VkBuf.u32_at(stages, 20, 1);
+        VkBuf.u64_at(stages, 24, vertex_module);
+        VkBuf.ptr_at(stages, 32, (void*)"main");
+        VkBuf.u32_at(stages, 48, 18);
+        VkBuf.u32_at(stages, 68, 16);
+        VkBuf.u64_at(stages, 72, fragment_module);
+        VkBuf.ptr_at(stages, 80, (void*)"main");
+        // vertices: position, atlas coordinate, color as four normalized bytes
+        void* vertex_binding = VkBuf.make(12);
+        VkBuf.u32_at(vertex_binding, 0, 0);
+        VkBuf.u32_at(vertex_binding, 4, VulkanRenderer.VERTEX_BYTES);
+        VkBuf.u32_at(vertex_binding, 8, 0);
+        void* attributes = VkBuf.make(48);
+        VkBuf.u32_at(attributes, 0, 0);
+        VkBuf.u32_at(attributes, 8, 103);
+        VkBuf.u32_at(attributes, 12, 0);
+        VkBuf.u32_at(attributes, 16, 1);
+        VkBuf.u32_at(attributes, 24, 103);
+        VkBuf.u32_at(attributes, 28, 8);
+        VkBuf.u32_at(attributes, 32, 2);
+        VkBuf.u32_at(attributes, 40, 37);
+        VkBuf.u32_at(attributes, 44, 16);
+        void* vertex_input = VkBuf.info(48, 19);
+        VkBuf.u32_at(vertex_input, 20, 1);
+        VkBuf.ptr_at(vertex_input, 24, vertex_binding);
+        VkBuf.u32_at(vertex_input, 32, 3);
+        VkBuf.ptr_at(vertex_input, 40, attributes);
+        void* assembly = VkBuf.info(32, 20);
+        VkBuf.u32_at(assembly, 20, 3);
+        void* viewport = VkBuf.info(48, 22);
+        VkBuf.u32_at(viewport, 20, 1);
+        VkBuf.u32_at(viewport, 32, 1);
+        void* raster = VkBuf.info(64, 23);
+        VkBuf.u32_at(raster, 28, 0);
+        VkBuf.u32_at(raster, 32, 0);
+        VkBuf.f32_at(raster, 56, (f32)1.0);
+        void* multisample = VkBuf.info(48, 24);
+        VkBuf.u32_at(multisample, 20, 1);
+        void* blend_attachment = VkBuf.make(32);
+        VkBuf.u32_at(blend_attachment, 0, 1);
+        VkBuf.u32_at(blend_attachment, 4, 6);
+        VkBuf.u32_at(blend_attachment, 8, 7);
+        VkBuf.u32_at(blend_attachment, 12, 0);
+        VkBuf.u32_at(blend_attachment, 16, 1);
+        VkBuf.u32_at(blend_attachment, 20, 7);
+        VkBuf.u32_at(blend_attachment, 24, 0);
+        VkBuf.u32_at(blend_attachment, 28, 15);
+        void* blend = VkBuf.info(56, 26);
+        VkBuf.u32_at(blend, 28, 1);
+        VkBuf.ptr_at(blend, 32, blend_attachment);
+        void* dynamic_states = VkBuf.make(8);
+        VkBuf.u32_at(dynamic_states, 0, 0);
+        VkBuf.u32_at(dynamic_states, 4, 1);
+        void* dynamic = VkBuf.info(32, 27);
+        VkBuf.u32_at(dynamic, 20, 2);
+        VkBuf.ptr_at(dynamic, 24, dynamic_states);
+        void* info = VkBuf.info(144, 28);
+        VkBuf.u32_at(info, 20, 2);
+        VkBuf.ptr_at(info, 24, stages);
+        VkBuf.ptr_at(info, 32, vertex_input);
+        VkBuf.ptr_at(info, 40, assembly);
+        VkBuf.ptr_at(info, 56, viewport);
+        VkBuf.ptr_at(info, 64, raster);
+        VkBuf.ptr_at(info, 72, multisample);
+        VkBuf.ptr_at(info, 88, blend);
+        VkBuf.ptr_at(info, 96, dynamic);
+        VkBuf.u64_at(info, 104, self.pipeline_layout);
+        VkBuf.u64_at(info, 112, self.render_pass);
+        VkBuf.u32_at(info, 120, 0);
+        VkBuf.u64_at(info, 128, 0);
+        VkBuf.u32_at(info, 136, 4294967295);
+        made = VulkanRenderer.ok(vkCreateGraphicsPipelines(self.device, 0, 1, info, (void*)0, &self.pipeline), "vkCreateGraphicsPipelines");
+        __djinn_free(info);
+        __djinn_free(dynamic);
+        __djinn_free(dynamic_states);
+        __djinn_free(blend);
+        __djinn_free(blend_attachment);
+        __djinn_free(multisample);
+        __djinn_free(raster);
+        __djinn_free(viewport);
+        __djinn_free(assembly);
+        __djinn_free(vertex_input);
+        __djinn_free(attributes);
+        __djinn_free(vertex_binding);
+        __djinn_free(stages);
+        vkDestroyShaderModule(self.device, vertex_module, (void*)0);
+        vkDestroyShaderModule(self.device, fragment_module, (void*)0);
+        return made;
+    }
+
+    // The atlas as a sampled R8 image with a staging buffer, and the descriptor set that points at it.
+    static unsafe bool create_atlas(VulkanRenderer* self, u32 width, u32 height) {
+        void* info = VkBuf.info(88, 14);
+        VkBuf.u32_at(info, 20, 1);
+        VkBuf.u32_at(info, 24, 9);
+        VkBuf.u32_at(info, 28, width);
+        VkBuf.u32_at(info, 32, height);
+        VkBuf.u32_at(info, 36, 1);
+        VkBuf.u32_at(info, 40, 1);
+        VkBuf.u32_at(info, 44, 1);
+        VkBuf.u32_at(info, 48, 1);
+        VkBuf.u32_at(info, 52, 0);
+        VkBuf.u32_at(info, 56, 6);
+        mut bool made = VulkanRenderer.ok(vkCreateImage(self.device, info, (void*)0, &self.atlas_image), "vkCreateImage");
+        __djinn_free(info);
+        if (!made) {
+            return false;
+        }
+        void* requirements = VkBuf.make(24);
+        vkGetImageMemoryRequirements(self.device, self.atlas_image, requirements);
+        u32 kind = VulkanRenderer.memory_type(self, VkBuf.get_u32(requirements, 16), 1);
+        void* allocation = VkBuf.info(32, 5);
+        VkBuf.u64_at(allocation, 16, VkBuf.get_u64(requirements, 0));
+        VkBuf.u32_at(allocation, 24, kind);
+        __djinn_free(requirements);
+        made = kind != 4294967295 && VulkanRenderer.ok(vkAllocateMemory(self.device, allocation, (void*)0, &self.atlas_memory), "vkAllocateMemory(atlas)");
+        __djinn_free(allocation);
+        if (!made || !VulkanRenderer.ok(vkBindImageMemory(self.device, self.atlas_image, self.atlas_memory, 0), "vkBindImageMemory")) {
+            return false;
+        }
+        void* view_info = VkBuf.info(80, 15);
+        VkBuf.u64_at(view_info, 24, self.atlas_image);
+        VkBuf.u32_at(view_info, 32, 1);
+        VkBuf.u32_at(view_info, 36, 9);
+        VkBuf.u32_at(view_info, 56, 1);
+        VkBuf.u32_at(view_info, 64, 1);
+        VkBuf.u32_at(view_info, 72, 1);
+        made = VulkanRenderer.ok(vkCreateImageView(self.device, view_info, (void*)0, &self.atlas_view), "vkCreateImageView(atlas)");
+        __djinn_free(view_info);
+        if (!made) {
+            return false;
+        }
+        if (!VulkanRenderer.buffer(self, (u64)(width * height), 1, &self.staging, &self.staging_memory, &self.staging_mapped)) {
+            return false;
+        }
+        void* sampler_info = VkBuf.info(80, 31);
+        VkBuf.u32_at(sampler_info, 20, 0);
+        VkBuf.u32_at(sampler_info, 24, 0);
+        VkBuf.u32_at(sampler_info, 32, 2);
+        VkBuf.u32_at(sampler_info, 36, 2);
+        VkBuf.u32_at(sampler_info, 40, 2);
+        made = VulkanRenderer.ok(vkCreateSampler(self.device, sampler_info, (void*)0, &self.sampler), "vkCreateSampler");
+        __djinn_free(sampler_info);
+        if (!made) {
+            return false;
+        }
+        void* pool_size = VkBuf.make(8);
+        VkBuf.u32_at(pool_size, 0, 1);
+        VkBuf.u32_at(pool_size, 4, 1);
+        void* pool_info = VkBuf.info(40, 33);
+        VkBuf.u32_at(pool_info, 20, 1);
+        VkBuf.u32_at(pool_info, 24, 1);
+        VkBuf.ptr_at(pool_info, 32, pool_size);
+        made = VulkanRenderer.ok(vkCreateDescriptorPool(self.device, pool_info, (void*)0, &self.pool), "vkCreateDescriptorPool");
+        __djinn_free(pool_info);
+        __djinn_free(pool_size);
+        if (!made) {
+            return false;
+        }
+        void* layouts = VkBuf.make(8);
+        VkBuf.u64_at(layouts, 0, self.set_layout);
+        void* set_info = VkBuf.info(40, 34);
+        VkBuf.u64_at(set_info, 16, self.pool);
+        VkBuf.u32_at(set_info, 24, 1);
+        VkBuf.ptr_at(set_info, 32, layouts);
+        made = VulkanRenderer.ok(vkAllocateDescriptorSets(self.device, set_info, &self.set), "vkAllocateDescriptorSets");
+        __djinn_free(set_info);
+        __djinn_free(layouts);
+        if (!made) {
+            return false;
+        }
+        void* image_info = VkBuf.make(24);
+        VkBuf.u64_at(image_info, 0, self.sampler);
+        VkBuf.u64_at(image_info, 8, self.atlas_view);
+        VkBuf.u32_at(image_info, 16, 5);
+        void* write = VkBuf.info(64, 35);
+        VkBuf.u64_at(write, 16, self.set);
+        VkBuf.u32_at(write, 24, 0);
+        VkBuf.u32_at(write, 28, 0);
+        VkBuf.u32_at(write, 32, 1);
+        VkBuf.u32_at(write, 36, 1);
+        VkBuf.ptr_at(write, 40, image_info);
+        vkUpdateDescriptorSets(self.device, 1, write, 0, (void*)0);
+        __djinn_free(write);
+        __djinn_free(image_info);
+        return true;
+    }
+
+    static unsafe bool create_sync(VulkanRenderer* self) {
+        void* pool_info = VkBuf.info(24, 39);
+        VkBuf.u32_at(pool_info, 16, 2);
+        VkBuf.u32_at(pool_info, 20, self.family);
+        mut bool made = VulkanRenderer.ok(vkCreateCommandPool(self.device, pool_info, (void*)0, &self.command_pool), "vkCreateCommandPool");
+        __djinn_free(pool_info);
+        if (!made) {
+            return false;
+        }
+        void* buffer_info = VkBuf.info(32, 40);
+        VkBuf.u64_at(buffer_info, 16, self.command_pool);
+        VkBuf.u32_at(buffer_info, 24, 0);
+        VkBuf.u32_at(buffer_info, 28, 1);
+        made = VulkanRenderer.ok(vkAllocateCommandBuffers(self.device, buffer_info, &self.command_buffer), "vkAllocateCommandBuffers");
+        __djinn_free(buffer_info);
+        if (!made) {
+            return false;
+        }
+        void* semaphore_info = VkBuf.info(24, 9);
+        made = VulkanRenderer.ok(vkCreateSemaphore(self.device, semaphore_info, (void*)0, &self.image_ready), "vkCreateSemaphore");
+        __djinn_free(semaphore_info);
+        if (!made) {
+            return false;
+        }
+        void* fence_info = VkBuf.info(24, 8);
+        VkBuf.u32_at(fence_info, 16, 1);
+        made = VulkanRenderer.ok(vkCreateFence(self.device, fence_info, (void*)0, &self.in_flight), "vkCreateFence");
+        __djinn_free(fence_info);
+        return made;
+    }
+
+    // The swapchain for a window size with one view, framebuffer and 'finished' semaphore per image.
+    static unsafe bool create_swapchain(VulkanRenderer* self, u32 want_width, u32 want_height) {
+        void* capabilities = VkBuf.make(64);
+        if (!VulkanRenderer.ok(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(self.physical, self.surface, capabilities), "surface capabilities")) {
+            return false;
+        }
+        mut u32 width = VkBuf.get_u32(capabilities, 8);
+        mut u32 height = VkBuf.get_u32(capabilities, 12);
+        if (width == 4294967295) {
+            width = want_width;
+            height = want_height;
+        }
+        mut u32 wanted_images = VkBuf.get_u32(capabilities, 0) + 1;
+        u32 most = VkBuf.get_u32(capabilities, 4);
+        if (most != 0 && wanted_images > most) {
+            wanted_images = most;
+        }
+        if (wanted_images > VulkanRenderer.MAX_IMAGES) {
+            wanted_images = VulkanRenderer.MAX_IMAGES;
+        }
+        u32 transform = VkBuf.get_u32(capabilities, 40);
+        __djinn_free(capabilities);
+        if (width == 0 || height == 0) {
+            return false;
+        }
+        void* info = VkBuf.info(104, 1000001000);
+        VkBuf.u64_at(info, 24, self.surface);
+        VkBuf.u32_at(info, 32, wanted_images);
+        VkBuf.u32_at(info, 36, 44);
+        VkBuf.u32_at(info, 40, 0);
+        VkBuf.u32_at(info, 44, width);
+        VkBuf.u32_at(info, 48, height);
+        VkBuf.u32_at(info, 52, 1);
+        VkBuf.u32_at(info, 56, 16);
+        VkBuf.u32_at(info, 60, 0);
+        VkBuf.u32_at(info, 80, transform);
+        VkBuf.u32_at(info, 84, 1);
+        VkBuf.u32_at(info, 88, 2);
+        VkBuf.u32_at(info, 92, 1);
+        VkBuf.u64_at(info, 96, self.swapchain);
+        u64 previous = self.swapchain;
+        mut bool made = VulkanRenderer.ok(vkCreateSwapchainKHR(self.device, info, (void*)0, &self.swapchain), "vkCreateSwapchainKHR");
+        __djinn_free(info);
+        if (previous != 0) {
+            vkDestroySwapchainKHR(self.device, previous, (void*)0);
+        }
+        if (!made) {
+            return false;
+        }
+        self.width = width;
+        self.height = height;
+        mut u32 count = 0;
+        vkGetSwapchainImagesKHR(self.device, self.swapchain, &count, (u64*)0);
+        if (count > VulkanRenderer.MAX_IMAGES) {
+            count = VulkanRenderer.MAX_IMAGES;
+        }
+        self.image_count = count;
+        vkGetSwapchainImagesKHR(self.device, self.swapchain, &count, self.images);
+        for (mut u32 i = 0; i < count; i = i + 1) {
+            void* view_info = VkBuf.info(80, 15);
+            VkBuf.u64_at(view_info, 24, self.images[i]);
+            VkBuf.u32_at(view_info, 32, 1);
+            VkBuf.u32_at(view_info, 36, 44);
+            VkBuf.u32_at(view_info, 56, 1);
+            VkBuf.u32_at(view_info, 64, 1);
+            VkBuf.u32_at(view_info, 72, 1);
+            made = VulkanRenderer.ok(vkCreateImageView(self.device, view_info, (void*)0, &self.views[i]), "vkCreateImageView");
+            __djinn_free(view_info);
+            if (!made) {
+                return false;
+            }
+            void* attachments = VkBuf.make(8);
+            VkBuf.u64_at(attachments, 0, self.views[i]);
+            void* framebuffer_info = VkBuf.info(64, 37);
+            VkBuf.u64_at(framebuffer_info, 24, self.render_pass);
+            VkBuf.u32_at(framebuffer_info, 32, 1);
+            VkBuf.ptr_at(framebuffer_info, 40, attachments);
+            VkBuf.u32_at(framebuffer_info, 48, width);
+            VkBuf.u32_at(framebuffer_info, 52, height);
+            VkBuf.u32_at(framebuffer_info, 56, 1);
+            made = VulkanRenderer.ok(vkCreateFramebuffer(self.device, framebuffer_info, (void*)0, &self.framebuffers[i]), "vkCreateFramebuffer");
+            __djinn_free(framebuffer_info);
+            __djinn_free(attachments);
+            if (!made) {
+                return false;
+            }
+            void* semaphore_info = VkBuf.info(24, 9);
+            made = VulkanRenderer.ok(vkCreateSemaphore(self.device, semaphore_info, (void*)0, &self.finished[i]), "vkCreateSemaphore");
+            __djinn_free(semaphore_info);
+            if (!made) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    static unsafe void destroy_swapchain_images(VulkanRenderer* self) {
+        for (mut u32 i = 0; i < self.image_count; i = i + 1) {
+            vkDestroyFramebuffer(self.device, self.framebuffers[i], (void*)0);
+            vkDestroyImageView(self.device, self.views[i], (void*)0);
+        }
+        self.image_count = 0;
+    }
+
+    // Opens the renderer on a window: null when the machine has no usable Vulkan (the caller keeps the software path).
+    public static unsafe VulkanRenderer* create(void* module, void* window, u32 width, u32 height) {
+        VulkanRenderer* self = (VulkanRenderer*)__djinn_alloc_zeroed((size_long)sizeof(VulkanRenderer));
+        self.images = (u64*)__djinn_alloc_zeroed((size_long)(VulkanRenderer.MAX_IMAGES * 8));
+        self.views = (u64*)__djinn_alloc_zeroed((size_long)(VulkanRenderer.MAX_IMAGES * 8));
+        self.framebuffers = (u64*)__djinn_alloc_zeroed((size_long)(VulkanRenderer.MAX_IMAGES * 8));
+        self.finished = (u64*)__djinn_alloc_zeroed((size_long)(VulkanRenderer.MAX_IMAGES * 8));
+        Atlas* atlas = Fonts.atlas();
+        if (VulkanRenderer.create_device(self, module, window) && VulkanRenderer.create_render_pass(self)
+            && VulkanRenderer.create_pipeline(self) && VulkanRenderer.create_atlas(self, atlas.width, atlas.height)
+            && VulkanRenderer.create_sync(self) && VulkanRenderer.create_swapchain(self, width, height)) {
+            return self;
+        }
+        return (VulkanRenderer*)0;
+    }
+
+    // Makes room for 'count' vertices (the buffer only grows).
+    static unsafe bool reserve(VulkanRenderer* self, u32 count) {
+        if (count <= self.vertex_capacity) {
+            return true;
+        }
+        vkDeviceWaitIdle(self.device);
+        if (self.vertex_buffer != 0) {
+            vkDestroyBuffer(self.device, self.vertex_buffer, (void*)0);
+            vkFreeMemory(self.device, self.vertex_memory, (void*)0);
+        }
+        mut u32 grown = self.vertex_capacity * 2;
+        if (grown < 65536) {
+            grown = 65536;
+        }
+        if (grown < count) {
+            grown = count;
+        }
+        if (!VulkanRenderer.buffer(self, (u64)grown * (u64)VulkanRenderer.VERTEX_BYTES, 128, &self.vertex_buffer, &self.vertex_memory, &self.vertex_mapped)) {
+            self.vertex_capacity = 0;
+            return false;
+        }
+        self.vertex_capacity = grown;
+        return true;
+    }
+
+    // Draws one display list into the window's next image. Returns false when the frame was not presented (the window is
+    // minimized or the swapchain had to be rebuilt): the caller just draws again.
+    public static unsafe bool draw(VulkanRenderer* self, DisplayList* list, u32 width, u32 height) {
+        if (width == 0 || height == 0) {
+            return false;
+        }
+        if (width != self.width || height != self.height) {
+            vkDeviceWaitIdle(self.device);
+            VulkanRenderer.destroy_swapchain_images(self);
+            for (mut u32 i = 0; i < VulkanRenderer.MAX_IMAGES; i = i + 1) {
+                if (self.finished[i] != 0) {
+                    self.finished[i] = 0;
+                }
+            }
+            if (!VulkanRenderer.create_swapchain(self, width, height)) {
+                return false;
+            }
+        }
+        if (!VulkanRenderer.reserve(self, list.count)) {
+            return false;
+        }
+        vkWaitForFences(self.device, 1, &self.in_flight, 1, 5000000000);
+        mut u32 index = 0;
+        i32 acquired = vkAcquireNextImageKHR(self.device, self.swapchain, 5000000000, self.image_ready, 0, &index);
+        if (acquired == -1000001004) {
+            self.width = 0;
+            return false;
+        }
+        if (!VulkanRenderer.ok(acquired, "vkAcquireNextImageKHR")) {
+            return false;
+        }
+        vkResetFences(self.device, 1, &self.in_flight);
+        if (list.count > 0) {
+            memcpy(self.vertex_mapped, (void*)list.vertices, (size_long)(list.count * VulkanRenderer.VERTEX_BYTES));
+        }
+        Atlas* atlas = Fonts.atlas();
+        bool upload = atlas.version != self.atlas_version;
+        if (upload) {
+            memcpy(self.staging_mapped, (void*)atlas.pixels, (size_long)(atlas.width * atlas.height));
+        }
+        u64 cb = self.command_buffer;
+        vkResetCommandBuffer(cb, 0);
+        void* begin = VkBuf.info(32, 42);
+        VkBuf.u32_at(begin, 16, 1);
+        vkBeginCommandBuffer(cb, begin);
+        __djinn_free(begin);
+        if (upload) {
+            VulkanRenderer.record_upload(self, cb, atlas);
+            self.atlas_version = atlas.version;
+        }
+        void* clear = VkBuf.make(16);
+        VkBuf.f32_at(clear, 0, (f32)1.0);
+        VkBuf.f32_at(clear, 4, (f32)1.0);
+        VkBuf.f32_at(clear, 8, (f32)1.0);
+        VkBuf.f32_at(clear, 12, (f32)1.0);
+        void* pass = VkBuf.info(64, 43);
+        VkBuf.u64_at(pass, 16, self.render_pass);
+        VkBuf.u64_at(pass, 24, self.framebuffers[index]);
+        VkBuf.u32_at(pass, 40, self.width);
+        VkBuf.u32_at(pass, 44, self.height);
+        VkBuf.u32_at(pass, 48, 1);
+        VkBuf.ptr_at(pass, 56, clear);
+        vkCmdBeginRenderPass(cb, pass, 0);
+        __djinn_free(pass);
+        __djinn_free(clear);
+        if (list.count > 0) {
+            vkCmdBindPipeline(cb, 0, self.pipeline);
+            void* viewport = VkBuf.make(24);
+            VkBuf.f32_at(viewport, 8, (f32)self.width);
+            VkBuf.f32_at(viewport, 12, (f32)self.height);
+            VkBuf.f32_at(viewport, 20, (f32)1.0);
+            vkCmdSetViewport(cb, 0, 1, viewport);
+            __djinn_free(viewport);
+            void* scissor = VkBuf.make(16);
+            VkBuf.u32_at(scissor, 8, self.width);
+            VkBuf.u32_at(scissor, 12, self.height);
+            vkCmdSetScissor(cb, 0, 1, scissor);
+            __djinn_free(scissor);
+            void* size = VkBuf.make(8);
+            VkBuf.f32_at(size, 0, (f32)self.width);
+            VkBuf.f32_at(size, 4, (f32)self.height);
+            vkCmdPushConstants(cb, self.pipeline_layout, 1, 0, 8, size);
+            __djinn_free(size);
+            vkCmdBindDescriptorSets(cb, 0, self.pipeline_layout, 0, 1, &self.set, 0, (u32*)0);
+            mut u64 offset = 0;
+            vkCmdBindVertexBuffers(cb, 0, 1, &self.vertex_buffer, &offset);
+            vkCmdDraw(cb, list.count, 1, 0, 0);
+        }
+        vkCmdEndRenderPass(cb);
+        vkEndCommandBuffer(cb);
+        mut u32 stage = 1024;
+        void* submit = VkBuf.info(72, 4);
+        VkBuf.u32_at(submit, 16, 1);
+        VkBuf.ptr_at(submit, 24, (void*)&self.image_ready);
+        VkBuf.ptr_at(submit, 32, (void*)&stage);
+        VkBuf.u32_at(submit, 40, 1);
+        VkBuf.ptr_at(submit, 48, (void*)&self.command_buffer);
+        VkBuf.u32_at(submit, 56, 1);
+        VkBuf.ptr_at(submit, 64, (void*)&self.finished[index]);
+        bool submitted = VulkanRenderer.ok(vkQueueSubmit(self.queue, 1, submit, self.in_flight), "vkQueueSubmit");
+        __djinn_free(submit);
+        if (!submitted) {
+            return false;
+        }
+        void* present = VkBuf.info(64, 1000001001);
+        VkBuf.u32_at(present, 16, 1);
+        VkBuf.ptr_at(present, 24, (void*)&self.finished[index]);
+        VkBuf.u32_at(present, 32, 1);
+        VkBuf.ptr_at(present, 40, (void*)&self.swapchain);
+        VkBuf.ptr_at(present, 48, (void*)&index);
+        i32 shown = vkQueuePresentKHR(self.queue, present);
+        __djinn_free(present);
+        if (shown == -1000001004) {
+            self.width = 0;
+            return false;
+        }
+        return VulkanRenderer.ok(shown, "vkQueuePresentKHR");
+    }
+
+    // Commands that copy the staging buffer into the atlas image and make it readable by the fragment stage.
+    static unsafe void record_upload(VulkanRenderer* self, u64 cb, Atlas* atlas) {
+        void* to_copy = VkBuf.info(72, 45);
+        VkBuf.u32_at(to_copy, 16, 0);
+        VkBuf.u32_at(to_copy, 20, 4096);
+        VkBuf.u32_at(to_copy, 24, 0);
+        VkBuf.u32_at(to_copy, 28, 7);
+        VkBuf.u32_at(to_copy, 32, 4294967295);
+        VkBuf.u32_at(to_copy, 36, 4294967295);
+        VkBuf.u64_at(to_copy, 40, self.atlas_image);
+        VkBuf.u32_at(to_copy, 48, 1);
+        VkBuf.u32_at(to_copy, 56, 1);
+        VkBuf.u32_at(to_copy, 64, 1);
+        vkCmdPipelineBarrier(cb, 1, 4096, 0, 0, (void*)0, 0, (void*)0, 1, to_copy);
+        __djinn_free(to_copy);
+        void* region = VkBuf.make(56);
+        VkBuf.u32_at(region, 16, 1);
+        VkBuf.u32_at(region, 28, 1);
+        VkBuf.u32_at(region, 44, atlas.width);
+        VkBuf.u32_at(region, 48, atlas.height);
+        VkBuf.u32_at(region, 52, 1);
+        vkCmdCopyBufferToImage(cb, self.staging, self.atlas_image, 7, 1, region);
+        __djinn_free(region);
+        void* to_read = VkBuf.info(72, 45);
+        VkBuf.u32_at(to_read, 16, 4096);
+        VkBuf.u32_at(to_read, 20, 32);
+        VkBuf.u32_at(to_read, 24, 7);
+        VkBuf.u32_at(to_read, 28, 5);
+        VkBuf.u32_at(to_read, 32, 4294967295);
+        VkBuf.u32_at(to_read, 36, 4294967295);
+        VkBuf.u64_at(to_read, 40, self.atlas_image);
+        VkBuf.u32_at(to_read, 48, 1);
+        VkBuf.u32_at(to_read, 56, 1);
+        VkBuf.u32_at(to_read, 64, 1);
+        vkCmdPipelineBarrier(cb, 4096, 128, 0, 0, (void*)0, 0, (void*)0, 1, to_read);
+        __djinn_free(to_read);
+    }
+
+    public static unsafe void release(VulkanRenderer* self) {
+        vkDeviceWaitIdle(self.device);
+        VulkanRenderer.destroy_swapchain_images(self);
+        vkDestroySwapchainKHR(self.device, self.swapchain, (void*)0);
+        vkDestroyDevice(self.device, (void*)0);
+        vkDestroySurfaceKHR(self.instance, self.surface, (void*)0);
+        vkDestroyInstance(self.instance, (void*)0);
+        __djinn_free((void*)self.images);
+        __djinn_free((void*)self.views);
+        __djinn_free((void*)self.framebuffers);
+        __djinn_free((void*)self.finished);
+        __djinn_free(self.memory_properties);
+        __djinn_free((void*)self);
+    }
+}

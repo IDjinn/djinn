@@ -1,0 +1,215 @@
+import ui;
+import win32;
+import std::types;
+import std::libc;
+
+namespace bench;
+
+// Speed, memory and CPU of the UI pipeline on a page of N rows (DJINN_BENCH_ROWS, default 1000), software raster at
+// 1280x720. Every stage is timed over several runs and reported as the median in microseconds:
+//   mount     build the DOM and the reactive graph
+//   frame     style + layout + paint into the display list (cold = first frame, warm = nothing changed)
+//   update    one signal write that changes one text, then the next frame
+//   raster    the display list drawn by the software rasterizer
+// Memory is the process working set / private bytes, CPU is the user+kernel time against wall time.
+extern "C" {
+    i32 QueryPerformanceCounter(i64* value);
+    i32 QueryPerformanceFrequency(i64* value);
+    void* GetCurrentProcess();
+    i32 GetProcessTimes(void* process, void* creation, void* exit, void* kernel, void* user);
+    i32 K32GetProcessMemoryInfo(void* process, void* counters, u32 size);
+}
+
+struct Row {
+    i32 index;
+
+    public unsafe Node render() {
+        return html!{
+            <div class="card cluster">
+                <strong>Row</strong>
+                <span>{this.index}</span>
+                <small>a short description of the row that wraps when it is long</small>
+                <button>open</button>
+            </div>
+        };
+    }
+}
+
+struct Page {
+    i32 rows;
+
+    public unsafe Node render() {
+        signal<i32> count = state(0);
+        return html!{
+            <main class="page stack">
+                <h1>Benchmark</h1>
+                <output id="count">{count}</output>
+                <button id="bump" on_click={() => count.set(count.get() + 1)}>bump</button>
+                {for (i32 i in 0..this.rows) { <Row index={i}/> }}
+            </main>
+        };
+    }
+}
+
+unsafe f64 now_us() {
+    mut i64 counter = 0;
+    mut i64 frequency = 1;
+    QueryPerformanceCounter(&counter);
+    QueryPerformanceFrequency(&frequency);
+    return (f64)counter * 1000000.0 / (f64)frequency;
+}
+
+// 100-nanosecond units to microseconds
+unsafe f64 cpu_us() {
+    void* times = Raw.make(32);
+    GetProcessTimes(GetCurrentProcess(), times, times, times + 16, times + 24);
+    f64 total = (f64)Raw.get_u64(times, 16) + (f64)Raw.get_u64(times, 24);
+    __djinn_free(times);
+    return total / 10.0;
+}
+
+// PROCESS_MEMORY_COUNTERS_EX: WorkingSetSize@16, PeakWorkingSetSize@8, PrivateUsage@64
+unsafe f64 memory_kb(u32 offset) {
+    void* counters = Raw.make(80);
+    Raw.put_u32(counters, 0, 80);
+    K32GetProcessMemoryInfo(GetCurrentProcess(), counters, 80);
+    f64 bytes = (f64)Raw.get_u64(counters, offset);
+    __djinn_free(counters);
+    return bytes / 1024.0;
+}
+
+unsafe u32 first_button(u32 id) {
+    if (Dom.kind(id) == DomKind.ELEMENT && Texts.same(Dom.tag(id), "button")) {
+        return id;
+    }
+    mut u32 child = Dom.first_child(id);
+    while (child != 0) {
+        u32 found = first_button(child);
+        if (found != 0) {
+            return found;
+        }
+        child = Dom.next_sibling(child);
+    }
+    return 0;
+}
+
+unsafe u32 find_bump(u32 id) {
+    if (Dom.kind(id) == DomKind.ELEMENT && Texts.same(Dom.tag(id), "button")) {
+        return id;
+    }
+    return first_button(id);
+}
+
+unsafe void sort(f64* values, u32 count) {
+    for (mut u32 i = 1; i < count; i = i + 1) {
+        f64 key = values[i];
+        mut i32 j = (i32)i - 1;
+        while (j >= 0 && values[j] > key) {
+            values[j + 1] = values[j];
+            j = j - 1;
+        }
+        values[j + 1] = key;
+    }
+}
+
+unsafe f64 median(f64* values, u32 count) {
+    sort(values, count);
+    return values[count / 2];
+}
+
+unsafe void report(str label, f64 us) {
+    printf("  %-22s %12.1f us   %9.3f ms\n", label.data, us, us / 1000.0);
+}
+
+unsafe i32 digits(i8* text) {
+    mut i32 value = 0;
+    mut u32 i = 0;
+    while (text[i] >= 48 && text[i] <= 57) {
+        value = value * 10 + ((i32)text[i] - 48);
+        i = i + 1;
+    }
+    return value;
+}
+
+unsafe i32 main() {
+    mut i32 rows = 1000;
+    i8* arg = getenv("DJINN_BENCH_ROWS");
+    if (arg != (i8*)0) {
+        rows = digits(arg);
+    }
+    GdiFonts.install();
+    f64 memory_start = memory_kb(16);
+    f64 cpu_start = cpu_us();
+    f64 wall_start = now_us();
+
+    Page page = { .rows = rows };
+    f64 t0 = now_us();
+    Mounted mounted = App.mount<Page>(page);
+    f64 mount_us = now_us() - t0;
+    f64 memory_mounted = memory_kb(16);
+
+    mut DisplayList list = DisplayList.create();
+    f64 t1 = now_us();
+    Layout.compute(Dom.document(), (f32)1280.0, (f32)720.0);
+    f64 layout_cold_us = now_us() - t1;
+    f64 memory_layout = memory_kb(16);
+    list.clear();
+    Painter.paint(&list, Dom.document(), (f32)1280.0, (f32)720.0);
+    f64 cold_us = now_us() - t1;
+    u32 vertices = list.count;
+    f64 memory_frame = memory_kb(16);
+
+    u32 runs = 21;
+    f64* warm = (f64*)__djinn_alloc((size_long)(runs * 8));
+    f64* update = (f64*)__djinn_alloc((size_long)(runs * 8));
+    f64* raster = (f64*)__djinn_alloc((size_long)(runs * 8));
+    f64* layout_only = (f64*)__djinn_alloc((size_long)(runs * 8));
+    f64* paint_only = (f64*)__djinn_alloc((size_long)(runs * 8));
+    mut Canvas canvas = Canvas.create(1280, 720);
+    u32 button = first_button(Dom.document());
+    for (mut u32 i = 0; i < runs; i = i + 1) {
+        f64 a = now_us();
+        Painter.frame(&list, (f32)1280.0, (f32)720.0);
+        warm[i] = now_us() - a;
+        f64 l0 = now_us();
+        Layout.compute(Dom.document(), (f32)1280.0, (f32)720.0);
+        layout_only[i] = now_us() - l0;
+        f64 p0 = now_us();
+        list.clear();
+        Painter.paint(&list, Dom.document(), (f32)1280.0, (f32)720.0);
+        paint_only[i] = now_us() - p0;
+        f64 b = now_us();
+        Dom.dispatch(button, "click");
+        Painter.frame(&list, (f32)1280.0, (f32)720.0);
+        update[i] = now_us() - b;
+        f64 c = now_us();
+        canvas.clear(0xFFFFFFFF);
+        SoftRaster.draw(&canvas, &list);
+        raster[i] = now_us() - c;
+    }
+    f64 wall_us = now_us() - wall_start;
+    f64 cpu_used = cpu_us() - cpu_start;
+
+    printf("sizeof Style %u, LayoutBox %u, DomNode %u
+", (u32)sizeof(Style), (u32)sizeof(LayoutBox), (u32)sizeof(DomNode));
+    printf("ui-bench: %d rows, %u dom nodes, %u vertices, 1280x720\n", rows, Dom.live(), vertices);
+    report("mount", mount_us);
+    report("frame (cold)", cold_us);
+    report("  of which style+layout", layout_cold_us);
+    printf("  memory after style+layout %.0f KB
+", memory_layout);
+    report("frame (warm, median)", median(warm, runs));
+    report("  layout only (median)", median(layout_only, runs));
+    report("  paint only (median)", median(paint_only, runs));
+    report("update + frame (median)", median(update, runs));
+    report("software raster (median)", median(raster, runs));
+    printf("  memory working set     start %.0f KB, mounted %.0f KB, after frame %.0f KB, peak %.0f KB, private %.0f KB\n",
+        memory_start, memory_mounted, memory_frame, memory_kb(8), memory_kb(64));
+    printf("  cpu                    %.1f ms of %.1f ms wall (%.0f%% of one core)\n", cpu_used / 1000.0, wall_us / 1000.0,
+        cpu_used * 100.0 / wall_us);
+
+    list.release();
+    canvas.release();
+    mounted.unmount();
+    return 0;
+}

@@ -1,0 +1,219 @@
+import std::types;
+import std::libc;
+
+namespace ui;
+
+unsafe static mut ptr painter_lines = null;
+unsafe static mut u32 painter_line_capacity = 0;
+
+// Turns the laid out tree into a display list: backgrounds, borders, text and outlines in tree order, with clipping
+// for overflow. It reads the boxes from Layout and the computed styles from Styles, so the caller runs
+// Layout.compute first (Painter.frame does).
+struct Painter {
+    // One whole frame: layout for the viewport, then paint. Returns the document height (what a page scrolls).
+    public static unsafe f32 frame(DisplayList* list, f32 width, f32 height) {
+        u32 document = Dom.document();
+        Layout.compute(document, width, height);
+        list.clear();
+        Painter.paint(list, document, width, height);
+        return Layout.box(document).height;
+    }
+
+    // Only what can reach the viewport is turned into triangles: a node whose box (plus the reach of its outline)
+    // lies outside the current clip draws nothing, its children are still visited since they may overflow it.
+    public static unsafe void paint(DisplayList* list, u32 root, f32 width, f32 height) {
+        list.clip_to((f32)0.0, (f32)0.0, width, height);
+        Painter.node(list, root, (f32)1.0);
+        list.restore_clip();
+    }
+
+    static unsafe bool outside(DisplayList* list, f32 left, f32 top, f32 width, f32 height, f32 reach) {
+        return left - reach >= list.clip_right || left + width + reach <= list.clip_left
+            || top - reach >= list.clip_bottom || top + height + reach <= list.clip_top;
+    }
+
+    static unsafe bool is_hidden_tag(str tag) {
+        return Texts.same(tag, "head") || Texts.same(tag, "style") || Texts.same(tag, "script") || Texts.same(tag, "title")
+            || Texts.same(tag, "meta") || Texts.same(tag, "link") || Texts.same(tag, "template");
+    }
+
+    static unsafe void children(DisplayList* list, u32 id, f32 opacity) {
+        mut u32 child = Dom.first_child(id);
+        while (child != 0) {
+            Painter.node(list, child, opacity);
+            child = Dom.next_sibling(child);
+        }
+    }
+
+    static unsafe void node(DisplayList* list, u32 id, f32 opacity) {
+        u8 kind = Dom.kind(id);
+        if (kind == DomKind.TEXT) {
+            Painter.text(list, id, opacity);
+            return;
+        }
+        if (kind != DomKind.ELEMENT) {
+            Painter.children(list, id, opacity);
+            return;
+        }
+        if (Painter.is_hidden_tag(Dom.tag(id))) {
+            return;
+        }
+        Style* style = Styles.of(id);
+        if (style.display == Display.NONE) {
+            return;
+        }
+        if (style.display == Display.CONTENTS) {
+            Painter.children(list, id, opacity * style.opacity);
+            return;
+        }
+        LayoutBox* box = Layout.box(id);
+        f32 faded = opacity * style.opacity;
+        f32 reach = style.outline_offset + style.outline_width + (f32)2.0;
+        bool visible = !Painter.outside(list, box.left, box.top, box.width, box.height, reach);
+        if (visible && style.visibility != Keyword.HIDDEN && faded > (f32)0.0) {
+            Painter.background(list, box, style, faded);
+            Painter.border(list, box, style, faded);
+        }
+        mut bool clipped = false;
+        if (style.overflow == Keyword.HIDDEN || style.overflow == Keyword.SCROLL || style.overflow == Keyword.AUTO) {
+            list.clip_to(box.left + box.border.left, box.top + box.border.top, box.left + box.width - box.border.right,
+                box.top + box.height - box.border.bottom);
+            clipped = true;
+        }
+        Painter.children(list, id, faded);
+        if (clipped) {
+            list.restore_clip();
+        }
+        if (visible && style.visibility != Keyword.HIDDEN && faded > (f32)0.0) {
+            Painter.outline(list, box, style, faded);
+        }
+    }
+
+    static unsafe void background(DisplayList* list, LayoutBox* box, Style* style, f32 opacity) {
+        if ((style.background & 255) == 0) {
+            return;
+        }
+        u32 color = DisplayList.gpu_color(style.background, opacity);
+        list.rounded(box.left, box.top, box.width, box.height, style.border_radius, color);
+    }
+
+    static unsafe void border(DisplayList* list, LayoutBox* box, Style* style, f32 opacity) {
+        if (style.border_style == Keyword.NONE || style.border_style == Keyword.HIDDEN || (style.border_color & 255) == 0) {
+            return;
+        }
+        Edges edge = box.border;
+        if (edge.top <= (f32)0.0 && edge.right <= (f32)0.0 && edge.bottom <= (f32)0.0 && edge.left <= (f32)0.0) {
+            return;
+        }
+        u32 color = DisplayList.gpu_color(style.border_color, opacity);
+        if (style.border_radius > (f32)0.0) {
+            mut f32 widest = Px.max(Px.max(edge.top, edge.right), Px.max(edge.bottom, edge.left));
+            list.ring(box.left, box.top, box.width, box.height, style.border_radius, widest, color);
+            return;
+        }
+        list.fill(box.left, box.top, box.width, edge.top, color);
+        list.fill(box.left, box.top + box.height - edge.bottom, box.width, edge.bottom, color);
+        list.fill(box.left, box.top + edge.top, edge.left, box.height - edge.top - edge.bottom, color);
+        list.fill(box.left + box.width - edge.right, box.top + edge.top, edge.right, box.height - edge.top - edge.bottom, color);
+    }
+
+    static unsafe void outline(DisplayList* list, LayoutBox* box, Style* style, f32 opacity) {
+        if (style.outline_style == Keyword.NONE || style.outline_width <= (f32)0.0 || (style.outline_color & 255) == 0) {
+            return;
+        }
+        f32 reach = style.outline_offset + style.outline_width;
+        u32 color = DisplayList.gpu_color(style.outline_color, opacity);
+        list.ring(box.left - reach, box.top - reach, box.width + reach * (f32)2.0, box.height + reach * (f32)2.0,
+            style.border_radius + reach, style.outline_width, color);
+    }
+
+    static unsafe TextLine* lines_for(u32 id, f32 limit, u32* count) {
+        if (painter_lines == null) {
+            painter_line_capacity = 64;
+            painter_lines = (ptr)__djinn_alloc_zeroed((size_long)(64 * sizeof(TextLine)));
+        }
+        mut u32 found = TextLines.split(id, limit, (TextLine*)painter_lines, painter_line_capacity);
+        if (found > painter_line_capacity) {
+            __djinn_free((void*)painter_lines);
+            painter_line_capacity = found + 16;
+            painter_lines = (ptr)__djinn_alloc_zeroed((size_long)(painter_line_capacity * sizeof(TextLine)));
+            found = TextLines.split(id, limit, (TextLine*)painter_lines, painter_line_capacity);
+        }
+        *count = found;
+        return (TextLine*)painter_lines;
+    }
+
+    static unsafe void text(DisplayList* list, u32 id, f32 opacity) {
+        if (!Fonts.active() || opacity <= (f32)0.0) {
+            return;
+        }
+        Style* style = Styles.of(id);
+        if (style.visibility == Keyword.HIDDEN || (style.color & 255) == 0) {
+            return;
+        }
+        LayoutBox* box = Layout.box(id);
+        if (box.width <= (f32)0.0 && box.height <= (f32)0.0) {
+            return;
+        }
+        if (Painter.outside(list, box.left, box.top, box.width, box.height, (f32)2.0)) {
+            return;
+        }
+        mut u32 count = 0;
+        TextLine* lines = Painter.lines_for(id, box.width, &count);
+        if (count == 0) {
+            return;
+        }
+        str text = Dom.text_of(id);
+        bool bold = style.font_weight >= 600;
+        f32 size = style.font_size;
+        u32 color = DisplayList.gpu_color(style.color, opacity);
+        f32 line_height = style.line_px();
+        mut f32 ascent = (f32)0.0;
+        mut f32 descent = (f32)0.0;
+        Fonts.line_metrics(size, bold, &ascent, &descent);
+        f32 space = TextLines.advance(32, style, true, bold);
+        f32 atlas = (f32)Fonts.ATLAS;
+        for (mut u32 n = 0; n < count; n = n + 1) {
+            TextLine line = lines[n];
+            f32 top = box.top + (f32)n * line_height;
+            f32 baseline = top + (line_height - (ascent + descent)) / (f32)2.0 + ascent;
+            mut f32 pen = box.left;
+            if (style.text_align == Keyword.CENTER) {
+                pen = box.left + (box.width - line.width) / (f32)2.0;
+            } else if (style.text_align == Keyword.END || style.text_align == Keyword.RIGHT) {
+                pen = box.left + box.width - line.width;
+            }
+            f32 line_left = pen;
+            mut bool gap = false;
+            mut u32 i = line.start;
+            while (i < line.end) {
+                mut u32 step = 1;
+                u32 code = Codepoints.decode(text.data, (u32)text.length, i, &step);
+                i = i + step;
+                if (TextLines.is_blank(code)) {
+                    gap = true;
+                    continue;
+                }
+                if (gap) {
+                    pen = pen + space;
+                    gap = false;
+                }
+                Glyph* glyph = Fonts.glyph(code, size, bold);
+                if (glyph != (Glyph*)0) {
+                    f32 x = (f32)Math.round((f64)(pen + (f32)glyph.bearing_x));
+                    f32 y = (f32)Math.round((f64)(baseline - (f32)glyph.bearing_y));
+                    list.quad(x, y, x + (f32)glyph.width, y + (f32)glyph.height, (f32)glyph.atlas_x / atlas,
+                        (f32)glyph.atlas_y / atlas, (f32)(glyph.atlas_x + glyph.width) / atlas,
+                        (f32)(glyph.atlas_y + glyph.height) / atlas, color);
+                }
+                pen = pen + TextLines.advance(code, style, true, bold);
+            }
+            f32 thickness = Px.max((f32)1.0, size / (f32)14.0);
+            if (style.text_decoration == Keyword.UNDERLINE) {
+                list.fill(line_left, baseline + Px.max((f32)1.0, size * (f32)0.1), pen - line_left, thickness, color);
+            } else if (style.text_decoration == Keyword.LINE_THROUGH) {
+                list.fill(line_left, baseline - size * (f32)0.3, pen - line_left, thickness, color);
+            }
+        }
+    }
+}

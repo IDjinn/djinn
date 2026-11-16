@@ -1,0 +1,340 @@
+import std::types;
+import std::libc;
+
+namespace ui;
+
+// One corner of a triangle: position in px, the atlas coordinate (0..1) it samples and its color (straight alpha,
+// R in the lowest byte, which is what the GPU reads as R8G8B8A8). The final pixel is 'color * atlas(u, v)', so a
+// plain shape samples the solid block of the atlas and a glyph its coverage.
+struct Vertex {
+    mut f32 x;
+    mut f32 y;
+    mut f32 u;
+    mut f32 v;
+    mut u32 color;
+}
+
+// What the painter produces and a renderer consumes: a flat list of triangles in paint order. The same list feeds
+// the Vulkan renderer and the software rasterizer, so they draw the same frame.
+struct DisplayList {
+    mut Vertex* vertices;
+    mut u32 count;
+    mut u32 capacity;
+    mut f32 clip_left;
+    mut f32 clip_top;
+    mut f32 clip_right;
+    mut f32 clip_bottom;
+    mut f32* scratch;
+    mut f32* clip_stack;
+    mut u32 clip_depth;
+
+    public static unsafe DisplayList create() {
+        DisplayList list = { .vertices = (Vertex*)0, .count = 0, .capacity = 0, .clip_left = (f32)-1000000.0, .clip_top = (f32)-1000000.0,
+            .clip_right = (f32)1000000.0, .clip_bottom = (f32)1000000.0, .scratch = (f32*)0, .clip_stack = (f32*)0, .clip_depth = 0 };
+        list.scratch = (f32*)__djinn_alloc_zeroed((size_long)(4096 * sizeof(f32)));
+        list.clip_stack = (f32*)__djinn_alloc_zeroed((size_long)(4 * DisplayList.MAX_CLIPS * sizeof(f32)));
+        return list;
+    }
+
+    public unsafe void release() {
+        __djinn_free((void*)this.vertices);
+        __djinn_free((void*)this.scratch);
+        __djinn_free((void*)this.clip_stack);
+        this.clip_stack = (f32*)0;
+        this.vertices = (Vertex*)0;
+        this.scratch = (f32*)0;
+        this.count = 0;
+        this.capacity = 0;
+    }
+
+    public unsafe void clear() {
+        this.count = 0;
+        this.clip_left = (f32)-1000000.0;
+        this.clip_top = (f32)-1000000.0;
+        this.clip_right = (f32)1000000.0;
+        this.clip_bottom = (f32)1000000.0;
+    }
+
+    unsafe void reserve(u32 extra) {
+        u32 needed = this.count + extra;
+        if (needed <= this.capacity) {
+            return;
+        }
+        mut u32 grown = this.capacity * 2;
+        if (grown < 1024) {
+            grown = 1024;
+        }
+        if (grown < needed) {
+            grown = needed;
+        }
+        this.vertices = (Vertex*)__djinn_realloc((void*)this.vertices, (size_long)(grown * sizeof(Vertex)));
+        this.capacity = grown;
+    }
+
+    // Straight alpha in the byte order the GPU reads: 0xRRGGBBAA to A B G R from the top byte down, scaled by 'alpha'.
+    public static u32 gpu_color(u32 rgba, f32 alpha) {
+        u32 r = (rgba >> 24) & 255;
+        u32 g = (rgba >> 16) & 255;
+        u32 b = (rgba >> 8) & 255;
+        mut f32 a = (f32)(rgba & 255) * alpha;
+        if (a > (f32)255.0) {
+            a = (f32)255.0;
+        }
+        if (a < (f32)0.0) {
+            a = (f32)0.0;
+        }
+        return r | (g << 8) | (b << 16) | ((u32)(a + (f32)0.5) << 24);
+    }
+
+    // The color with its alpha multiplied by 'factor' (0..1), alpha being the top byte of a GPU color.
+    public static u32 fade(u32 color, f32 factor) {
+        mut f32 a = (f32)(color >> 24) * factor;
+        if (a > (f32)255.0) {
+            a = (f32)255.0;
+        }
+        return (color & 0x00FFFFFF) | ((u32)(a + (f32)0.5) << 24);
+    }
+
+    public unsafe void push(f32 x, f32 y, f32 u, f32 v, u32 color) {
+        this.reserve(1);
+        Vertex* vertex = &this.vertices[this.count];
+        vertex.x = x;
+        vertex.y = y;
+        vertex.u = u;
+        vertex.v = v;
+        vertex.color = color;
+        this.count = this.count + 1;
+    }
+
+    // The solid block of the atlas: the center of its 2x2 pixels.
+    public static f32 solid_u() {
+        return (f32)1.0 / (f32)Fonts.ATLAS;
+    }
+
+    const u32 MAX_CLIPS = 64;
+
+    // Narrows the clip rectangle to the given one (and the old clip); restore_clip undoes it after the subtree.
+    public unsafe void clip_to(f32 left, f32 top, f32 right, f32 bottom) {
+        if (this.clip_depth >= DisplayList.MAX_CLIPS) {
+            return;
+        }
+        f32* saved = &this.clip_stack[this.clip_depth * 4];
+        this.clip_depth = this.clip_depth + 1;
+        saved[0] = this.clip_left;
+        saved[1] = this.clip_top;
+        saved[2] = this.clip_right;
+        saved[3] = this.clip_bottom;
+        if (left > this.clip_left) {
+            this.clip_left = left;
+        }
+        if (top > this.clip_top) {
+            this.clip_top = top;
+        }
+        if (right < this.clip_right) {
+            this.clip_right = right;
+        }
+        if (bottom < this.clip_bottom) {
+            this.clip_bottom = bottom;
+        }
+    }
+
+    public unsafe void restore_clip() {
+        if (this.clip_depth == 0) {
+            return;
+        }
+        this.clip_depth = this.clip_depth - 1;
+        f32* saved = &this.clip_stack[this.clip_depth * 4];
+        this.clip_left = saved[0];
+        this.clip_top = saved[1];
+        this.clip_right = saved[2];
+        this.clip_bottom = saved[3];
+    }
+
+    // Two triangles for the rectangle [x0,x1] x [y0,y1] sampling the atlas rectangle [u0,u1] x [v0,v1], cut to the
+    // clip rectangle (the atlas coordinates are cut with it).
+    public unsafe void quad(f32 x0, f32 y0, f32 x1, f32 y1, f32 u0, f32 v0, f32 u1, f32 v1, u32 color) {
+        mut f32 left = x0;
+        mut f32 top = y0;
+        mut f32 right = x1;
+        mut f32 bottom = y1;
+        mut f32 ul = u0;
+        mut f32 vt = v0;
+        mut f32 ur = u1;
+        mut f32 vb = v1;
+        f32 width = x1 - x0;
+        f32 height = y1 - y0;
+        if (width <= (f32)0.0 || height <= (f32)0.0) {
+            return;
+        }
+        if (left < this.clip_left) {
+            ul = ul + (u1 - u0) * (this.clip_left - x0) / width;
+            left = this.clip_left;
+        }
+        if (right > this.clip_right) {
+            ur = ur - (u1 - u0) * (x1 - this.clip_right) / width;
+            right = this.clip_right;
+        }
+        if (top < this.clip_top) {
+            vt = vt + (v1 - v0) * (this.clip_top - y0) / height;
+            top = this.clip_top;
+        }
+        if (bottom > this.clip_bottom) {
+            vb = vb - (v1 - v0) * (y1 - this.clip_bottom) / height;
+            bottom = this.clip_bottom;
+        }
+        if (left >= right || top >= bottom) {
+            return;
+        }
+        this.reserve(6);
+        this.push(left, top, ul, vt, color);
+        this.push(right, top, ur, vt, color);
+        this.push(left, bottom, ul, vb, color);
+        this.push(right, top, ur, vt, color);
+        this.push(right, bottom, ur, vb, color);
+        this.push(left, bottom, ul, vb, color);
+    }
+
+    // A solid rectangle, edges snapped to whole pixels so neighbours meet without seams.
+    public unsafe void fill(f32 x, f32 y, f32 width, f32 height, u32 color) {
+        if ((color >> 24) == 0) {
+            return;
+        }
+        f32 u = DisplayList.solid_u();
+        f32 x0 = (f32)Math.round((f64)(x));
+        f32 y0 = (f32)Math.round((f64)(y));
+        f32 x1 = (f32)Math.round((f64)(x + width));
+        f32 y1 = (f32)Math.round((f64)(y + height));
+        this.quad(x0, y0, x1, y1, u, u, u, u, color);
+    }
+
+    // One point of a rounded rectangle outline moved 'grow' px outward, walking clockwise from the top-left corner;
+    // 'index' counts 0 .. 4 * (SEGMENTS + 1) - 1. Writes x and y into out[0], out[1].
+    static unsafe void outline_point(f32 x, f32 y, f32 width, f32 height, f32 radius, f32 grow, u32 index, f32* out) {
+        u32 per_corner = DisplayList.SEGMENTS + 1;
+        u32 corner = index / per_corner;
+        u32 step = index % per_corner;
+        mut f32 r = radius + grow;
+        if (r < (f32)0.0) {
+            r = (f32)0.0;
+        }
+        f32 left = x - grow;
+        f32 top = y - grow;
+        f32 right = x + width + grow;
+        f32 bottom = y + height + grow;
+        mut f32 cx = left + r;
+        mut f32 cy = top + r;
+        mut f32 start = (f32)3.14159265;
+        if (corner == 1) {
+            cx = right - r;
+            start = (f32)4.71238898;
+        } else if (corner == 2) {
+            cx = right - r;
+            cy = bottom - r;
+            start = (f32)0.0;
+        } else if (corner == 3) {
+            cy = bottom - r;
+            start = (f32)1.57079633;
+        }
+        f32 angle = start + (f32)1.57079633 * (f32)step / (f32)DisplayList.SEGMENTS;
+        out[0] = cx + r * (f32)Math.cos((f64)angle);
+        out[1] = cy + r * (f32)Math.sin((f64)angle);
+    }
+
+    const u32 SEGMENTS = 8;
+
+    // A rounded rectangle with a one pixel soft edge: the inside is opaque, the last half pixel on each side fades out.
+    public unsafe void rounded(f32 x, f32 y, f32 width, f32 height, f32 radius, u32 color) {
+        if ((color >> 24) == 0 || width <= (f32)0.0 || height <= (f32)0.0) {
+            return;
+        }
+        mut f32 r = radius;
+        f32 limit = Px.min(width, height) / (f32)2.0;
+        if (r > limit) {
+            r = limit;
+        }
+        if (r <= (f32)0.0) {
+            this.fill(x, y, width, height, color);
+            return;
+        }
+        if (x + width < this.clip_left || x > this.clip_right || y + height < this.clip_top || y > this.clip_bottom) {
+            return;
+        }
+        u32 points = 4 * (DisplayList.SEGMENTS + 1);
+        f32 u = DisplayList.solid_u();
+        u32 clear = DisplayList.fade(color, (f32)0.0);
+        f32* inner = this.scratch;
+        f32* outer = &this.scratch[points * 2];
+        f32 center_x = x + width / (f32)2.0;
+        f32 center_y = y + height / (f32)2.0;
+        this.reserve(points * 9);
+        for (mut u32 i = 0; i < points; i = i + 1) {
+            DisplayList.outline_point(x, y, width, height, r, (f32)-0.5, i, &inner[i * 2]);
+            DisplayList.outline_point(x, y, width, height, r, (f32)0.5, i, &outer[i * 2]);
+        }
+        for (mut u32 i = 0; i < points; i = i + 1) {
+            u32 next = (i + 1) % points;
+            this.push(center_x, center_y, u, u, color);
+            this.push(inner[i * 2], inner[i * 2 + 1], u, u, color);
+            this.push(inner[next * 2], inner[next * 2 + 1], u, u, color);
+            this.push(inner[i * 2], inner[i * 2 + 1], u, u, color);
+            this.push(outer[i * 2], outer[i * 2 + 1], u, u, clear);
+            this.push(outer[next * 2], outer[next * 2 + 1], u, u, clear);
+            this.push(inner[i * 2], inner[i * 2 + 1], u, u, color);
+            this.push(outer[next * 2], outer[next * 2 + 1], u, u, clear);
+            this.push(inner[next * 2], inner[next * 2 + 1], u, u, color);
+        }
+    }
+
+    // A border of 'thickness' px inside a rounded rectangle, soft on both edges.
+    public unsafe void ring(f32 x, f32 y, f32 width, f32 height, f32 radius, f32 thickness, u32 color) {
+        if ((color >> 24) == 0 || thickness <= (f32)0.0 || width <= (f32)0.0 || height <= (f32)0.0) {
+            return;
+        }
+        mut f32 r = radius;
+        f32 limit = Px.min(width, height) / (f32)2.0;
+        if (r > limit) {
+            r = limit;
+        }
+        mut f32 t = thickness;
+        if (t > limit) {
+            t = limit;
+        }
+        f32 u = DisplayList.solid_u();
+        u32 clear = DisplayList.fade(color, (f32)0.0);
+        u32 points = 4 * (DisplayList.SEGMENTS + 1);
+        f32 hole_x = x + t;
+        f32 hole_y = y + t;
+        f32 hole_width = width - t * (f32)2.0;
+        f32 hole_height = height - t * (f32)2.0;
+        mut f32 hole_radius = r - t;
+        if (hole_radius < (f32)0.0) {
+            hole_radius = (f32)0.0;
+        }
+        f32* a = this.scratch;                         // outer edge, fading out
+        f32* b = &this.scratch[points * 2];       // outer edge, opaque
+        f32* c = &this.scratch[points * 4];       // hole edge, opaque
+        f32* d = &this.scratch[points * 6];       // hole edge, fading out
+        this.reserve(points * 18);
+        for (mut u32 i = 0; i < points; i = i + 1) {
+            DisplayList.outline_point(x, y, width, height, r, (f32)0.5, i, &a[i * 2]);
+            DisplayList.outline_point(x, y, width, height, r, (f32)-0.5, i, &b[i * 2]);
+            DisplayList.outline_point(hole_x, hole_y, hole_width, hole_height, hole_radius, (f32)0.5, i, &c[i * 2]);
+            DisplayList.outline_point(hole_x, hole_y, hole_width, hole_height, hole_radius, (f32)-0.5, i, &d[i * 2]);
+        }
+        for (mut u32 i = 0; i < points; i = i + 1) {
+            u32 n = (i + 1) % points;
+            this.strip(a, clear, b, color, i, n, u);
+            this.strip(b, color, c, color, i, n, u);
+            this.strip(c, color, d, clear, i, n, u);
+        }
+    }
+
+    unsafe void strip(f32* from, u32 from_color, f32* to, u32 to_color, u32 i, u32 n, f32 u) {
+        this.push(from[i * 2], from[i * 2 + 1], u, u, from_color);
+        this.push(to[i * 2], to[i * 2 + 1], u, u, to_color);
+        this.push(from[n * 2], from[n * 2 + 1], u, u, from_color);
+        this.push(to[i * 2], to[i * 2 + 1], u, u, to_color);
+        this.push(to[n * 2], to[n * 2 + 1], u, u, to_color);
+        this.push(from[n * 2], from[n * 2 + 1], u, u, from_color);
+    }
+}
