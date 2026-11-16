@@ -3,6 +3,74 @@ import std::libc;
 
 namespace ui;
 
+unsafe static mut ptr block_heads = null;
+unsafe static mut ptr block_counts = null;
+
+// Recycled memory blocks in power-of-two size classes (64 bytes up to 4 MB). A layout, a restyle or a frame needs
+// about the same scratch memory as the one before it, so a block that is given back is kept on a free list and the
+// next take of its class reuses it: after the first frame the hot paths do not call malloc or free at all. Each class
+// keeps at most 64 blocks, the rest go back to the allocator. Meant for the UI thread (the lists are not locked).
+struct Blocks {
+    const u32 CLASSES = 17;
+    const u32 KEEP = 64;
+
+    public static u32 class_of(u64 bytes) {
+        mut u32 k = 0;
+        mut u64 size = 64;
+        while (size < bytes) {
+            size = size * 2;
+            k = k + 1;
+        }
+        return k;
+    }
+
+    public static u64 size_of(u32 k) {
+        return (u64)64 << k;
+    }
+
+    // A block of at least 'bytes': its real size is size_of(class_of(bytes)).
+    public static unsafe void* take(u64 bytes) {
+        u32 k = Blocks.class_of(bytes);
+        if (k >= Blocks.CLASSES) {
+            return __djinn_alloc((size_long)bytes);
+        }
+        if (block_heads == null) {
+            block_heads = (ptr)__djinn_alloc_zeroed((size_long)(Blocks.CLASSES * 8));
+            block_counts = (ptr)__djinn_alloc_zeroed((size_long)(Blocks.CLASSES * 4));
+        }
+        void** heads = (void**)block_heads;
+        u32* counts = (u32*)block_counts;
+        void* block = heads[k];
+        if (block != (void*)0) {
+            heads[k] = ((void**)block)[0];
+            counts[k] = counts[k] - 1;
+            return block;
+        }
+        return __djinn_alloc((size_long)Blocks.size_of(k));
+    }
+
+    // Gives back a block taken with 'bytes' (any size that maps to the same class).
+    public static unsafe void give(void* block, u64 bytes) {
+        if (block == (void*)0) {
+            return;
+        }
+        u32 k = Blocks.class_of(bytes);
+        if (k >= Blocks.CLASSES || block_heads == null) {
+            __djinn_free(block);
+            return;
+        }
+        void** heads = (void**)block_heads;
+        u32* counts = (u32*)block_counts;
+        if (counts[k] >= Blocks.KEEP) {
+            __djinn_free(block);
+            return;
+        }
+        ((void**)block)[0] = heads[k];
+        heads[k] = block;
+        counts[k] = counts[k] + 1;
+    }
+}
+
 // A growable array of trivial values (the style tables: selector parts, rules, declarations, media features).
 struct Growable<T> {
     mut T* data;
@@ -15,12 +83,30 @@ struct Growable<T> {
             if (grown < 16) {
                 grown = 16;
             }
-            this.data = (T*)__djinn_realloc((void*)this.data, (size_long)((u64)grown * sizeof(T)));
-            this.capacity = grown;
+            u32 k = Blocks.class_of((u64)grown * sizeof(T));
+            T* fresh = (T*)Blocks.take((u64)grown * sizeof(T));
+            if (this.count > 0) {
+                memcpy((void*)fresh, (void*)this.data, (size_long)((u64)this.count * sizeof(T)));
+            }
+            if (this.data != (T*)0) {
+                Blocks.give((void*)this.data, (u64)this.capacity * sizeof(T));
+            }
+            this.data = fresh;
+            this.capacity = (u32)(Blocks.size_of(k) / sizeof(T));
         }
         this.data[this.count] = value;
         this.count = this.count + 1;
         return this.count - 1;
+    }
+
+    // Hands the memory back for the next array to reuse; the array is empty again.
+    public unsafe void release() {
+        if (this.data != (T*)0) {
+            Blocks.give((void*)this.data, (u64)this.capacity * sizeof(T));
+        }
+        this.data = (T*)0;
+        this.count = 0;
+        this.capacity = 0;
     }
 
     public unsafe T get(u32 index) {
