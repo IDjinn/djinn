@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-11-16
+
+### Added
+- `(i16s)x`: a saturating integer cast clamps to the range of the target (the `w` suffix already truncated), at run time and in constant evaluation.
+- `--windowed` (and `windowed: true` in `djinn.proj`): links a Windows GUI program with no console window. `-l<name>` and `-L<dir>` on the command line, with the same mapping as the manifest.
+- `std::libc`: `atoi`, `atoll`, `strtoll`, `strtoull`. `Math` has `f32` versions of the error and gamma functions.
+
+### Changed
+- Pointer arithmetic (`p + n`, `p - n`, `p++`) steps by the size of the element, as in C. A `ptr` (void pointer) still steps by bytes.
+- `__djinn_free(null)` is accepted and does nothing.
+
+### Fixed
+- Linking without `--lld` on Windows failed with `undefined symbol: printf`: the clang link now adds `legacy_stdio_definitions`.
+
 ## [0.6.0] - 2026-11-15
 
 ### Added
