@@ -1,0 +1,497 @@
+import std::types;
+import std::libc;
+
+namespace ui;
+
+unsafe static mut ptr hotkey_system = null;
+
+struct HotkeyRun {
+    fn() -> void run;
+}
+
+struct HotkeyInfo {
+    mut bool used;
+    mut u32 id;
+    mut u32 steps;
+    mut u32 keys0;
+    mut u32 keys1;
+    mut u32 keys2;
+    mut u32 keys3;
+    mut u32 mods0;
+    mut u32 mods1;
+    mut u32 mods2;
+    mut u32 mods3;
+    mut i8* scope;
+    mut u32 scope_length;
+}
+
+struct HotkeySystem {
+    mut HotkeyRun* runs;
+    mut HotkeyInfo* infos;
+    mut u32 count;
+    mut u32 next_id;
+    mut bool mac;
+    // the last presses, newest last, for sequences such as "g i"
+    mut u32 recent_keys0;
+    mut u32 recent_keys1;
+    mut u32 recent_keys2;
+    mut u32 recent_keys3;
+    mut u32 recent_mods0;
+    mut u32 recent_mods1;
+    mut u32 recent_mods2;
+    mut u32 recent_mods3;
+    mut u32 recent_count;
+    mut u32 recent_time;
+    mut i8** scopes;
+    mut u32* scope_lengths;
+    mut u32 scope_count;
+}
+
+// Keyboard shortcuts. A combo is written like "Ctrl+K", "Mod+Shift+P", "F5", "Escape" or, for a sequence, with spaces:
+// "g i" (press g, then i within a second). "Mod" is Ctrl, or Command when Hotkeys.use_command(true) was called (macOS
+// hosts). A binding may belong to a scope; it only fires while that scope is on top of the scope stack (global
+// bindings, with an empty scope, always fire). Shortcuts without Ctrl, Alt or Meta are ignored while a text field has
+// focus, so typing never triggers them; a Ctrl or Alt shortcut still does (except the editing keys Ctrl+A / C / X / V
+// and the arrows, which a text field keeps). The host does nothing special: Input.press consults Hotkeys.
+struct Hotkeys {
+    const u32 CAPACITY = 128;
+    const u32 SCOPES = 8;
+    const u32 WINDOW = 1000;
+
+    static unsafe HotkeySystem* system() {
+        if (hotkey_system == null) {
+            HotkeySystem* made = (HotkeySystem*)__djinn_alloc_zeroed((size_long)sizeof(HotkeySystem));
+            made.runs = (HotkeyRun*)__djinn_alloc_zeroed((size_long)(Hotkeys.CAPACITY * (u32)sizeof(HotkeyRun)));
+            made.infos = (HotkeyInfo*)__djinn_alloc_zeroed((size_long)(Hotkeys.CAPACITY * (u32)sizeof(HotkeyInfo)));
+            made.scopes = (i8**)__djinn_alloc_zeroed((size_long)(Hotkeys.SCOPES * 8));
+            made.scope_lengths = (u32*)__djinn_alloc_zeroed((size_long)(Hotkeys.SCOPES * 4));
+            made.next_id = 1;
+            hotkey_system = (ptr)made;
+        }
+        return (HotkeySystem*)hotkey_system;
+    }
+
+    public static unsafe void use_command(bool on) {
+        Hotkeys.system().mac = on;
+    }
+
+    // ---- scopes ----
+
+    public static unsafe void push_scope(str name) {
+        HotkeySystem* s = Hotkeys.system();
+        if (s.scope_count >= Hotkeys.SCOPES) {
+            return;
+        }
+        i8* copy = (i8*)__djinn_alloc_zeroed((size_long)(name.length + 1));
+        if (name.length > 0) {
+            memcpy((void*)copy, (void*)name.data, (size_long)name.length);
+        }
+        s.scopes[s.scope_count] = copy;
+        s.scope_lengths[s.scope_count] = (u32)name.length;
+        s.scope_count = s.scope_count + 1;
+    }
+
+    public static unsafe void pop_scope() {
+        HotkeySystem* s = Hotkeys.system();
+        if (s.scope_count == 0) {
+            return;
+        }
+        s.scope_count = s.scope_count - 1;
+        __djinn_free((void*)s.scopes[s.scope_count]);
+        s.scopes[s.scope_count] = (i8*)0;
+    }
+
+    static unsafe bool in_scope(HotkeyInfo* info) {
+        if (info.scope_length == 0) {
+            return true;
+        }
+        HotkeySystem* s = Hotkeys.system();
+        if (s.scope_count == 0) {
+            return false;
+        }
+        u32 top = s.scope_count - 1;
+        if (s.scope_lengths[top] != info.scope_length) {
+            return false;
+        }
+        return memcmp((void*)s.scopes[top], (void*)info.scope, (size_long)info.scope_length) == 0;
+    }
+
+    // ---- parsing ----
+
+    static unsafe u32 lower(i8 c) {
+        u32 v = (u32)((i32)c & 255);
+        if (v >= 65 && v <= 90) {
+            return v + 32;
+        }
+        return v;
+    }
+
+    static unsafe bool word(str text, u32 from, u32 to, str expected) {
+        if ((size)(to - from) != expected.length) {
+            return false;
+        }
+        mut u32 i = 0;
+        while (i < to - from) {
+            if (Hotkeys.lower(text.data[from + i]) != Hotkeys.lower(expected.data[i])) {
+                return false;
+            }
+            i = i + 1;
+        }
+        return true;
+    }
+
+    // The virtual-key code for a key name, or 0.
+    static unsafe u32 key_code(str text, u32 from, u32 to) {
+        u32 length = to - from;
+        if (length == 0) {
+            return 0;
+        }
+        if (length == 1) {
+            u32 c = Hotkeys.lower(text.data[from]);
+            if (c >= 97 && c <= 122) {
+                return c - 32;
+            }
+            if (c >= 48 && c <= 57) {
+                return c;
+            }
+            if (c == 44) {
+                return 188;
+            }
+            if (c == 46) {
+                return 190;
+            }
+            if (c == 47) {
+                return 191;
+            }
+            if (c == 45) {
+                return 189;
+            }
+            if (c == 61) {
+                return 187;
+            }
+            return 0;
+        }
+        if (Hotkeys.lower(text.data[from]) == 102 && length <= 3) {
+            mut u32 n = 0;
+            mut u32 i = from + 1;
+            while (i < to) {
+                u32 d = Hotkeys.lower(text.data[i]);
+                if (d < 48 || d > 57) {
+                    return 0;
+                }
+                n = n * 10 + (d - 48);
+                i = i + 1;
+            }
+            if (n >= 1 && n <= 12) {
+                return 111 + n;
+            }
+            return 0;
+        }
+        if (Hotkeys.word(text, from, to, "enter") || Hotkeys.word(text, from, to, "return")) { return (u32)Key.ENTER; }
+        if (Hotkeys.word(text, from, to, "escape") || Hotkeys.word(text, from, to, "esc")) { return (u32)Key.ESCAPE; }
+        if (Hotkeys.word(text, from, to, "space")) { return (u32)Key.SPACE; }
+        if (Hotkeys.word(text, from, to, "tab")) { return (u32)Key.TAB; }
+        if (Hotkeys.word(text, from, to, "backspace")) { return (u32)Key.BACKSPACE; }
+        if (Hotkeys.word(text, from, to, "delete") || Hotkeys.word(text, from, to, "del")) { return (u32)Key.DELETE; }
+        if (Hotkeys.word(text, from, to, "home")) { return (u32)Key.HOME; }
+        if (Hotkeys.word(text, from, to, "end")) { return (u32)Key.END; }
+        if (Hotkeys.word(text, from, to, "left")) { return (u32)Key.LEFT; }
+        if (Hotkeys.word(text, from, to, "right")) { return (u32)Key.RIGHT; }
+        if (Hotkeys.word(text, from, to, "up")) { return (u32)Key.UP; }
+        if (Hotkeys.word(text, from, to, "down")) { return (u32)Key.DOWN; }
+        return 0;
+    }
+
+    static unsafe u32 modifier(str text, u32 from, u32 to) {
+        if (Hotkeys.word(text, from, to, "ctrl") || Hotkeys.word(text, from, to, "control")) { return Mod.CTRL; }
+        if (Hotkeys.word(text, from, to, "shift")) { return Mod.SHIFT; }
+        if (Hotkeys.word(text, from, to, "alt") || Hotkeys.word(text, from, to, "option")) { return Mod.ALT; }
+        if (Hotkeys.word(text, from, to, "meta") || Hotkeys.word(text, from, to, "cmd")
+            || Hotkeys.word(text, from, to, "command") || Hotkeys.word(text, from, to, "super")) { return Mod.META; }
+        if (Hotkeys.word(text, from, to, "mod")) {
+            if (Hotkeys.system().mac) {
+                return Mod.META;
+            }
+            return Mod.CTRL;
+        }
+        return 0;
+    }
+
+    // Parses one step (between spaces): modifiers joined by '+', then the key. False when it is not a valid step.
+    static unsafe bool step(str text, u32 from, u32 to, u32* key, u32* mods) {
+        mut u32 start = from;
+        mut u32 found = 0;
+        mut u32 i = from;
+        while (i <= to) {
+            if (i == to || text.data[i] == (i8)43) {
+                if (i == to) {
+                    u32 code = Hotkeys.key_code(text, start, to);
+                    if (code == 0) {
+                        return false;
+                    }
+                    *key = code;
+                    *mods = found;
+                    return true;
+                }
+                // a '+' at the very end means the key itself is '+'; not supported
+                u32 mod = Hotkeys.modifier(text, start, i);
+                if (mod == 0) {
+                    return false;
+                }
+                found = found | mod;
+                start = i + 1;
+            }
+            i = i + 1;
+        }
+        return false;
+    }
+
+    // Parses a whole combo into the slots of 'info'. False when it is empty, too long or has an unknown name.
+    static unsafe bool parse(str combo, HotkeyInfo* info) {
+        mut u32 count = 0;
+        mut u32 i = 0;
+        u32 length = (u32)combo.length;
+        while (i < length) {
+            while (i < length && combo.data[i] == (i8)32) {
+                i = i + 1;
+            }
+            if (i >= length) {
+                break;
+            }
+            mut u32 end = i;
+            while (end < length && combo.data[end] != (i8)32) {
+                end = end + 1;
+            }
+            if (count == 4) {
+                return false;
+            }
+            mut u32 key = 0;
+            mut u32 mods = 0;
+            if (!Hotkeys.step(combo, i, end, &key, &mods)) {
+                return false;
+            }
+            if (count == 0) { info.keys0 = key; info.mods0 = mods; }
+            if (count == 1) { info.keys1 = key; info.mods1 = mods; }
+            if (count == 2) { info.keys2 = key; info.mods2 = mods; }
+            if (count == 3) { info.keys3 = key; info.mods3 = mods; }
+            count = count + 1;
+            i = end;
+        }
+        info.steps = count;
+        return count > 0;
+    }
+
+    static unsafe u32 key_at(HotkeyInfo* info, u32 n) {
+        if (n == 0) { return info.keys0; }
+        if (n == 1) { return info.keys1; }
+        if (n == 2) { return info.keys2; }
+        return info.keys3;
+    }
+
+    static unsafe u32 mods_at(HotkeyInfo* info, u32 n) {
+        if (n == 0) { return info.mods0; }
+        if (n == 1) { return info.mods1; }
+        if (n == 2) { return info.mods2; }
+        return info.mods3;
+    }
+
+    static unsafe bool same_combo(HotkeyInfo* a, HotkeyInfo* b) {
+        if (a.steps != b.steps) {
+            return false;
+        }
+        mut u32 n = 0;
+        while (n < a.steps) {
+            if (Hotkeys.key_at(a, n) != Hotkeys.key_at(b, n) || Hotkeys.mods_at(a, n) != Hotkeys.mods_at(b, n)) {
+                return false;
+            }
+            n = n + 1;
+        }
+        return true;
+    }
+
+    static unsafe bool same_scope(HotkeyInfo* a, HotkeyInfo* b) {
+        if (a.scope_length == 0 || b.scope_length == 0) {
+            return true;
+        }
+        return a.scope_length == b.scope_length
+            && memcmp((void*)a.scope, (void*)b.scope, (size_long)a.scope_length) == 0;
+    }
+
+    // ---- registering ----
+
+    // Is a binding for this combo already live in an overlapping scope? (A global one overlaps every scope.)
+    public static unsafe bool conflicts(str combo, str scope) {
+        HotkeySystem* s = Hotkeys.system();
+        HotkeyInfo* probe = (HotkeyInfo*)__djinn_alloc_zeroed((size_long)sizeof(HotkeyInfo));
+        probe.scope = (i8*)scope.data;
+        probe.scope_length = (u32)scope.length;
+        bool valid = Hotkeys.parse(combo, probe);
+        mut bool clash = false;
+        mut u32 i = 0;
+        while (valid && i < s.count) {
+            HotkeyInfo* info = &s.infos[i];
+            if (info.used && Hotkeys.same_combo(info, probe) && Hotkeys.same_scope(info, probe)) {
+                clash = true;
+            }
+            i = i + 1;
+        }
+        __djinn_free((void*)probe);
+        return clash;
+    }
+
+    // Binds a combo (in a scope, "" for global) to a handler. Returns the binding id, or 0 when the combo is not valid,
+    // is already taken in an overlapping scope, or there is no room.
+    public static unsafe u32 on(str combo, str scope, fn() -> void handler) {
+        HotkeySystem* s = Hotkeys.system();
+        if (Hotkeys.conflicts(combo, scope)) {
+            return 0;
+        }
+        mut u32 slot = s.count;
+        mut u32 i = 0;
+        while (i < s.count) {
+            if (!s.infos[i].used) {
+                slot = i;
+                break;
+            }
+            i = i + 1;
+        }
+        if (slot >= Hotkeys.CAPACITY) {
+            return 0;
+        }
+        HotkeyInfo* info = &s.infos[slot];
+        if (!Hotkeys.parse(combo, info)) {
+            return 0;
+        }
+        if (info.scope != (i8*)0) {
+            __djinn_free((void*)info.scope);
+        }
+        i8* kept = (i8*)__djinn_alloc_zeroed((size_long)(scope.length + 1));
+        if (scope.length > 0) {
+            memcpy((void*)kept, (void*)scope.data, (size_long)scope.length);
+        }
+        info.scope = kept;
+        info.scope_length = (u32)scope.length;
+        info.used = true;
+        info.id = s.next_id;
+        s.next_id = s.next_id + 1;
+        HotkeyRun run = { .run = handler };
+        s.runs[slot] = run;
+        if (slot == s.count) {
+            s.count = s.count + 1;
+        }
+        return info.id;
+    }
+
+    // Removes a binding.
+    public static unsafe void off(u32 id) {
+        HotkeySystem* s = Hotkeys.system();
+        mut u32 i = 0;
+        while (i < s.count) {
+            if (s.infos[i].used && s.infos[i].id == id) {
+                s.infos[i].used = false;
+            }
+            i = i + 1;
+        }
+    }
+
+    // Forgets every binding, scope and pending sequence.
+    public static unsafe void clear() {
+        HotkeySystem* s = Hotkeys.system();
+        mut u32 i = 0;
+        while (i < s.count) {
+            s.infos[i].used = false;
+            i = i + 1;
+        }
+        s.recent_count = 0;
+        while (s.scope_count > 0) {
+            Hotkeys.pop_scope();
+        }
+    }
+
+    // ---- delivery ----
+
+    static unsafe void remember(HotkeySystem* s, u32 key, u32 mods) {
+        if (s.recent_count == 4) {
+            s.recent_keys0 = s.recent_keys1;
+            s.recent_keys1 = s.recent_keys2;
+            s.recent_keys2 = s.recent_keys3;
+            s.recent_mods0 = s.recent_mods1;
+            s.recent_mods1 = s.recent_mods2;
+            s.recent_mods2 = s.recent_mods3;
+            s.recent_count = 3;
+        }
+        if (s.recent_count == 0) { s.recent_keys0 = key; s.recent_mods0 = mods; }
+        if (s.recent_count == 1) { s.recent_keys1 = key; s.recent_mods1 = mods; }
+        if (s.recent_count == 2) { s.recent_keys2 = key; s.recent_mods2 = mods; }
+        if (s.recent_count == 3) { s.recent_keys3 = key; s.recent_mods3 = mods; }
+        s.recent_count = s.recent_count + 1;
+    }
+
+    static unsafe u32 recent_key(HotkeySystem* s, u32 n) {
+        if (n == 0) { return s.recent_keys0; }
+        if (n == 1) { return s.recent_keys1; }
+        if (n == 2) { return s.recent_keys2; }
+        return s.recent_keys3;
+    }
+
+    static unsafe u32 recent_mod(HotkeySystem* s, u32 n) {
+        if (n == 0) { return s.recent_mods0; }
+        if (n == 1) { return s.recent_mods1; }
+        if (n == 2) { return s.recent_mods2; }
+        return s.recent_mods3;
+    }
+
+    // Do the last presses end with this binding's steps?
+    static unsafe bool tail_matches(HotkeySystem* s, HotkeyInfo* info) {
+        if (info.steps > s.recent_count) {
+            return false;
+        }
+        mut u32 n = 0;
+        while (n < info.steps) {
+            u32 at = s.recent_count - info.steps + n;
+            if (Hotkeys.recent_key(s, at) != Hotkeys.key_at(info, n) || Hotkeys.recent_mod(s, at) != Hotkeys.mods_at(info, n)) {
+                return false;
+            }
+            n = n + 1;
+        }
+        return true;
+    }
+
+    // Offers a key press to the bindings. Returns true when one ran (the press is then consumed).
+    public static unsafe bool handle(i32 key, u32 mods) {
+        HotkeySystem* s = Hotkeys.system();
+        if (s.count == 0 || key == 16 || key == 17 || key == 18 || key == 91 || key == 92) {
+            return false;
+        }
+        u32 now = Animation.clock();
+        if (s.recent_count > 0 && now - s.recent_time > Hotkeys.WINDOW) {
+            s.recent_count = 0;
+        }
+        s.recent_time = now;
+        u32 focused = Focus.current();
+        bool typing = Input.editable(focused);
+        bool command = (mods & (Mod.CTRL | Mod.ALT | Mod.META)) != 0;
+        if (typing && !command) {
+            s.recent_count = 0;
+            return false;
+        }
+        if (typing && (mods & Mod.CTRL) != 0 && (key == 65 || key == 67 || key == 86 || key == 88)) {
+            return false;
+        }
+        Hotkeys.remember(s, (u32)key, mods);
+        mut u32 i = 0;
+        while (i < s.count) {
+            HotkeyInfo* info = &s.infos[i];
+            if (info.used && Hotkeys.in_scope(info) && Hotkeys.tail_matches(s, info)) {
+                s.recent_count = 0;
+                ReactiveGraph* graph = Reactive.graph();
+                graph.batching = graph.batching + 1;
+                s.runs[i].run();
+                graph.batching = graph.batching - 1;
+                return true;
+            }
+            i = i + 1;
+        }
+        return false;
+    }
+}

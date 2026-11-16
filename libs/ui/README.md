@@ -259,6 +259,18 @@ select / menu, tooltip, tables, and two-way binding of a field's value to a sign
 `prefers-reduced-motion` they are skipped. The `Outlet` fades each new page in over 220 ms. Not yet: exit
 animations, slide / shared-element transitions (there is no transform support), CSS `transition` / `@keyframes`.
 
+## Hotkeys
+
+`Hotkeys.on("Mod+Shift+P", scope, handler)` binds a shortcut and returns its id (0 when the combo is not valid or is
+already taken in an overlapping scope; `Hotkeys.conflicts(combo, scope)` asks first); `Hotkeys.off(id)` removes it.
+Combos are modifiers joined by `+` and a key (`Ctrl`, `Shift`, `Alt`, `Meta` / `Cmd`, and `Mod`, which is Ctrl or, after
+`Hotkeys.use_command(true)`, Command; keys are letters, digits, `F1`..`F12`, `Enter`, `Escape`, `Space`, `Tab`,
+`Backspace`, `Delete`, `Home`, `End`, arrows, `,` `.` `/` `-` `=`). Spaces make a sequence, `"g i"`: each key within one
+second of the last. A binding with a scope fires only while `Hotkeys.push_scope(name)` has that scope on top (`pop_scope`
+leaves it); the empty scope is global. `Input.press` offers every press to the bindings after the `keydown` listeners
+and before the default actions; a match runs the handler (as one reactive batch) and consumes the press. Shortcuts
+without Ctrl, Alt or Meta are ignored while a text field has focus, and Ctrl+A / C / X / V stay with the field.
+
 ## Output safety
 
 The HTML writer (`view/html.djinn`, `view/html_safety.djinn`) treats every value as untrusted:

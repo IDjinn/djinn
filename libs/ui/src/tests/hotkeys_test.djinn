@@ -1,0 +1,117 @@
+namespace ui;
+
+import testing;
+import std::types;
+
+unsafe static mut i32 hotkey_log = 0;
+
+struct Typing {
+    i32 unused;
+
+    public unsafe Node render() {
+        return Node.element("main")
+            .child(Node.element("input").attr("id", "f"))
+            .child(Node.element("button").attr("id", "b").add("b"));
+    }
+}
+
+struct HotkeyTests {
+    static Typing typing() {
+        Typing value = { .unused = 0 };
+        return value;
+    }
+
+    [Test]
+    unsafe void a_combo_runs_its_handler_and_consumes_the_press() {
+        Hotkeys.clear();
+        Focus.reset();
+        hotkey_log = 0;
+        u32 id = Hotkeys.on("Ctrl+K", "", () => hotkey_log = hotkey_log + 1);
+        Expect.is_true(id != 0);
+        Expect.is_true(Input.press(75, Mod.CTRL));
+        Expect.equal(1, (i64)hotkey_log);
+        Input.press(75, 0);
+        Input.press(75, Mod.CTRL | Mod.SHIFT);
+        Expect.equal(1, (i64)hotkey_log, "other modifiers do not match");
+        Hotkeys.off(id);
+        Input.press(75, Mod.CTRL);
+        Expect.equal(1, (i64)hotkey_log, "removed");
+        Hotkeys.clear();
+    }
+
+    [Test]
+    unsafe void mod_is_ctrl_and_function_keys_and_names_parse() {
+        Hotkeys.clear();
+        hotkey_log = 0;
+        Hotkeys.on("Mod+Shift+P", "", () => hotkey_log = hotkey_log + 1);
+        Hotkeys.on("f5", "", () => hotkey_log = hotkey_log + 10);
+        Hotkeys.on("Alt+Left", "", () => hotkey_log = hotkey_log + 100);
+        Input.press(80, Mod.CTRL | Mod.SHIFT);
+        Input.press(116, 0);
+        Input.press(Key.LEFT, Mod.ALT);
+        Expect.equal(111, (i64)hotkey_log);
+        Expect.equal(0, (i64)Hotkeys.on("Ctrl+Nonsense", "", () => hotkey_log = 0), "unknown key name");
+        Expect.equal(0, (i64)Hotkeys.on("", "", () => hotkey_log = 0), "empty");
+        Hotkeys.clear();
+    }
+
+    [Test]
+    unsafe void sequences_need_every_step_in_order() {
+        Hotkeys.clear();
+        hotkey_log = 0;
+        Hotkeys.on("g i", "", () => hotkey_log = hotkey_log + 1);
+        Input.press(71, 0);
+        Input.press(73, 0);
+        Expect.equal(1, (i64)hotkey_log);
+        Input.press(73, 0);
+        Input.press(71, 0);
+        Expect.equal(1, (i64)hotkey_log, "wrong order");
+        Input.press(71, 0);
+        Input.press(72, 0);
+        Input.press(73, 0);
+        Expect.equal(1, (i64)hotkey_log, "a stray key in between breaks it");
+        Hotkeys.clear();
+    }
+
+    [Test]
+    unsafe void scopes_limit_where_a_binding_fires_and_conflicts_are_refused() {
+        Hotkeys.clear();
+        hotkey_log = 0;
+        Expect.is_true(Hotkeys.on("Ctrl+S", "editor", () => hotkey_log = hotkey_log + 1) != 0);
+        Expect.equal(0, (i64)Hotkeys.on("Ctrl+S", "editor", () => hotkey_log = 99), "same combo, same scope");
+        Expect.is_true(Hotkeys.on("Ctrl+S", "dialog", () => hotkey_log = hotkey_log + 10) != 0, "another scope is fine");
+        Expect.equal(0, (i64)Hotkeys.on("Ctrl+S", "", () => hotkey_log = 99), "a global one overlaps every scope");
+        Input.press(83, Mod.CTRL);
+        Expect.equal(0, (i64)hotkey_log, "no scope is active");
+        Hotkeys.push_scope("editor");
+        Input.press(83, Mod.CTRL);
+        Expect.equal(1, (i64)hotkey_log);
+        Hotkeys.push_scope("dialog");
+        Input.press(83, Mod.CTRL);
+        Expect.equal(11, (i64)hotkey_log, "the top scope decides");
+        Hotkeys.pop_scope();
+        Hotkeys.pop_scope();
+        Hotkeys.clear();
+    }
+
+    [Test]
+    unsafe void plain_keys_do_not_fire_while_typing() {
+        Hotkeys.clear();
+        Focus.reset();
+        hotkey_log = 0;
+        Mounted app = App.mount<Typing>(HotkeyTests.typing());
+        Hotkeys.on("g", "", () => hotkey_log = hotkey_log + 1);
+        Hotkeys.on("Ctrl+K", "", () => hotkey_log = hotkey_log + 10);
+        Focus.set(Dom.find(app.node.id, "f"), true);
+        Input.press(71, 0);
+        Expect.equal(0, (i64)hotkey_log, "g is text in a field");
+        Input.press(75, Mod.CTRL);
+        Expect.equal(10, (i64)hotkey_log, "Ctrl+K still works");
+        Focus.set(Dom.find(app.node.id, "b"), true);
+        Input.press(71, 0);
+        Expect.equal(11, (i64)hotkey_log, "on a button g fires");
+        app.unmount();
+        Focus.reset();
+        Hotkeys.clear();
+    }
+}
