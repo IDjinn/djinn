@@ -11,6 +11,7 @@ struct ScrollEntry {
     mut f32 y;
     mut f32 goal_x;
     mut f32 goal_y;
+    mut f32 stretch;
 }
 
 struct ScrollSystem {
@@ -24,6 +25,7 @@ struct ScrollSystem {
     mut f32 viewport;
     mut f32 page_goal_x;
     mut f32 page_goal_y;
+    mut f32 page_stretch;
     mut f32 page_limit_x;
     mut f32 viewport_x;
     mut bool smooth;
@@ -61,6 +63,7 @@ struct Scroll {
         system.page_y = (f32)0.0;
         system.page_goal_x = (f32)0.0;
         system.page_goal_y = (f32)0.0;
+        system.page_stretch = (f32)0.0;
         system.version = system.version + 1;
     }
 
@@ -116,10 +119,16 @@ struct Scroll {
             if (Scroll.approach(&entry.y, entry.goal_y, factor, &changed)) {
                 moving = true;
             }
+            if (Scroll.approach(&entry.stretch, (f32)0.0, factor * (f32)0.7, &changed)) {
+                moving = true;
+            }
             if (entry.x != was_x || entry.y != was_y) {
                 Dom.dispatch(entry.id, "scroll");
             }
             i = i + 1;
+        }
+        if (Scroll.approach(&system.page_stretch, (f32)0.0, factor * (f32)0.7, &changed)) {
+            moving = true;
         }
         if (Scroll.approach(&system.page_x, system.page_goal_x, factor, &changed)) {
             moving = true;
@@ -200,7 +209,7 @@ struct Scroll {
         if (entry == (ScrollEntry*)0) {
             return (f32)0.0;
         }
-        return Scroll.whole(Px.min(entry.y, Scroll.max_y(id)));
+        return Scroll.whole(Px.min(entry.y, Scroll.max_y(id)) + entry.stretch);
     }
 
     public static unsafe f32 left(u32 id) {
@@ -329,7 +338,7 @@ struct Scroll {
     // The viewport own scroll (the document is taller or wider than the window).
     public static unsafe f32 page_top() {
         ScrollSystem* system = Scroll.system();
-        return Scroll.whole(Px.min(system.page_y, system.page_limit));
+        return Scroll.whole(Px.min(system.page_y, system.page_limit) + system.page_stretch);
     }
 
     public static unsafe f32 page_left() {
@@ -414,14 +423,48 @@ struct Scroll {
         return true;
     }
 
+    // Pulls a rubber band past the end: 'stretch' grows with the wheel but ever more reluctantly and springs back by
+    // itself (see advance). Only while smooth scrolling is on.
+    static unsafe f32 pull(f32 stretch, f32 dy) {
+        f32 size = stretch;
+        mut f32 magnitude = size;
+        if (magnitude < (f32)0.0) {
+            magnitude = (f32)0.0 - magnitude;
+        }
+        mut f32 next = stretch + dy * (f32)0.6 / ((f32)1.0 + magnitude / ((f32)60.0 * (f32)Styles.device_scale()));
+        f32 limit = (f32)140.0 * (f32)Styles.device_scale();
+        if (next > limit) {
+            next = limit;
+        }
+        if (next < (f32)0.0 - limit) {
+            next = (f32)0.0 - limit;
+        }
+        return next;
+    }
+
+    // Pulls the rubber band of a container (what the wheel does past its end); false when smooth scrolling is off.
+    public static unsafe bool stretch_by(u32 id, f32 dy) {
+        if (!Scroll.gliding()) {
+            return false;
+        }
+        ScrollEntry* entry = Scroll.find(id, true);
+        entry.stretch = Scroll.pull(entry.stretch, dy);
+        Scroll.touch();
+        return true;
+    }
+
     // The mouse wheel at a point of the window (client pixels): the innermost scroll container under it that can
     // still move takes the delta, then the ones around it, then the page. Positive is down.
     public static unsafe bool wheel(f32 x, f32 y, f32 dy) {
         u32 target = Hit.at(x, y);
         mut u32 holder = target;
+        mut u32 edge = 0;
         while (holder != 0) {
             if (Scroll.container(holder)) {
                 bool down = dy > (f32)0.0;
+                if (edge == 0 && Scroll.max_y(holder) > (f32)0.0) {
+                    edge = holder;
+                }
                 bool room = (down && Scroll.goal_top(holder) < Scroll.max_y(holder)) || (!down && Scroll.goal_top(holder) > (f32)0.0);
                 if (room && Scroll.glide_by(holder, (f32)0.0, dy)) {
                     return true;
@@ -429,7 +472,23 @@ struct Scroll {
             }
             holder = Dom.parent(holder);
         }
-        return Scroll.page_by(dy);
+        if (Scroll.page_by(dy)) {
+            return true;
+        }
+        if (Scroll.gliding()) {
+            ScrollSystem* system = Scroll.system();
+            if (edge != 0) {
+                ScrollEntry* entry = Scroll.find(edge, true);
+                entry.stretch = Scroll.pull(entry.stretch, dy);
+            } else if (system.page_limit > (f32)0.0) {
+                system.page_stretch = Scroll.pull(system.page_stretch, dy);
+            } else {
+                return false;
+            }
+            system.version = system.version + 1;
+            return true;
+        }
+        return false;
     }
 
     // The horizontal wheel (or shift + wheel) the same way. Positive is right.
