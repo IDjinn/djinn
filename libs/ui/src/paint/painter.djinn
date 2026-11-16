@@ -108,6 +108,15 @@ struct Painter {
     // lies outside the current clip draws nothing, its children are still visited since they may overflow it.
     public static unsafe void paint(DisplayList* list, u32 root, f32 width, f32 height) {
         list.clip_to((f32)0.0, (f32)0.0, width, height);
+        if (Scroll.page_top() < (f32)0.0 || Scroll.page_top() > Scroll.page_max_y()
+            || Scroll.page_left() < (f32)0.0 || Scroll.page_left() > Scroll.page_max_x()) {
+            // the page is pulled past its end (the rubber band): the strip it uncovers shows the page background,
+            // not the window's own clear color, or it would flash
+            u32 canvas = Painter.canvas_color(root);
+            if ((canvas & 255) != 0) {
+                list.fill((f32)0.0, (f32)0.0, width, height, DisplayList.gpu_color(canvas, (f32)1.0));
+            }
+        }
         list.shift((f32)0.0 - Scroll.page_left(), (f32)0.0 - Scroll.page_top());
         raised_count = 0;
         Transitions.begin();
@@ -115,6 +124,31 @@ struct Painter {
         Painter.flush_raised(list);
         list.shift(Scroll.page_left(), Scroll.page_top());
         list.restore_clip();
+    }
+
+    // The background the page paints over the whole window: the first one set by the root, its html or its body.
+    static unsafe u32 canvas_color(u32 root) {
+        mut u32 node = root;
+        mut u32 depth = 0;
+        while (node != 0 && depth < 4) {
+            if (Dom.kind(node) == DomKind.ELEMENT) {
+                u32 color = Styles.of(node).background;
+                if ((color & 255) != 0) {
+                    return color;
+                }
+            }
+            mut u32 next = 0;
+            mut u32 child = Dom.first_child(node);
+            while (child != 0 && next == 0) {
+                if (Dom.kind(child) == DomKind.ELEMENT && !Painter.is_hidden_tag(Dom.tag(child))) {
+                    next = child;
+                }
+                child = Dom.next_sibling(child);
+            }
+            node = next;
+            depth = depth + 1;
+        }
+        return 0;
     }
 
     static unsafe bool outside(DisplayList* list, f32 left, f32 top, f32 width, f32 height, f32 reach) {
