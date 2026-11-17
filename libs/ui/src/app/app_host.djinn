@@ -60,7 +60,7 @@ struct RenderedPage {
     mut Paths links;
 }
 
-struct Pages {
+struct SitePages {
     // A path a static site can have a file for: starts with '/', no '//' (another host), no ':' or '*' (patterns),
     // no '..'; the query and the fragment are dropped.
     public static unsafe str page_path(str href) {
@@ -82,14 +82,14 @@ struct Pages {
 
     static unsafe void collect(u32 id, Paths* links) {
         if (Dom.kind(id) == DomKind.ELEMENT && Texts.same(Dom.tag(id), "a") && Dom.has_attr(id, "href")) {
-            str path = Pages.page_path(Dom.attr(id, "href"));
+            str path = SitePages.page_path(Dom.attr(id, "href"));
             if (path.length > 0) {
                 links.add(path);
             }
         }
         mut u32 child = Dom.first_child(id);
         while (child != 0) {
-            Pages.collect(child, links);
+            SitePages.collect(child, links);
             child = Dom.next_sibling(child);
         }
     }
@@ -102,7 +102,7 @@ struct Pages {
         Dom.set_static(true);
         Mounted mounted = App.mount<T>(app);
         mut Paths links = Paths.create();
-        Pages.collect(mounted.node.id, &links);
+        SitePages.collect(mounted.node.id, &links);
         TextBuffer html = Html.document(mounted.node, mode == RenderMode.HYDRATE);
         mounted.unmount();
         Reactive.set_static(false);
@@ -146,7 +146,7 @@ struct StaticSite {
         mut u32 written = 0;
         for (mut u32 i = 0; i < pending.count; i = i + 1) {
             str path = pending.at(i);
-            mut RenderedPage page = Pages.render<T>(app, mode, path);
+            mut RenderedPage page = SitePages.render<T>(app, mode, path);
             for (mut u32 k = 0; k < page.links.count; k = k + 1) {
                 pending.add(page.links.at(k));
             }
@@ -182,7 +182,7 @@ struct StaticSite {
     }
 }
 
-// A small HTTP/1.0 server for an application: GET of a page renders it (Pages.render) and GET of a file (a last
+// A small HTTP/1.0 server for an application: GET of a page renders it (SitePages.render) and GET of a file (a last
 // segment with a '.', such as /djinn.js or /app.wasm) is read from the public directory. One request at a time; a
 // development server, not a production one.
 struct Serve {
@@ -285,7 +285,7 @@ struct Serve {
 
     static unsafe async void answer<T>(T app, u8 mode, Socket* client, str request, i8* public_dir) {
         str target = Serve.request_path(request);
-        str path = Pages.page_path(target);
+        str path = SitePages.page_path(target);
         if (path.length == 0) {
             await Serve.send(client, 400, "Bad Request", "text/plain", (i8*)"bad request", 11);
             return;
@@ -294,7 +294,7 @@ struct Serve {
             await Serve.file(client, path, public_dir);
             return;
         }
-        mut RenderedPage page = Pages.render<T>(app, mode, path);
+        mut RenderedPage page = SitePages.render<T>(app, mode, path);
         await Serve.send(client, 200, "OK", "text/html; charset=utf-8", page.html.data, page.html.length);
         page.html.release();
         page.links.release();
