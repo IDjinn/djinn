@@ -39,5 +39,8 @@ check x86_64-pc-windows-msvc 2 20
 check x86_64-unknown-linux-gnu 2 20
 check x86_64-apple-darwin 2 30
 check aarch64-linux-android 4 30
+# 'native' is everything but the web, so the web keeps the plain shell
+check wasm32-unknown-unknown 3 10
+check web 3 10
 
 echo "PASS platform_files"

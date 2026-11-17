@@ -9,6 +9,8 @@ struct Target {
         mut ptr<i8> chosen = triple;
         if (chosen == null) {
             chosen = Target.native_triple();
+        } else if (Strings.same(chosen, "web")) {
+            chosen = "wasm32-unknown-unknown";
         }
         target_triple = (ptr)chosen;
         target_bits = Target.bits_for(chosen);
@@ -261,19 +263,38 @@ struct Target {
             || Target.arch_is(triple, "i586") || Target.arch_is(triple, "i686") || Target.arch_is(triple, "x86")) {
             return "x86";
         }
+        if (Target.arch_is(triple, "wasm32")) {
+            return "wasm";
+        }
         return null;
     }
 
+    // The data layout of the module. x86 keeps the layout the compiler always used (the backend fills in the rest);
+    // wasm32 needs its own, with 32-bit pointers.
+    public static ptr<i8> data_layout() {
+        if (Target.is_wasm32()) {
+            return "e-m:e-p:32:32-p10:8:8-p20:8:8-i64:64-i128:128-n32:64-S128-ni:1:10:20";
+        }
+        return "e-p:64:64-i64:64-i128:128-f64:64-n8:16:32:64";
+    }
+
+    // The x86 backend is always set up (the host runs procedural macros and the JIT); WebAssembly when it is the target.
     public static bool initialize_backend() {
         ptr<i8> family = Target.backend_family();
         if (family == null) {
-            logger_error(Log.get(), "djinnc: this djinnc was linked with the x86 LLVM backend only, so '%s' can be compiled with --emit-ir but not to an object", Target.triple());
+            logger_error(Log.get(), "djinnc: '%s' can be compiled with --emit-ir but not to an object (supported: x86, x86_64, wasm32)", Target.triple());
             return false;
         }
         LLVMInitializeX86TargetInfo();
         LLVMInitializeX86Target();
         LLVMInitializeX86TargetMC();
         LLVMInitializeX86AsmPrinter();
+        if (Strings.same(family, "wasm")) {
+            LLVMInitializeWebAssemblyTargetInfo();
+            LLVMInitializeWebAssemblyTarget();
+            LLVMInitializeWebAssemblyTargetMC();
+            LLVMInitializeWebAssemblyAsmPrinter();
+        }
         return true;
     }
 }
