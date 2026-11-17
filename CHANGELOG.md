@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## [0.7.0-preview.1] - 2026-11-17
+
+Preview of the UI work: the JavaScript web target and the same `libs/ui` source rendered natively and on the web. A preview release is marked as such on GitHub.
+
 ### Added
 - The web target compiles to JavaScript: `--target web` writes one `.js` file instead of an object. The emitter (`djinnc/src/codegen/js`) walks the type-checked tree and writes only what `main` reaches: plain JS functions, struct values as object literals, JS strings, arrays and closures, checked / wrapped / saturating integer arithmetic as natively. `[Js("template")]` makes every call of a function the template (`$this`, `$0`, `$*`), which is how the bindings reach the browser with no wrapper: `std` is `runtime/js/std` and `libs/ui/js` is `ui` on the web (`ui.js`: push-pull signals, memos, effects, direct DOM building, keyed lists, two-way binding, router, theme). `examples/web-app` and `tests/djinnc/web.sh` (the same programs natively and under Node.js, the app on a fake DOM).
 - `examples/showcase`: one front end built as a native Windows app and as a web page; `tests/djinnc/showcase.sh` checks that every route builds the same tree on both. The kit components that only build markup are shared with the web as they are (`libs/ui/js/shared.txt`).
