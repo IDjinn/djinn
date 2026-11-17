@@ -2,10 +2,19 @@
 
 ## [Unreleased]
 
+### Added
+- The web target: `--target web` (`wasm32-unknown-unknown`) builds a freestanding WebAssembly module, linked by `wasm-ld` with the web runtime (`runtime/web`: allocator, the libc Djinn declares, printf, math, JSON, logger and an event loop that never blocks) and loaded by `djinn.js` in a browser or in Node.js. `extern "mod" { ... }` imports from a WebAssembly module and `[Export("name")]` exports a function. `tests/djinnc/wasm.sh` runs programs natively and under Node.js and compares their output.
+- Procedural macros while cross-compiling: they run on the host, `<lib-dir>/<triple>/` holds the target's libraries, and a library built for the host only lends its macros.
+- `libs/ui` on the web: the real DOM, updated in batches from the retained tree, with delegated events, bound fields, router and address bar, timers and animations on frames. Client rendering, hydration of the server's HTML (no node created) and `[Client]` islands of server pages. `[Server]` / `[Static]` parts render inside `<dj-server>`.
+- `App.run` natively: `--out <dir>` writes a static site following the internal links, `--serve <port>` is a development server. `examples/ui-web` builds as both the server and the client; `tests/djinnc/ui_web.sh` checks it all under Node.js.
+
 ### Changed
 - `libs/vulkan` delay-loads `vulkan-1.dll`: a program that uses the UI starts on a machine without the Vulkan loader and draws with the software rasterizer (Vulkan stays the default; `DJINN_UI_CPU=1` still opts out). A `-Wl,<flag>` entry in a `djinn.proj` reaches the linker with and without `--lld`.
 
 ### Fixed
+- The socket operations of the runtime (`accept`, `connect`, `send`, `recv`) did not mark their coroutine waiting, so the event loop resumed it before the I/O finished: an accept failed at once.
+- A UI node removed while a fade ran on it got the fade's last attribute after its id was reused.
+- `nint.MAX_VALUE`, `MIN_VALUE` and `BITS` follow the target instead of assuming 64 bits.
 - `VulkanRenderer.create` freed nothing when it failed halfway, and `release` left the pipeline, layouts, pools, sampler, atlas, buffers and sync objects behind: both now destroy every object that was created.
 
 ## [0.6.2] - 2026-11-16

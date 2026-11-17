@@ -130,7 +130,7 @@ LLVM), a warning is printed and the library is used without inlining. `--inspect
 - `.djni` interface-only files.
 - Static variable initializers and global constructors across libraries (header globals are declarations only).
 - Reflection method pointers (`funcPtr`) and `[Reflect]` tables of library types when mixed with `--reflect-all`.
-- Cross-target libraries (one interface, several objects per triple).
+- Cross-target libraries in one file (one interface, several objects per triple). Today each target has its own `.djlib`: while cross-compiling, `<lib-dir>/<triple>/<name>.djlib` is preferred over `<lib-dir>/<name>.djlib`, and a library built for the host is loaded only for its procedural macros (they run in the JIT; nothing of it is linked), which is how `ui_macros` serves a web build. A prebuilt std is `<lib-dir>/<triple>/std.djlib`; without it the std is compiled from source.
 - Incremental rebuild: skip packing when interface and object checksums are unchanged.
 - Rename `is_header` to something that does not read as "C header" (it marks a library interface source).
 - Compression of the interface and object sections.

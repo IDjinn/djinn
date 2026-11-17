@@ -6,8 +6,11 @@ library: a program that does not list it pays nothing.
 
 Status: phases 1 to 7 of the roadmap (reactive core, retained tree, `html!`, components, control flow, render modes,
 HTML writer, test host, CSS engine, the default theme, the layout engine, text, the software rasterizer, the Vulkan
-renderer and the Windows host in `libs/win32`). Vulkan is the default renderer; `vulkan-1.dll` is delay-loaded, so a
-machine without it (or `DJINN_UI_CPU=1`) draws with the software rasterizer. The web (wasm) host comes next.
+renderer and the Windows host in `libs/win32`) and phase 11, the web: the same components run in the browser as
+WebAssembly on the real DOM, rendered by the client, hydrated from the server's HTML or as islands of a server page,
+and written as a static site (see [On the web](#on-the-web)). Vulkan is the default renderer on the desktop;
+`vulkan-1.dll` is delay-loaded, so a machine without it (or `DJINN_UI_CPU=1`) draws with the software rasterizer.
+Linux, macOS, Android and iOS hosts come later.
 
 ## Using it
 
@@ -93,10 +96,51 @@ Declared in code, the most specific wins:
   no listener is kept, and everything is released before the response (`Reactive.live()` and `Dom.live()` are back
   to where they were). No client code except `[Client]` islands.
 - `static`: `server` done once. `[Static]` on a component renders it the first time it is shown and shares the same
-  HTML with every later request (`StaticPages`); writing it to files at build time is the `ui build` step (phase 14).
-- `[Server]` keeps the struct in native builds and replaces it in the web build with a placeholder
-  (`View.server_island`), so its code never reaches the client. `[Client]` wraps the render in
-  `<dj-island data-component="Name">`.
+  HTML with every later request (`StaticPages`); `--out <dir>` writes a whole static site (see below).
+- `[Server]` renders natively inside `<dj-server data-component="Name">` and is replaced in the web build by a
+  placeholder (`View.server_island`) that adopts that element, so its code never reaches the client. `[Client]`
+  wraps the render in `<dj-island data-component="Name">`. Both elements have `display: contents`.
+
+## On the web
+
+One program, two builds. Natively it is the server; with `--target web` it is the client:
+
+```
+djinnc libs/ui_macros -o build/libs/ui_macros.djlib --std-dir std            # macros run on the host
+djinnc libs/ui -o build/libs/ui.djlib --std-dir std                           # the server side
+djinnc libs/ui -o build/libs/wasm32-unknown-unknown/ui.djlib --std-dir std --target web
+djinnc examples/ui-web -o build/site/server --std-dir std
+djinnc examples/ui-web -o build/site/public/app.wasm --std-dir std --target web   # also copies djinn.js
+```
+
+The native program prints the page (no arguments), writes a static site (`--out <dir>`: "/" and every page its
+internal links reach, plus `Router.declare(path)`; `<dir>` is relative) or serves it (`--serve <port>`, with files
+such as `djinn.js` and the `.wasm` from `--public <dir>`; a development server, one request at a time). A page the
+client takes over loads `<script type="module" src="/djinn.js" data-wasm="/app.wasm">`; `Html.set_client` changes the
+paths.
+
+In the browser the app runs in the page by mode: `client` builds the DOM, `hydrate` adopts the server's HTML without
+creating a node (it builds its tree without touching the page, then claims each server node in document order), and
+`server` / `static` pages adopt only their `[Client]` islands. After that it is all fine-grained updates:
+
+- `Dom` reports every change to `DomHost` (empty natively). The web host turns them into operations in a buffer of
+  32-bit words and `djinn.js` applies the batch in one call after each entry into the program (an event, a timer, a
+  frame). A region (`if`, `for`) is a pair of comments, `<!--[-->` ... `<!--]-->`, as the server writes it.
+- Events are delegated from the document to the nearest node the program made, and bubble through `Dom.dispatch`.
+  A click that navigates cancels the browser's default. Fields send their value back (`input`, `change`), keys go
+  through `Input.deliver` (the listeners and `Hotkeys`; the browser keeps editing, Tab and scrolling), focus follows
+  the page.
+- The router starts at the page's path, pushes the address bar on `navigate` and follows back and forward.
+  `Timers`, `Animation` and the `Outlet` transitions run on animation frames; CSS transitions are the browser's.
+- The CSS the native engine uses is sent as one `<style data-djinn>` (the server's is kept when hydrating); layout,
+  text and painting are the browser's, so none of that code runs on the web.
+- The rules of the HTML writer apply to the DOM too: invalid tags and attribute names, `on...` and `srcdoc` never
+  reach the page, and dangerous URLs become `about:invalid#blocked`.
+
+`tests/djinnc/ui_web.sh` builds all of it and runs `tests/web/ui` under Node.js on a small DOM
+(`tests/web/fake_dom.js`): client rendering, hydration, islands, the static site and `examples/ui-web` end to end.
+Not yet: island props (an island is built from its declaration, not from the server's values), a mismatch between
+the page and the program is reported but not repaired, and `Serve` handles one request at a time.
 
 ## Styles (`src/style`)
 

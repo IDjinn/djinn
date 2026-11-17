@@ -67,7 +67,7 @@ The runtime (the `.c` files in `runtime/`) is compiled together with the program
 | `--inspect-lib <file>` | Print a `.djlib` header, sections, integrity and interface. |
 | `--sections-only` | With `--inspect-lib`: only the header and the section sizes, no interface dump. |
 | `--std` / `--std-dir <dir>` | Compile the `std/` library too (also `libs: ['std']` in `djinn.proj`, or `DJINN_STD_DIR`); see [STD_ROADMAP.md](STD_ROADMAP.md). |
-| `--target <triple>` | Target triple (default: the host). Sets the width of `usize`/`isize`; non-x86 targets only support `--emit-ir`. |
+| `--target <triple>` | Target triple (default: the host). x86 and x86_64 build objects and executables; `--target web` (`wasm32-unknown-unknown`) builds a WebAssembly module, see [The web target](#the-web-target); other triples only support `--emit-ir`. While cross-compiling, procedural macros still run on the host, a library is looked up in `<lib-dir>/<triple>/` first, and a library built for the host only lends its macros (see LIBRARY.md). |
 | `--tiered`, `--tier-threshold=<n>`, `--tier-settle=<ms>` | With `--run`: tiered JIT with three tiers. Tier 0 is unoptimized code that only counts how many times each function is entered and each loop iterates. A function that reaches `n` hits (default 1000) is promoted once no new function has started running for `ms` milliseconds (default 100, at most about one second of waiting): a background thread recompiles just the hot functions at `-O1` with a counter on every conditional branch (tier 1). When a tier-1 function has seen `4n` branch events it is recompiled again at `-O2` (or the `-O` level given) with `!prof branch_weights` from those counters (tier 2). Every function forwards to its newest version, and the program runs the whole time. There is no on-stack replacement, so a loop already running in an older tier stays there until its function is called again; coroutines, variadic functions, functions taking structs by value and `main` always stay in tier 0. Needs the runtime library built by `tools/build_runtime.sh` (it ships `tier.o`) and does not support `-g`. The JIT uses the large code model in this mode. |
 | `--run` | Run `main` in process through ORC LLJIT (`driver/jit.djinn`) instead of writing an object and linking. Needs `--runtime-lib` and the host target; the exit code of `main` is the exit code of djinnc. The JIT backend uses the code generation level of `-O` (none by default, so startup stays fast), and without a resident `.djlib` everything the program cannot reach from `main` is dropped before compiling. |
 | `--no-link` | Stop after generating code; writes `<output>.ll`. |
@@ -87,7 +87,26 @@ The runtime (the `.c` files in `runtime/`) is compiled together with the program
 | Platform files | In a project (and the std and core), `name.<platform>.djinn` replaces `name.djinn` for the target: `windows`, `linux`, `macos`, `android`, `ios`, `web`, then the groups `desktop` / `mobile`, then `native`. Variants for other platforms are left out (`--target` picks the platform). |
 | `--tests` | Include `*_test.djinn` in a project build without running anything. Normal builds skip those files. |
 
-Objects are emitted directly through LLVM-C (`LLVMTargetMachineEmitToFile`); only the x86 target is initialized.
+Objects are emitted directly through LLVM-C (`LLVMTargetMachineEmitToFile`); the x86 target is always initialized and WebAssembly when it is the target, so the LLVM-C library djinnc links needs both (the official LLVM 21 release has every target).
+
+### The web target
+
+`djinnc app.djinn --target web -o public/app.wasm` (or a project directory) builds a freestanding WebAssembly module
+(wasm32, no WASI) and copies `djinn.js`, the host that loads it, next to it. `wasm-ld` links it with the web runtime,
+`runtime/web/web_runtime.c`, which `clang --target=wasm32-unknown-unknown` compiles on each link unless
+`DJINN_WEB_RUNTIME_LIB` names a prebuilt one. Run it in a page with
+`<script type="module" src="djinn.js" data-wasm="app.wasm"></script>`, or under Node.js with `node tests/web/run.mjs
+app.wasm`.
+
+- The runtime has the allocator, the libc functions Djinn declares (with 64-bit sizes, as on the desktop), `printf`,
+  math (from JavaScript's `Math`), JSON, the logger and a single-threaded event loop that never blocks: `Task.delay`
+  sets a browser timer, and an `async main` returns at once and reports its exit code when it finishes. Files,
+  processes, sockets and threads fail as error values.
+- A synchronous wait (`.sync`, or a sync function that awaits) works only while nothing waits for a timer; otherwise it
+  fails with a runtime error. Make the caller async.
+- `extern "mod" { ... }` imports its functions from the WebAssembly module `mod` (`extern "C"` and plain `extern` stay
+  C functions); `[Export("name")]` exports a function under that name. Both mean nothing on other targets.
+- `libs/ui` builds for the web too: the page is the real DOM (see libs/ui/README.md).
 
 ### Environment variables
 
@@ -99,6 +118,8 @@ Objects are emitted directly through LLVM-C (`LLVMTargetMachineEmitToFile`); onl
 | `DJINN_CRT_DIR` | Directory with `crt1.o`, `crti.o`, `crtn.o` (POSIX `--lld`, default `/usr/lib/x86_64-linux-gnu`). |
 | `DJINN_DYNAMIC_LINKER` | Dynamic loader (POSIX `--lld`, default `/lib64/ld-linux-x86-64.so.2`). |
 | `DJINN_USE_LLD` | Test scripts only: when set, they add `--lld` if a runtime library is given. |
+| `DJINN_WASM_LD` | `wasm-ld` executable (`--target web`, default `wasm-ld`). |
+| `DJINN_WEB_RUNTIME_LIB` | A prebuilt web runtime (`libdjinn_runtime.a` for wasm32) instead of compiling `runtime/web` on each link. |
 
 ### Linking with a prebuilt runtime and lld
 
