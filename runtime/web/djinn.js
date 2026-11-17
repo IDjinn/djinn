@@ -283,7 +283,17 @@ export class DjinnProgram {
 
     tick() {
         this.timer = null;
-        this.guard(() => this.exports.djinn_tick());
+        this.call(() => this.exports.djinn_tick());
+    }
+
+    // Runs a call into the program and then applies what it changed in the page (libs/ui) in one go.
+    call(body) {
+        const result = this.guard(body);
+        if (this.exports.ui_flush && this.exitCode === null) {
+            const wants = this.guard(() => this.exports.ui_flush());
+            if (wants && this.dom) this.dom.requestFrame();
+        }
+        return result;
     }
 
     // Runs a call into the program; a panic or a trap rejects 'exited' instead of escaping into the caller.
@@ -343,15 +353,415 @@ export class DjinnProgram {
     }
 
     start() {
-        const code = this.guard(() => this.exports.main(0, 0));
+        const code = this.call(() => this.exports.main(0, 0));
         if (this.exitCode !== null) return this;
-        this.guard(() => this.exports.djinn_tick());
-        if (this.exitCode === null && !this.exports.djinn_main_pending()) {
+        this.call(() => this.exports.djinn_tick());
+        // A page keeps running after main returns (its listeners, timers and frames call back in).
+        if (this.exitCode === null && !this.exports.djinn_main_pending() && !this.exports.ui_flush) {
             this.finish(code ?? 0);
+        }
+        if (this.exitCode === null && this.exports.ui_flush) {
+            this.mainResult = code ?? 0;
         }
         return this;
     }
 }
+
+// ── The DOM host of libs/ui ─────────────────────────────────────────────────────────────────────────────────────────
+//
+// The program sends batches of operations (libs/ui/src/view/dom_host.web.djinn, WebOp): nodes are created, filled
+// and moved by id. A fragment (a region of 'if' or 'for') is a pair of comments, <!--[--> and <!--]-->, with its
+// children between them, as the server writes it. Events are delegated: one listener per event type on the document
+// finds the nearest node the program made and calls ui_dispatch.
+
+const OP = {
+    ELEMENT: 1, TEXT: 2, FRAGMENT: 3, ISLAND: 4, SLOT: 5, RAW: 6, SET_TEXT: 7, SET_ATTR: 8, REMOVE_ATTR: 9, INSERT: 10,
+    REMOVE: 11, LISTEN: 12, STYLE: 13, HISTORY: 14, FOCUS: 15, CLAIM: 16, CLAIM_END: 17, DOCUMENT: 18,
+};
+const KIND = { ELEMENT: 1, TEXT: 2, FRAGMENT: 3, ISLAND: 4, SLOT: 5, RAW: 6 };
+const HOST_EVENTS = new Set(["input", "change", "keydown", "keyup", "focus", "blur"]);
+const NAMED_KEYS = {
+    Backspace: 8, Tab: 9, Enter: 13, Shift: 16, Control: 17, Alt: 18, Pause: 19, CapsLock: 20, Escape: 27, " ": 32,
+    PageUp: 33, PageDown: 34, End: 35, Home: 36, ArrowLeft: 37, ArrowUp: 38, ArrowRight: 39, ArrowDown: 40, Insert: 45,
+    Delete: 46, Meta: 91, ContextMenu: 93,
+};
+
+export function virtualKey(event) {
+    if (NAMED_KEYS[event.key] !== undefined) return NAMED_KEYS[event.key];
+    if (/^F([1-9]|1[0-9]|2[0-4])$/.test(event.key)) return 111 + Number(event.key.slice(1));
+    if (event.code && /^Key[A-Z]$/.test(event.code)) return event.code.charCodeAt(3);
+    if (event.code && /^Digit[0-9]$/.test(event.code)) return event.code.charCodeAt(5);
+    if (event.key && event.key.length === 1) return event.key.toUpperCase().charCodeAt(0);
+    return 0;
+}
+
+export class DomHost {
+    constructor(program, doc) {
+        this.program = program;
+        this.doc = doc;
+        this.nodes = new Map();
+        this.events = new Set();
+        this.names = new Map();
+        this.style = null;
+        this.frame = 0;
+        this.frames = [];
+        this.islands = null;
+        this.mismatches = 0;
+        this.listenHost();
+    }
+
+    get exports() {
+        return this.program.exports;
+    }
+
+    // A text the program reads during a call, kept for the life of the page (event names).
+    name(text) {
+        let entry = this.names.get(text);
+        if (!entry) {
+            entry = this.program.allocate(text);
+            this.names.set(text, entry);
+        }
+        return entry;
+    }
+
+    tag(node, id) {
+        node.__djinn = id;
+        return node;
+    }
+
+    entry(id) {
+        const entry = this.nodes.get(id);
+        if (!entry) throw new Error(`djinn: the page has no node #${id}`);
+        return entry;
+    }
+
+    // The DOM nodes of an entry, in order: one node, or the range of a fragment with its markers.
+    domNodes(entry) {
+        if (entry.kind !== KIND.FRAGMENT) return [entry.node];
+        const nodes = [];
+        for (let node = entry.start; node; node = node.nextSibling) {
+            nodes.push(node);
+            if (node === entry.end) break;
+        }
+        return nodes;
+    }
+
+    firstNode(entry) {
+        return entry.kind === KIND.FRAGMENT ? entry.start : entry.node;
+    }
+
+    element(id, tag) {
+        if (tag === "html") {
+            this.nodes.set(id, { kind: KIND.ELEMENT, node: this.tag(this.doc.documentElement, id), container: this.doc.body });
+            return;
+        }
+        this.nodes.set(id, { kind: KIND.ELEMENT, node: this.tag(this.doc.createElement(tag), id) });
+    }
+
+    fragment(id) {
+        const holder = this.doc.createDocumentFragment();
+        const start = this.tag(this.doc.createComment("["), id);
+        const end = this.tag(this.doc.createComment("]"), id);
+        holder.appendChild(start);
+        holder.appendChild(end);
+        this.nodes.set(id, { kind: KIND.FRAGMENT, start, end });
+    }
+
+    raw(id, html) {
+        const template = this.doc.createElement("template");
+        template.innerHTML = html;
+        const holder = this.doc.createDocumentFragment();
+        const start = this.tag(this.doc.createComment("["), id);
+        const end = this.tag(this.doc.createComment("]"), id);
+        holder.appendChild(start);
+        holder.appendChild(template.content);
+        holder.appendChild(end);
+        this.nodes.set(id, { kind: KIND.FRAGMENT, start, end });
+    }
+
+    insert(parentId, childId, beforeId) {
+        const parent = this.entry(parentId);
+        const child = this.entry(childId);
+        let container;
+        let reference;
+        if (parent.kind === KIND.FRAGMENT) {
+            container = parent.end.parentNode;
+            reference = beforeId ? this.firstNode(this.entry(beforeId)) : parent.end;
+        } else {
+            container = parent.container || parent.node;
+            reference = beforeId ? this.firstNode(this.entry(beforeId)) : null;
+        }
+        for (const node of this.domNodes(child)) container.insertBefore(node, reference);
+    }
+
+    forget(node) {
+        if (node.__djinn !== undefined && this.nodes.get(node.__djinn)) {
+            const entry = this.nodes.get(node.__djinn);
+            if (entry.node === node || entry.start === node) this.nodes.delete(node.__djinn);
+        }
+        for (let child = node.firstChild; child; child = child.nextSibling) this.forget(child);
+    }
+
+    remove(id) {
+        const entry = this.nodes.get(id);
+        if (!entry) return;
+        for (const node of this.domNodes(entry)) {
+            this.forget(node);
+            if (node.parentNode) node.parentNode.removeChild(node);
+        }
+        this.nodes.delete(id);
+    }
+
+    setAttribute(id, name, value) {
+        const node = this.entry(id).node;
+        try {
+            node.setAttribute(name, value);
+        } catch {
+            return;
+        }
+        if (name === "value" && "value" in node && node.value !== value) node.value = value;
+        if (name === "checked" && "checked" in node) node.checked = true;
+        if (name === "selected" && "selected" in node) node.selected = true;
+    }
+
+    removeAttribute(id, name) {
+        const node = this.entry(id).node;
+        node.removeAttribute(name);
+        if (name === "checked" && "checked" in node) node.checked = false;
+        if (name === "value" && "value" in node) node.value = "";
+    }
+
+    setStyle(css) {
+        if (!this.style) {
+            this.style = this.doc.querySelector("style[data-djinn]");
+            if (!this.style) {
+                this.style = this.doc.createElement("style");
+                this.style.setAttribute("data-djinn", "");
+                (this.doc.head || this.doc.documentElement).appendChild(this.style);
+            }
+        }
+        if (this.style.textContent !== css) this.style.textContent = css;
+    }
+
+    history(path) {
+        const location = globalThis.location;
+        const history = globalThis.history;
+        if (!location || !history || !history.pushState) return;
+        if (location.pathname + location.search + location.hash === path || location.pathname + location.search === path) return;
+        history.pushState(null, "", path);
+    }
+
+    focus(id) {
+        const node = this.entry(id).node;
+        if (this.doc.activeElement !== node && node.focus) node.focus();
+    }
+
+    // ── Hydration: a cursor walks the HTML the server sent, in step with the program's tree ──
+
+    claimNext(kind, text) {
+        const frame = this.frames[this.frames.length - 1];
+        if (!frame) {
+            if (kind !== KIND.ISLAND) return null;
+            if (!this.islands) this.islands = Array.from(this.doc.querySelectorAll("dj-island"));
+            return this.islands.shift() || null;
+        }
+        let node = frame.next;
+        if (kind === KIND.TEXT) {
+            if (node && node.nodeType === 3) {
+                if (node.data.length > text.length && node.data.startsWith(text) && text.length > 0) {
+                    node.splitText(text.length);
+                }
+                if (node.data === text) {
+                    frame.next = node.nextSibling;
+                    return node;
+                }
+            }
+            if (text.length === 0) {
+                const empty = this.doc.createTextNode("");
+                frame.parent.insertBefore(empty, node || null);
+                return empty;
+            }
+            return null;
+        }
+        if (kind === KIND.FRAGMENT) {
+            if (node && node.nodeType === 8 && node.data === "[") {
+                frame.next = node.nextSibling;
+                return node;
+            }
+            return null;
+        }
+        if (node && node.nodeType === 1) {
+            frame.next = node.nextSibling;
+            return node;
+        }
+        return null;
+    }
+
+    claim(id, kind, text) {
+        const node = this.claimNext(kind, text);
+        if (!node) {
+            this.mismatches++;
+            if (this.mismatches === 1) console.warn(`djinn: the page does not match the program at node #${id} (${text || kind})`);
+            return;
+        }
+        this.tag(node, id);
+        if (kind === KIND.TEXT) {
+            this.nodes.set(id, { kind: KIND.TEXT, node });
+            return;
+        }
+        if (kind === KIND.FRAGMENT) {
+            this.frames.push({ id, kind, parent: node.parentNode, next: node.nextSibling, start: node });
+            return;
+        }
+        this.nodes.set(id, { kind: KIND.ELEMENT, node });
+        if (kind === KIND.SLOT || kind === KIND.RAW) return;
+        this.frames.push({ id, kind, parent: node, next: node.firstChild });
+    }
+
+    claimEnd(id) {
+        const frame = this.frames.pop();
+        if (!frame) return;
+        if (frame.kind === KIND.FRAGMENT) {
+            let end = frame.next;
+            if (!(end && end.nodeType === 8 && end.data === "]")) {
+                this.mismatches++;
+                end = this.doc.createComment("]");
+                frame.parent.insertBefore(end, frame.next || null);
+            }
+            this.tag(end, id);
+            this.nodes.set(id, { kind: KIND.FRAGMENT, start: frame.start, end });
+            const outer = this.frames[this.frames.length - 1];
+            if (outer) outer.next = end.nextSibling;
+        }
+    }
+
+    // ── Applying a batch ──
+
+    apply(wordsAt, count, bytesAt) {
+        const buffer = this.program.exports.memory.buffer;
+        const words = new Uint32Array(buffer, wordsAt, count);
+        const bytes = new Uint8Array(buffer);
+        let at = 0;
+        const text = () => {
+            const offset = words[at++];
+            const length = words[at++];
+            return decoder.decode(bytes.subarray(bytesAt + offset, bytesAt + offset + length));
+        };
+        while (at < count) {
+            const op = words[at++];
+            const id = words[at++];
+            switch (op) {
+                case OP.ELEMENT: this.element(id, text()); break;
+                case OP.TEXT: this.nodes.set(id, { kind: KIND.TEXT, node: this.tag(this.doc.createTextNode(text()), id) }); break;
+                case OP.FRAGMENT: this.fragment(id); break;
+                case OP.ISLAND:
+                case OP.SLOT: {
+                    const node = this.tag(this.doc.createElement(op === OP.ISLAND ? "dj-island" : "dj-server"), id);
+                    node.setAttribute("data-component", text());
+                    this.nodes.set(id, { kind: KIND.ELEMENT, node });
+                    break;
+                }
+                case OP.RAW: this.raw(id, text()); break;
+                case OP.SET_TEXT: this.entry(id).node.data = text(); break;
+                case OP.SET_ATTR: { const name = text(); this.setAttribute(id, name, text()); break; }
+                case OP.REMOVE_ATTR: this.removeAttribute(id, text()); break;
+                case OP.INSERT: { const child = words[at++]; const before = words[at++]; this.insert(id, child, before); break; }
+                case OP.REMOVE: this.remove(id); break;
+                case OP.LISTEN: this.listen(text()); break;
+                case OP.STYLE: this.setStyle(text()); break;
+                case OP.HISTORY: this.history(text()); break;
+                case OP.FOCUS: this.focus(id); break;
+                case OP.CLAIM: { const kind = words[at++]; this.claim(id, kind, text()); break; }
+                case OP.CLAIM_END: this.claimEnd(id); break;
+                case OP.DOCUMENT:
+                    this.nodes.set(id, { kind: KIND.ELEMENT, node: this.tag(this.doc.documentElement, id), container: this.doc.body });
+                    this.frames = [{ id, kind: KIND.ELEMENT, parent: this.doc.body, next: this.doc.body.firstChild }];
+                    break;
+                default: throw new Error(`djinn: unknown DOM operation ${op}`);
+            }
+        }
+    }
+
+    // ── Events ──
+
+    idOf(target) {
+        for (let node = target; node; node = node.parentNode) {
+            if (node.__djinn !== undefined && node.nodeType === 1) return node.__djinn;
+        }
+        return 0;
+    }
+
+    listen(type) {
+        if (HOST_EVENTS.has(type) || this.events.has(type)) return;
+        this.events.add(type);
+        this.doc.addEventListener(type, (event) => {
+            const id = this.idOf(event.target);
+            if (!id) return;
+            const { pointer, length } = this.name(type);
+            const prevent = this.program.call(() => this.exports.ui_dispatch(id, pointer, length));
+            if (prevent) event.preventDefault();
+        });
+    }
+
+    listenHost() {
+        const value = (type) => (event) => {
+            const target = event.target;
+            const id = this.idOf(target);
+            if (!id || target.__djinn !== id || !("value" in target)) return;
+            const typed = this.program.allocate(String(target.value));
+            const { pointer, length } = this.name(type);
+            this.program.call(() => this.exports.ui_input(id, typed.pointer, typed.length, pointer, length));
+            this.exports.djinn_free(typed.pointer);
+        };
+        this.doc.addEventListener("input", value("input"));
+        this.doc.addEventListener("change", value("change"));
+        this.doc.addEventListener("keydown", (event) => {
+            const mods = (event.shiftKey ? 1 : 0) | (event.ctrlKey ? 2 : 0) | (event.altKey ? 4 : 0) | (event.metaKey ? 8 : 0);
+            const prevent = this.program.call(() => this.exports.ui_key(virtualKey(event), mods));
+            if (prevent) event.preventDefault();
+        });
+        this.doc.addEventListener("focusin", (event) => {
+            const id = this.idOf(event.target);
+            if (id) this.program.call(() => this.exports.ui_focus(id));
+        });
+        this.doc.addEventListener("focusout", (event) => {
+            const id = this.idOf(event.target);
+            if (id) this.program.call(() => this.exports.ui_blur(id));
+        });
+        const window = this.doc.defaultView || globalThis;
+        if (window && window.addEventListener) {
+            window.addEventListener("popstate", () => {
+                const path = this.program.allocate(globalThis.location.pathname + globalThis.location.search);
+                this.program.call(() => this.exports.ui_popstate(path.pointer, path.length));
+                this.exports.djinn_free(path.pointer);
+            });
+        }
+    }
+
+    requestFrame() {
+        if (this.frame) return;
+        const request = globalThis.requestAnimationFrame || ((callback) => setTimeout(() => callback(performance.now()), 16));
+        this.frame = request((now) => {
+            this.frame = 0;
+            this.program.call(() => this.exports.ui_frame(now));
+        });
+    }
+}
+
+DjinnProgram.domImports = (program) => ({
+    dom_apply: (words, count, bytes) => {
+        if (!program.dom) program.dom = new DomHost(program, program.options.document || globalThis.document);
+        program.dom.apply(words, count, bytes);
+    },
+    dom_location: (out, capacity) => {
+        const location = program.options.location || globalThis.location;
+        const path = location ? location.pathname + (location.search || "") : "/";
+        const bytes = encoder.encode(path);
+        const length = Math.min(bytes.length, capacity);
+        program.memory().set(bytes.subarray(0, length), out);
+        return length;
+    },
+});
 
 async function loadModule(source) {
     if (source instanceof WebAssembly.Module) return source;
@@ -378,9 +788,9 @@ export async function run(source, options = {}) {
 }
 
 if (!isNode && typeof document !== "undefined") {
-    const script = document.currentScript || document.querySelector("script[data-wasm]");
+    const script = document.querySelector("script[data-wasm]");
     const wasm = script && script.dataset && script.dataset.wasm;
     if (wasm) {
-        run(new URL(wasm, script.src || document.baseURI)).then((program) => program.exited).catch((error) => console.error(error));
+        run(new URL(wasm, document.baseURI)).then((program) => program.exited).catch((error) => console.error(error));
     }
 }

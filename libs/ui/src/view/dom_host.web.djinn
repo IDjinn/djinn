@@ -1,0 +1,386 @@
+import std::types;
+import std::libc;
+
+namespace ui;
+
+// The web host: every change of Dom becomes an operation in a buffer of 32-bit words (texts are copied into a byte
+// arena, since the tree may free them before the flush), and djinn.js applies the whole buffer to the real DOM in
+// one call after each entry into the program (main, an event, a timer, a frame). See WebOp for the encoding.
+extern "djinn" {
+    void dom_apply(u32* words, u32 count, i8* bytes);
+    u32 dom_location(i8* buffer, u32 capacity);
+}
+
+unsafe static mut ptr web_host = null;
+
+// Operation codes; each is followed by the words listed (a text is an offset into the byte arena and a length).
+struct WebOp {
+    const u32 ELEMENT = 1;      // id, tag
+    const u32 TEXT = 2;         // id, text
+    const u32 FRAGMENT = 3;     // id
+    const u32 ISLAND = 4;       // id, component name
+    const u32 SLOT = 5;         // id, component name
+    const u32 RAW = 6;          // id, html
+    const u32 SET_TEXT = 7;     // id, text
+    const u32 SET_ATTR = 8;     // id, name, value
+    const u32 REMOVE_ATTR = 9;  // id, name
+    const u32 INSERT = 10;      // parent, child, before (0 appends)
+    const u32 REMOVE = 11;      // id
+    const u32 LISTEN = 12;      // id, event
+    const u32 STYLE = 13;       // css
+    const u32 HISTORY = 14;     // path
+    const u32 FOCUS = 15;       // id
+    const u32 CLAIM = 16;       // id, kind (hydration: adopt the next server node instead of creating one)
+    const u32 CLAIM_END = 17;   // id (the end of a claimed element's or fragment's children)
+    const u32 DOCUMENT = 18;    // id of the document element (<html>; its children go into <body>)
+}
+
+struct WebHost {
+    mut u32* words;
+    mut u32 count;
+    mut u32 capacity;
+    mut i8* bytes;
+    mut u32 used;
+    mut u32 room;
+    mut u32 muted;
+    mut u32 sheets;
+    mut bool started;
+}
+
+struct DomHost {
+    static unsafe WebHost* host() {
+        if (web_host == null) {
+            web_host = (ptr)__djinn_alloc_zeroed((size_long)sizeof(WebHost));
+        }
+        return (WebHost*)web_host;
+    }
+
+    public static unsafe bool active() {
+        WebHost* h = DomHost.host();
+        return h.muted == 0 && !Dom.is_static();
+    }
+
+    // While muted (hydration adopts nodes that already exist, a value the browser already shows), changes reach the
+    // tree but not the page.
+    public static unsafe void mute() {
+        DomHost.host().muted = DomHost.host().muted + 1;
+    }
+
+    public static unsafe void unmute() {
+        DomHost.host().muted = DomHost.host().muted - 1;
+    }
+
+    public static unsafe void word(u32 value) {
+        WebHost* h = DomHost.host();
+        if (h.count == h.capacity) {
+            mut u32 grown = h.capacity * 2;
+            if (grown < 1024) {
+                grown = 1024;
+            }
+            h.words = (u32*)__djinn_realloc((void*)h.words, (size_long)(grown * 4));
+            h.capacity = grown;
+        }
+        h.words[h.count] = value;
+        h.count = h.count + 1;
+    }
+
+    public static unsafe void text(i8* data, u32 length) {
+        WebHost* h = DomHost.host();
+        if (h.used + length > h.room) {
+            mut u32 grown = h.room * 2;
+            if (grown < 4096) {
+                grown = 4096;
+            }
+            while (grown < h.used + length) {
+                grown = grown * 2;
+            }
+            h.bytes = (i8*)__djinn_realloc((void*)h.bytes, (size_long)grown);
+            h.room = grown;
+        }
+        if (length > 0) {
+            memcpy((void*)(h.bytes + (size_long)h.used), (void*)data, (size_long)length);
+        }
+        DomHost.word(h.used);
+        DomHost.word(length);
+        h.used = h.used + length;
+    }
+
+    public static unsafe void op(u32 code, u32 id) {
+        DomHost.word(code);
+        DomHost.word(id);
+    }
+
+    public static unsafe void created(u32 id) {
+        if (!DomHost.active()) {
+            return;
+        }
+        DomNode* node = Dom.at(id);
+        u8 kind = node.kind;
+        if (kind == DomKind.ELEMENT) {
+            mut str tag = node.tag;
+            if (!HtmlSafety.is_tag_name(tag)) {
+                tag = "dj-invalid";
+            }
+            DomHost.op(WebOp.ELEMENT, id);
+            DomHost.text(tag.data, (u32)tag.length);
+        } else if (kind == DomKind.TEXT) {
+            DomHost.op(WebOp.TEXT, id);
+            DomHost.text(node.text, node.text_length);
+        } else if (kind == DomKind.FRAGMENT) {
+            DomHost.op(WebOp.FRAGMENT, id);
+        } else if (kind == DomKind.ISLAND) {
+            DomHost.op(WebOp.ISLAND, id);
+            DomHost.text(node.tag.data, (u32)node.tag.length);
+        } else if (kind == DomKind.SERVER_SLOT) {
+            DomHost.op(WebOp.SLOT, id);
+            DomHost.text(node.tag.data, (u32)node.tag.length);
+        } else if (kind == DomKind.RAW) {
+            DomHost.op(WebOp.RAW, id);
+            DomHost.text(node.text, node.text_length);
+        }
+    }
+
+    public static unsafe void text_changed(u32 id) {
+        if (!DomHost.active()) {
+            return;
+        }
+        DomNode* node = Dom.at(id);
+        DomHost.op(WebOp.SET_TEXT, id);
+        DomHost.text(node.text, node.text_length);
+    }
+
+    // The same rules as the HTML writer: names that are not attribute names and event handler attributes (on...)
+    // never reach the page, and a URL attribute with a dangerous scheme gets the blocked URL instead.
+    public static unsafe void attr_set(u32 id, str name, i8* data, u32 length) {
+        if (!DomHost.active() || !HtmlSafety.is_attribute_name(name) || HtmlSafety.is_forbidden(name)) {
+            return;
+        }
+        DomHost.op(WebOp.SET_ATTR, id);
+        DomHost.text(name.data, (u32)name.length);
+        if (HtmlSafety.is_url_attribute(name) && !HtmlSafety.is_safe_url(data, length)) {
+            str blocked = HtmlSafety.BLOCKED_URL;
+            DomHost.text(blocked.data, (u32)blocked.length);
+            return;
+        }
+        DomHost.text(data, length);
+    }
+
+    public static unsafe void attr_removed(u32 id, str name) {
+        if (!DomHost.active()) {
+            return;
+        }
+        DomHost.op(WebOp.REMOVE_ATTR, id);
+        DomHost.text(name.data, (u32)name.length);
+    }
+
+    public static unsafe void inserted(u32 parent, u32 child, u32 before) {
+        if (!DomHost.active()) {
+            return;
+        }
+        DomHost.op(WebOp.INSERT, parent);
+        DomHost.word(child);
+        DomHost.word(before);
+    }
+
+    public static unsafe void removed(u32 id) {
+        if (!DomHost.active()) {
+            return;
+        }
+        DomHost.op(WebOp.REMOVE, id);
+    }
+
+    public static unsafe void listened(u32 id, str event) {
+        if (DomHost.host().muted > 0 && !Dom.is_static()) {
+            // a hydrated node gets its listeners when it is claimed
+            return;
+        }
+        if (!DomHost.active()) {
+            return;
+        }
+        DomHost.op(WebOp.LISTEN, id);
+        DomHost.text(event.data, (u32)event.length);
+    }
+
+    public static unsafe void focused(u32 id) {
+        if (!DomHost.active()) {
+            return;
+        }
+        DomHost.op(WebOp.FOCUS, id);
+    }
+
+    public static unsafe void history(str path) {
+        DomHost.op(WebOp.HISTORY, 0);
+        DomHost.text(path.data, (u32)path.length);
+    }
+
+    // The theme and the author stylesheets as one <style> (again whenever a sheet is added).
+    public static unsafe void styles() {
+        StyleEngine* engine = Styles.engine();
+        WebHost* h = DomHost.host();
+        if (engine.sheets.count == h.sheets) {
+            return;
+        }
+        h.sheets = engine.sheets.count;
+        mut TextBuffer css = TextBuffer.create();
+        for (mut u32 i = 0; i < engine.sheets.count; i = i + 1) {
+            StyleSheet* sheet = engine.sheets.get(i);
+            if (sheet.origin == StyleOrigin.BROWSER || sheet.rules.count == 0) {
+                continue;
+            }
+            css.append(sheet.source);
+            css.append("\n");
+        }
+        DomHost.op(WebOp.STYLE, 0);
+        DomHost.text(css.data, css.length);
+        css.release();
+    }
+
+    // Sends what changed to the page. Returns 1 when the host should call ui_frame on the next animation frame.
+    public static unsafe i32 flush() {
+        WebHost* h = DomHost.host();
+        if (h.started) {
+            DomHost.styles();
+        }
+        if (h.count > 0) {
+            dom_apply(h.words, h.count, h.bytes);
+            h.count = 0;
+            h.used = 0;
+        }
+        if (Animation.active() || Timers.pending()) {
+            return 1;
+        }
+        return 0;
+    }
+
+    // The path the page was opened at (location.pathname + search).
+    public static unsafe str location() {
+        i8* buffer = (i8*)__djinn_alloc((size_long)2048);
+        u32 length = dom_location(buffer, 2048);
+        str path = { .data = buffer, .length = (size)length };
+        return path;
+    }
+
+    // Starts the web side of an application: the router follows the address bar and the address bar the router.
+    public static unsafe void start() {
+        WebHost* h = DomHost.host();
+        h.started = true;
+        DomHost.op(WebOp.DOCUMENT, Dom.document());
+        Router.start(DomHost.location());
+        u32 root = Reactive.create_root(0);
+        Scope saved = Reactive.enter(root);
+        effect(() => {
+            str path = Router.path();
+            DomHost.history(path);
+        });
+        Reactive.leave(saved);
+    }
+
+    // Hydration: the tree was built muted; now each node is matched, in document order, with what the server sent.
+    public static unsafe void adopt(u32 id, bool inside_island) {
+        u8 kind = Dom.kind(id);
+        mut bool claimed = !inside_island;
+        if (kind == DomKind.ISLAND) {
+            claimed = true;
+        }
+        if (claimed) {
+            DomHost.op(WebOp.CLAIM, id);
+            DomHost.word((u32)kind);
+            if (kind == DomKind.TEXT) {
+                str value = Dom.text_of(id);
+                DomHost.text(value.data, (u32)value.length);
+            } else if (kind == DomKind.ELEMENT || kind == DomKind.ISLAND || kind == DomKind.SERVER_SLOT) {
+                str tag = Dom.tag(id);
+                DomHost.text(tag.data, (u32)tag.length);
+            } else {
+                DomHost.text((i8*)"", 0);
+            }
+            DomTree* t = Dom.tree();
+            mut u32 listener = t.nodes[id].listeners;
+            while (listener != 0) {
+                str event = t.listener_info[listener].event;
+                DomHost.op(WebOp.LISTEN, id);
+                DomHost.text(event.data, (u32)event.length);
+                listener = t.listener_info[listener].next;
+            }
+        }
+        if (kind == DomKind.SERVER_SLOT || kind == DomKind.RAW || kind == DomKind.TEXT) {
+            return;
+        }
+        bool island_inside = inside_island && kind != DomKind.ISLAND;
+        mut u32 child = Dom.first_child(id);
+        while (child != 0) {
+            DomHost.adopt(child, island_inside);
+            child = Dom.next_sibling(child);
+        }
+        if (claimed) {
+            DomHost.op(WebOp.CLAIM_END, id);
+        }
+    }
+}
+
+// The entry points djinn.js calls. Each one leaves its changes in the buffer; djinn.js then calls ui_flush.
+[Export("ui_flush")]
+public unsafe i32 ui_flush() {
+    return DomHost.flush();
+}
+
+// A DOM event on the node 'id' (the nearest one the program made): the listeners of the node and of its ancestors
+// run. Returns 1 when the browser's default action must be cancelled (the handler navigated, or it was a submit).
+[Export("ui_dispatch")]
+public unsafe i32 ui_dispatch(u32 id, i8* event, u32 length) {
+    str name = { .data = event, .length = (size)length };
+    u32 before = Router.version();
+    i32 handled = Dom.dispatch(id, name);
+    if (Router.version() != before || (handled > 0 && Texts.same(name, "submit"))) {
+        return 1;
+    }
+    return 0;
+}
+
+// The browser changed the value of a field: the tree takes it (without echoing it back to the page, which would
+// move the caret), then 'event' (input or change) is dispatched.
+[Export("ui_input")]
+public unsafe i32 ui_input(u32 id, i8* value, u32 length, i8* event, u32 event_length) {
+    DomHost.mute();
+    Dom.set_attr(id, "value", value, length);
+    DomHost.unmute();
+    str name = { .data = event, .length = (size)event_length };
+    Dom.dispatch(id, name);
+    return 0;
+}
+
+// A key press (Windows virtual-key code, Mod flags). Returns 1 when the browser's default action must be cancelled.
+[Export("ui_key")]
+public unsafe i32 ui_key(i32 key, u32 mods) {
+    if (Input.deliver(key, mods)) {
+        return 1;
+    }
+    return 0;
+}
+
+[Export("ui_focus")]
+public unsafe void ui_focus(u32 id) {
+    DomHost.mute();
+    Focus.set(id, false);
+    DomHost.unmute();
+}
+
+[Export("ui_blur")]
+public unsafe void ui_blur(u32 id) {
+    if (Focus.current() == id) {
+        Focus.clear();
+    }
+}
+
+[Export("ui_popstate")]
+public unsafe void ui_popstate(i8* path, u32 length) {
+    str arrived = { .data = path, .length = (size)length };
+    Router.arrive(arrived);
+}
+
+// One animation frame at 'now' (milliseconds): timers and animations move on.
+[Export("ui_frame")]
+public unsafe i32 ui_frame(f64 now) {
+    Animation.advance((u32)now);
+    return 0;
+}
