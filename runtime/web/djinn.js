@@ -560,11 +560,14 @@ export class DomHost {
 
     claimNext(kind, text) {
         const frame = this.frames[this.frames.length - 1];
-        if (!frame) {
-            if (kind !== KIND.ISLAND) return null;
+        // Islands come in document order whether the page around them is adopted (hydrate) or not (server pages).
+        if (kind === KIND.ISLAND) {
             if (!this.islands) this.islands = Array.from(this.doc.querySelectorAll("dj-island"));
-            return this.islands.shift() || null;
+            const island = this.islands.shift() || null;
+            if (island && frame && frame.next === island) frame.next = island.nextSibling;
+            return island;
         }
+        if (!frame) return null;
         let node = frame.next;
         if (kind === KIND.TEXT) {
             if (node && node.nodeType === 3) {

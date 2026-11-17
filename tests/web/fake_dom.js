@@ -134,6 +134,7 @@ export class Document extends Node {
         super(null, 9);
         this.ownerDocument = this;
         this.created = 0;
+        this.createdElements = 0;
         this.listeners = new Map();
         this.activeElement = null;
         this.documentElement = new Element(this, "html");
@@ -143,9 +144,9 @@ export class Document extends Node {
         this.appendChild(this.documentElement);
     }
 
-    createElement(tag) { this.created++; return new Element(this, tag); }
+    createElement(tag) { this.created++; this.createdElements++; return new Element(this, tag); }
     createTextNode(data) { this.created++; return new Text(this, data); }
-    createComment(data) { this.created++; return new Comment(this, data); }
+    createComment(data) { this.created++; this.createdElements++; return new Comment(this, data); }
     createDocumentFragment() { return new DocumentFragment(this); }
 
     addEventListener(type, listener) {
@@ -200,6 +201,7 @@ export class Document extends Node {
         this.head = root.childNodes.find((node) => node.localName === "head") || this.head;
         this.body = root.childNodes.find((node) => node.localName === "body") || this.body;
         this.created = 0;
+        this.createdElements = 0;
     }
 }
 
