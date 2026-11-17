@@ -1,0 +1,201 @@
+namespace djinnc;
+
+impl JsEmitter {
+    // The statements of a block without its braces (a function body, a case).
+    unsafe void block_body(Node* node) {
+        if (node == null) {
+            return;
+        }
+        if (node.kind() == NodeKind::BLOCK) {
+            for (mut i32 i = 0; i < node.count(); i = i + 1) {
+                this.statement(node.child(i));
+            }
+            return;
+        }
+        this.statement(node);
+    }
+
+    // A statement nested in if / while / for, always braced.
+    unsafe void nested(Node* node) {
+        ByteBuffer* code = this.code;
+        code.append("{\n");
+        this.depth = this.depth + 1;
+        this.block_body(node);
+        this.depth = this.depth - 1;
+        this.line_start();
+        code.append("}");
+    }
+
+    unsafe void statement(Node* node) {
+        if (node == null) {
+            return;
+        }
+        NodeKind kind = node.kind();
+        ByteBuffer* code = this.code;
+        switch (kind) {
+            case EMPTY:
+                return;
+            case BLOCK:
+                this.line_start();
+                this.nested(node);
+                code.append("\n");
+            case VAR_DECL:
+                this.variable(node);
+            case EXPR_STMT:
+                this.line_start();
+                code.append(this.expression(node.first()));
+                code.append(";\n");
+            case RETURN:
+                this.line_start();
+                if (node.first() == null) {
+                    code.append("return;\n");
+                } else {
+                    code.append("return ");
+                    code.append(this.stored(node.first()));
+                    code.append(";\n");
+                }
+            case IF:
+                this.line_start();
+                this.if_chain(node);
+                code.append("\n");
+            case WHILE:
+                this.line_start();
+                code.append("while (");
+                code.append(this.expression(node.first()));
+                code.append(") ");
+                this.nested(node.second());
+                code.append("\n");
+            case DO_WHILE:
+                this.line_start();
+                code.append("do ");
+                this.nested(node.second());
+                code.append(" while (");
+                code.append(this.expression(node.first()));
+                code.append(");\n");
+            case FOR:
+                this.for_loop(node);
+            case SWITCH:
+                this.switch_statement(node);
+            case BREAK:
+                this.line("break;");
+            case CONTINUE:
+                this.line("continue;");
+            default:
+                this.error(node, "this statement is not supported by the web target yet");
+        }
+    }
+
+    unsafe void if_chain(Node* node) {
+        ByteBuffer* code = this.code;
+        code.append("if (");
+        code.append(this.expression(node.first()));
+        code.append(") ");
+        this.nested(node.second());
+        Node* otherwise = node.third();
+        if (otherwise == null) {
+            return;
+        }
+        code.append(" else ");
+        if (otherwise.kind() == NodeKind::IF) {
+            this.if_chain(otherwise);
+            return;
+        }
+        this.nested(otherwise);
+    }
+
+    unsafe void variable(Node* node) {
+        LocalVariable* variable = (LocalVariable*)node.symbol();
+        ByteBuffer* code = this.code;
+        this.line_start();
+        if (variable != null && !variable.is_mutable) {
+            code.append("const ");
+        } else {
+            code.append("let ");
+        }
+        if (variable != null) {
+            code.append(this.local_name(variable));
+        } else {
+            code.append(node.text());
+        }
+        code.append(" = ");
+        if (node.first() != null) {
+            code.append(this.stored(node.first()));
+        } else if (variable != null) {
+            code.append(this.default_value(variable.type));
+        } else {
+            code.append("undefined");
+        }
+        code.append(";\n");
+    }
+
+    // for (init; condition; step): the initializer is a declaration or an expression statement.
+    unsafe void for_loop(Node* node) {
+        ByteBuffer* code = this.code;
+        this.line_start();
+        code.append("for (");
+        Node* init = node.first();
+        if (init != null) {
+            if (init.kind() == NodeKind::VAR_DECL) {
+                LocalVariable* variable = (LocalVariable*)init.symbol();
+                code.append("let ");
+                code.append(this.local_name(variable));
+                code.append(" = ");
+                if (init.first() != null) {
+                    code.append(this.stored(init.first()));
+                } else {
+                    code.append(this.default_value(variable.type));
+                }
+            } else if (init.kind() == NodeKind::EXPR_STMT) {
+                code.append(this.expression(init.first()));
+            } else {
+                this.error(init, "this loop initializer is not supported by the web target yet");
+            }
+        }
+        code.append("; ");
+        if (node.second() != null) {
+            code.append(this.expression(node.second()));
+        }
+        code.append("; ");
+        if (node.third() != null) {
+            code.append(this.expression(node.third()));
+        }
+        code.append(") ");
+        this.nested(node.fourth());
+        code.append("\n");
+    }
+
+    unsafe void switch_statement(Node* node) {
+        ByteBuffer* code = this.code;
+        this.line_start();
+        code.append("switch (");
+        code.append(this.expression(node.first()));
+        code.append(") {\n");
+        for (mut i32 i = 0; i < node.count(); i = i + 1) {
+            Node* arm = node.child(i);
+            this.line_start();
+            if (arm.first() == null) {
+                code.append("default: {\n");
+            } else {
+                code.append("case ");
+                code.append(this.case_label(arm.first()));
+                code.append(": {\n");
+            }
+            this.depth = this.depth + 1;
+            for (mut i32 j = 0; j < arm.count(); j = j + 1) {
+                this.statement(arm.child(j));
+            }
+            this.line("break;");
+            this.depth = this.depth - 1;
+            this.line("}");
+        }
+        this.line("}");
+    }
+
+    unsafe ptr<i8> case_label(Node* label) {
+        if (label.symbol_kind() == SymbolKind.CONSTANT) {
+            Node* variant = (Node*)label.symbol();
+            return this.expression(variant.first());
+        }
+        return this.expression(label);
+    }
+}

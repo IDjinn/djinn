@@ -7,6 +7,8 @@ unsafe static mut ptr router_state = null;
 
 unsafe static mut i32 router_direction = 1;
 
+unsafe static mut ptr router_declared = null;
+
 struct RouterState {
     mut i8** paths;
     mut u32* lengths;
@@ -136,6 +138,45 @@ struct Router {
         return now;
     }
 
+    // The host's own history moved to 'path' (the browser's back and forward buttons): one step back or forward
+    // when that is where it leads, a new entry otherwise.
+    public static unsafe void arrive(str path) {
+        RouterState* s = Router.state();
+        if (s.index > 0) {
+            str previous = { .data = s.paths[s.index - 1], .length = (size)s.lengths[s.index - 1] };
+            if (Texts.same(previous, path)) {
+                Router.back();
+                return;
+            }
+        }
+        if (s.index + 1 < s.count) {
+            str following = { .data = s.paths[s.index + 1], .length = (size)s.lengths[s.index + 1] };
+            if (Texts.same(following, path)) {
+                Router.forward();
+                return;
+            }
+        }
+        Router.navigate(path);
+    }
+
+    // Pages a static site should have that no link reaches (StaticSite starts at "/" and follows the links).
+    public static unsafe void declare(str path) {
+        Router.declared().add(path);
+    }
+
+    public static unsafe Paths* declared() {
+        if (router_declared == null) {
+            Paths* made = (Paths*)__djinn_alloc_zeroed((size_long)sizeof(Paths));
+            router_declared = (ptr)made;
+        }
+        return (Paths*)router_declared;
+    }
+
+    // Changes on every navigation, without subscribing.
+    public static unsafe u32 version() {
+        return Router.state().version.peek();
+    }
+
     // The current path; an effect that calls this runs again after every navigation.
     public static unsafe str path() {
         RouterState* s = Router.state();
@@ -261,15 +302,5 @@ struct Outlet {
             Dom.append(region, page.id);
         });
         return box;
-    }
-}
-
-// A link that navigates inside the app: Enter or a click on it goes to 'to' without leaving the page.
-struct Link {
-    str to;
-    str label;
-
-    public unsafe Node render() {
-        return html!{ <a href={this.to} on_click={() => Router.navigate(this.to)}>{this.label}</a> };
     }
 }

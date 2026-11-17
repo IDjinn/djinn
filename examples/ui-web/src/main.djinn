@@ -1,0 +1,115 @@
+import ui;
+import std::types;
+import std::collections;
+import std::libc;
+
+namespace webapp;
+
+// One program, two builds: natively it is the server (it prints the page, writes a static site with --out <dir> or
+// serves it with --serve <port>), and with --target wasm it is the client that hydrates that page in the browser.
+[Application(render: hydrate)]
+struct WebApp {
+    public unsafe Node render() {
+        return html!{
+            <div class="page stack">
+                <header class="cluster">
+                    <strong>Djinn on the web</strong>
+                    <Navigator routes="/=Home|/todos=Todos|/about=About"/>
+                    <button id="theme" on_click={() => Theme.toggle()}>theme</button>
+                </header>
+                <Outlet view={(str path) => WebApp.page(path)}/>
+            </div>
+        };
+    }
+
+    public static unsafe Node page(str path) {
+        if (Router.matches("/todos", path)) {
+            return html!{ <Todos/> };
+        }
+        if (Router.matches("/about", path)) {
+            return html!{ <About/> };
+        }
+        return html!{ <Home/> };
+    }
+}
+
+struct Home {
+    public unsafe Node render() {
+        signal<i32> count = state(0);
+        return html!{
+            <section class="stack">
+                <h1>Home</h1>
+                <p>This page was rendered by the server and hydrated by WebAssembly: the button already works.</p>
+                <div class="cluster">
+                    <output id="count">{count}</output>
+                    <button id="inc" class="primary" on_click={() => count.set(count.get() + 1)}>add one</button>
+                    {if (count.get() >= 3) { <small>that is a lot of clicks</small> }}
+                </div>
+            </section>
+        };
+    }
+}
+
+struct Todos {
+    public unsafe Node render() {
+        signal<str> draft = state<str>("");
+        signal<slice<str>> items = state<slice<str>>(Todos.start());
+        return html!{
+            <section class="stack">
+                <h1>Todos</h1>
+                <div class="cluster">
+                    <Field label="New item" placeholder="something to do" value={draft}/>
+                    <button id="add" on_click={() => Todos.add(items, draft)}>add</button>
+                </div>
+                <ul id="todos">{for (str item in items.get()) { <li>{item}</li> }}</ul>
+                <small>{(i32)items.get().length} item(s)</small>
+            </section>
+        };
+    }
+
+    static unsafe slice<str> start() {
+        str* list = (str*)__djinn_alloc_zeroed((size_long)(2 * sizeof(str)));
+        list[0] = "hydrate the page";
+        list[1] = "write the static site";
+        slice<str> made = { .data = list, .length = 2 };
+        return made;
+    }
+
+    static unsafe void add(signal<slice<str>> items, signal<str> draft) {
+        str text = draft.get();
+        if (text.length == 0) {
+            return;
+        }
+        slice<str> old = items.get();
+        u32 count = (u32)old.length;
+        str* list = (str*)__djinn_alloc_zeroed((size_long)((count + 1) * (u32)sizeof(str)));
+        for (mut u32 i = 0; i < count; i = i + 1) {
+            list[i] = old[i];
+        }
+        str copy = { .data = Texts.copy(text.data, (u32)text.length), .length = text.length };
+        list[count] = copy;
+        slice<str> grown = { .data = list, .length = (size)(count + 1) };
+        items.set(grown);
+        draft.set("");
+    }
+}
+
+// Rendered by the server only: the client keeps the HTML it received and never runs this code.
+[Server]
+struct BuildInfo {
+    public unsafe Node render() {
+        return html!{ <p id="built">Built natively, sent as HTML.</p> };
+    }
+}
+
+struct About {
+    public unsafe Node render() {
+        return html!{
+            <section class="stack">
+                <h1>About</h1>
+                <p>Djinn compiles the same components to a native window (Vulkan), to HTML on a server and to WebAssembly in a page.</p>
+                <BuildInfo/>
+            </section>
+        };
+    }
+}

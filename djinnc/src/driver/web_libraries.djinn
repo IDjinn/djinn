@@ -1,0 +1,140 @@
+namespace djinnc;
+
+unsafe static mut ptr web_scripts = null;
+
+// The web target compiles a program to JavaScript, so a library is not linked as an object: 'std' becomes the
+// bindings in <runtime>/js/std and a library 'name' with a 'js' folder (<runtime>/../libs/<name>/js) is replaced by
+// the Djinn bindings and the .js runtime there. A library without one (ui_macros) still runs its procedural macros.
+struct WebLibraries {
+    public static unsafe PointerList* scripts() {
+        if (web_scripts == null) {
+            web_scripts = (ptr)PointerList.create();
+        }
+        return (PointerList*)web_scripts;
+    }
+
+    public static unsafe bool apply(Options* options) {
+        ByteBuffer* runtime = ByteBuffer.create();
+        runtime.append(options.runtime_dir);
+        runtime.append("/js");
+        if (!WebLibraries.add_folder(options, runtime.cstr(), false)) {
+            logger_error(Log.get(), "djinnc: cannot find the JavaScript runtime '%s' (see --runtime-dir)", runtime.cstr());
+            return false;
+        }
+        if (options.use_std) {
+            options.use_std = false;
+            ByteBuffer* std = ByteBuffer.create();
+            std.append(runtime.cstr());
+            std.append("/std");
+            if (!WebLibraries.add_folder(options, std.cstr(), true)) {
+                logger_error(Log.get(), "djinnc: cannot find the std bindings for the web '%s'", std.cstr());
+                return false;
+            }
+        }
+        PointerList* libraries = options.libraries;
+        PointerList* kept = PointerList.create();
+        for (mut i32 i = 0; i < libraries.length; i = i + 1) {
+            ptr<i8> path = (ptr<i8>)libraries.get(i);
+            ByteBuffer* folder = ByteBuffer.create();
+            folder.append(options.runtime_dir);
+            folder.append("/../libs/");
+            folder.append(WebLibraries.library_name(path));
+            folder.append("/js");
+            if (!WebLibraries.add_folder(options, folder.cstr(), true)) {
+                kept.push((ptr)path);
+            }
+        }
+        options.libraries = kept;
+        return true;
+    }
+
+    // Adds the .djinn files of a folder as inputs (when 'sources') and remembers its .js files for the output.
+    static unsafe bool add_folder(Options* options, ptr<i8> folder, bool sources) {
+        ptr<i8> scripts = __djinn_list_files(folder, ".js");
+        if (scripts == null) {
+            return false;
+        }
+        PointerList* found_scripts = PointerList.create();
+        WebLibraries.each_line(scripts, found_scripts);
+        PointerList* known = WebLibraries.scripts();
+        for (mut i32 i = 0; i < found_scripts.length; i = i + 1) {
+            if (!known.contains_string((ptr<i8>)found_scripts.get(i))) {
+                known.push(found_scripts.get(i));
+            }
+        }
+        if (sources) {
+            PointerList* found = PointerList.create();
+            ptr<i8> listing = __djinn_list_files(folder, ".djinn");
+            if (listing != null) {
+                WebLibraries.each_line(listing, found);
+            }
+            WebLibraries.add_shared(folder, found);
+            PointerList* inputs = options.inputs;
+            PointerList* dependencies = options.dependencies;
+            for (mut i32 i = 0; i < found.length; i = i + 1) {
+                inputs.push(found.get(i));
+                dependencies.push(found.get(i));
+            }
+        }
+        return true;
+    }
+
+    // <folder>/shared.txt names source files of the library itself (relative to the folder above 'js') that need
+    // nothing native, so the web bindings compile them as they are instead of keeping a copy.
+    static unsafe void add_shared(ptr<i8> folder, PointerList* into) {
+        ByteBuffer* list_path = ByteBuffer.create();
+        list_path.append(folder);
+        list_path.append("/shared.txt");
+        ptr<i8> listing = Files.read_all(list_path.cstr());
+        if (listing == null) {
+            return;
+        }
+        PointerList* names = PointerList.create();
+        WebLibraries.each_line(listing, names);
+        for (mut i32 i = 0; i < names.length; i = i + 1) {
+            ptr<i8> name = (ptr<i8>)names.get(i);
+            i32 length = strlen(name);
+            mut i32 end = length;
+            while (end > 0 && (name[end - 1] == 13 || name[end - 1] == 32)) {
+                end = end - 1;
+            }
+            if (end == 0) {
+                continue;
+            }
+            ByteBuffer* path = ByteBuffer.create();
+            path.append(folder);
+            path.append("/../");
+            path.append_slice(name, end);
+            into.push((ptr)path.cstr());
+        }
+    }
+
+    static unsafe void each_line(ptr<i8> listing, PointerList* into) {
+        i32 length = strlen(listing);
+        mut i32 start = 0;
+        for (mut i32 i = 0; i <= length; i = i + 1) {
+            if (i == length || listing[i] == 10) {
+                if (i > start) {
+                    into.push((ptr)Strings.duplicate(listing + start, i - start));
+                }
+                start = i + 1;
+            }
+        }
+    }
+
+    // 'ui' for '<dir>/ui.djlib'.
+    static unsafe ptr<i8> library_name(ptr<i8> path) {
+        i32 length = strlen(path);
+        mut i32 start = 0;
+        for (mut i32 i = 0; i < length; i = i + 1) {
+            if (path[i] == 47 || path[i] == 92) {
+                start = i + 1;
+            }
+        }
+        mut i32 end = length;
+        if (end - start > 6 && Strings.equals(path + end - 6, 6, ".djlib")) {
+            end = end - 6;
+        }
+        return Strings.duplicate(path + start, end - start);
+    }
+}

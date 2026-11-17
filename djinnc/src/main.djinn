@@ -91,7 +91,7 @@ unsafe i32 run_compiler() {
     }
     PointerList* libraries = options.libraries;
     for (mut i32 i = 0; i < libraries.length; i = i + 1) {
-        if (Library.load(options, (ptr<i8>)libraries.get(i), diagnostics_list) < 0) {
+        if (Library.load(options, Library.for_target(options, (ptr<i8>)libraries.get(i)), diagnostics_list) < 0) {
             return 1;
         }
     }
@@ -145,6 +145,9 @@ unsafe i32 run_compiler() {
             i = step - (total_sources - source_count);
         }
         SourceFile* file = Sources.get(i);
+        if (file.macros_only && Target.is_js()) {
+            continue;
+        }
         Diagnostics* file_diagnostics = (Diagnostics*)diagnostics_list.get(i);
         Parser* parser = Parser.create(tokens, file, file_diagnostics, type_names);
         Node* unit = parser.parse_program();
@@ -184,6 +187,16 @@ unsafe i32 run_compiler() {
     gen.async_threads_forced = options.async_threads_forced;
     if (options.debug) {
         gen.enable_debug((ptr<i8>)inputs.get(0), options.optimize, options.emit_asm || options.emit_ir);
+    }
+    if (Target.is_js() && !options.check_only) {
+        if (!gen.check(program)) {
+            return 1;
+        }
+        monitor.lap("check");
+        i32 written = JsEmitter.write(gen, options);
+        monitor.lap("emit-js");
+        monitor.finish();
+        return written;
     }
     if (options.check_only) {
         if (!gen.check(program)) {
@@ -287,7 +300,7 @@ unsafe i32 run_compiler() {
 
     monitor.lap("object");
     logger_info(Log.get(), "djinnc: wrote object '%s'", object_path.cstr());
-    if (!Target.is_native()) {
+    if (!Target.is_native() && !Target.is_wasm()) {
         logger_info(Log.get(), "djinnc: '%s' is not the host target, so the object was not linked", Target.triple());
         monitor.finish();
         return 0;

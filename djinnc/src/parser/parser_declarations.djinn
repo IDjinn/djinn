@@ -302,8 +302,9 @@ impl Parser {
         group.set_text("");
         group.set_flag(true);
 
+        mut ptr<i8> module = (ptr<i8>)0;
         if (this.check(TokenKind::STRING_LITERAL)) {
-            this.advance();
+            module = this.copy_of(this.advance());
         }
 
         if (this.match(TokenKind::LBRACE)) {
@@ -312,7 +313,7 @@ impl Parser {
                 if (this.check(TokenKind::LBRACKET)) {
                     found = this.parse_attributes();
                 }
-                group.add(this.parse_extern_function(found, access));
+                group.add(this.parse_extern_function(this.with_import(found, module), access));
             }
             this.expect(TokenKind::RBRACE, "expected '}' to close extern block");
             return group;
@@ -322,8 +323,27 @@ impl Parser {
         if (this.check(TokenKind::LBRACKET)) {
             single = this.parse_attributes();
         }
-        group.add(this.parse_extern_function(single, access));
+        group.add(this.parse_extern_function(this.with_import(single, module), access));
         return group;
+    }
+
+    // extern "module" { ... } with a module other than "C" imports each function from that module (WebAssembly).
+    unsafe PointerList* with_import(PointerList* found, ptr<i8> module) {
+        if (module == null || Strings.same(module, "C")) {
+            return found;
+        }
+        mut PointerList* uses = found;
+        if (uses == null) {
+            uses = PointerList.create();
+        }
+        i32 at = this.current();
+        AttributeUse* use = (AttributeUse*)Memory.zalloc(sizeof(AttributeUse));
+        use.name = "Import";
+        use.text_arg = module;
+        use.line = this.line_of(at);
+        use.column = this.column_of(at);
+        uses.push((ptr)use);
+        return uses;
     }
 
     Node* parse_extern_function(PointerList* found, i32 access) {

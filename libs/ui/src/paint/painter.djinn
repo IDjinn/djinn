@@ -93,15 +93,84 @@ struct Painter {
     }
 
     // One whole frame: layout for the viewport, then paint. Returns the document height (what a page scrolls).
+    // A document taller than the window is laid out again without the strip of the page bar, as a browser does.
     public static unsafe f32 frame(DisplayList* list, f32 width, f32 height) {
         u32 document = Dom.document();
         Layout.compute(document, width, height);
         list.clear();
-        f32 total = Layout.box(document).height;
+        mut f32 total = Layout.box(document).height;
+        mut f32 used = width;
+        mut f32 gutter = (f32)0.0;
+        u32 root = Painter.root_element(document);
+        if (root != 0 && total > height + (f32)0.5) {
+            Style* root_style = Styles.of(root);
+            if (root_style.overflow != Keyword.HIDDEN) {
+                gutter = Layout.bar_width(root_style);
+            }
+            if (gutter > (f32)0.0 && gutter < width) {
+                used = width - gutter;
+                Layout.compute(document, used, height);
+                total = Layout.box(document).height;
+            } else {
+                gutter = (f32)0.0;
+            }
+        }
+        Bars.set_page(width, gutter);
         Scroll.page_limit(total - height, height);
-        Scroll.page_limit_x(Layout.box(document).content_width - width, width);
-        Painter.paint(list, document, width, height);
+        Scroll.page_limit_x(Layout.box(document).content_width - used, used);
+        Painter.paint(list, document, used, height);
+        if (gutter > (f32)0.0) {
+            Painter.page_bar(list, root, width, height, gutter);
+        }
         return total;
+    }
+
+    // The element whose scroll bar is the page's: the first element of the document (html, or the app's root).
+    static unsafe u32 root_element(u32 document) {
+        mut u32 child = Dom.first_child(document);
+        while (child != 0) {
+            u8 kind = Dom.kind(child);
+            if (kind == DomKind.ELEMENT && !Painter.is_hidden_tag(Dom.tag(child))) {
+                return child;
+            }
+            if (kind != DomKind.TEXT && kind != DomKind.ELEMENT) {
+                u32 inside = Painter.root_element(child);
+                if (inside != 0) {
+                    return inside;
+                }
+            }
+            child = Dom.next_sibling(child);
+        }
+        return 0;
+    }
+
+    static unsafe void page_bar(DisplayList* list, u32 root, f32 width, f32 height, f32 gutter) {
+        Style* style = Styles.of(root);
+        u32 canvas = Painter.canvas_color(Dom.document());
+        if ((style.scrollbar_track & 255) != 0) {
+            list.fill(width - gutter, (f32)0.0, gutter, height, DisplayList.gpu_color(style.scrollbar_track, (f32)1.0));
+        } else if ((canvas & 255) != 0) {
+            list.fill(width - gutter, (f32)0.0, gutter, height, DisplayList.gpu_color(canvas, (f32)1.0));
+        }
+        mut BarRect r = { .x = (f32)0.0, .y = (f32)0.0, .w = (f32)0.0, .h = (f32)0.0, .free = (f32)0.0 };
+        if (Bars.rect(Dom.document(), true, &r)) {
+            list.rounded(r.x, r.y, r.w, r.h, r.w / (f32)2.0, Painter.thumb_color(Dom.document(), style));
+        }
+    }
+
+    static unsafe u32 thumb_color(u32 id, Style* style) {
+        if ((style.scrollbar_thumb & 255) != 0) {
+            mut f32 alpha = (f32)1.0;
+            if (Bars.grabbed() != id) {
+                alpha = (f32)0.85;
+            }
+            return DisplayList.gpu_color(style.scrollbar_thumb, alpha);
+        }
+        mut f32 alpha = (f32)0.55;
+        if (Bars.grabbed() == id) {
+            alpha = (f32)0.85;
+        }
+        return DisplayList.gpu_color(0x7f7f7fff, alpha);
     }
 
     // Only what can reach the viewport is turned into triangles: a node whose box (plus the reach of its outline)
@@ -237,6 +306,9 @@ struct Painter {
         if (visible && style.visibility != Keyword.HIDDEN && faded > (f32)0.0) {
             Painter.background(list, box, style, faded);
             Painter.border(list, box, style, faded);
+            if (style.list_item && style.list_marker != ListMarker.NONE) {
+                Painter.marker(list, id, box, style, faded);
+            }
         }
         mut bool clipped = false;
         if (style.overflow == Keyword.HIDDEN || style.overflow == Keyword.SCROLL || style.overflow == Keyword.AUTO) {
@@ -273,20 +345,173 @@ struct Painter {
         }
     }
 
-    // The overlay scroll thumbs of a container: a rounded bar on the right (and bottom) edge, only when there is
-    // something to scroll.
-    static unsafe void scrollbars(DisplayList* list, u32 id, LayoutBox* box, Style* style) {
-        f32 thickness = (f32)6.0 * (f32)Styles.device_scale();
-        mut f32 alpha = (f32)0.55;
-        if (Bars.grabbed() == id) {
-            alpha = (f32)0.85;
+    // The marker of a list item, outside its box as browsers place it: the text "1. " or "• " ending at the item's
+    // left edge, on the baseline of its first line.
+    static unsafe void marker(DisplayList* list, u32 id, LayoutBox* box, Style* style, f32 opacity) {
+        if (!Fonts.active() || (style.color & 255) == 0) {
+            return;
         }
+        mut i64 number = 0;
+        if (style.list_marker == ListMarker.DECIMAL) {
+            number = Painter.ordinal(id);
+        }
+        u32 count = Painter.marker_length(style.list_marker, number);
+        u32 weight = (u32)style.font_weight;
+        f32 size = style.font_size;
+        mut f32 width = (f32)0.0;
+        for (mut u32 i = 0; i < count; i = i + 1) {
+            width = width + TextLines.advance(Painter.marker_code(style.list_marker, number, i), style, true, weight);
+        }
+        mut f32 ascent = (f32)0.0;
+        mut f32 descent = (f32)0.0;
+        Fonts.line_metrics(size, weight, &ascent, &descent);
+        f32 line_height = style.line_px();
+        f32 top = box.top + box.border.top + box.padding.top;
+        f32 baseline = top + (line_height - (ascent + descent)) / (f32)2.0 + ascent;
+        u32 color = DisplayList.gpu_color(style.color, opacity);
+        mut f32 pen = Math.round(box.left - width);
+        for (mut u32 i = 0; i < count; i = i + 1) {
+            u32 code = Painter.marker_code(style.list_marker, number, i);
+            if (code != 32) {
+                Painter.glyph(list, code, pen, baseline, size, weight, color);
+            }
+            pen = pen + TextLines.advance(code, style, true, weight);
+        }
+    }
+
+    static u32 digit_count(i64 number) {
+        mut i64 rest = number;
+        if (rest < 0) {
+            rest = 0 - rest;
+        }
+        mut u32 count = 1;
+        while (rest >= 10) {
+            rest = rest / 10;
+            count = count + 1;
+        }
+        return count;
+    }
+
+    // How many code points the marker text has: "-12. " or "• ".
+    public static u32 marker_length(u8 marker, i64 number) {
+        if (marker != ListMarker.DECIMAL) {
+            return 2;
+        }
+        mut u32 sign = 0;
+        if (number < 0) {
+            sign = 1;
+        }
+        return sign + Painter.digit_count(number) + 2;
+    }
+
+    // The code point at 'index' of the marker text.
+    public static u32 marker_code(u8 marker, i64 number, u32 index) {
+        u32 length = Painter.marker_length(marker, number);
+        if (index + 1 == length) {
+            return 32;
+        }
+        if (marker == ListMarker.CIRCLE) {
+            return 9702;
+        }
+        if (marker == ListMarker.SQUARE) {
+            return 9642;
+        }
+        if (marker != ListMarker.DECIMAL) {
+            return 8226;
+        }
+        if (index + 2 == length) {
+            return 46;
+        }
+        mut u32 at = index;
+        if (number < 0) {
+            if (index == 0) {
+                return 45;
+            }
+            at = index - 1;
+        }
+        mut i64 rest = number;
+        if (rest < 0) {
+            rest = 0 - rest;
+        }
+        // digit 'at' counted from the left
+        mut u32 shift = Painter.digit_count(number) - 1 - at;
+        while (shift > 0) {
+            rest = rest / 10;
+            shift = shift - 1;
+        }
+        return 48 + (u32)(rest % 10);
+    }
+
+    // The number of a list item: its place among the items of its list, from the list's 'start' (1 by default).
+    public static unsafe i64 ordinal(u32 id) {
+        u32 owner = SelectorMatcher.parent_element(id);
+        if (owner == 0) {
+            return 1;
+        }
+        mut i64 first = 1;
+        str start = Dom.attr(owner, "start");
+        if (start.length > 0) {
+            mut i64 value = 0;
+            mut bool negative = false;
+            mut bool digits = false;
+            for (mut u32 i = 0; i < (u32)start.length; i = i + 1) {
+                u32 c = (u32)(u8)start.data[i];
+                if (i == 0 && c == 45) {
+                    negative = true;
+                } else if (c >= 48 && c <= 57) {
+                    value = value * 10 + (i64)(c - 48);
+                    digits = true;
+                } else {
+                    break;
+                }
+            }
+            if (digits) {
+                first = value;
+                if (negative) {
+                    first = 0 - value;
+                }
+            }
+        }
+        mut u32 before = 0;
+        Painter.count_items(owner, id, &before);
+        return first + (i64)before;
+    }
+
+    // Counts the list items under 'node' (looking through fragments) that come before 'item'; true once it is found.
+    static unsafe bool count_items(u32 node, u32 item, u32* before) {
+        mut u32 child = Dom.first_child(node);
+        while (child != 0) {
+            if (child == item) {
+                return true;
+            }
+            u8 kind = Dom.kind(child);
+            if (kind == DomKind.ELEMENT) {
+                Style* child_style = Styles.of(child);
+                if (child_style.list_item && child_style.display != Display.NONE) {
+                    *before = *before + 1;
+                }
+            } else if (kind != DomKind.TEXT && Painter.count_items(child, item, before)) {
+                return true;
+            }
+            child = Dom.next_sibling(child);
+        }
+        return false;
+    }
+
+    // The scroll bar of a container: the track (when 'scrollbar-color' gives it a color) in the strip the layout kept,
+    // and a rounded thumb, only when there is something to scroll.
+    static unsafe void scrollbars(DisplayList* list, u32 id, LayoutBox* box, Style* style) {
+        if (box.gutter > (f32)0.0 && (style.scrollbar_track & 255) != 0) {
+            list.fill(box.left + box.width - box.border.right - box.gutter, box.top + box.border.top, box.gutter,
+                box.height - box.border.vertical(), DisplayList.gpu_color(style.scrollbar_track, (f32)1.0));
+        }
+        u32 color = Painter.thumb_color(id, style);
         mut BarRect r = { .x = (f32)0.0, .y = (f32)0.0, .w = (f32)0.0, .h = (f32)0.0, .free = (f32)0.0 };
         if (Bars.rect(id, true, &r)) {
-            list.rounded(r.x, r.y, r.w, r.h, thickness / (f32)2.0, DisplayList.gpu_color(0x7f7f7fff, alpha));
+            list.rounded(r.x, r.y, r.w, r.h, r.w / (f32)2.0, color);
         }
         if (Bars.rect(id, false, &r)) {
-            list.rounded(r.x, r.y, r.w, r.h, thickness / (f32)2.0, DisplayList.gpu_color(0x7f7f7fff, alpha));
+            list.rounded(r.x, r.y, r.w, r.h, r.h / (f32)2.0, color);
         }
     }
 
@@ -345,14 +570,14 @@ struct Painter {
     }
 
     // One glyph at a pen position: the whole pixels place the bitmap, the quarter pixels pick the sub-pixel variant.
-    static unsafe void glyph(DisplayList* list, u32 code, f32 pen, f32 baseline, f32 size, bool bold, u32 color) {
+    static unsafe void glyph(DisplayList* list, u32 code, f32 pen, f32 baseline, f32 size, u32 weight, u32 color) {
         f32 atlas = (f32)Fonts.ATLAS;
         mut i32 quarters = 0;
         if (pen > (f32)0.0) {
             quarters = (i32)(pen * (f32)4.0 + (f32)0.5);
         }
         u32 phase = (u32)(quarters & 3);
-        Glyph* found = Fonts.glyph(code, size, bold, phase);
+        Glyph* found = Fonts.glyph(code, size, weight, phase);
         if (found != (Glyph*)0) {
             f32 x = (f32)(quarters >> 2) + (f32)found.bearing_x;
             f32 y = Math.round(baseline - (f32)found.bearing_y);
@@ -385,10 +610,10 @@ struct Painter {
         f32 inner_top = box.top + box.border.top;
         f32 inner_bottom = box.top + box.height - box.border.bottom;
         f32 size = style.font_size;
-        bool bold = style.font_weight >= 600;
+        u32 weight = (u32)style.font_weight;
         mut f32 ascent = (f32)0.0;
         mut f32 descent = (f32)0.0;
-        Fonts.line_metrics(size, bold, &ascent, &descent);
+        Fonts.line_metrics(size, weight, &ascent, &descent);
         f32 baseline = (inner_top + inner_bottom) / (f32)2.0 - (ascent + descent) / (f32)2.0 + ascent;
         u32 length = (u32)shown.length;
         mut f32 total = (f32)0.0;
@@ -400,7 +625,7 @@ struct Painter {
             if (secret) {
                 code = 8226;
             }
-            total = total + TextLines.advance(code, style, true, bold);
+            total = total + TextLines.advance(code, style, true, weight);
         }
         mut f32 shift = (f32)0.0;
         if (!placeholder && focused) {
@@ -430,9 +655,9 @@ struct Painter {
                 code = 8226;
             }
             if (!TextLines.is_blank(code)) {
-                Painter.glyph(list, code, pen, baseline, size, bold, color);
+                Painter.glyph(list, code, pen, baseline, size, weight, color);
             }
-            pen = pen + TextLines.advance(code, style, true, bold);
+            pen = pen + TextLines.advance(code, style, true, weight);
         }
         if (focused) {
             mut f32 caret = left - shift;
@@ -465,7 +690,7 @@ struct Painter {
             return;
         }
         str text = Dom.text_of(id);
-        bool bold = style.font_weight >= 600;
+        u32 weight = (u32)style.font_weight;
         f32 size = style.font_size;
         mut u32 own_color = style.color;
         u32 owner = SelectorMatcher.parent_element(id);
@@ -476,8 +701,8 @@ struct Painter {
         f32 line_height = style.line_px();
         mut f32 ascent = (f32)0.0;
         mut f32 descent = (f32)0.0;
-        Fonts.line_metrics(size, bold, &ascent, &descent);
-        f32 space = TextLines.advance(32, style, true, bold);
+        Fonts.line_metrics(size, weight, &ascent, &descent);
+        f32 space = TextLines.advance(32, style, true, weight);
         f32 atlas = (f32)Fonts.ATLAS;
         for (mut u32 n = 0; n < count; n = n + 1) {
             TextLine line = lines[n];
@@ -507,8 +732,8 @@ struct Painter {
                     pen = pen + space;
                     gap = false;
                 }
-                Painter.glyph(list, code, pen, baseline, size, bold, color);
-                pen = pen + TextLines.advance(code, style, true, bold);
+                Painter.glyph(list, code, pen, baseline, size, weight, color);
+                pen = pen + TextLines.advance(code, style, true, weight);
             }
             f32 thickness = Px.max((f32)1.0, size / (f32)14.0);
             if (style.text_decoration == Keyword.UNDERLINE) {

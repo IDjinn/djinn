@@ -69,6 +69,7 @@ struct LayoutBox {
     mut Edges padding;
     mut f32 content_width;
     mut f32 content_height;
+    mut f32 gutter;
     mut bool visible;
 }
 
@@ -469,10 +470,15 @@ struct Layout {
             inner.known.width = Px.clamp(used, sizes.min.width, sizes.max.width);
             inner.known = Layout.ratio(inner.known, &sizes);
         }
+        f32 gutter = Layout.reserve(id, &style, &sizes, inner);
+        if (gutter > (f32)0.0) {
+            sizes.padding.right = sizes.padding.right + gutter;
+        }
         Size size = Layout.algorithm(id, &style, &sizes, inner);
         if (input.perform) {
             box = Layout.box(id);
             box.visible = true;
+            box.gutter = gutter;
             box.width = size.width;
             box.height = size.height;
             box.margin = sizes.margin;
@@ -480,6 +486,49 @@ struct Layout {
             box.padding = sizes.padding;
         }
         return size;
+    }
+
+    // The width of a scroll bar under 'scrollbar-width' in device pixels, as browsers draw classic (not overlay)
+    // bars: 15 CSS px, 10 when thin.
+    public static unsafe f32 bar_width(Style* style) {
+        if (style.scrollbar_width == Keyword.NONE) {
+            return (f32)0.0;
+        }
+        mut f32 width = (f32)15.0;
+        if (style.scrollbar_width == Keyword.THIN) {
+            width = (f32)10.0;
+        }
+        return width * (f32)Styles.device_scale();
+    }
+
+    // The room a scroll container keeps for its vertical bar, taken from the right of its padding box like a
+    // browser does: always with overflow: scroll, with auto only when the content is taller than the box.
+    static unsafe f32 reserve(u32 id, Style* style, BoxSizes* sizes, LayoutInput input) {
+        if (style.overflow != Keyword.SCROLL && style.overflow != Keyword.AUTO) {
+            return (f32)0.0;
+        }
+        f32 bar = Layout.bar_width(style);
+        if (bar <= (f32)0.0 || style.overflow == Keyword.SCROLL) {
+            return bar;
+        }
+        mut f32 limit = input.known.height;
+        if (!Px.defined(limit)) {
+            limit = sizes.max.height;
+        }
+        if (!Px.defined(limit)) {
+            return (f32)0.0;
+        }
+        mut BoxSizes open = *sizes;
+        open.size.height = Space.UNDEFINED;
+        open.max.height = Space.UNDEFINED;
+        mut LayoutInput probe = input;
+        probe.perform = false;
+        probe.known.height = Space.UNDEFINED;
+        f32 natural = Layout.algorithm(id, style, &open, probe).height;
+        if (natural > limit + (f32)0.5) {
+            return bar;
+        }
+        return (f32)0.0;
     }
 
     // The size of 'id' from its content alone, ignoring its own width (or its height when 'width' is false): what
@@ -1000,10 +1049,10 @@ struct TextMetrics {
         f32 narrow = style.font_size * (f32)0.5 + style.letter_spacing;
         f32 wide = style.font_size + style.letter_spacing;
         bool real = Fonts.active();
-        bool bold = style.font_weight >= 600;
+        u32 weight = (u32)style.font_weight;
         mut f32 space = narrow;
         if (real) {
-            space = Fonts.advance(32, style.font_size, bold) + style.letter_spacing;
+            space = Fonts.advance(32, style.font_size, weight) + style.letter_spacing;
         }
         mut f32 line = (f32)0.0;
         mut f32 widest = (f32)0.0;
@@ -1063,7 +1112,7 @@ struct TextMetrics {
                 u32 code = Codepoints.decode(text.data, length, i, &step);
                 advance = (f32)0.0;
                 if (!Codepoints.is_zero_width(code)) {
-                    advance = Fonts.advance(code, style.font_size, bold) + style.letter_spacing;
+                    advance = Fonts.advance(code, style.font_size, weight) + style.letter_spacing;
                 }
             } else if (b >= 240) {
                 advance = wide;

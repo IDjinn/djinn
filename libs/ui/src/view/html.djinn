@@ -3,6 +3,9 @@ import std::libc;
 
 namespace ui;
 
+unsafe static mut str html_client_script = "";
+unsafe static mut str html_client_module = "";
+
 // Writes the retained tree as HTML. With markers (hydration), fragments are wrapped in '<!--[-->' / '<!--]-->' and
 // elements with listeners carry 'data-dj', so the client can adopt the nodes; without them the HTML is plain.
 struct Html {
@@ -18,7 +21,7 @@ struct Html {
         mut TextBuffer out = TextBuffer.create();
         out.append("<!doctype html><html");
         Html.attributes(&out, Dom.document());
-        out.append("><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><meta name=\"color-scheme\" content=\"light dark\"><meta name=\"text-scale\" content=\"scale\"><style>");
+        out.append("><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><meta name=\"color-scheme\" content=\"light dark\"><meta name=\"text-scale\" content=\"scale\"><style data-djinn>");
         StyleEngine* engine = Styles.engine();
         for (mut u32 i = 0; i < engine.sheets.count; i = i + 1) {
             StyleSheet* sheet = engine.sheets.get(i);
@@ -27,10 +30,53 @@ struct Html {
             }
             Html.stylesheet(&out, sheet.source);
         }
-        out.append("</style></head><body>");
+        out.append("</style>");
+        if (markers || Html.has_island(content.id)) {
+            out.append("<script type=\"module\" src=\"");
+            out.append_escaped(Html.client_script().data, (u32)Html.client_script().length, true);
+            out.append("\" data-wasm=\"");
+            out.append_escaped(Html.client_module().data, (u32)Html.client_module().length, true);
+            out.append("\"></script>");
+        }
+        out.append("</head><body>");
         Html.write(&out, content.id, markers);
         out.append("</body></html>");
         return out;
+    }
+
+    // Where a page that the client takes over (hydration, islands) loads the program from: djinn.js and the
+    // module built with --target web. Absolute by default, so every route finds them.
+    public static unsafe void set_client(str script, str module) {
+        html_client_script = script;
+        html_client_module = module;
+    }
+
+    public static unsafe str client_script() {
+        if (html_client_script.length == 0) {
+            return "/djinn.js";
+        }
+        return html_client_script;
+    }
+
+    public static unsafe str client_module() {
+        if (html_client_module.length == 0) {
+            return "/app.wasm";
+        }
+        return html_client_module;
+    }
+
+    static unsafe bool has_island(u32 id) {
+        if (Dom.kind(id) == DomKind.ISLAND) {
+            return true;
+        }
+        mut u32 child = Dom.first_child(id);
+        while (child != 0) {
+            if (Html.has_island(child)) {
+                return true;
+            }
+            child = Dom.next_sibling(child);
+        }
+        return false;
     }
 
     static unsafe void stylesheet(TextBuffer* out, str css) {
@@ -93,7 +139,8 @@ struct Html {
             str name = Dom.tag(id);
             out.append_escaped(name.data, (u32)name.length, true);
             out.append("\">");
-            Html.children(out, id, markers);
+            // an island is hydrated even in a page that is not, so its content always carries the markers
+            Html.children(out, id, markers || kind == DomKind.ISLAND);
             if (kind == DomKind.ISLAND) {
                 out.append("</dj-island>");
             } else {

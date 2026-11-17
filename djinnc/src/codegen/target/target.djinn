@@ -6,12 +6,34 @@ unsafe static mut i32 target_debug = 0;
 
 struct Target {
     public static void init(ptr<i8> triple) {
-        mut ptr<i8> chosen = triple;
-        if (chosen == null) {
-            chosen = Target.native_triple();
-        }
+        ptr<i8> chosen = Target.normalize(triple);
         target_triple = (ptr)chosen;
         target_bits = Target.bits_for(chosen);
+    }
+
+    // The triple a --target value names: the host when there is none, js-unknown-web (JavaScript) for 'web' and
+    // wasm32-unknown-unknown for 'wasm'.
+    public static ptr<i8> normalize(ptr<i8> triple) {
+        if (triple == null) {
+            return Target.native_triple();
+        }
+        if (Strings.same(triple, "web") || Strings.same(triple, "js")) {
+            return "js-unknown-web";
+        }
+        if (Strings.same(triple, "wasm")) {
+            return "wasm32-unknown-unknown";
+        }
+        return triple;
+    }
+
+    // The machine djinnc runs on, which also runs procedural macros and the JIT whatever the target is.
+    public static ptr<i8> host_triple() {
+        return Target.native_triple();
+    }
+
+    // True when a --target value names another machine than the host.
+    public static bool is_cross(ptr<i8> triple) {
+        return triple != null && !Strings.same(Target.normalize(triple), Target.native_triple());
     }
 
     static ptr<i8> native_triple() {
@@ -62,7 +84,17 @@ struct Target {
         return Target.triple_mentions("-ios");
     }
 
+    // The web platform: JavaScript (the 'web' target) or WebAssembly.
     public static bool is_web() {
+        return Target.is_js() || Target.is_wasm();
+    }
+
+    // The 'web' target: the program is emitted as a JavaScript module instead of an object (codegen/js).
+    public static bool is_js() {
+        return Target.arch_is(Target.triple(), "js");
+    }
+
+    public static bool is_wasm() {
         ptr<i8> triple = Target.triple();
         return Target.arch_is(triple, "wasm32") || Target.arch_is(triple, "wasm64");
     }
@@ -120,7 +152,7 @@ struct Target {
 
     public static bool supports_threads() {
         ptr<i8> triple = Target.triple();
-        return !Target.is_embedded() && !Target.arch_is(triple, "wasm32") && !Target.arch_is(triple, "wasm64");
+        return !Target.is_embedded() && !Target.is_web();
     }
 
     public static bool is_x64() {
@@ -261,19 +293,42 @@ struct Target {
             || Target.arch_is(triple, "i586") || Target.arch_is(triple, "i686") || Target.arch_is(triple, "x86")) {
             return "x86";
         }
+        if (Target.arch_is(triple, "wasm32")) {
+            return "wasm";
+        }
+        if (Target.is_js()) {
+            return "js";
+        }
         return null;
     }
 
+    // The data layout of the module. x86 keeps the layout the compiler always used (the backend fills in the rest);
+    // wasm32 needs its own, with 32-bit pointers.
+    public static ptr<i8> data_layout() {
+        if (Target.is_wasm32()) {
+            return "e-m:e-p:32:32-p10:8:8-p20:8:8-i64:64-i128:128-n32:64-S128-ni:1:10:20";
+        }
+        return "e-p:64:64-i64:64-i128:128-f64:64-n8:16:32:64";
+    }
+
+    // The x86 backend is always set up (the host runs procedural macros and the JIT); WebAssembly when it is the target.
+    // The JavaScript target has no LLVM backend of its own.
     public static bool initialize_backend() {
         ptr<i8> family = Target.backend_family();
         if (family == null) {
-            logger_error(Log.get(), "djinnc: this djinnc was linked with the x86 LLVM backend only, so '%s' can be compiled with --emit-ir but not to an object", Target.triple());
+            logger_error(Log.get(), "djinnc: '%s' can be compiled with --emit-ir but not to an object (supported: x86, x86_64, wasm32)", Target.triple());
             return false;
         }
         LLVMInitializeX86TargetInfo();
         LLVMInitializeX86Target();
         LLVMInitializeX86TargetMC();
         LLVMInitializeX86AsmPrinter();
+        if (Strings.same(family, "wasm")) {
+            LLVMInitializeWebAssemblyTargetInfo();
+            LLVMInitializeWebAssemblyTarget();
+            LLVMInitializeWebAssemblyTargetMC();
+            LLVMInitializeWebAssemblyAsmPrinter();
+        }
         return true;
     }
 }

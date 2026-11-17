@@ -1,0 +1,169 @@
+import ui;
+import std::types;
+import std::collections;
+
+namespace webapp;
+
+// Compiled with 'djinnc examples/web-app --target web': the components below become plain JavaScript that builds
+// the DOM directly, with one reactive computation per dynamic part (no virtual DOM, no WebAssembly).
+[Application(render: client)]
+struct WebApp {
+    public Node render() {
+        return html!{
+            <div class="page stack">
+                <header class="cluster">
+                    <strong>Djinn on the web</strong>
+                    <Navigator routes="/=Home|/todos=Todos|/about=About"/>
+                    <button id="theme" on_click={() => Theme.toggle()}>theme</button>
+                </header>
+                <Outlet view={(str path) => WebApp.page(path)}/>
+            </div>
+        };
+    }
+
+    public static Node page(str path) {
+        if (Router.matches("/todos", path)) {
+            return html!{ <Todos/> };
+        }
+        if (Router.matches("/about", path)) {
+            return html!{ <About/> };
+        }
+        return html!{ <Home/> };
+    }
+}
+
+struct Card {
+    str title;
+    Node children;
+
+    public Node render() {
+        return html!{
+            <section class="card stack">
+                <h2>{this.title}</h2>
+                {this.children}
+            </section>
+        };
+    }
+}
+
+struct Home {
+    public Node render() {
+        signal<i32> count = state(0);
+        memo<i32> doubled = derived(() => count.get() * 2);
+        return html!{
+            <Card title="Counter">
+                <div class="cluster">
+                    <output id="count">{count}</output>
+                    <button id="inc" class="primary" on_click={() => count.set(count.get() + 1)}>add one</button>
+                    <button id="reset" on_click={() => count.set(0)}>reset</button>
+                </div>
+                <p id="doubled">doubled: {doubled.get()}</p>
+                {if (count.get() >= 3) { <small id="lot">that is a lot of clicks</small> }}
+                <ol id="squares">{for (i32 i in 0..count.get()) { <li>{i * i}</li> }}</ol>
+            </Card>
+        };
+    }
+}
+
+struct Todo {
+    i64 id;
+    str text;
+    bool done;
+}
+
+struct Todos {
+    public Node render() {
+        signal<str> draft = state<str>("");
+        signal<slice<Todo>> items = state<slice<Todo>>(Todos.start());
+        signal<i64> next = state<i64>(3);
+        memo<i32> left = derived(() => Todos.remaining(items.get()));
+        return html!{
+            <Card title="Todos">
+                <div class="cluster">
+                    <input id="draft" placeholder="something to do" bind:value={draft}/>
+                    <button id="add" on_click={() => Todos.add(items, draft, next)}>add</button>
+                </div>
+                <ul id="todos">
+                    {for (Todo todo in items.get()) key(todo.id) {
+                        <li class={Todos.state_of(todo)}>
+                            <button class="check" on_click={() => items.set(Todos.toggled(items.peek(), todo.id))}>{if (todo.done) { "done" } else { "todo" }}</button>
+                            {todo.text}
+                            <button class="remove" on_click={() => items.set(Todos.without(items.peek(), todo.id))}>x</button>
+                        </li>
+                    }}
+                </ul>
+                <small id="left">{left.get()} left of {(i32)items.get().length}</small>
+            </Card>
+        };
+    }
+
+    static slice<Todo> start() {
+        slice<Todo> none = Arrays.empty<Todo>();
+        Todo first = { .id = 1, .text = "compile Djinn to JavaScript", .done = true };
+        Todo second = { .id = 2, .text = "drop the virtual DOM", .done = false };
+        return Arrays.append<Todo>(Arrays.append<Todo>(none, first), second);
+    }
+
+    static str state_of(Todo todo) {
+        if (todo.done) {
+            return "todo done";
+        }
+        return "todo";
+    }
+
+    static i32 remaining(slice<Todo> list) {
+        mut i32 count = 0;
+        for (Todo todo in list) {
+            if (!todo.done) {
+                count = count + 1;
+            }
+        }
+        return count;
+    }
+
+    static void add(signal<slice<Todo>> items, signal<str> draft, signal<i64> next) {
+        str text = Texts.trim(draft.get());
+        if (text.length == 0) {
+            return;
+        }
+        Todo todo = { .id = next.get(), .text = text, .done = false };
+        Reactive.batch(() => {
+            items.set(Arrays.append<Todo>(items.peek(), todo));
+            next.set(next.peek() + 1);
+            draft.set("");
+        });
+    }
+
+    static slice<Todo> toggled(slice<Todo> list, i64 id) {
+        mut slice<Todo> result = list;
+        for (mut i32 i = 0; i < (i32)list.length; i = i + 1) {
+            Todo todo = list[(u32)i];
+            if (todo.id == id) {
+                Todo flipped = { .id = todo.id, .text = todo.text, .done = !todo.done };
+                result = Arrays.replace_at<Todo>(list, i, flipped);
+            }
+        }
+        return result;
+    }
+
+    static slice<Todo> without(slice<Todo> list, i64 id) {
+        mut slice<Todo> result = list;
+        for (mut i32 i = 0; i < (i32)list.length; i = i + 1) {
+            Todo todo = list[(u32)i];
+            if (todo.id == id) {
+                result = Arrays.remove_at<Todo>(list, i);
+            }
+        }
+        return result;
+    }
+}
+
+struct About {
+    public Node render() {
+        return html!{
+            <Card title="About">
+                <p>The same components compile natively (a Vulkan window, HTML on a server) and to JavaScript for the browser.</p>
+            </Card>
+        };
+    }
+}

@@ -69,7 +69,7 @@ Bootstrap rodado pelo usuário com o stage0 de `cmake-build-release-visual-studi
 
 - `djinn` não está no `PATH`; o stage0 sai com `0xC0000135` ao executar o djinnc se `LLVM-C.dll` não estiver no `PATH`, mas o `djinnc.exe` já foi gerado.
 - Os wrappers `.ps1` pegavam o `bash` do WSL (`System32`), sem distribuição; passaram a preferir `C:\Program Files\Git\bin\bash.exe`.
-- O LLVM de `C:\dev\llvm-21.1.1` não traz `clang` nem `lld-link`; eles vêm de `C:\Program Files\LLVM\bin`, que deve ficar depois no `PATH` para a `LLVM-C.dll` continuar sendo a da 21.
+- O LLVM local é o release oficial `clang+llvm-21.1.8-x86_64-pc-windows-msvc` em `C:\dev\llvm-21.1.8` (todos os targets, inclusive WebAssembly; traz `clang`, `lld-link` e `wasm-ld`). Ele fica antes de `C:\Program Files\LLVM\bin` no `PATH` para a `LLVM-C.dll` ser a da 21.
 - **Linux (Docker): o stage0 falhava com `E3004: field 'symbols' could not be located inside struct 'CodeGenerator'`.** Causa: `DjinnCompiler::compileFromDirectory` junta os arquivos do projeto com `recursive_directory_iterator` sem ordenar (`DjinnCompiler.cpp:701`). No NTFS a iteração é alfabética, no Linux é arbitrária, e o stage0 precisa do arquivo do struct antes dos arquivos `impl` (`djinnc/README.md:24`). Corrigido com `std::ranges::sort(userFiles)` antes do parse. É a mesma classe de problema de determinismo da Fase 0.7. As listas da std (`DjinnCompiler.cpp:507, 588, 1043`) também iteram sem ordenar e não foram tocadas.
 - No Git Bash, `/out:` do `llvm-lib` era reescrito como caminho Unix; `build_runtime.sh` usa `-out:`.
 

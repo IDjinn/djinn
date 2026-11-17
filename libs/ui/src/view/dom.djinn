@@ -156,7 +156,9 @@ struct Dom {
     }
 
     public static unsafe u32 element(str tag) {
-        return Dom.allocate(DomKind.ELEMENT, tag);
+        u32 id = Dom.allocate(DomKind.ELEMENT, tag);
+        DomHost.created(id);
+        return id;
     }
 
     public static unsafe u32 text(str value) {
@@ -164,6 +166,7 @@ struct Dom {
         DomTree* t = Dom.tree();
         t.nodes[id].text = Texts.copy(value.data, (u32)value.length);
         t.nodes[id].text_length = (u32)value.length;
+        DomHost.created(id);
         return id;
     }
 
@@ -173,19 +176,26 @@ struct Dom {
         DomTree* t = Dom.tree();
         t.nodes[id].text = Texts.copy(html.data, (u32)html.length);
         t.nodes[id].text_length = (u32)html.length;
+        DomHost.created(id);
         return id;
     }
 
     public static unsafe u32 fragment() {
-        return Dom.allocate(DomKind.FRAGMENT, "");
+        u32 id = Dom.allocate(DomKind.FRAGMENT, "");
+        DomHost.created(id);
+        return id;
     }
 
     public static unsafe u32 island(str name) {
-        return Dom.allocate(DomKind.ISLAND, name);
+        u32 id = Dom.allocate(DomKind.ISLAND, name);
+        DomHost.created(id);
+        return id;
     }
 
     public static unsafe u32 server_slot(str name) {
-        return Dom.allocate(DomKind.SERVER_SLOT, name);
+        u32 id = Dom.allocate(DomKind.SERVER_SLOT, name);
+        DomHost.created(id);
+        return id;
     }
 
     public static unsafe DomNode* at(u32 id) {
@@ -372,6 +382,7 @@ struct Dom {
         node.text = Texts.copy(data, length);
         node.text_length = length;
         Dom.content_changed(id);
+        DomHost.text_changed(id);
         if (Dom.logging()) {
             Dom.begin("set_text", id);
             Dom.quote(data, length);
@@ -430,6 +441,7 @@ struct Dom {
         t.attrs[index].value = Texts.copy(data, length);
         t.attrs[index].length = length;
         Dom.changed(id);
+        DomHost.attr_set(id, name, data, length);
         Animation.attribute(id, name, length, existed);
         if (Dom.logging()) {
             Dom.begin("set_attr", id);
@@ -458,6 +470,7 @@ struct Dom {
                 IdList* free_attrs = &t.free_attrs;
                 free_attrs.push(index);
                 Dom.changed(id);
+                DomHost.attr_removed(id, name);
                 if (Dom.logging()) {
                     Dom.begin("remove_attr", id);
                     Dom.log_text(" ");
@@ -536,6 +549,7 @@ struct Dom {
             after.prev = child;
         }
         Dom.children_changed(parent);
+        DomHost.inserted(parent, child, before);
         if (Dom.logging()) {
             if (moving) {
                 Dom.begin("move", child);
@@ -562,6 +576,7 @@ struct Dom {
             Dom.begin("remove", id);
             Dom.end();
         }
+        DomHost.removed(id);
         Dom.detach(id);
         Dom.release(id);
     }
@@ -601,6 +616,10 @@ struct Dom {
         if (t.nodes[id].text != (i8*)0) {
             __djinn_free((void*)t.nodes[id].text);
         }
+        // a tween must not outlive its node: the id is reused, and its end would touch the new owner
+        if (Animation.active()) {
+            Animation.cancel(id);
+        }
         memset((void*)&t.nodes[id], 0, (size_long)sizeof(DomNode));
         t.live = t.live - 1;
         IdList* free_nodes = &t.free_nodes;
@@ -634,6 +653,7 @@ struct Dom {
         t.listener_info[index].event = event;
         t.listener_info[index].next = t.nodes[id].listeners;
         t.nodes[id].listeners = index;
+        DomHost.listened(id, event);
     }
 
     public static unsafe bool has_listeners(u32 id) {

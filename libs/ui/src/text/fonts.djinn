@@ -19,14 +19,15 @@ struct GlyphBitmap {
 // What a platform provides to turn text into pixels (the Windows host uses GDI; a later one can ship its own
 // rasterizer). 'advance' is the pen movement of a code point in px, 'rasterize' fills a GlyphBitmap, 'metrics' gives
 // the ascent and descent of a line of that size in px. 'rasterize' also takes a sub-pixel phase 0..3: the glyph is
-// drawn shifted right by phase/4 of a pixel, so text can sit at fractional pen positions.
+// drawn shifted right by phase/4 of a pixel, so text can sit at fractional pen positions. Every call takes the CSS
+// font weight, rounded to a hundred (100..900); the provider picks the face that CSS font matching would.
 struct FontProvider {
-    fn(u32, f32, bool) -> f32 advance;
-    fn(u32, f32, bool, u32, GlyphBitmap*) -> bool rasterize;
-    fn(f32, bool, f32*, f32*) -> void metrics;
+    fn(u32, f32, u32) -> f32 advance;
+    fn(u32, f32, u32, u32, GlyphBitmap*) -> bool rasterize;
+    fn(f32, u32, f32*, f32*) -> void metrics;
 }
 
-// A cached glyph: where it sits in the atlas and how it is placed. Slots are found by (code point, size, weight).
+// A cached glyph: where it sits in the atlas and how it is placed. Slots are found by (code point, size, weight, phase).
 struct Glyph {
     mut u32 code;
     mut u32 shape;
@@ -117,20 +118,33 @@ struct Fonts {
         return &Fonts.system().atlas;
     }
 
-    // Size in 1/16 px with the weight in the top bit: what two glyphs must share to be the same glyph.
-    static u32 shape_of(f32 size, bool bold) {
+    // A CSS weight rounded to the nearest hundred, 100..900.
+    public static u32 weight_of(u32 weight) {
+        mut u32 steps = (weight + 50) / 100;
+        if (steps < 1) {
+            steps = 1;
+        }
+        if (steps > 9) {
+            steps = 9;
+        }
+        return steps * 100;
+    }
+
+    // Size in 1/16 px with the weight (in hundreds) above it: what two glyphs must share to be the same glyph.
+    static u32 shape_of(f32 size, u32 weight) {
         mut u32 quantized = (u32)(size * (f32)16.0 + (f32)0.5);
         if (quantized > 65535) {
             quantized = 65535;
         }
-        if (bold) {
-            return quantized | 0x80000000;
-        }
-        return quantized;
+        return quantized | ((Fonts.weight_of(weight) / 100) << 16);
     }
 
     static f32 size_of(u32 shape) {
         return (f32)(shape & 0xFFFF) / (f32)16.0;
+    }
+
+    static u32 weight_in(u32 shape) {
+        return ((shape >> 16) & 15) * 100;
     }
 
     static u32 slot_of(u32 code, u32 shape, u32 size) {
@@ -159,38 +173,38 @@ struct Fonts {
     }
 
     // The pen movement of a code point in px, cached. Only meaningful while a provider is installed.
-    public static unsafe f32 advance(u32 code, f32 size, bool bold) {
+    public static unsafe f32 advance(u32 code, f32 size, u32 weight) {
         FontSystem* system = Fonts.system();
-        u32 shape = Fonts.shape_of(size, bold);
+        u32 shape = Fonts.shape_of(size, weight);
         Glyph* glyph = Fonts.find(system, code, shape);
         if (glyph == (Glyph*)0) {
-            return system.provider.advance(code, size, bold);
+            return system.provider.advance(code, size, Fonts.weight_of(weight));
         }
         if (glyph.advance < (f32)0.0) {
-            glyph.advance = system.provider.advance(code, Fonts.size_of(shape), bold);
+            glyph.advance = system.provider.advance(code, Fonts.size_of(shape), Fonts.weight_in(shape));
         }
         return glyph.advance;
     }
 
     // Ascent and descent of a line of text of this size.
-    public static unsafe void line_metrics(f32 size, bool bold, f32* ascent, f32* descent) {
+    public static unsafe void line_metrics(f32 size, u32 weight, f32* ascent, f32* descent) {
         FontSystem* system = Fonts.system();
         if (!system.active) {
             *ascent = size * (f32)0.8;
             *descent = size * (f32)0.2;
             return;
         }
-        system.provider.metrics(size, bold, ascent, descent);
+        system.provider.metrics(size, Fonts.weight_of(weight), ascent, descent);
     }
 
     // The glyph of a code point, rasterized into the atlas the first time. Null when it has no pixels (a space) or
     // the atlas is full; spaces still advance.
-    public static unsafe Glyph* glyph(u32 code, f32 size, bool bold, u32 phase) {
+    public static unsafe Glyph* glyph(u32 code, f32 size, u32 weight, u32 phase) {
         FontSystem* system = Fonts.system();
         if (!system.active) {
             return (Glyph*)0;
         }
-        u32 shape = Fonts.shape_of(size, bold) | ((phase & 3) << 24);
+        u32 shape = Fonts.shape_of(size, weight) | ((phase & 3) << 24);
         Glyph* glyph = Fonts.find(system, code, shape);
         if (glyph == (Glyph*)0) {
             return (Glyph*)0;
@@ -202,8 +216,8 @@ struct Fonts {
             return (Glyph*)0;
         }
         GlyphBitmap bitmap = { .width = 0, .height = 0, .bearing_x = 0, .bearing_y = 0, .pixels = (u8*)0 };
-        bool ok = system.provider.rasterize(code, Fonts.size_of(shape), bold, phase & 3, &bitmap);
-        glyph.advance = system.provider.advance(code, Fonts.size_of(shape), bold);
+        bool ok = system.provider.rasterize(code, Fonts.size_of(shape), Fonts.weight_in(shape), phase & 3, &bitmap);
+        glyph.advance = system.provider.advance(code, Fonts.size_of(shape), Fonts.weight_in(shape));
         glyph.width = -1;
         if (!ok || bitmap.width <= 0 || bitmap.height <= 0 || bitmap.pixels == (u8*)0) {
             return (Glyph*)0;

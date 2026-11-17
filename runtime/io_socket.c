@@ -379,6 +379,8 @@ int64_t __djinn_async_accept(int64_t server_sock, int64_t* out_result, void* cor
 #endif
 
     DJINN_TRACE("async_accept submitted for server socket: %lld", (long long)server_sock);
+    // The loop must not resume the coroutine before the completion puts it back on the ready queue.
+    __djinn_mark_waiting(coro);
     return 0;
 }
 
@@ -443,6 +445,7 @@ int64_t __djinn_async_connect(int64_t socket_fd, const char* address, int port, 
     {
         req->result = 0;
         req->completed = 1;
+        __djinn_mark_waiting(coro);
         djinn_enqueue_task(&djinn_rt.ready_queue, coro);
         free(req);
         return 0;
@@ -459,6 +462,8 @@ int64_t __djinn_async_connect(int64_t socket_fd, const char* address, int port, 
     }
 #endif
 
+    // The loop must not resume the coroutine before the completion puts it back on the ready queue.
+    __djinn_mark_waiting(coro);
     return 0;
 }
 
@@ -506,6 +511,8 @@ int64_t __djinn_async_send(int64_t socket_fd, void* buffer, int64_t count, int64
     }
 #endif
 
+    // The loop must not resume the coroutine before the completion puts it back on the ready queue.
+    __djinn_mark_waiting(coro);
     return 0;
 }
 
@@ -557,5 +564,7 @@ int64_t __djinn_async_recv(int64_t socket_fd, void* buffer, int64_t count, int64
 #endif
 
     DJINN_TRACE("recv done");
+    // The loop must not resume the coroutine before the completion puts it back on the ready queue.
+    __djinn_mark_waiting(coro);
     return 0;
 }
