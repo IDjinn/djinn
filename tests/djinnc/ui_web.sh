@@ -47,13 +47,25 @@ for app in client hydrate islands; do
     mkdir -p "$out/$app"
     build "$app-web" "tests/web/ui/$app" -o "$out/$app/app.wasm" "${flags[@]}" --target web
 done
+mkdir -p "$out/example/public"
+build example-web examples/ui-web -o "$out/example/public/app.wasm" "${flags[@]}" --target web
+build example-native examples/ui-web -o "$out/example/server$exe" "${native_flags[@]}"
 for app in hydrate islands; do
     build "$app-native" "tests/web/ui/$app" -o "$out/$app/server$exe" "${native_flags[@]}"
     "$out/$app/server$exe" > "$out/$app/index.html" || fail "the $app server must run"
 done
 
+# the static site: "/" and every page its links reach
+(cd "$out/example" && "./server$exe" --out site > ssg.log 2>&1) || { cat "$out/example/ssg.log"; fail "the static site must be written"; }
+for page in index.html todos/index.html about/index.html; do
+    [ -f "$out/example/site/$page" ] || fail "the static site must have $page"
+done
+grep -q 'Built natively' "$out/example/site/about/index.html" || fail "a [Server] part is in the static page"
+
 node tests/web/ui/client.mjs "$out/client/app.wasm" || fail "client"
 node tests/web/ui/hydrate.mjs "$out/hydrate/index.html" "$out/hydrate/app.wasm" hydrate || fail "hydrate"
 node tests/web/ui/hydrate.mjs "$out/islands/index.html" "$out/islands/app.wasm" islands || fail "islands"
+
+node tests/web/ui/example.mjs "$out/example/site/index.html" "$out/example/public/app.wasm" || fail "example"
 
 echo "PASS ui_web"

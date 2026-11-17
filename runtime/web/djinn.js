@@ -435,6 +435,15 @@ export class DomHost {
         return entry;
     }
 
+    // An update for a node the page does not have (a bug in the program or a page that did not match): reported
+    // once, and the rest of the batch still applies.
+    known(id) {
+        if (this.nodes.has(id)) return true;
+        if (!this.warnedMissing) console.warn(`djinn: an update for node #${id}, which the page does not have, was skipped`);
+        this.warnedMissing = true;
+        return false;
+    }
+
     // The DOM nodes of an entry, in order: one node, or the range of a fragment with its markers.
     domNodes(entry) {
         if (entry.kind !== KIND.FRAGMENT) return [entry.node];
@@ -665,9 +674,9 @@ export class DomHost {
                     break;
                 }
                 case OP.RAW: this.raw(id, text()); break;
-                case OP.SET_TEXT: this.entry(id).node.data = text(); break;
-                case OP.SET_ATTR: { const name = text(); this.setAttribute(id, name, text()); break; }
-                case OP.REMOVE_ATTR: this.removeAttribute(id, text()); break;
+                case OP.SET_TEXT: { const value = text(); if (this.known(id)) this.entry(id).node.data = value; break; }
+                case OP.SET_ATTR: { const name = text(); const value = text(); if (this.known(id)) this.setAttribute(id, name, value); break; }
+                case OP.REMOVE_ATTR: { const name = text(); if (this.known(id)) this.removeAttribute(id, name); break; }
                 case OP.INSERT: { const child = words[at++]; const before = words[at++]; this.insert(id, child, before); break; }
                 case OP.REMOVE: this.remove(id); break;
                 case OP.LISTEN: this.listen(text()); break;
