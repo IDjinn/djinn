@@ -56,6 +56,17 @@ export class Node {
 
     append(...nodes) { for (const node of nodes) this.appendChild(node); }
 
+    prepend(...nodes) { const first = this.firstChild; for (const node of nodes) this.insertBefore(node, first); }
+
+    replaceChildren(...nodes) { for (const child of [...this.childNodes]) this.removeChild(child); this.append(...nodes); }
+
+    // Listeners on any node; Document.fire calls them from the target up to the document (bubbling).
+    addEventListener(type, listener) {
+        if (!this.listeners) this.listeners = new Map();
+        if (!this.listeners.has(type)) this.listeners.set(type, []);
+        this.listeners.get(type).push(listener);
+    }
+
     get textContent() {
         if (this.nodeType === 3 || this.nodeType === 8) return this.data;
         return this.childNodes.map((child) => (child.nodeType === 8 ? "" : child.textContent)).join("");
@@ -112,6 +123,9 @@ export class Element extends Node {
         if (name === "value") this.value = String(value);
     }
 
+    get className() { return this.getAttribute("class") || ""; }
+    set className(value) { this.setAttribute("class", value); }
+
     getAttribute(name) { return this.attributes.has(name) ? this.attributes.get(name) : null; }
     hasAttribute(name) { return this.attributes.has(name); }
     removeAttribute(name) { this.attributes.delete(name); }
@@ -154,9 +168,12 @@ export class Document extends Node {
         this.listeners.get(type).push(listener);
     }
 
-    // Fires an event at 'target'; the listeners on the document see it bubble up (that is all the host uses).
+    // Fires an event at 'target': the listeners of the target and of its ancestors run, then the document's.
     fire(type, target, fields = {}) {
         const event = { type, target, defaultPrevented: false, preventDefault() { this.defaultPrevented = true; }, ...fields };
+        for (let node = target; node && node !== this; node = node.parentNode) {
+            for (const listener of (node.listeners && node.listeners.get(type)) || []) listener(event);
+        }
         for (const listener of this.listeners.get(type) || []) listener(event);
         return event;
     }

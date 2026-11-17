@@ -14,6 +14,25 @@ struct Display {
     const u8 CONTENTS = 7;
 }
 
+// The marker of a list item ('list-style-type').
+struct ListMarker {
+    const u8 NONE = 0;
+    const u8 DISC = 1;
+    const u8 CIRCLE = 2;
+    const u8 SQUARE = 3;
+    const u8 DECIMAL = 4;
+    const u8 UNKNOWN = 255;
+
+    public static unsafe u8 of(str word) {
+        if (CssNames.equal(word, "none")) { return ListMarker.NONE; }
+        if (CssNames.equal(word, "disc")) { return ListMarker.DISC; }
+        if (CssNames.equal(word, "circle")) { return ListMarker.CIRCLE; }
+        if (CssNames.equal(word, "square")) { return ListMarker.SQUARE; }
+        if (CssNames.equal(word, "decimal")) { return ListMarker.DECIMAL; }
+        return ListMarker.UNKNOWN;
+    }
+}
+
 struct Keyword {
     const u8 NONE = 0;
     const u8 START = 1;
@@ -56,6 +75,7 @@ struct Keyword {
     const u8 BORDER_BOX = 38;
     const u8 CONTENT_BOX = 39;
     const u8 COLLAPSE = 40;
+    const u8 THIN = 41;
     const u8 UNKNOWN = 255;
 }
 
@@ -103,6 +123,11 @@ struct Style {
     mut f32 letter_spacing;
     mut u8 text_align;
     mut u8 text_decoration;
+    mut bool list_item;
+    mut u8 list_marker;
+    mut u8 scrollbar_width;
+    mut u32 scrollbar_thumb;
+    mut u32 scrollbar_track;
     mut u8 cursor;
     mut bool dark_scheme;
     mut Length padding_top;
@@ -182,6 +207,8 @@ struct Style {
         style.line_height = (f32)0.0;
         style.text_align = Keyword.START;
         style.text_decoration = Keyword.NONE;
+        style.list_marker = ListMarker.DISC;
+        style.scrollbar_width = Keyword.AUTO;
         style.cursor = Keyword.AUTO;
         style.padding_top = Length.px((f32)0.0);
         style.padding_right = Length.px((f32)0.0);
@@ -236,6 +263,9 @@ struct Style {
         style.wrap_anywhere = parent.wrap_anywhere;
         style.letter_spacing = parent.letter_spacing;
         style.text_align = parent.text_align;
+        style.list_marker = parent.list_marker;
+        style.scrollbar_thumb = parent.scrollbar_thumb;
+        style.scrollbar_track = parent.scrollbar_track;
         style.cursor = parent.cursor;
         style.dark_scheme = parent.dark_scheme;
         style.vars = parent.vars;
@@ -273,7 +303,8 @@ struct Props {
         return CssNames.equal(name, "color") || CssNames.equal(name, "font-size") || CssNames.equal(name, "font-weight") || CssNames.equal(name, "font-style")
             || CssNames.equal(name, "font-family") || CssNames.equal(name, "line-height") || CssNames.equal(name, "letter-spacing")
             || CssNames.equal(name, "text-align") || CssNames.equal(name, "visibility") || CssNames.equal(name, "cursor") || CssNames.equal(name, "color-scheme")
-            || CssNames.equal(name, "overflow-wrap") || CssNames.equal(name, "word-wrap");
+            || CssNames.equal(name, "overflow-wrap") || CssNames.equal(name, "word-wrap")
+            || CssNames.equal(name, "list-style") || CssNames.equal(name, "list-style-type") || CssNames.equal(name, "scrollbar-color");
     }
 
     static unsafe u8 keyword(str word) {
@@ -379,7 +410,16 @@ struct Props {
     // Copies one property (or the properties of a shorthand) from 'from': 'inherit', 'initial' and 'unset'.
     public static unsafe void copy(Style* style, str logical, Style* from) {
         str name = Props.physical(logical);
-        if (CssNames.equal(name, "display")) { style.display = from.display; }
+        if (CssNames.equal(name, "display")) {
+            style.display = from.display;
+            style.list_item = from.list_item;
+        }
+        else if (CssNames.equal(name, "list-style") || CssNames.equal(name, "list-style-type")) { style.list_marker = from.list_marker; }
+        else if (CssNames.equal(name, "scrollbar-width")) { style.scrollbar_width = from.scrollbar_width; }
+        else if (CssNames.equal(name, "scrollbar-color")) {
+            style.scrollbar_thumb = from.scrollbar_thumb;
+            style.scrollbar_track = from.scrollbar_track;
+        }
         else if (CssNames.equal(name, "position")) { style.position = from.position; }
         else if (CssNames.equal(name, "visibility")) { style.visibility = from.visibility; }
         else if (CssNames.equal(name, "color")) { style.color = from.color; }
@@ -680,7 +720,44 @@ struct Props {
             u8 value = Props.display(first.text);
             if (value == Keyword.UNKNOWN) { return false; }
             style.display = value;
+            style.list_item = CssNames.equal(first.text, "list-item");
             return true;
+        }
+        if (CssNames.equal(name, "scrollbar-width")) {
+            if (CssNames.equal(first.text, "auto")) { style.scrollbar_width = Keyword.AUTO; return true; }
+            if (CssNames.equal(first.text, "thin")) { style.scrollbar_width = Keyword.THIN; return true; }
+            if (CssNames.equal(first.text, "none")) { style.scrollbar_width = Keyword.NONE; return true; }
+            return false;
+        }
+        if (CssNames.equal(name, "scrollbar-color")) {
+            // 'auto' (0, 0) or a thumb and a track color; the track is often transparent
+            if (first.kind == CssKind.IDENT && CssNames.equal(first.text, "auto")) {
+                style.scrollbar_thumb = 0;
+                style.scrollbar_track = 0;
+                return true;
+            }
+            mut u32 thumb = 0;
+            mut u32 track = 0;
+            if (!Props.color(reader, context, style, &thumb) || !Props.color(reader, context, style, &track)) {
+                return false;
+            }
+            style.scrollbar_thumb = thumb;
+            style.scrollbar_track = track;
+            return true;
+        }
+        if (CssNames.equal(name, "list-style-type") || CssNames.equal(name, "list-style")) {
+            // of the shorthand only the type is read (markers sit outside, images are not drawn)
+            while (!reader.done()) {
+                CssToken token = reader.next();
+                if (token.kind == CssKind.IDENT) {
+                    u8 marker = ListMarker.of(token.text);
+                    if (marker != ListMarker.UNKNOWN) {
+                        style.list_marker = marker;
+                        return true;
+                    }
+                }
+            }
+            return false;
         }
         if (CssNames.equal(name, "color")) {
             return Colors.read(reader, context, parent.color, &style.color);

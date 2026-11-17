@@ -1,0 +1,116 @@
+import std::types;
+import std::libc;
+
+namespace ui;
+
+// Kit components that talk to the retained tree, input and animation directly; the web target has its own (libs/ui/js).
+
+// A modal dialog over the page, shown while 'open' is true; the close button (and Escape in a later phase) clears it.
+struct Dialog {
+    str title;
+    signal<bool> open;
+    Node children;
+
+    // Escape closes the dialog while it is open (the document gets the key when nothing is focused, or it bubbles up).
+    static unsafe void on_key(signal<bool> open) {
+        if (open.get() && Input.key() == Key.ESCAPE) {
+            open.set(false);
+            Input.prevent();
+        }
+    }
+
+    public unsafe Node render() {
+        signal<bool> open = this.open;
+        Dom.listen(Dom.document(), "keydown", () => Dialog.on_key(open));
+        return html!{
+            <div class="dialog-backdrop" data-open={Kit.flag(this.open.get())}>
+                <section class="card stack dialog" role="dialog" aria-modal="true" data-open={Kit.flag(this.open.get())}>
+                    <h2>{this.title}</h2>
+                    {this.children}
+                    <div class="cluster">
+                        <button class="primary" on_click={() => this.open.set(false)}>Close</button>
+                    </div>
+                </section>
+            </div>
+        };
+    }
+}
+
+// Shows its content while 'show' is true: it fades in when 'show' turns true and fades out, then disappears, when it
+// turns false (immediately with reduced motion). The content keeps its state while hidden.
+struct Transition {
+    signal<bool> show;
+    Node children;
+
+    public unsafe Node render() {
+        Node box = Node.element("div").attr("class", "transition").child(this.children);
+        u32 id = box.id;
+        effect(() => Animation.present(id, this.show.get()));
+        return box;
+    }
+}
+
+// A labelled text field with an optional hint. Give it a signal<str> as 'value' to bind it both ways: typing sets the
+// signal and setting the signal rewrites the field. Without one it just holds what is typed.
+struct Field {
+    str label;
+    str hint;
+    str placeholder;
+    str kind;
+    signal<str> value;
+
+    static unsafe u32 first_tag(u32 root, str tag) {
+        if (Dom.kind(root) == DomKind.ELEMENT && Texts.same(Dom.tag(root), tag)) {
+            return root;
+        }
+        mut u32 child = Dom.first_child(root);
+        while (child != 0) {
+            u32 found = Field.first_tag(child, tag);
+            if (found != 0) {
+                return found;
+            }
+            child = Dom.next_sibling(child);
+        }
+        return 0;
+    }
+
+    static unsafe void show(u32 input, str text) {
+        Dom.set_attr(input, "value", text.data, (u32)text.length);
+    }
+
+    // The signal owns a copy of what was typed; 'owned' remembers the last copy so the previous one is freed.
+    static unsafe void typed(u32 input, signal<str> value, u64* owned) {
+        str now = Dom.attr(input, "value");
+        str old = value.peek();
+        str next = { .data = Texts.copy(now.data, (u32)now.length), .length = now.length };
+        value.set(next);
+        if (owned[0] != 0 && (u64)old.data == owned[0]) {
+            __djinn_free((void*)old.data);
+        }
+        owned[0] = (u64)next.data;
+    }
+
+    static unsafe void bind(u32 root, signal<str> value) {
+        u32 input = Field.first_tag(root, "input");
+        if (input == 0) {
+            return;
+        }
+        u64* owned = (u64*)__djinn_alloc_zeroed((size_long)8);
+        effect(() => Field.show(input, value.get()));
+        Dom.listen(input, "input", () => Field.typed(input, value, owned));
+    }
+
+    public unsafe Node render() {
+        Node root = html!{
+            <label class="field stack">
+                <span class="field-label">{this.label}</span>
+                <input type={this.kind} placeholder={this.placeholder}/>
+                <small class="muted">{this.hint}</small>
+            </label>
+        };
+        if (this.value.id != 0) {
+            Field.bind(root.id, this.value);
+        }
+        return root;
+    }
+}

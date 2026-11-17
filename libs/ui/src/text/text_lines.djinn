@@ -3,8 +3,8 @@ import std::libc;
 
 namespace ui;
 
-// One line of a wrapped text: the bytes [start, end) of the node's text (leading and trailing blanks left out,
-// blanks between words count as one space) and the width they take.
+// One line of a wrapped text: the bytes [start, end) of the node's text (trailing blanks left out, blanks before the
+// first word and between words count as one space) and the width they take.
 struct TextLine {
     mut u32 start;
     mut u32 end;
@@ -19,12 +19,12 @@ struct TextLines {
     }
 
     // The pen movement of one code point under a style (the placeholder metrics when no font is installed).
-    public static unsafe f32 advance(u32 code, Style* style, bool real, bool bold) {
+    public static unsafe f32 advance(u32 code, Style* style, bool real, u32 weight) {
         if (Codepoints.is_zero_width(code)) {
             return (f32)0.0;
         }
         if (real) {
-            return Fonts.advance(code, style.font_size, bold) + style.letter_spacing;
+            return Fonts.advance(code, style.font_size, weight) + style.letter_spacing;
         }
         if (Codepoints.is_wide(code)) {
             return style.font_size + style.letter_spacing;
@@ -38,8 +38,8 @@ struct TextLines {
         str text = Dom.text_of(id);
         Style* style = Styles.of(id);
         bool real = Fonts.active();
-        bool bold = style.font_weight >= 600;
-        f32 space = TextLines.advance(32, style, real, bold);
+        u32 weight = (u32)style.font_weight;
+        f32 space = TextLines.advance(32, style, real, weight);
         u32 length = (u32)text.length;
         mut u32 count = 0;
         mut f32 line_width = (f32)0.0;
@@ -66,7 +66,7 @@ struct TextLines {
                 if (TextLines.is_blank(code)) {
                     break;
                 }
-                word_width = word_width + TextLines.advance(code, style, real, bold);
+                word_width = word_width + TextLines.advance(code, style, real, weight);
                 letters = letters + 1;
                 j = j + s;
                 word_end = j;
@@ -88,7 +88,7 @@ struct TextLines {
                 while (k < word_end) {
                     mut u32 s = 1;
                     u32 code = Codepoints.decode(text.data, length, k, &s);
-                    f32 glyph = TextLines.advance(code, style, real, bold);
+                    f32 glyph = TextLines.advance(code, style, real, weight);
                     if (piece_width + glyph > limit + (f32)0.01 && k > piece_start) {
                         if (count < max) {
                             TextLine done = { .start = piece_start, .end = k, .width = piece_width };
@@ -111,6 +111,12 @@ struct TextLines {
                 line_start = word_start;
                 line_end = word_end;
                 line_width = word_width;
+                if (count == 0 && word_start > 0) {
+                    // blanks before the first word are one space, as TextMetrics.measure counts them: the line starts
+                    // at the text so the painter advances over it
+                    line_start = 0;
+                    line_width = space + word_width;
+                }
                 has_line = true;
             } else if (limit >= (f32)0.0 && line_width + space + word_width > limit + (f32)0.01) {
                 if (count < max) {

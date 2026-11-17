@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# The web target: every program in tests/web/programs is built for the host and for the web (wasm32), run natively and
-# under Node.js (tests/web/run.mjs), and must print the same output and end the same way (a panic ends both with a
-# failure). Needs wasm-ld and node; without them the test is skipped.
+# The WebAssembly target (--target wasm, an add-on next to the JavaScript web target): every program in
+# tests/web/programs is built for the host and for wasm32, run natively and under Node.js (tests/web/run.mjs), and must
+# print the same output and end the same way (a panic ends both with a failure). Needs wasm-ld and node; without them the test is skipped.
 set -eu
 compiler="${1:?usage: wasm.sh <djinnc> <runtime lib> [runtime dir]}"
 runtime_lib="${2:?usage: wasm.sh <djinnc> <runtime lib> [runtime dir]}"
@@ -31,7 +31,7 @@ for source in tests/web/programs/*.djinn; do
     name="$(basename "$source" .djinn)"
     "$compiler" "$source" -o "$out/$name$exe" "${native_flags[@]}" > "$out/$name.native.log" 2>&1 \
         || { cat "$out/$name.native.log"; fail "$name must build for the host"; }
-    "$compiler" "$source" -o "$out/$name.wasm" --target web --std-dir "$root/std" --runtime-dir "$runtime" > "$out/$name.web.log" 2>&1 \
+    "$compiler" "$source" -o "$out/$name.wasm" --target wasm --std-dir "$root/std" --runtime-dir "$runtime" > "$out/$name.web.log" 2>&1 \
         || { cat "$out/$name.web.log"; fail "$name must build for the web"; }
     [ -f "$out/djinn.js" ] || fail "djinn.js must be copied next to $name.wasm"
 

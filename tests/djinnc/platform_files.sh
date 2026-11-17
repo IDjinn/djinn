@@ -41,6 +41,10 @@ check x86_64-apple-darwin 2 30
 check aarch64-linux-android 4 30
 # 'native' is everything but the web, so the web keeps the plain shell
 check wasm32-unknown-unknown 3 10
-check web 3 10
+
+# The web target emits JavaScript instead of IR; it is the same 'web' platform.
+"$compiler" "$out" --target web -o "$out/web" --runtime-dir "$runtime" > "$out/web.log" 2>&1 || { cat "$out/web.log"; fail "web must compile"; }
+grep -A1 'function \$widget()' "$out/web.js" | grep -q "return 3" || fail "web must pick widget 3"
+grep -A1 'function \$shell()' "$out/web.js" | grep -q "return 10" || fail "web must pick shell 10"
 
 echo "PASS platform_files"

@@ -1,0 +1,789 @@
+namespace djinnc;
+
+impl JsEmitter {
+    // A value about to be stored (variable, field, argument, return): a mutable struct read from a place is copied.
+    unsafe ptr<i8> stored(Node* node) {
+        ptr<i8> value = this.expression(node);
+        NodeKind kind = node.kind();
+        bool place = kind == NodeKind::IDENTIFIER || kind == NodeKind::FIELD_ACCESS || kind == NodeKind::INDEX;
+        if (place && this.needs_copy(node.value_type())) {
+            ByteBuffer* out = ByteBuffer.create();
+            out.append("{...");
+            out.append(value);
+            out.append("}");
+            return out.cstr();
+        }
+        return value;
+    }
+
+    unsafe ptr<i8> expression(Node* node) {
+        if (node == null) {
+            return "undefined";
+        }
+        NodeKind kind = node.kind();
+        u32 type = node.value_type();
+        if (kind == NodeKind::INT_LITERAL) {
+            if (this.is_text(type)) {
+                return JsEmitter.quote((ptr<i8>)node.int_value());
+            }
+            ByteBuffer* number = ByteBuffer.create();
+            number.append_int(node.int_value());
+            if (type == Types.bool_type()) {
+                if (node.int_value() != 0) {
+                    return "true";
+                }
+                return "false";
+            }
+            return number.cstr();
+        }
+        if (kind == NodeKind::FLOAT_LITERAL) {
+            return JsEmitter.number_text(node.float_value());
+        }
+        if (kind == NodeKind::FLOAT_CONST) {
+            return JsEmitter.number_text(ConstBits.to_float(node.int_value()));
+        }
+        if (kind == NodeKind::STRING_LITERAL) {
+            return JsEmitter.quote(node.text());
+        }
+        if (kind == NodeKind::BOOL_LITERAL) {
+            if (node.int_value() != 0) {
+                return "true";
+            }
+            return "false";
+        }
+        if (kind == NodeKind::NULL_LITERAL) {
+            return "null";
+        }
+        if (kind == NodeKind::IDENTIFIER) {
+            return this.identifier(node);
+        }
+        if (kind == NodeKind::LAMBDA) {
+            return this.lambda(node);
+        }
+        if (kind == NodeKind::UNARY) {
+            return this.unary(node);
+        }
+        if (kind == NodeKind::BINARY) {
+            return this.binary(node);
+        }
+        if (kind == NodeKind::ASSIGN) {
+            return this.assignment(node);
+        }
+        if (kind == NodeKind::CALL) {
+            return this.call(node);
+        }
+        if (kind == NodeKind::CAST) {
+            return this.cast(this.expression(node.first()), node.first().value_type(), type);
+        }
+        if (kind == NodeKind::INDEX) {
+            return this.index(node);
+        }
+        if (kind == NodeKind::STRUCT_INIT) {
+            return this.struct_init(node);
+        }
+        if (kind == NodeKind::ARRAY_LITERAL) {
+            ByteBuffer* out = ByteBuffer.create();
+            out.append("[");
+            for (mut i32 i = 0; i < node.count(); i = i + 1) {
+                if (i > 0) {
+                    out.append(", ");
+                }
+                out.append(this.stored(node.child(i)));
+            }
+            out.append("]");
+            return out.cstr();
+        }
+        if (kind == NodeKind::INTERPOLATION) {
+            return this.interpolation(node);
+        }
+        if (kind == NodeKind::FIELD_ACCESS) {
+            return this.member(node);
+        }
+        if (kind == NodeKind::INTRINSIC && (node.op() == Intrinsic.LIKELY || node.op() == Intrinsic.UNLIKELY)) {
+            return this.expression(node.first());
+        }
+        this.error(node, "this expression is not supported by the web target yet");
+        return "undefined";
+    }
+
+    static unsafe ptr<i8> number_text(f64 value) {
+        ptr<i8> buffer = (ptr<i8>)Memory.zalloc(40);
+        snprintf(buffer, 40, "%.17g", value);
+        return buffer;
+    }
+
+    unsafe ptr<i8> identifier(Node* node) {
+        i32 symbol = node.symbol_kind();
+        if (symbol == SymbolKind.LOCAL) {
+            return this.local_name((LocalVariable*)node.symbol());
+        }
+        if (symbol == SymbolKind.GLOBAL) {
+            return this.use_global((LocalVariable*)node.symbol());
+        }
+        if (symbol == SymbolKind.CONSTANT) {
+            Node* sibling = (Node*)node.symbol();
+            return this.expression(sibling.first());
+        }
+        if (symbol == SymbolKind.IMPLICIT_FIELD) {
+            FieldInfo* field = (FieldInfo*)node.symbol();
+            ByteBuffer* out = ByteBuffer.create();
+            out.append("self.");
+            out.append(JsEmitter.field_name(field.name));
+            return out.cstr();
+        }
+        if (symbol == SymbolKind.IMPLICIT_GET) {
+            FunctionInfo* getter = (FunctionInfo*)node.symbol();
+            PointerList* none = PointerList.create();
+            return this.invoke(getter, "self", none);
+        }
+        if (symbol == SymbolKind.FUNCTION) {
+            FunctionInfo* target = (FunctionInfo*)node.symbol();
+            if (this.template_of(target) != null) {
+                this.error(node, "a [Js] binding cannot be used as a fn value");
+            }
+            return this.use_function(target);
+        }
+        LocalVariable* variable = (LocalVariable*)node.symbol();
+        if (variable != null && symbol == SymbolKind.NONE) {
+            return this.local_name(variable);
+        }
+        this.error(node, "this name is not supported by the web target yet");
+        return "undefined";
+    }
+
+    // (a, b) => { ... }, or (a) => (expr) for a body that only returns. A mutable variable it captures is passed in, as
+    // Djinn copies captures when the lambda is created.
+    unsafe ptr<i8> lambda(Node* node) {
+        FunctionInfo* info = (FunctionInfo*)node.symbol();
+        ByteBuffer* out = ByteBuffer.create();
+        PointerList* captures = info.captures;
+        ByteBuffer* rebound = ByteBuffer.create();
+        mut i32 rebinds = 0;
+        if (captures != null) {
+            for (mut i32 i = 0; i < captures.length; i = i + 1) {
+                LocalVariable* captured = (LocalVariable*)captures.get(i);
+                if (captured.is_mutable) {
+                    if (rebinds > 0) {
+                        rebound.append(", ");
+                    }
+                    rebound.append(this.local_name(captured));
+                    rebinds = rebinds + 1;
+                }
+            }
+        }
+        if (rebinds > 0) {
+            out.append("((");
+            out.append(rebound.cstr());
+            out.append(") => ");
+        }
+        out.append("(");
+        for (mut i32 i = 0; i < node.count(); i = i + 1) {
+            if (i > 0) {
+                out.append(", ");
+            }
+            out.append(this.parameter_name(node.child(i)));
+        }
+        out.append(") => ");
+        Node* body = node.first();
+        bool single = body != null && body.kind() == NodeKind::BLOCK && body.count() == 1;
+        if (single && body.child(0).kind() == NodeKind::RETURN && body.child(0).first() != null) {
+            ptr<i8> value = this.stored(body.child(0).first());
+            if (value[0] == 123) {
+                out.append("(");
+                out.append(value);
+                out.append(")");
+            } else {
+                out.append(value);
+            }
+        } else if (single && body.child(0).kind() == NodeKind::EXPR_STMT) {
+            out.append("{ ");
+            out.append(this.expression(body.child(0).first()));
+            out.append("; }");
+        } else {
+            ByteBuffer* saved = this.code;
+            i32 saved_depth = this.depth;
+            ByteBuffer* inner = ByteBuffer.create();
+            this.code = inner;
+            this.depth = saved_depth + 1;
+            this.block_body(body);
+            this.code = saved;
+            this.depth = saved_depth;
+            out.append("{\n");
+            out.append(inner.cstr());
+            for (mut i32 i = 0; i < saved_depth; i = i + 1) {
+                out.append("  ");
+            }
+            out.append("}");
+        }
+        if (rebinds > 0) {
+            out.append(")(");
+            out.append(rebound.cstr());
+            out.append(")");
+        }
+        return out.cstr();
+    }
+
+    unsafe ptr<i8> unary(Node* node) {
+        TokenKind op = node.op_kind();
+        Node* operand = node.first();
+        if (node.symbol_kind() == SymbolKind.OPERATOR) {
+            PointerList* args = PointerList.create();
+            args.push((ptr)this.stored(operand));
+            return this.invoke((FunctionInfo*)node.symbol(), null, args);
+        }
+        ByteBuffer* out = ByteBuffer.create();
+        if (op == TokenKind::PLUS_PLUS || op == TokenKind::MINUS_MINUS) {
+            u32 type = node.value_type();
+            ptr<i8> target = this.expression(operand);
+            mut ptr<i8> step = "+ 1";
+            if (op == TokenKind::MINUS_MINUS) {
+                step = "- 1";
+            }
+            ByteBuffer* next = ByteBuffer.create();
+            next.append(target);
+            next.append(" ");
+            next.append(step);
+            mut ptr<i8> wrapped = next.cstr();
+            if (Types.is_integer(type)) {
+                wrapped = this.arithmetic(next.cstr(), type, node.mode());
+            }
+            if (node.flag()) {
+                ptr<i8> old = this.temporary();
+                out.append("((");
+                out.append(old);
+                out.append(") => (");
+                out.append(target);
+                out.append(" = ");
+                out.append(wrapped);
+                out.append(", ");
+                out.append(old);
+                out.append("))(");
+                out.append(target);
+                out.append(")");
+                return out.cstr();
+            }
+            out.append("(");
+            out.append(target);
+            out.append(" = ");
+            out.append(wrapped);
+            out.append(")");
+            return out.cstr();
+        }
+        if (op == TokenKind::BANG_DOT || op == TokenKind::PLUS) {
+            return this.expression(operand);
+        }
+        if (op == TokenKind::MINUS) {
+            out.append("-");
+            out.append(JsEmitter.grouped(this.expression(operand)));
+            if (Types.is_integer(node.value_type())) {
+                return this.arithmetic(out.cstr(), node.value_type(), node.mode());
+            }
+            return out.cstr();
+        }
+        if (op == TokenKind::TILDE) {
+            out.append("~");
+            out.append(JsEmitter.grouped(this.expression(operand)));
+            return this.wrap(out.cstr(), node.value_type());
+        }
+        if (op == TokenKind::BANG) {
+            out.append("!");
+            out.append(JsEmitter.grouped(this.expression(operand)));
+            return out.cstr();
+        }
+        this.error(node, "this operator is not supported by the web target (pointers do not exist there)");
+        return "undefined";
+    }
+
+    // An integer add, subtract, multiply, divide or negate: without a suffix (and with 't' / 'c') an overflow stops
+    // the program as it does natively, 'w' wraps and 's' clamps. 64-bit integers are exact up to 2^53 on the web, so
+    // checked 64-bit arithmetic stops beyond that.
+    unsafe ptr<i8> arithmetic(ptr<i8> exact, u32 type, OverflowMode mode) {
+        if (mode == OverflowMode::WRAPPED) {
+            return this.wrap(exact, type);
+        }
+        u32 bits = Types.bits(type);
+        bool signed = Types.is_signed(type);
+        ByteBuffer* out = ByteBuffer.create();
+        if (mode == OverflowMode::SATURATING) {
+            out.append("$sat(");
+            out.append(exact);
+            out.append(", ");
+            out.append(JsEmitter.minimum_text(bits, signed));
+            out.append(", ");
+            out.append(JsEmitter.maximum_text(bits, signed));
+            out.append(")");
+            return out.cstr();
+        }
+        if (bits >= 64) {
+            out.append("$i64(");
+        } else if (bits == 32 && signed) {
+            out.append("$i32(");
+        } else if (bits == 32) {
+            out.append("$u32(");
+        } else {
+            out.append("$ck(");
+            out.append(exact);
+            out.append(", ");
+            out.append(JsEmitter.minimum_text(bits, signed));
+            out.append(", ");
+            out.append(JsEmitter.maximum_text(bits, signed));
+            out.append(")");
+            return out.cstr();
+        }
+        out.append(exact);
+        out.append(")");
+        return out.cstr();
+    }
+
+    static unsafe ptr<i8> minimum_text(u32 bits, bool signed) {
+        ByteBuffer* out = ByteBuffer.create();
+        if (!signed) {
+            return "0";
+        }
+        if (bits >= 64) {
+            return "Number.MIN_SAFE_INTEGER";
+        }
+        out.append_int(0 - (1 << (i64)(bits - 1)));
+        return out.cstr();
+    }
+
+    static unsafe ptr<i8> maximum_text(u32 bits, bool signed) {
+        ByteBuffer* out = ByteBuffer.create();
+        if (bits >= 64) {
+            return "Number.MAX_SAFE_INTEGER";
+        }
+        if (signed) {
+            out.append_int((1 << (i64)(bits - 1)) - 1);
+        } else {
+            out.append_int((1 << (i64)bits) - 1);
+        }
+        return out.cstr();
+    }
+
+    // Integer results stay in their width: |0 for 32 bits, >>>0 unsigned, shifts for 8 and 16 bits. 64-bit integers
+    // are plain JS numbers (exact up to 2^53).
+    unsafe ptr<i8> wrap(ptr<i8> code, u32 type) {
+        if (!Types.is_integer(type) || type == Types.bool_type()) {
+            return code;
+        }
+        u32 bits = Types.bits(type);
+        bool signed = Types.is_signed(type);
+        if (bits >= 64) {
+            return code;
+        }
+        ByteBuffer* out = ByteBuffer.create();
+        out.append("(");
+        out.append(JsEmitter.enclosed(code));
+        if (bits == 32) {
+            if (signed) {
+                out.append(" | 0)");
+            } else {
+                out.append(" >>> 0)");
+            }
+            return out.cstr();
+        }
+        if (signed) {
+            out.append(" << ");
+            out.append_int((i64)(32 - bits));
+            out.append(" >> ");
+            out.append_int((i64)(32 - bits));
+            out.append(")");
+            return out.cstr();
+        }
+        out.append(" & ");
+        out.append_int((1 << (i64)bits) - 1);
+        out.append(")");
+        return out.cstr();
+    }
+
+    unsafe ptr<i8> binary(Node* node) {
+        TokenKind op = node.op_kind();
+        i32 symbol = node.symbol_kind();
+        if (symbol == SymbolKind.OPERATOR || symbol == SymbolKind.NEGATED_OPERATOR) {
+            PointerList* args = PointerList.create();
+            args.push((ptr)this.stored(node.first()));
+            args.push((ptr)this.stored(node.second()));
+            ptr<i8> called = this.invoke((FunctionInfo*)node.symbol(), null, args);
+            if (symbol == SymbolKind.NEGATED_OPERATOR) {
+                ByteBuffer* negated = ByteBuffer.create();
+                negated.append("!");
+                negated.append(JsEmitter.grouped(called));
+                return negated.cstr();
+            }
+            return called;
+        }
+        ptr<i8> left = this.expression(node.first());
+        ptr<i8> right = this.expression(node.second());
+        u32 type = node.value_type();
+        u32 operand = Types.common(node.first().value_type(), node.second().value_type());
+        bool integer = Types.is_integer(type) && type != Types.bool_type();
+        bool unsigned = integer && !Types.is_signed(type);
+        ByteBuffer* out = ByteBuffer.create();
+        OverflowMode mode = node.mode();
+        bool overflows = op == TokenKind::PLUS || op == TokenKind::MINUS || op == TokenKind::STAR;
+        if (integer && !this.is_text(operand) && (op == TokenKind::SLASH || op == TokenKind::PERCENT)) {
+            if (op == TokenKind::SLASH) {
+                out.append("$div(");
+            } else {
+                out.append("$rem(");
+            }
+            out.append(left);
+            out.append(", ");
+            out.append(right);
+            out.append(")");
+            if (op == TokenKind::SLASH && Types.is_signed(type)) {
+                return this.arithmetic(out.cstr(), type, mode);
+            }
+            return out.cstr();
+        }
+        if (integer && op == TokenKind::STAR && mode == OverflowMode::WRAPPED && Types.bits(type) <= 32) {
+            out.append("Math.imul(");
+            out.append(left);
+            out.append(", ");
+            out.append(right);
+            out.append(")");
+            return this.wrap(out.cstr(), type);
+        }
+        mut ptr<i8> symbol_text = JsEmitter.operator_text(op);
+        if (symbol_text == null) {
+            this.error(node, "this operator is not supported by the web target yet");
+            return "undefined";
+        }
+        if (unsigned && op == TokenKind::GREATER_GREATER) {
+            symbol_text = ">>>";
+        }
+        out.append("(");
+        out.append(left);
+        out.append(" ");
+        out.append(symbol_text);
+        out.append(" ");
+        out.append(right);
+        out.append(")");
+        if (integer && overflows && !this.is_text(operand)) {
+            return this.arithmetic(out.cstr(), type, mode);
+        }
+        bool bitwise = op == TokenKind::AMPERSAND || op == TokenKind::PIPE || op == TokenKind::CARET || op == TokenKind::LESS_LESS
+            || op == TokenKind::GREATER_GREATER;
+        if (integer && bitwise) {
+            return this.wrap(out.cstr(), type);
+        }
+        return out.cstr();
+    }
+
+    static unsafe ptr<i8> operator_text(TokenKind op) {
+        if (op == TokenKind::PLUS) { return "+"; }
+        if (op == TokenKind::MINUS) { return "-"; }
+        if (op == TokenKind::STAR) { return "*"; }
+        if (op == TokenKind::SLASH) { return "/"; }
+        if (op == TokenKind::PERCENT) { return "%"; }
+        if (op == TokenKind::EQUAL_EQUAL) { return "==="; }
+        if (op == TokenKind::BANG_EQUAL) { return "!=="; }
+        if (op == TokenKind::LESS) { return "<"; }
+        if (op == TokenKind::LESS_EQUAL) { return "<="; }
+        if (op == TokenKind::GREATER) { return ">"; }
+        if (op == TokenKind::GREATER_EQUAL) { return ">="; }
+        if (op == TokenKind::AND_AND) { return "&&"; }
+        if (op == TokenKind::OR_OR) { return "||"; }
+        if (op == TokenKind::AMPERSAND) { return "&"; }
+        if (op == TokenKind::PIPE) { return "|"; }
+        if (op == TokenKind::CARET) { return "^"; }
+        if (op == TokenKind::LESS_LESS) { return "<<"; }
+        if (op == TokenKind::GREATER_GREATER) { return ">>"; }
+        if (op == TokenKind::QUESTION_QUESTION) { return "??"; }
+        return (ptr<i8>)0;
+    }
+
+    unsafe ptr<i8> assignment(Node* node) {
+        Node* target = node.first();
+        if (target.kind() == NodeKind::IDENTIFIER && target.symbol_kind() == SymbolKind.IMPLICIT_SET) {
+            PointerList* args = PointerList.create();
+            args.push((ptr)this.stored(node.second()));
+            return this.invoke((FunctionInfo*)target.symbol(), "self", args);
+        }
+        if (target.kind() == NodeKind::FIELD_ACCESS && target.symbol_kind() == SymbolKind.PROPERTY_SET) {
+            PointerList* args = PointerList.create();
+            args.push((ptr)this.stored(node.second()));
+            return this.invoke((FunctionInfo*)target.symbol(), this.expression(target.first()), args);
+        }
+        if (target.kind() == NodeKind::INDEX && target.symbol_kind() == SymbolKind.INDEX_SET) {
+            PointerList* args = PointerList.create();
+            args.push((ptr)this.expression(target.second()));
+            args.push((ptr)this.stored(node.second()));
+            return this.invoke((FunctionInfo*)target.symbol(), this.expression(target.first()), args);
+        }
+        ByteBuffer* out = ByteBuffer.create();
+        out.append("(");
+        out.append(this.expression(target));
+        out.append(" = ");
+        out.append(this.stored(node.second()));
+        out.append(")");
+        return out.cstr();
+    }
+
+    unsafe ptr<i8> cast(ptr<i8> value, u32 from, u32 to) {
+        if (to == Types.bool_type()) {
+            if (from == Types.bool_type()) {
+                return value;
+            }
+            ByteBuffer* truth = ByteBuffer.create();
+            truth.append("(");
+            truth.append(value);
+            truth.append(" !== 0)");
+            return truth.cstr();
+        }
+        if (Types.is_integer(to)) {
+            if (from == Types.bool_type()) {
+                ByteBuffer* number = ByteBuffer.create();
+                number.append("(");
+                number.append(value);
+                number.append(" ? 1 : 0)");
+                return number.cstr();
+            }
+            if (Types.is_float(from)) {
+                ByteBuffer* truncated = ByteBuffer.create();
+                truncated.append("Math.trunc(");
+                truncated.append(value);
+                truncated.append(")");
+                return this.wrap(truncated.cstr(), to);
+            }
+            if (Types.is_integer(from) && (Types.bits(from) > Types.bits(to) || Types.is_signed(from) != Types.is_signed(to))) {
+                return this.wrap(value, to);
+            }
+            return value;
+        }
+        if (Types.is_float(to) && Types.bits(to) == 32 && !(Types.is_float(from) && Types.bits(from) == 32)) {
+            ByteBuffer* single = ByteBuffer.create();
+            single.append("Math.fround(");
+            single.append(value);
+            single.append(")");
+            return single.cstr();
+        }
+        return value;
+    }
+
+    unsafe ptr<i8> index(Node* node) {
+        if (node.symbol_kind() == SymbolKind.INDEX_GET) {
+            PointerList* args = PointerList.create();
+            args.push((ptr)this.expression(node.second()));
+            return this.invoke((FunctionInfo*)node.symbol(), this.expression(node.first()), args);
+        }
+        ByteBuffer* out = ByteBuffer.create();
+        out.append(JsEmitter.grouped(this.expression(node.first())));
+        out.append("[");
+        out.append(this.expression(node.second()));
+        out.append("]");
+        return out.cstr();
+    }
+
+    // { .a = x, .b = y }: every field is written, in declaration order, so all values of a struct share one shape.
+    unsafe ptr<i8> struct_init(Node* node) {
+        u32 type = node.value_type();
+        StructInfo* info = this.struct_info(type);
+        if (info == null || info.fields == null) {
+            this.error(node, "this initializer is not supported by the web target yet");
+            return "undefined";
+        }
+        PointerList* fields = info.fields;
+        if (this.is_sequence(type)) {
+            this.error(node, "an arr or slice is built from pointers here, which the web target does not have: use an array literal");
+            return "[]";
+        }
+        ByteBuffer* out = ByteBuffer.create();
+        out.append("{");
+        for (mut i32 f = 0; f < fields.length; f = f + 1) {
+            FieldInfo* field = (FieldInfo*)fields.get(f);
+            if (f > 0) {
+                out.append(", ");
+            }
+            out.append(JsEmitter.field_name(field.name));
+            out.append(": ");
+            mut ptr<i8> value = (ptr<i8>)0;
+            for (mut i32 i = 0; i < node.count(); i = i + 1) {
+                Node* init = node.child(i);
+                if ((FieldInfo*)init.symbol() == field) {
+                    value = this.stored(init.first());
+                }
+            }
+            if (value == null) {
+                value = this.default_value(field.type);
+            }
+            out.append(value);
+        }
+        out.append("}");
+        return out.cstr();
+    }
+
+    // $"a {x} b": the text parts and String() of each value, joined with +.
+    unsafe ptr<i8> interpolation(Node* node) {
+        ByteBuffer* out = ByteBuffer.create();
+        out.append("(");
+        for (mut i32 i = 0; i < node.count(); i = i + 1) {
+            Node* part = node.child(i);
+            if (i > 0) {
+                out.append(" + ");
+            }
+            if (i % 2 == 0) {
+                i64 length = part.int_value() & 4294967295;
+                if (length > 0) {
+                    out.append(JsEmitter.quote(Strings.duplicate(part.text(), (i32)length)));
+                } else {
+                    out.append("\"\"");
+                }
+                continue;
+            }
+            u32 value_type = part.value_type();
+            ptr<i8> value = this.expression(part);
+            if (this.is_text(value_type)) {
+                out.append(JsEmitter.grouped(value));
+            } else {
+                out.append("$str(");
+                out.append(value);
+                out.append(")");
+            }
+        }
+        out.append(")");
+        return out.cstr();
+    }
+
+    unsafe ptr<i8> member(Node* node) {
+        Node* base = node.first();
+        i32 symbol = node.symbol_kind();
+        if (symbol == SymbolKind.CONSTANT) {
+            Node* constant = (Node*)node.symbol();
+            return this.expression(constant.first());
+        }
+        if (symbol == SymbolKind.PROPERTY_GET) {
+            PointerList* none = PointerList.create();
+            return this.invoke((FunctionInfo*)node.symbol(), this.expression(base), none);
+        }
+        if (symbol == SymbolKind.FIELD) {
+            FieldInfo* field = (FieldInfo*)node.symbol();
+            ByteBuffer* out = ByteBuffer.create();
+            out.append(JsEmitter.grouped(this.expression(base)));
+            if (Strings.same(field.name, "data") && (this.is_text(base.value_type()) || this.is_sequence(base.value_type()))) {
+                this.error(node, "'.data' is a pointer, which the web target does not have");
+            }
+            out.append(".");
+            out.append(JsEmitter.field_name(field.name));
+            return out.cstr();
+        }
+        if (symbol == SymbolKind.GLOBAL) {
+            return this.use_global((LocalVariable*)node.symbol());
+        }
+        if (symbol == SymbolKind.ENUM_VALUE) {
+            return this.expression(base);
+        }
+        this.error(node, "this member is not supported by the web target yet");
+        return "undefined";
+    }
+
+    unsafe ptr<i8> call(Node* node) {
+        Node* callee = node.first();
+        i32 symbol = callee.symbol_kind();
+        if (node.symbol_kind() == SymbolKind.CLOSURE_CALL) {
+            ByteBuffer* out = ByteBuffer.create();
+            out.append(JsEmitter.grouped(this.expression(callee)));
+            out.append("(");
+            for (mut i32 i = 0; i < node.count(); i = i + 1) {
+                if (i > 0) {
+                    out.append(", ");
+                }
+                out.append(this.stored(node.child(i)));
+            }
+            out.append(")");
+            return out.cstr();
+        }
+        if (symbol == SymbolKind.CONSTANT) {
+            Node* variant = (Node*)callee.symbol();
+            if (node.count() > 0) {
+                this.error(node, "enum variants with payloads are not supported by the web target yet");
+            }
+            return this.expression(variant.first());
+        }
+        if (symbol == SymbolKind.ENUM_VALUE) {
+            return this.expression(callee.first());
+        }
+        if (symbol == SymbolKind.FLOAT_BUILTIN) {
+            this.error(node, "float builtins are not supported by the web target yet");
+            return "undefined";
+        }
+        FunctionInfo* info = (FunctionInfo*)callee.symbol();
+        if (symbol == SymbolKind.CONSTRUCTOR && info == null) {
+            return this.default_value(node.value_type());
+        }
+        if (info == null) {
+            this.error(node, "this call is not supported by the web target yet");
+            return "undefined";
+        }
+        PointerList* args = PointerList.create();
+        for (mut i32 i = 0; i < node.count(); i = i + 1) {
+            mut Node* argument = node.child(i);
+            if (argument.kind() == NodeKind::NAMED_ARG) {
+                argument = argument.first();
+            }
+            args.push((ptr)this.stored(argument));
+        }
+        if (symbol == SymbolKind.CONSTRUCTOR) {
+            return this.construct(node, info, args);
+        }
+        mut ptr<i8> receiver = (ptr<i8>)0;
+        if (symbol == SymbolKind.INSTANCE_METHOD) {
+            receiver = this.expression(callee.first());
+        }
+        if (info.is_async) {
+            this.error(node, "async functions are not supported by the web target yet");
+        }
+        return this.invoke(info, receiver, args);
+    }
+
+    // T(args): a fresh zero value given to the constructor, which fills it in.
+    unsafe ptr<i8> construct(Node* node, FunctionInfo* info, PointerList* args) {
+        ptr<i8> template = this.template_of(info);
+        if (template != null) {
+            return JsEmitter.expand(template, null, args);
+        }
+        ptr<i8> made = this.temporary();
+        ByteBuffer* out = ByteBuffer.create();
+        out.append("((");
+        out.append(made);
+        out.append(") => (");
+        out.append(this.use_function(info));
+        out.append("(");
+        out.append(made);
+        for (mut i32 i = 0; i < args.length; i = i + 1) {
+            out.append(", ");
+            out.append((ptr<i8>)args.get(i));
+        }
+        out.append("), ");
+        out.append(made);
+        out.append("))(");
+        out.append(this.default_value(node.value_type()));
+        out.append(")");
+        return out.cstr();
+    }
+
+    // A call of a known function: its [Js] template, or name(receiver, args).
+    unsafe ptr<i8> invoke(FunctionInfo* info, ptr<i8> receiver, PointerList* args) {
+        ptr<i8> template = this.template_of(info);
+        if (template != null) {
+            return JsEmitter.expand(template, receiver, args);
+        }
+        ByteBuffer* out = ByteBuffer.create();
+        out.append(this.use_function(info));
+        out.append("(");
+        mut bool first = true;
+        if (receiver != null && info.is_instance) {
+            out.append(receiver);
+            first = false;
+        }
+        for (mut i32 i = 0; i < args.length; i = i + 1) {
+            if (!first) {
+                out.append(", ");
+            }
+            first = false;
+            out.append((ptr<i8>)args.get(i));
+        }
+        out.append(")");
+        return out.cstr();
+    }
+}

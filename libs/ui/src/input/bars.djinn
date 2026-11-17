@@ -8,6 +8,8 @@ unsafe static mut f32 bar_start = (f32)0.0;
 unsafe static mut f32 bar_origin = (f32)0.0;
 unsafe static mut f32 bar_free = (f32)0.0;
 unsafe static mut f32 bar_limit = (f32)0.0;
+unsafe static mut f32 bar_page_width = (f32)0.0;
+unsafe static mut f32 bar_page_gutter = (f32)0.0;
 
 struct BarRect {
     mut f32 x;
@@ -17,17 +19,85 @@ struct BarRect {
     mut f32 free;
 }
 
-// The overlay scroll thumbs of the scroll containers: where they sit and dragging them. The painter draws what
-// 'rect' describes; the host grabs a thumb with 'begin' when the pointer goes down on one (Hit.bar says which),
-// moves it with 'drag' and lets go with 'end'.
+// The scroll thumbs of the scroll containers and of the page: where they sit and dragging them. A container that
+// keeps room for its bar (Layout.reserve, the box's gutter) has its thumb in that strip, as in a browser; with
+// 'scrollbar-width: none' it still scrolls but shows no bar. The page bar sits in the strip the painter keeps at the
+// right of the window (Bars.set_page). The painter draws what 'rect' describes; the host grabs a thumb with 'begin'
+// when the pointer goes down on one (Hit.bar says which, the document for the page), moves it with 'drag' and lets
+// go with 'end'.
 struct Bars {
-    // The rect of a container's thumb in the space of its box: left, top, width, height, free = how far the
-    // thumb can travel along its track. False when the container has nothing to scroll on that axis.
+    // Set by the painter each frame: the window width and the strip of the page bar (0 when the page fits).
+    public static unsafe void set_page(f32 width, f32 gutter) {
+        bar_page_width = width;
+        bar_page_gutter = gutter;
+    }
+
+    public static unsafe f32 page_gutter() {
+        return bar_page_gutter;
+    }
+
+    static unsafe bool is_page(u32 id) {
+        return id == Dom.document();
+    }
+
+    static unsafe f32 offset(u32 id, bool vertical) {
+        if (Bars.is_page(id)) {
+            return Scroll.page_top();
+        }
+        if (vertical) {
+            return Scroll.top(id);
+        }
+        return Scroll.left(id);
+    }
+
+    static unsafe f32 limit(u32 id, bool vertical) {
+        if (Bars.is_page(id)) {
+            return Scroll.page_max_y();
+        }
+        if (vertical) {
+            return Scroll.max_y(id);
+        }
+        return Scroll.max_x(id);
+    }
+
+    // The thumb of the page bar, in window pixels.
+    static unsafe bool page_rect(bool vertical, BarRect* r) {
+        if (!vertical || bar_page_gutter <= (f32)0.0) {
+            return false;
+        }
+        f32 pixel = (f32)Styles.device_scale();
+        f32 inset = (f32)2.0 * pixel;
+        f32 view = Scroll.page_size();
+        f32 limit = Scroll.page_max_y();
+        if (limit <= (f32)0.0 || view <= (f32)16.0 * pixel) {
+            return false;
+        }
+        f32 track = view - inset * (f32)2.0;
+        f32 length = Px.clamp(track * view / (view + limit), (f32)24.0 * pixel, track);
+        f32 free = track - length;
+        r.free = free;
+        r.x = bar_page_width - bar_page_gutter + inset;
+        r.y = inset + Px.clamp(free * Scroll.page_top() / limit, (f32)0.0, free);
+        r.w = Px.max(bar_page_gutter - inset * (f32)2.0, pixel);
+        r.h = length;
+        return true;
+    }
+
+    // The rect of a container's thumb in the space of its box (the page's in window pixels): left, top, width,
+    // height, free = how far the thumb can travel along its track. False when there is nothing to scroll on that
+    // axis or no bar is shown.
     public static unsafe bool rect(u32 id, bool vertical, BarRect* r) {
+        if (Bars.is_page(id)) {
+            return Bars.page_rect(vertical, r);
+        }
         LayoutBox* box = Layout.box(id);
         f32 pixel = (f32)Styles.device_scale();
-        f32 thickness = (f32)6.0 * pixel;
         f32 inset = (f32)2.0 * pixel;
+        f32 bar = Layout.bar_width(Styles.of(id));
+        if (bar <= (f32)0.0) {
+            return false;
+        }
+        f32 thickness = Px.max(bar - inset * (f32)2.0, pixel);
         mut f32 view = box.width - box.border.horizontal();
         mut f32 limit = Scroll.max_x(id);
         mut f32 at = Scroll.left(id);
@@ -87,6 +157,9 @@ struct Bars {
         if (!Bars.rect(id, vertical, &r) || Bars.over(id, vertical, x, y)) {
             return false;
         }
+        if (Bars.is_page(id)) {
+            return vertical && x >= bar_page_width - bar_page_gutter && x < bar_page_width && y >= (f32)0.0 && y < Scroll.page_size();
+        }
         LayoutBox* box = Layout.box(id);
         if (vertical) {
             return x >= r.x && x < r.x + r.w && y >= box.top && y < box.top + box.height;
@@ -107,6 +180,14 @@ struct Bars {
     // A click on the track scrolls a page towards it, as the system does ('before': the click is above or left of
     // the thumb).
     public static unsafe void page(u32 id, bool vertical, bool before) {
+        if (Bars.is_page(id)) {
+            mut f32 step = Scroll.page_size() * (f32)0.9;
+            if (before) {
+                step = (f32)0.0 - step;
+            }
+            Scroll.page_by(step);
+            return;
+        }
         LayoutBox* box = Layout.box(id);
         mut f32 amount = (box.width - box.border.horizontal()) * (f32)0.9;
         if (vertical) {
@@ -131,15 +212,12 @@ struct Bars {
         bar_id = id;
         bar_vertical = vertical;
         bar_free = r.free;
+        bar_start = x;
         if (vertical) {
             bar_start = y;
-            bar_origin = Scroll.top(id);
-            bar_limit = Scroll.max_y(id);
-        } else {
-            bar_start = x;
-            bar_origin = Scroll.left(id);
-            bar_limit = Scroll.max_x(id);
         }
+        bar_origin = Bars.offset(id, vertical);
+        bar_limit = Bars.limit(id, vertical);
         Scroll.touch();
     }
 
@@ -161,6 +239,10 @@ struct Bars {
             moved = y - bar_start;
         }
         f32 goal = bar_origin + moved * bar_limit / bar_free;
+        if (Bars.is_page(bar_id)) {
+            Scroll.page_to(goal);
+            return;
+        }
         if (bar_vertical) {
             Scroll.set(bar_id, Scroll.left(bar_id), goal);
         } else {

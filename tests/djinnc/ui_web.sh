@@ -41,14 +41,14 @@ build() {
 
 build macros libs/ui_macros -o "$libs/ui_macros.djlib" "${native_flags[@]}"
 build ui-native libs/ui -o "$libs/ui.djlib" "${native_flags[@]}"
-build ui-web libs/ui -o "$web_libs/ui.djlib" "${flags[@]}" --target web
+build ui-web libs/ui -o "$web_libs/ui.djlib" "${flags[@]}" --target wasm
 
 for app in client hydrate islands; do
     mkdir -p "$out/$app"
-    build "$app-web" "tests/web/ui/$app" -o "$out/$app/app.wasm" "${flags[@]}" --target web
+    build "$app-web" "tests/web/ui/$app" -o "$out/$app/app.wasm" "${flags[@]}" --target wasm
 done
 mkdir -p "$out/example/public"
-build example-web examples/ui-web -o "$out/example/public/app.wasm" "${flags[@]}" --target web
+build example-web examples/ui-web -o "$out/example/public/app.wasm" "${flags[@]}" --target wasm
 build example-native examples/ui-web -o "$out/example/server$exe" "${native_flags[@]}"
 for app in hydrate islands; do
     build "$app-native" "tests/web/ui/$app" -o "$out/$app/server$exe" "${native_flags[@]}"

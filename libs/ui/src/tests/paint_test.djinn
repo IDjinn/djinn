@@ -21,12 +21,12 @@ struct TestFont {
 
     public static unsafe void install() {
         FontProvider provider = {
-            .advance = (u32 code, f32 size, bool bold) => size * (f32)0.6,
-            .rasterize = (u32 code, f32 size, bool bold, u32 phase, GlyphBitmap* out) => {
+            .advance = (u32 code, f32 size, u32 weight) => size * (f32)0.6,
+            .rasterize = (u32 code, f32 size, u32 weight, u32 phase, GlyphBitmap* out) => {
                 TestFont.fill(size, out);
                 return true;
             },
-            .metrics = (f32 size, bool bold, f32* ascent, f32* descent) => {
+            .metrics = (f32 size, u32 weight, f32* ascent, f32* descent) => {
                 *ascent = size * (f32)0.8;
                 *descent = size * (f32)0.2;
             }
@@ -97,15 +97,15 @@ struct TextTests {
     [Test]
     unsafe void a_glyph_is_rasterized_into_the_atlas_once() {
         TestFont.install();
-        Glyph* first = Fonts.glyph(65, (f32)10.0, false, 0);
+        Glyph* first = Fonts.glyph(65, (f32)10.0, 400, 0);
         Expect.is_true(first != (Glyph*)0, "the glyph exists");
         u32 version = Fonts.atlas().version;
-        Glyph* again = Fonts.glyph(65, (f32)10.0, false, 0);
+        Glyph* again = Fonts.glyph(65, (f32)10.0, 400, 0);
         Expect.is_true(first == again, "the same slot");
         Expect.equal((i64)version, (i64)Fonts.atlas().version, "nothing was uploaded again");
-        Glyph* other = Fonts.glyph(66, (f32)10.0, false, 0);
+        Glyph* other = Fonts.glyph(66, (f32)10.0, 400, 0);
         Expect.is_true(other.atlas_x != first.atlas_x || other.atlas_y != first.atlas_y, "another place in the atlas");
-        Expect.is_true(Fonts.glyph(32, (f32)10.0, false, 0) != (Glyph*)0, "the test font draws a box even for a blank");
+        Expect.is_true(Fonts.glyph(32, (f32)10.0, 400, 0) != (Glyph*)0, "the test font draws a box even for a blank");
         TestFont.remove();
     }
 
@@ -192,5 +192,123 @@ struct PaintTests {
         Node gone = Node.element("div").attr("class", "p6 p6n");
         Expect.equal(0, (i64)Shot.vertices(hidden, 20, 20));
         Expect.equal(0, (i64)Shot.vertices(gone, 20, 20));
+    }
+
+    [Test]
+    unsafe void list_items_get_a_marker_outside_their_box() {
+        Styles.add(".p7 { margin: 0; padding-left: 40px; font-size: 10px; line-height: 20px; width: 100px; } .p7 li { color: #000; }");
+        TestFont.install();
+        Node first = Node.element("li").add("a");
+        Node second = Node.element("li").add("b");
+        Node list = Node.element("ol").attr("class", "p7").attr("start", "3").child(first).child(second);
+        mut Canvas canvas = Shot.take(list, 120, 60);
+        Expect.is_true(Styles.of(first.id).list_item, "li is a list item");
+        Expect.equal((i64)ListMarker.DECIMAL, (i64)Styles.of(first.id).list_marker, "ol numbers its items");
+        Expect.equal(3, Painter.ordinal(first.id), "counting from 'start'");
+        Expect.equal(4, Painter.ordinal(second.id));
+        // "3. " is three 6px advances ending at the item's left edge (40px): the '3' box covers x 22..27, y 6..13
+        Expect.is_true(canvas.at(24, 10) != 0xFFFFFFFF, "the number is drawn left of the item");
+        Expect.equal(0xFFFFFFFF, (i64)canvas.at(24, 2), "above the glyph");
+        canvas.release();
+        TestFont.remove();
+    }
+
+    [Test]
+    unsafe void marker_text_is_built_like_the_browser() {
+        Expect.equal(5, (i64)Painter.marker_length(ListMarker.DECIMAL, -12), "-12. ");
+        Expect.equal(45, (i64)Painter.marker_code(ListMarker.DECIMAL, -12, 0));
+        Expect.equal(49, (i64)Painter.marker_code(ListMarker.DECIMAL, -12, 1));
+        Expect.equal(50, (i64)Painter.marker_code(ListMarker.DECIMAL, -12, 2));
+        Expect.equal(46, (i64)Painter.marker_code(ListMarker.DECIMAL, -12, 3));
+        Expect.equal(32, (i64)Painter.marker_code(ListMarker.DECIMAL, -12, 4));
+        Expect.equal(8226, (i64)Painter.marker_code(ListMarker.DISC, 0, 0), "a disc is the bullet character");
+        Node item = Node.element("li").add("x");
+        Node list = Node.element("ul").child(item);
+        Layout.compute(list.id, (f32)200.0, (f32)100.0);
+        Expect.equal((i64)ListMarker.DISC, (i64)Styles.of(item.id).list_marker, "ul items get a disc");
+    }
+}
+
+struct FontUnitTests {
+    [Test]
+    unsafe void a_blank_before_a_run_is_drawn_as_a_space() {
+        Styles.add(".f1 { font-size: 10px; line-height: 20px; width: 200px; }");
+        TestFont.install();
+        Node text = Node.element("div").attr("class", "f1").add("ab").add(" cd ");
+        Layout.compute(text.id, (f32)800.0, (f32)600.0);
+        u32 second = Dom.next_sibling(Dom.first_child(text.id));
+        mut TextLine* lines = (TextLine*)__djinn_alloc((size_long)(8 * sizeof(TextLine)));
+        u32 count = TextLines.split(second, (f32)-1.0, lines, 8);
+        Expect.equal(1, (i64)count);
+        Expect.equal(0, (i64)lines[0].start, "the line starts at the blank, so the painter moves over it");
+        Expect.equal(18, Lay.px(lines[0].width), "a 6px space and two 6px letters");
+        Expect.equal(12, Lay.px(Layout.rect(Dom.first_child(text.id)).width), "the first run");
+        Expect.equal(24, Lay.px(Layout.rect(second).width), "the measure counts both blanks");
+        __djinn_free((void*)lines);
+        TestFont.remove();
+    }
+
+    [Test]
+    unsafe void ch_is_the_advance_of_zero() {
+        Styles.add(".f2 { font-size: 10px; width: 10ch; }");
+        TestFont.install();
+        Node box = Node.element("div").attr("class", "f2");
+        Layout.compute(box.id, (f32)800.0, (f32)600.0);
+        Expect.equal(60, Lay.px(Layout.rect(box.id).width), "ten zeros of 6px");
+        TestFont.remove();
+    }
+
+    [Test]
+    unsafe void weights_are_kept_apart() {
+        Expect.equal(500, (i64)Fonts.weight_of(500));
+        Expect.equal(700, (i64)Fonts.weight_of(650));
+        Expect.equal(900, (i64)Fonts.weight_of(1000));
+        Expect.equal(100, (i64)Fonts.weight_of(0));
+        TestFont.install();
+        Glyph* regular = Fonts.glyph(65, (f32)10.0, 400, 0);
+        Glyph* medium = Fonts.glyph(65, (f32)10.0, 500, 0);
+        Expect.is_true(regular != medium, "500 is a glyph of its own, not the regular one");
+        TestFont.remove();
+    }
+
+    [Test]
+    unsafe void a_scroll_container_keeps_room_for_its_bar() {
+        Styles.add(".s1 { width: 100px; height: 50px; overflow: auto; scrollbar-width: thin; } .s1 > div { height: 200px; } .s1n { scrollbar-width: none; } .s1s { overflow: scroll; } .s1s > div { height: 10px; }");
+        Node tall = Node.element("div");
+        Node box = Node.element("div").attr("class", "s1").child(tall);
+        Layout.compute(box.id, (f32)800.0, (f32)600.0);
+        Expect.equal(10, Lay.px(Layout.box(box.id).gutter), "thin bars take 10px, as in the browser");
+        Expect.equal(90, Lay.px(Layout.rect(tall.id).width), "the content gets the rest");
+        mut BarRect r = { .x = (f32)0.0, .y = (f32)0.0, .w = (f32)0.0, .h = (f32)0.0, .free = (f32)0.0 };
+        Expect.is_true(Bars.rect(box.id, true, &r), "there is a thumb");
+        Expect.equal(92, Lay.px(r.x), "inside the strip, 2px from its edges");
+        Expect.equal(6, Lay.px(r.w));
+        Node hidden = Node.element("div");
+        Node bare = Node.element("div").attr("class", "s1 s1n").child(hidden);
+        Layout.compute(bare.id, (f32)800.0, (f32)600.0);
+        Expect.equal(100, Lay.px(Layout.rect(hidden.id).width), "scrollbar-width: none keeps no room");
+        Expect.is_true(!Bars.rect(bare.id, true, &r), "and shows no thumb");
+        Node low = Node.element("div");
+        Node always = Node.element("div").attr("class", "s1 s1s").child(low);
+        Layout.compute(always.id, (f32)800.0, (f32)600.0);
+        Expect.equal(90, Lay.px(Layout.rect(low.id).width), "overflow: scroll keeps it even when the content fits");
+        Node short = Node.element("p").add("x");
+        Node fits = Node.element("div").attr("class", "s1").child(short);
+        Layout.compute(fits.id, (f32)800.0, (f32)600.0);
+        Expect.equal(0, Lay.px(Layout.box(fits.id).gutter), "auto keeps none when nothing overflows");
+    }
+
+    [Test]
+    unsafe void the_page_bar_sits_in_its_strip() {
+        Scroll.page_limit((f32)500.0, (f32)500.0);
+        Bars.set_page((f32)800.0, (f32)10.0);
+        mut BarRect r = { .x = (f32)0.0, .y = (f32)0.0, .w = (f32)0.0, .h = (f32)0.0, .free = (f32)0.0 };
+        Expect.is_true(Bars.rect(Dom.document(), true, &r), "a taller document has a page thumb");
+        Expect.equal(792, Lay.px(r.x));
+        Expect.equal(6, Lay.px(r.w));
+        Expect.equal(248, Lay.px(r.h), "half the track: the window shows half the document");
+        Expect.is_true(Bars.on_track(Dom.document(), true, (f32)795.0, (f32)400.0), "below the thumb is track");
+        Bars.set_page((f32)0.0, (f32)0.0);
+        Scroll.page_limit((f32)0.0, (f32)500.0);
     }
 }
