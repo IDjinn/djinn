@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+- Libraries declare the language of their macros for the editor (#150): a `djinn.editor` file (`macro html = html`, `language sql { keywords: ... }`) makes `djinn-lsp` highlight and lint the body of `html! { ... }` as markup (tags, components, attributes, `{expr}` back in Djinn, tags inside `{if ...}` groups) or as a rule language. New semantic token types `tag`, `operator` and `string`; lint rules have ids (diagnostic `code`) and `lint-disable:` turns them off; `libs/ui_macros/djinn.editor` binds `html`. `djinn-lsp/tests/embedded_test.py`.
+
 ## [0.7.0-preview.1] - 2026-11-17
 
 Preview of the UI work: the JavaScript web target and the same `libs/ui` source rendered natively and on the web. A preview release is marked as such on GitHub.

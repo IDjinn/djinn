@@ -1,0 +1,253 @@
+namespace djinnc;
+
+struct EmbedKind {
+    const i32 HTML = 1;
+    const i32 RULES = 2;
+}
+
+struct EmbedLanguage {
+    ptr<i8> name;
+    i32 builtin;
+    bool ignore_case;
+    PointerList* keywords;
+    PointerList* types;
+    PointerList* functions;
+    PointerList* constants;
+}
+
+struct EmbedBinding {
+    ptr<i8> macro_name;
+    ptr<i8> language;
+}
+
+unsafe static mut ptr editor_config = null;
+unsafe static mut ptr editor_arena = null;
+
+struct EditorConfig {
+    PointerList* languages;
+    PointerList* bindings;
+    PointerList* disabled;
+    PointerList* loaded;
+
+    public static unsafe EditorConfig* get() {
+        if (editor_config == null) {
+            ptr saved = process_arena;
+            editor_arena = (ptr)Arena.create(65536);
+            process_arena = editor_arena;
+            EditorConfig* config = (EditorConfig*)calloc(1, sizeof(EditorConfig));
+            config.languages = PointerList.create();
+            config.bindings = PointerList.create();
+            config.disabled = PointerList.create();
+            config.loaded = PointerList.create();
+            config.add_builtin("html", EmbedKind.HTML);
+            editor_config = (ptr)config;
+            process_arena = saved;
+        }
+        return (EditorConfig*)editor_config;
+    }
+
+    unsafe void add_builtin(ptr<i8> name, i32 builtin) {
+        EmbedLanguage* language = (EmbedLanguage*)calloc(1, sizeof(EmbedLanguage));
+        language.name = name;
+        language.builtin = builtin;
+        this.languages.push((ptr)language);
+    }
+
+    public unsafe EmbedLanguage* language(ptr<i8> name) {
+        for (mut i32 i = 0; i < this.languages.length; i = i + 1) {
+            EmbedLanguage* language = (EmbedLanguage*)this.languages.get(i);
+            if (Strings.same(language.name, name)) {
+                return language;
+            }
+        }
+        return (EmbedLanguage*)0;
+    }
+
+    public unsafe EmbedLanguage* bound(ptr<i8> macro_name) {
+        for (mut i32 i = 0; i < this.bindings.length; i = i + 1) {
+            EmbedBinding* binding = (EmbedBinding*)this.bindings.get(i);
+            if (Strings.same(binding.macro_name, macro_name)) {
+                return this.language(binding.language);
+            }
+        }
+        return (EmbedLanguage*)0;
+    }
+
+    public unsafe bool has_bindings() {
+        return this.bindings.length > 0;
+    }
+
+    public unsafe bool lint_enabled(ptr<i8> id) {
+        for (mut i32 i = 0; i < this.disabled.length; i = i + 1) {
+            if (Strings.same((ptr<i8>)this.disabled.get(i), id)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    unsafe bool already_loaded(ptr<i8> path) {
+        for (mut i32 i = 0; i < this.loaded.length; i = i + 1) {
+            if (Strings.same((ptr<i8>)this.loaded.get(i), path)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Every `*.editor` file below `directory` (a library's `djinn.editor`, a project's own, or the `<lib>.editor`
+    // next to a built `.djlib`) declares the embedded languages of the macros it provides.
+    public static unsafe i32 load_directory(ptr<i8> directory) {
+        ptr<i8> listing = __djinn_list_files(directory, ".editor");
+        if (listing == null) {
+            return 0;
+        }
+        EditorConfig* config = EditorConfig.get();
+        ptr saved = process_arena;
+        process_arena = editor_arena;
+        i32 length = strlen(listing);
+        mut i32 start = 0;
+        mut i32 count = 0;
+        for (mut i32 i = 0; i <= length; i = i + 1) {
+            if (i == length || listing[i] == 10) {
+                if (i > start) {
+                    ptr<i8> path = Paths.normalize(Strings.duplicate(listing + start, i - start));
+                    bool visible = !Workspace.skipped_directory(path) || Paths.contains(path, "/build/libs/");
+                    if (visible && !config.already_loaded(path)) {
+                        config.loaded.push((ptr)path);
+                        config.read_file(path);
+                        count = count + 1;
+                    }
+                }
+                start = i + 1;
+            }
+        }
+        free((ptr)listing);
+        process_arena = saved;
+        return count;
+    }
+
+    unsafe void read_file(ptr<i8> path) {
+        ptr<i8> text = Files.read_all(path);
+        if (text == null) {
+            return;
+        }
+        i32 length = strlen(text);
+        mut EmbedLanguage* current = (EmbedLanguage*)0;
+        mut i32 start = 0;
+        for (mut i32 i = 0; i <= length; i = i + 1) {
+            if (i == length || text[i] == 10) {
+                mut i32 first = start;
+                mut i32 last = i;
+                while (first < last && (text[first] == 32 || text[first] == 9)) {
+                    first = first + 1;
+                }
+                while (last > first && (text[last - 1] == 13 || text[last - 1] == 32 || text[last - 1] == 9)) {
+                    last = last - 1;
+                }
+                if (last > first && text[first] != 35) {
+                    current = this.read_line(text, first, last, current);
+                }
+                start = i + 1;
+            }
+        }
+    }
+
+    unsafe EmbedLanguage* read_line(ptr<i8> text, i32 first, i32 last, EmbedLanguage* current) {
+        if (current != null) {
+            if (text[first] == 125) {
+                return (EmbedLanguage*)0;
+            }
+            this.read_rule(text, first, last, current);
+            return current;
+        }
+        if (Strings.starts_with(text, first, last, "macro ")) {
+            PointerList* words = EditorConfig.words(text, first + 6, last);
+            if (words.length == 3 && Strings.same((ptr<i8>)words.get(1), "=")) {
+                EmbedBinding* binding = (EmbedBinding*)calloc(1, sizeof(EmbedBinding));
+                binding.macro_name = (ptr<i8>)words.get(0);
+                binding.language = (ptr<i8>)words.get(2);
+                this.bindings.push((ptr)binding);
+            }
+        } else if (Strings.starts_with(text, first, last, "language ")) {
+            PointerList* words = EditorConfig.words(text, first + 9, last);
+            if (words.length >= 1) {
+                EmbedLanguage* language = (EmbedLanguage*)calloc(1, sizeof(EmbedLanguage));
+                language.name = (ptr<i8>)words.get(0);
+                language.builtin = EmbedKind.RULES;
+                language.keywords = PointerList.create();
+                language.types = PointerList.create();
+                language.functions = PointerList.create();
+                language.constants = PointerList.create();
+                this.languages.push((ptr)language);
+                return language;
+            }
+        } else if (Strings.starts_with(text, first, last, "lint-disable:")) {
+            PointerList* words = EditorConfig.words(text, first + 13, last);
+            for (mut i32 w = 0; w < words.length; w = w + 1) {
+                this.disabled.push(words.get(w));
+            }
+        }
+        return (EmbedLanguage*)0;
+    }
+
+    unsafe void read_rule(ptr<i8> text, i32 first, i32 last, EmbedLanguage* language) {
+        if (Strings.starts_with(text, first, last, "case-insensitive")) {
+            language.ignore_case = true;
+            return;
+        }
+        mut PointerList* target = (PointerList*)0;
+        mut i32 skip = 0;
+        if (Strings.starts_with(text, first, last, "keywords:")) {
+            target = language.keywords;
+            skip = 9;
+        } else if (Strings.starts_with(text, first, last, "types:")) {
+            target = language.types;
+            skip = 6;
+        } else if (Strings.starts_with(text, first, last, "functions:")) {
+            target = language.functions;
+            skip = 10;
+        } else if (Strings.starts_with(text, first, last, "constants:")) {
+            target = language.constants;
+            skip = 10;
+        }
+        if (target == null) {
+            return;
+        }
+        PointerList* words = EditorConfig.words(text, first + skip, last);
+        for (mut i32 w = 0; w < words.length; w = w + 1) {
+            mut ptr<i8> word = (ptr<i8>)words.get(w);
+            if (language.ignore_case) {
+                word = EditorConfig.lower(word);
+            }
+            target.push((ptr)word);
+        }
+    }
+
+    public static unsafe ptr<i8> lower(ptr<i8> word) {
+        i32 length = strlen(word);
+        mut ptr<i8> copy = Strings.duplicate(word, length);
+        for (mut i32 i = 0; i < length; i = i + 1) {
+            i32 c = (i32)copy[i];
+            if (c >= 65 && c <= 90) {
+                copy[i] = (i8)(c + 32);
+            }
+        }
+        return copy;
+    }
+
+    static unsafe PointerList* words(ptr<i8> text, i32 from, i32 to) {
+        PointerList* words = PointerList.create();
+        mut i32 start = from;
+        for (mut i32 i = from; i <= to; i = i + 1) {
+            bool separator = i == to || text[i] == 32 || text[i] == 9 || text[i] == 44;
+            if (separator) {
+                if (i > start) {
+                    words.push((ptr)Strings.duplicate(text + start, i - start));
+                }
+                start = i + 1;
+            }
+        }
+        return words;
+    }
+}

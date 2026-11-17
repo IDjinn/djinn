@@ -1,0 +1,89 @@
+namespace djinnc;
+
+struct EmbedContext {
+    Unit* unit;
+    ptr<i8> over;
+    PointerList* lint;
+
+    public unsafe void mark(i32 code_index, i32 type) {
+        if (this.over != null && code_index >= 0 && code_index < this.unit.code_count) {
+            this.over[code_index] = (i8)(type + 1);
+        }
+    }
+
+    public unsafe void report(i32 code_index, ptr<i8> id, ptr<i8> message, i32 severity) {
+        if (this.lint == null || code_index < 0 || code_index >= this.unit.code_count) {
+            return;
+        }
+        if (!EditorConfig.get().lint_enabled(id)) {
+            return;
+        }
+        LintItem* item = (LintItem*)Memory.zalloc(sizeof(LintItem));
+        item.token = this.unit.code[code_index];
+        item.message = message;
+        item.id = id;
+        item.severity = severity;
+        this.lint.push((ptr)item);
+    }
+}
+
+// A library binds a macro to a language in its `djinn.editor` (`macro html = html`); the body of `name!{...}`,
+// `name!(...)` and `name![...]` is then marked and checked by that language. To add a language, give it a
+// `<Language>.scan(EmbedContext*, i32 from, i32 to)` and a case in `scan_language`.
+struct Embedded {
+    static unsafe void scan_language(EmbedLanguage* language, EmbedContext* context, i32 from, i32 to) {
+        if (language.builtin == EmbedKind.HTML) {
+            Html.scan(context, from, to);
+        } else if (language.builtin == EmbedKind.RULES) {
+            RuleLanguage.scan(language, context, from, to);
+        }
+    }
+
+    static unsafe void run(EmbedContext* context) {
+        EditorConfig* config = EditorConfig.get();
+        if (!config.has_bindings()) {
+            return;
+        }
+        Unit* u = context.unit;
+        for (mut i32 c = 0; c + 3 < u.code_count; c = c + 1) {
+            if (!u.is_name(c) || !u.is_punct(c + 1, 33)) {
+                continue;
+            }
+            bool opens = u.is_punct(c + 2, 40) || u.is_punct(c + 2, 91) || u.is_punct(c + 2, 123);
+            if (!opens || u.is_word(c - 1, "macro")) {
+                continue;
+            }
+            i32 close = u.match[c + 2];
+            if (close <= c + 2) {
+                continue;
+            }
+            EmbedLanguage* language = config.bound(u.word_at(c));
+            if (language == null) {
+                continue;
+            }
+            context.mark(c, ST.MACRO);
+            Embedded.scan_language(language, context, c + 3, close);
+            c = close;
+        }
+    }
+
+    // Symbols the language gives to a token (go to definition, hover, references, rename).
+    public static unsafe Sym* symbol_at(Unit* u, i32 c) {
+        if (!EditorConfig.get().has_bindings()) {
+            return (Sym*)0;
+        }
+        return Html.attribute_symbol(u, c);
+    }
+
+    public static unsafe void mark(Unit* u, ptr<i8> over) {
+        EmbedContext context = { .unit = u, .over = over, .lint = (PointerList*)0 };
+        Embedded.run(&context);
+    }
+
+    public static unsafe PointerList* lint(Unit* u) {
+        PointerList* found = PointerList.create();
+        EmbedContext context = { .unit = u, .over = (ptr<i8>)0, .lint = found };
+        Embedded.run(&context);
+        return found;
+    }
+}
