@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Changed
+- `libs/vulkan` delay-loads `vulkan-1.dll`: a program that uses the UI starts on a machine without the Vulkan loader and draws with the software rasterizer (Vulkan stays the default; `DJINN_UI_CPU=1` still opts out). A `-Wl,<flag>` entry in a `djinn.proj` reaches the linker with and without `--lld`.
+
+### Fixed
+- `VulkanRenderer.create` freed nothing when it failed halfway, and `release` left the pipeline, layouts, pools, sampler, atlas, buffers and sync objects behind: both now destroy every object that was created.
+
 ## [0.6.2] - 2026-11-16
 
 ### Changed

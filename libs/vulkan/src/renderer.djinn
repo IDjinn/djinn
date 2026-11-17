@@ -615,6 +615,10 @@ struct VulkanRenderer {
 
     // Opens the renderer on a window: null when the machine has no usable Vulkan (the caller keeps the software path).
     public static unsafe VulkanRenderer* create(void* module, void* window, u32 width, u32 height) {
+        if (LoadLibraryExA("vulkan-1.dll", (void*)0, 0) == (void*)0) {
+            printf("vulkan: vulkan-1.dll not found\n");
+            return (VulkanRenderer*)0;
+        }
         VulkanRenderer* self = (VulkanRenderer*)__djinn_alloc_zeroed((size_long)sizeof(VulkanRenderer));
         self.images = (u64*)__djinn_alloc_zeroed((size_long)(VulkanRenderer.MAX_IMAGES * 8));
         self.views = (u64*)__djinn_alloc_zeroed((size_long)(VulkanRenderer.MAX_IMAGES * 8));
@@ -626,6 +630,7 @@ struct VulkanRenderer {
             && VulkanRenderer.create_sync(self) && VulkanRenderer.create_swapchain(self, width, height)) {
             return self;
         }
+        VulkanRenderer.release(self);
         return (VulkanRenderer*)0;
     }
 
@@ -811,13 +816,36 @@ struct VulkanRenderer {
         VkBuf.drop(to_read, 72);
     }
 
+    // Frees everything the renderer made, also when 'create' stopped halfway. Vulkan's destroy and free calls accept
+    // the null handle of an object that was never created; only the device, surface and instance need a guard.
     public static unsafe void release(VulkanRenderer* self) {
-        vkDeviceWaitIdle(self.device);
-        VulkanRenderer.destroy_swapchain_images(self);
-        vkDestroySwapchainKHR(self.device, self.swapchain, (void*)0);
-        vkDestroyDevice(self.device, (void*)0);
-        vkDestroySurfaceKHR(self.instance, self.surface, (void*)0);
-        vkDestroyInstance(self.instance, (void*)0);
+        u64 device = self.device;
+        if (device != 0) {
+            vkDeviceWaitIdle(device);
+            VulkanRenderer.destroy_swapchain_images(self);
+            vkDestroySwapchainKHR(device, self.swapchain, (void*)0);
+            vkDestroyBuffer(device, self.vertex_buffer, (void*)0);
+            vkFreeMemory(device, self.vertex_memory, (void*)0);
+            vkDestroyBuffer(device, self.staging, (void*)0);
+            vkFreeMemory(device, self.staging_memory, (void*)0);
+            vkDestroyImageView(device, self.atlas_view, (void*)0);
+            vkDestroyImage(device, self.atlas_image, (void*)0);
+            vkFreeMemory(device, self.atlas_memory, (void*)0);
+            vkDestroyFence(device, self.in_flight, (void*)0);
+            vkDestroySemaphore(device, self.image_ready, (void*)0);
+            vkDestroyCommandPool(device, self.command_pool, (void*)0);
+            vkDestroySampler(device, self.sampler, (void*)0);
+            vkDestroyDescriptorPool(device, self.pool, (void*)0);
+            vkDestroyPipeline(device, self.pipeline, (void*)0);
+            vkDestroyPipelineLayout(device, self.pipeline_layout, (void*)0);
+            vkDestroyDescriptorSetLayout(device, self.set_layout, (void*)0);
+            vkDestroyRenderPass(device, self.render_pass, (void*)0);
+            vkDestroyDevice(device, (void*)0);
+        }
+        if (self.instance != 0) {
+            vkDestroySurfaceKHR(self.instance, self.surface, (void*)0);
+            vkDestroyInstance(self.instance, (void*)0);
+        }
         __djinn_free((void*)self.images);
         __djinn_free((void*)self.views);
         __djinn_free((void*)self.framebuffers);

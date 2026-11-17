@@ -4,9 +4,10 @@ A cross-platform UI library: one component code base, fine-grained reactivity (r
 JSX-like markup through the `html!` procedural macro, and render modes declared in code. It is an ordinary optional
 library: a program that does not list it pays nothing.
 
-Status: phases 1 to 4 of the roadmap (reactive core, retained tree, `html!`, components, control flow, render modes,
-HTML writer, test host, CSS engine, the default theme and the layout engine). Text shaping, the Vulkan renderer and
-the window host come next; the web (wasm) host after them.
+Status: phases 1 to 7 of the roadmap (reactive core, retained tree, `html!`, components, control flow, render modes,
+HTML writer, test host, CSS engine, the default theme, the layout engine, text, the software rasterizer, the Vulkan
+renderer and the Windows host in `libs/win32`). Vulkan is the default renderer; `vulkan-1.dll` is delay-loaded, so a
+machine without it (or `DJINN_UI_CPU=1`) draws with the software rasterizer. The web (wasm) host comes next.
 
 ## Using it
 
