@@ -1,0 +1,267 @@
+namespace djinnc;
+
+// JSX-like markup as the `html!` macro of libs/ui_macros reads it: <tag attr="x" other={expr}>text {expr}</tag>.
+// `{...}` groups are Djinn; tags that appear inside them (`{if (c) { <b/> }}`) are markup again.
+struct Html {
+    static unsafe bool wordlike(Unit* u, i32 c) {
+        i32 kind = u.kind_at(c);
+        return kind == Tk.IDENT || kind == Tk.KEYWORD || kind == Tk.TYPE;
+    }
+
+    static unsafe bool touching(Unit* u, i32 a, i32 b) {
+        return u.tend[u.code[a]] == u.tstart[u.code[b]];
+    }
+
+    // `data-id`, `aria-label`: words joined by touching hyphens are one name.
+    static unsafe i32 name_end(Unit* u, i32 c, i32 to) {
+        mut i32 e = c + 1;
+        while (e + 1 < to && u.is_punct(e, 45) && Html.touching(u, e - 1, e) && Html.touching(u, e, e + 1) && Html.wordlike(u, e + 1)) {
+            e = e + 2;
+        }
+        return e;
+    }
+
+    static unsafe ptr<i8> name_text(Unit* u, i32 from, i32 to) {
+        i32 start = u.tstart[u.code[from]];
+        i32 end = u.tend[u.code[to - 1]];
+        return Strings.duplicate(u.text + start, end - start);
+    }
+
+    static unsafe void mark_range(EmbedContext* context, i32 from, i32 to, i32 type) {
+        for (mut i32 i = from; i < to; i = i + 1) {
+            context.mark(i, type);
+        }
+    }
+
+    static unsafe bool is_void(ptr<i8> name) {
+        ptr<i8> voids = " area base br col embed hr img input link meta source track wbr ";
+        i32 length = strlen(name);
+        i32 total = strlen(voids);
+        for (mut i32 i = 0; i + length + 1 < total; i = i + 1) {
+            if (voids[i] == 32 && Strings.equals(voids + i + 1, length, name) && voids[i + 1 + length] == 32) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static unsafe bool duplicate(PointerList* names, ptr<i8> name) {
+        for (mut i32 i = 0; i < names.length; i = i + 1) {
+            if (Strings.same((ptr<i8>)names.get(i), name)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static unsafe bool closing_tag_at(Unit* u, i32 c) {
+        return u.is_punct(c, 60) && u.is_punct(c + 1, 47);
+    }
+
+    // `<Button label="x" on_click={f}/>`: an attribute of a component is a field of the struct of that name.
+    public static unsafe Sym* attribute_symbol(Unit* u, i32 c) {
+        if (!Html.wordlike(u, c)) {
+            return (Sym*)0;
+        }
+        mut i32 p = c - 1;
+        while (p >= 0 && p > c - 600) {
+            if (u.is_punct(p, 125)) {
+                i32 open = u.match[p];
+                if (open < 0 || open >= p) {
+                    return (Sym*)0;
+                }
+                p = open - 1;
+            } else if (u.is_punct(p, 123) || u.is_punct(p, 62) || u.is_punct(p, 59) || u.is_punct(p, 40) || u.is_punct(p, 41) || u.is_punct(p, 47) || u.is_punct(p, 44)) {
+                return (Sym*)0;
+            } else if (u.is_punct(p, 60)) {
+                if (p + 1 >= c || !Html.wordlike(u, p + 1) || Html.name_end(u, p + 1, c) != p + 2) {
+                    return (Sym*)0;
+                }
+                ptr<i8> tag = u.word_at(p + 1);
+                i32 first = (i32)tag[0];
+                if (first < 65 || first > 90) {
+                    return (Sym*)0;
+                }
+                if (Resolve.type_named(u, tag) == null) {
+                    return (Sym*)0;
+                }
+                return Resolve.member(tag, u.word_at(c));
+            } else {
+                p = p - 1;
+            }
+        }
+        return (Sym*)0;
+    }
+
+    public static unsafe void scan(EmbedContext* context, i32 from, i32 to) {
+        Unit* u = context.unit;
+        mut i32 c = from;
+        while (c < to) {
+            i32 at = Html.children(context, c, to);
+            if (at >= to) {
+                break;
+            }
+            i32 end = Html.name_end(u, at + 2, to);
+            if (Html.wordlike(u, at + 2)) {
+                ptr<i8> name = Html.name_text(u, at + 2, end);
+                ByteBuffer* message = ByteBuffer.create();
+                message.append("closing tag </");
+                message.append(name);
+                message.append("> has no opening tag");
+                context.report(at + 2, "html-unexpected-closing-tag", message.cstr(), 1);
+            }
+            c = at + 1;
+        }
+    }
+
+    // Text and elements until a closing tag (returns its `<`) or the end.
+    static unsafe i32 children(EmbedContext* context, i32 from, i32 to) {
+        Unit* u = context.unit;
+        mut i32 c = from;
+        while (c < to) {
+            if (Html.closing_tag_at(u, c)) {
+                return c;
+            }
+            if (u.is_punct(c, 60) && Html.wordlike(u, c + 1)) {
+                c = Html.element(context, c, to);
+            } else if (u.is_punct(c, 123) && u.match[c] > c && u.match[c] <= to) {
+                Html.code(context, c + 1, u.match[c]);
+                c = u.match[c] + 1;
+            } else {
+                if (Html.wordlike(u, c)) {
+                    context.mark(c, ST.TEXT);
+                }
+                c = c + 1;
+            }
+        }
+        return to;
+    }
+
+    static unsafe bool starts_markup(Unit* u, i32 c, i32 from) {
+        if (!u.is_punct(c, 60) || !Html.wordlike(u, c + 1)) {
+            return false;
+        }
+        if (c == from) {
+            return true;
+        }
+        return u.is_punct(c - 1, 123) || u.is_punct(c - 1, 125) || u.is_punct(c - 1, 62) || u.is_punct(c - 1, 40) || u.is_punct2(c - 1, 61, 62) || u.is_word(c - 1, "return");
+    }
+
+    static unsafe void code(EmbedContext* context, i32 from, i32 to) {
+        Unit* u = context.unit;
+        mut i32 c = from;
+        while (c < to) {
+            if (Html.starts_markup(u, c, from)) {
+                c = Html.element(context, c, to);
+            } else if (u.is_punct(c, 123) && u.match[c] > c && u.match[c] <= to) {
+                Html.code(context, c + 1, u.match[c]);
+                c = u.match[c] + 1;
+            } else {
+                c = c + 1;
+            }
+        }
+    }
+
+    // `c` is at `<` of an opening tag; returns the index after the whole element.
+    static unsafe i32 element(EmbedContext* context, i32 c, i32 to) {
+        Unit* u = context.unit;
+        i32 name_start = c + 1;
+        i32 name_stop = Html.name_end(u, name_start, to);
+        ptr<i8> name = Html.name_text(u, name_start, name_stop);
+        mut i32 name_type = ST.TAG;
+        i32 first = (i32)name[0];
+        if (first >= 65 && first <= 90) {
+            name_type = ST.CLASS;
+        }
+        context.mark(c, ST.OPERATOR);
+        Html.mark_range(context, name_start, name_stop, name_type);
+        PointerList* seen = PointerList.create();
+        mut i32 p = name_stop;
+        mut bool closed = false;
+        while (p < to && !closed) {
+            if (u.is_punct(p, 62)) {
+                context.mark(p, ST.OPERATOR);
+                p = p + 1;
+                closed = true;
+            } else if (u.is_punct(p, 47) && u.is_punct(p + 1, 62)) {
+                context.mark(p, ST.OPERATOR);
+                context.mark(p + 1, ST.OPERATOR);
+                return p + 2;
+            } else if (u.is_punct(p, 123) && u.match[p] > p && u.match[p] <= to) {
+                Html.code(context, p + 1, u.match[p]);
+                p = u.match[p] + 1;
+            } else if (Html.wordlike(u, p)) {
+                i32 attribute_stop = Html.name_end(u, p, to);
+                ptr<i8> attribute = Html.name_text(u, p, attribute_stop);
+                Html.mark_range(context, p, attribute_stop, ST.PROPERTY);
+                if (Html.duplicate(seen, attribute)) {
+                    ByteBuffer* message = ByteBuffer.create();
+                    message.append("attribute '");
+                    message.append(attribute);
+                    message.append("' is repeated on <");
+                    message.append(name);
+                    message.append(">");
+                    context.report(p, "html-duplicate-attribute", message.cstr(), 2);
+                }
+                seen.push((ptr)attribute);
+                p = attribute_stop;
+                if (u.is_punct(p, 61)) {
+                    context.mark(p, ST.OPERATOR);
+                    p = p + 1;
+                    if (u.kind_at(p) == Tk.STRING) {
+                        context.mark(p, ST.STRING);
+                        p = p + 1;
+                    } else if (u.is_punct(p, 123) && u.match[p] > p && u.match[p] <= to) {
+                        Html.code(context, p + 1, u.match[p]);
+                        p = u.match[p] + 1;
+                    }
+                }
+            } else {
+                p = p + 1;
+            }
+        }
+        if (!closed) {
+            ByteBuffer* message = ByteBuffer.create();
+            message.append("tag <");
+            message.append(name);
+            message.append("> is missing its '>'");
+            context.report(name_start, "html-unterminated-tag", message.cstr(), 1);
+            return to;
+        }
+        if (Html.is_void(name)) {
+            return p;
+        }
+        i32 at = Html.children(context, p, to);
+        if (at >= to) {
+            ByteBuffer* message = ByteBuffer.create();
+            message.append("<");
+            message.append(name);
+            message.append("> is never closed");
+            context.report(name_start, "html-unclosed-tag", message.cstr(), 1);
+            return to;
+        }
+        context.mark(at, ST.OPERATOR);
+        context.mark(at + 1, ST.OPERATOR);
+        mut i32 after = at + 2;
+        if (Html.wordlike(u, at + 2)) {
+            i32 close_stop = Html.name_end(u, at + 2, to);
+            ptr<i8> close_name = Html.name_text(u, at + 2, close_stop);
+            Html.mark_range(context, at + 2, close_stop, name_type);
+            if (!Strings.same(close_name, name)) {
+                ByteBuffer* message = ByteBuffer.create();
+                message.append("closing tag </");
+                message.append(close_name);
+                message.append("> does not match <");
+                message.append(name);
+                message.append(">");
+                context.report(at + 2, "html-mismatched-tag", message.cstr(), 1);
+            }
+            after = close_stop;
+        }
+        if (u.is_punct(after, 62)) {
+            context.mark(after, ST.OPERATOR);
+            after = after + 1;
+        }
+        return after;
+    }
+}

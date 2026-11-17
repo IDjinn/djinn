@@ -1,0 +1,46 @@
+namespace djinnc;
+
+// A language declared in `djinn.editor` with word lists. The macro body is lexed as Djinn tokens, so the rules classify
+// those tokens: words, calls, and the `{expr}` groups, which stay Djinn.
+struct RuleLanguage {
+    static unsafe bool listed(PointerList* words, ptr<i8> word) {
+        for (mut i32 i = 0; i < words.length; i = i + 1) {
+            if (Strings.same((ptr<i8>)words.get(i), word)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    public static unsafe void scan(EmbedLanguage* language, EmbedContext* context, i32 from, i32 to) {
+        Unit* u = context.unit;
+        mut i32 c = from;
+        while (c < to) {
+            if (u.is_punct(c, 123) && u.match[c] > c) {
+                c = u.match[c] + 1;
+                continue;
+            }
+            i32 kind = u.kind_at(c);
+            if (kind != Tk.IDENT && kind != Tk.KEYWORD && kind != Tk.TYPE) {
+                c = c + 1;
+                continue;
+            }
+            mut ptr<i8> word = u.word_at(c);
+            if (language.ignore_case) {
+                word = EditorConfig.lower(word);
+            }
+            if (RuleLanguage.listed(language.keywords, word)) {
+                context.mark(c, ST.KEYWORD);
+            } else if (RuleLanguage.listed(language.types, word)) {
+                context.mark(c, ST.TYPE);
+            } else if (RuleLanguage.listed(language.constants, word)) {
+                context.mark(c, ST.ENUM_MEMBER);
+            } else if (RuleLanguage.listed(language.functions, word) && u.is_punct(c + 1, 40)) {
+                context.mark(c, ST.FUNCTION);
+            } else {
+                context.mark(c, ST.VARIABLE);
+            }
+            c = c + 1;
+        }
+    }
+}
