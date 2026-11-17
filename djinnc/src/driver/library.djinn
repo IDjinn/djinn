@@ -983,6 +983,24 @@ struct Library {
         return true;
     }
 
+    // When cross-compiling, <dir>/<triple>/<name>.djlib (built for the target) is preferred over <dir>/<name>.djlib,
+    // which may then be a library of procedural macros built for the host.
+    public static unsafe ptr<i8> for_target(Options* options, ptr<i8> path) {
+        if (!Target.is_cross(options.target)) {
+            return path;
+        }
+        ptr<i8> directory = Linker.directory_of(path);
+        ByteBuffer* candidate = ByteBuffer.create();
+        candidate.append(directory);
+        candidate.append(Target.triple());
+        candidate.append("/");
+        candidate.append(path + strlen(directory));
+        if (Library.file_exists(candidate.cstr())) {
+            return candidate.cstr();
+        }
+        return path;
+    }
+
     public static unsafe i32 load(Options* options, ptr<i8> path, PointerList* diagnostics_list) {
         i32 length = 0;
         ptr<i8> data = Files.read_bytes(path, &length);
@@ -1015,9 +1033,18 @@ struct Library {
         i32 name_length = (i32)Library.get_u32(data, manifest_offset);
         i32 triple_at = manifest_offset + 4 + name_length;
         i32 triple_size = (i32)Library.get_u32(data, triple_at);
-        if (!Strings.equals(data + triple_at + 4, triple_size, Target.triple())) {
+        // While cross-compiling, a library built for the host only lends its procedural macros: they run in the JIT,
+        // and nothing of it is linked into the program.
+        bool for_target = Strings.equals(data + triple_at + 4, triple_size, Target.triple());
+        bool macros_only = !for_target && !Target.is_native() && Strings.equals(data + triple_at + 4, triple_size, Target.host_triple());
+        if (!for_target && !macros_only) {
             logger_error(Log.get(), "djinnc: '%s' targets a different triple than '%s'", path, Target.triple());
             return -1;
+        }
+        if (macros_only) {
+            Library.macro_objects().push((ptr)(data + object_offset));
+            Library.macro_object_sizes().push((ptr)(u64)object_size);
+            return Library.read_packed_files(path, data, interface_offset, interface_size, options, diagnostics_list);
         }
 
         if (!Library.link_dependencies(options, path, data, manifest_offset, manifest_size, triple_at + 4 + triple_size)) {
@@ -1031,8 +1058,10 @@ struct Library {
             Library.bitcode_sizes().push((ptr)(u64)bitcode_size);
         }
 
-        Library.macro_objects().push((ptr)(data + object_offset));
-        Library.macro_object_sizes().push((ptr)(u64)object_size);
+        if (Target.is_native()) {
+            Library.macro_objects().push((ptr)(data + object_offset));
+            Library.macro_object_sizes().push((ptr)(u64)object_size);
+        }
         if (options.run || options.check_only) {
             Library.resident().push((ptr)(data + object_offset));
             Library.resident_sizes().push((ptr)(u64)object_size);
@@ -1056,6 +1085,11 @@ struct Library {
         }
 
         library_loaded = 1;
+        return Library.read_packed_files(path, data, interface_offset, interface_size, options, diagnostics_list);
+    }
+
+    // Adds the source files packed in a library's interface, as headers of the program being compiled.
+    static unsafe i32 read_packed_files(ptr<i8> path, ptr<i8> data, i32 interface_offset, i32 interface_size, Options* options, PointerList* diagnostics_list) {
         LibraryInterface* context = (LibraryInterface*)Memory.zalloc(sizeof(LibraryInterface));
         if (!Library.read_interface(data, interface_offset, interface_size, context)) {
             logger_error(Log.get(), "djinnc: '%s' has an interface this compiler cannot read; build the library again with this djinnc", path);
