@@ -237,6 +237,30 @@ struct Lexer {
         return this.peek(0) == '"' && this.peek(1) == '"' && this.peek(2) == '"';
     }
 
+    void read_string_escape(ByteBuffer* value) {
+        i32 start = this.pos;
+        this.advance();
+        char escaped = this.advance();
+        if (escaped == 'n') {
+            value.append_char('\n');
+        } else if (escaped == 't') {
+            value.append_char('\t');
+        } else if (escaped == 'r') {
+            value.append_char('\r');
+        } else if (escaped == '0') {
+            value.append_byte(0);
+        } else if (escaped == 'u') {
+            value.append_utf8((i64)this.read_unicode_escape(start, 4));
+        } else if (escaped == 'U') {
+            value.append_utf8((i64)this.read_unicode_escape(start, 8));
+        } else if (escaped == '\\' || escaped == '"' || escaped == '\'' || escaped == '{' || escaped == '}') {
+            value.append_char(escaped);
+        } else {
+            this.error_at(start, "unknown escape sequence in a string literal");
+            value.append_char(escaped);
+        }
+    }
+
     void read_string(bool interpolating) {
         mut i32 start = this.pos;
         if (interpolating) {
@@ -274,15 +298,7 @@ struct Lexer {
         mut bool interpolated = false;
         while (this.pos < this.length && !this.at_string_end(is_block)) {
             if (!is_block && this.peek(0) == '\\') {
-                this.advance();
-                char escaped = this.advance();
-                if (escaped == 'n') {
-                    value.append_char('\n');
-                } else if (escaped == 't') {
-                    value.append_char('\t');
-                } else {
-                    value.append_char(escaped);
-                }
+                this.read_string_escape(value);
             } else if (counted_braces && this.peek(0) == '}') {
                 value.append_char(this.advance());
             } else if (counted_braces && this.peek(0) == '{' && this.count_run('{') < this.interpolation_braces) {

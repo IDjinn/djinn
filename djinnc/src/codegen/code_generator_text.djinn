@@ -1,8 +1,8 @@
 namespace djinnc;
 
 impl CodeGenerator {
-    Value* gen_text_value(Node* node, ptr text, u32 type) {
-        return this.gen_constant_text(node.text(), text, type);
+    unsafe Value* gen_text_value(Node* node, ptr text, u32 type) {
+        return Value.create(this.constant_text_n((u64)node.text_length(), text, type), type);
     }
 
     unsafe Value* gen_constant_text(ptr<i8> content, ptr text, u32 type) {
@@ -14,12 +14,16 @@ impl CodeGenerator {
     }
 
     unsafe ptr constant_text(ptr<i8> content, ptr data, u32 type) {
+        return this.constant_text_n((u64)strlen(content), data, type);
+    }
+
+    unsafe ptr constant_text_n(u64 length, ptr data, u32 type) {
         StructInfo* info = this.struct_of(type);
         PointerList* fields = info.fields;
         FieldInfo* length_field = (FieldInfo*)fields.get(1);
         ptr<ptr> values = CodeGenerator.array_of(3);
         values[0] = data;
-        values[1] = LLVMConstInt(this.llvm_type(length_field.type), (u64)strlen(content), 0);
+        values[1] = LLVMConstInt(this.llvm_type(length_field.type), length, 0);
         if (fields.length > 2) {
             FieldInfo* meta_field = (FieldInfo*)fields.get(2);
             values[2] = LLVMConstInt(this.llvm_type(meta_field.type), 1, 0);
@@ -121,11 +125,13 @@ impl CodeGenerator {
     }
 
     ptr string_constant(ptr<i8> literal) {
-        mut ptr<i8> text = literal;
-        if (text == null) {
-            text = "";
+        if (literal == null) {
+            return this.string_constant_n("", 0);
         }
-        u64 length = (u64)strlen(text);
+        return this.string_constant_n(literal, (u64)strlen(literal));
+    }
+
+    ptr string_constant_n(ptr<i8> text, u64 length) {
         ptr initializer = LLVMConstStringInContext2(this.context, text, length, 0);
         ptr global = LLVMAddGlobal(this.module, LLVMTypeOf(initializer), ".str");
         LLVMSetInitializer(global, initializer);
