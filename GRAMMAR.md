@@ -63,7 +63,12 @@ Immutable by default; `mut` requires the `unsafe` prefix. `mut const` is an erro
 ```ebnf
 extern_block         = [ "public" | "internal" ] "extern" [ STRING_LITERAL ] ( "{" { extern_function } "}" | extern_function ) ;
 extern_function      = [ attributes ] type IDENTIFIER "(" [ param_list ] [ "," "..." ] ")" ";" ;
+extern_binding       = "extern" ( "C" | "JS" ) "{" { [ attributes ] extern_struct } "}" ;
+extern_struct        = "struct" IDENTIFIER [ generic_params ] "{" { [ attributes ] extern_method } "}" ;
+extern_method        = [ "public" ] [ "static" ] type IDENTIFIER [ generic_params ] "(" [ param_list ] ")" ";" ;
 ```
+
+`extern "C"` and `extern "JS"` can also declare structs, the interop bindings of a platform. The struct has no fields, constructors, properties or bodies: a value of it is an opaque handle, and it cannot be instantiated (`E3068`). The methods are provided by the platform: in `extern "JS"` each one needs a `[Js("template")]` (`$this`, `$0`..`$9`, `$*`) and exists only with `--target web`; in `extern "C"` each one needs `[Symbol("c_name")]` and links against that C symbol. Calling a binding on the wrong target is `E3069`; a method without its `[Js]` or `[Symbol]` is `E3070`. `abstract` is not needed (nor allowed) inside the block. Any other string (`extern "mod"`) is still a WebAssembly module and declares functions only.
 
 With `--strict-externs`, an extern is visible only in the file that declares it (without it, every extern is visible everywhere; externs of the core library are always visible). `public extern` makes it visible to every file that sees its namespace (core, `std` and shared libc declarations use it). `internal extern` makes it visible to every file of the same namespace only.
 
@@ -113,7 +118,7 @@ operator_signature   = type "operator" operator_symbol "(" [ param_list ] ")" ";
 ### Struct and Impl
 
 ```ebnf
-struct               = [ attributes ] [ "constexpr" ] "struct" IDENTIFIER [ generic_params ] [ where_clause ] [ struct_base ] ( ";" | struct_body ) ;
+struct               = [ attributes ] [ "constexpr" | "abstract" ] "struct" IDENTIFIER [ generic_params ] [ where_clause ] [ struct_base ] ( ";" | struct_body ) ;
 struct_base          = ":" [ "interface" ] type { "," type } ;
 struct_body          = "{" { member } "}" ;
 member               = field_decl | property | method | constructor | operator_decl | const_decl ;
@@ -122,7 +127,7 @@ field_decl           = [ attributes ] [ modifiers ] [ "mut" ] type IDENTIFIER [ 
 property             = [ modifiers ] type IDENTIFIER ( "{" { getter | setter } "}" | "=>" expression ";" ) ;
 getter               = "get" ( ";" | "=>" expression ";" | block ) ;
 setter               = "set" ( ";" | "=>" expression ";" | block ) ;
-method               = [ attributes ] [ modifiers ] [ "async" | "sync" ] type IDENTIFIER [ generic_params ] "(" [ param_list ] ")"
+method               = [ attributes ] [ modifiers ] [ "abstract" ] [ "async" | "sync" ] type IDENTIFIER [ generic_params ] "(" [ param_list ] ")"
                        [ where_clause ] [ throws_clause ] { contract_clause } ( ";" | "=>" expression ";" | block ) ;
 constructor          = IDENTIFIER "(" [ param_list ] ")" block ;
 operator_decl        = [ modifiers ] type "operator" operator_symbol "(" [ param_list ] ")" ( "=>" expression ";" | block ) ;

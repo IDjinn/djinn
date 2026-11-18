@@ -61,6 +61,22 @@ impl SemanticAnalyzer {
         if (this.is_library_declaration(declaration, info)) {
             info.is_extern = true;
             info.from_library = true;
+        } else if (declaration.kind() == NodeKind::FUNCTION && (declaration.op() & 512) != 0 && owner != null) {
+            info.is_abstract = true;
+            this.check_extern_binding(declaration, owner);
+        }
+    }
+
+    // A method of an extern "JS" struct is a [Js("...")] template, one of an extern "C" struct names its C symbol.
+    unsafe void check_extern_binding(Node* declaration, StructInfo* owner) {
+        if (owner.node == null || owner.node.kind() != NodeKind::STRUCT_DECL || owner.origin != null) {
+            return;
+        }
+        i32 kind = owner.node.op() & 6;
+        if (kind == 2 && !Attributes.has(declaration, "Js")) {
+            this.error_code(declaration, DiagnosticErrors.EXTERN_BINDING_MISSING, "a method of an extern \"JS\" struct needs a [Js(\"...\")] template");
+        } else if (kind == 4 && !Attributes.has(declaration, "Symbol")) {
+            this.error_code(declaration, DiagnosticErrors.EXTERN_BINDING_MISSING, "a method of an extern \"C\" struct needs a [Symbol(\"name\")] attribute");
         }
     }
 
@@ -158,6 +174,8 @@ impl SemanticAnalyzer {
         }
         name.append_char('>');
         info.name = name.cstr();
+        info.is_abstract = template.is_abstract;
+        info.is_extern = template.is_extern;
         info.bindings = bindings;
         info.mode_bindings = mode_bindings;
         symbols.add_function_instance(info);
