@@ -20,7 +20,8 @@ operators            = "+" "-" "*" "/" "%" "++" "--" "==" "!=" "<" "<=" ">" ">="
 
 INTEGER_LITERAL      = DIGIT_SEQ [ EXPONENT ] [ overflow_suffix ] ;     (* 42, 420_000, 800'000'000, 1e9, 123w, 123t, 123c, 123s *)
 FLOAT_LITERAL        = DIGIT_SEQ "." DIGIT_SEQ [ EXPONENT ] ;           (* 3.14, 2.5e-3 *)
-STRING_LITERAL       = '"' { any_char | escape } '"' | '"""' { any_char } '"""' ;
+STRING_LITERAL       = '"' { any_char | string_escape } '"' | '"""' { any_char } '"""' ;
+string_escape        = "\\" ( "n" | "t" | "r" | "0" | "\\" | '"' | "'" | "{" | "}" | "u" HEX4 | "U" HEX8 ) ;   (* same escapes as char literals; any other escape is an error; block strings are raw *)
 CHAR_LITERAL         = "'" ( any_char | escape | "\u" HEX4 | "\U" HEX8 ) "'" ;   (* one Unicode scalar value, type char *)
 INTERP_STRING        = { "$" } ( '"' | '"""' ) { text | brace_group } ( '"' | '"""' ) ;
 brace_group          = "{" expression [ ":" format ] "}" ;

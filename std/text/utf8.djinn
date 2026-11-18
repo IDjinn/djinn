@@ -9,7 +9,7 @@ struct Utf8 {
     public const str REPLACEMENT = "�";
 
     // The length of the well-formed sequence starting at 'index' (1 to 4), or 0 when the bytes there are not one.
-    public static unsafe size sequence_length(i8* data, size length, size index) {
+    [ForceInline] public static unsafe size sequence_length(i8* data, size length, size index) {
         u32 lead = (u32)(u8)data[index];
         if (lead < 128) {
             return 1u;
@@ -53,7 +53,7 @@ struct Utf8 {
     }
 
     // Skips the ASCII run at 'index' eight bytes at a time (the common case for markup, code and JSON).
-    public static unsafe size skip_ascii(i8* data, size length, size index) {
+    [ForceInline] public static unsafe size skip_ascii(i8* data, size length, size index) {
         mut size i = index;
         mut u64 word = 0;
         while (i + 8u <= length) {
@@ -80,6 +80,25 @@ struct Utf8 {
             i = i + width;
         }
         return true;
+    }
+
+    [ForceInline] public static unsafe bool is_valid_text(str text) {
+        return Utf8.is_valid(text.data, text.length);
+    }
+
+    [ForceInline] public static unsafe char decode_at(str text, size index) {
+        Debug.assert(index < text.length, "decode_at - index out of bounds");
+        size width = Utf8.sequence_length(text.data, text.length, index);
+        Debug.assert(width != 0u, "decode_at - invalid utf-8 sequence");
+        u32 lead = (u32)(u8)text.data[index];
+        if (width == 1u) {
+            return (char)lead;
+        }
+        mut u32 code = lead & (255 >> (width + 1u));
+        for (mut size k = 1u; k < width; k = k + 1u) {
+            code = (code << 6) | ((u32)(u8)text.data[index + k] & 63);
+        }
+        return (char)code;
     }
 
     // The offset of the first byte that does not start a well-formed sequence, or 'length' when all are valid.

@@ -1,8 +1,80 @@
 namespace djinnc;
 
 impl CodeGenerator {
-    Value* gen_text_value(Node* node, ptr text, u32 type) {
-        return this.gen_constant_text(node.text(), text, type);
+    unsafe Value* gen_expression(Node* node) {
+        i32 conversion = node.text_conversion();
+        if (conversion == 0) {
+            return this.gen_expression_plain(node);
+        }
+        Value* pointer = this.gen_expression_plain(node);
+        if (conversion >= 3) {
+            return this.cstring_of_text(pointer.ref, conversion == 4);
+        }
+        mut u32 target = this.symbols_core_type("str");
+        if (conversion == 2) {
+            target = this.symbols_core_type("string");
+        }
+        return this.text_of_cstring(pointer.ref, target);
+    }
+
+    unsafe Value* cstring_of_text(ptr text, bool owned) {
+        ptr pointer_llvm = LLVMPointerTypeInContext(this.context, 0);
+        ptr i64_type = LLVMIntTypeInContext(this.context, 64);
+        ptr byte_type = LLVMIntTypeInContext(this.context, 8);
+        ptr data = LLVMBuildExtractValue(this.builder, text, 0, "text.data");
+        ptr length = LLVMBuildIntCast2(this.builder, LLVMBuildExtractValue(this.builder, text, 1, "text.size"), i64_type, 0, "text.length");
+        if (owned) {
+            return Value.create(data, Types.byte_pointer());
+        }
+        ptr total = LLVMBuildAdd(this.builder, length, LLVMConstInt(i64_type, 1, 0), "cstring.total");
+        ptr<ptr> alloc_parameters = CodeGenerator.array_of(1);
+        alloc_parameters[0] = i64_type;
+        ptr allocator_type = LLVMFunctionType(pointer_llvm, alloc_parameters, 1, 0);
+        ptr allocator = this.allocator_function("__djinn_alloc", allocator_type);
+        ptr<ptr> alloc_arguments = CodeGenerator.array_of(1);
+        alloc_arguments[0] = total;
+        ptr buffer = LLVMBuildCall2(this.builder, allocator_type, allocator, alloc_arguments, 1, "cstring.buffer");
+        ptr<ptr> copy_parameters = CodeGenerator.array_of(3);
+        ptr<ptr> copy_arguments = CodeGenerator.array_of(3);
+        copy_parameters[0] = pointer_llvm;
+        copy_parameters[1] = pointer_llvm;
+        copy_parameters[2] = i64_type;
+        copy_arguments[0] = buffer;
+        copy_arguments[1] = data;
+        copy_arguments[2] = length;
+        this.call_runtime("memcpy", pointer_llvm, copy_parameters, copy_arguments, 3);
+        ptr<ptr> indices = CodeGenerator.array_of(1);
+        indices[0] = length;
+        ptr terminator = LLVMBuildGEP2(this.builder, byte_type, buffer, indices, 1, "cstring.end");
+        LLVMBuildStore(this.builder, LLVMConstInt(byte_type, 0, 0), terminator);
+        return Value.create(buffer, Types.byte_pointer());
+    }
+
+    unsafe Value* text_of_cstring(ptr data, u32 type) {
+        StructInfo* info = this.struct_of(type);
+        PointerList* fields = info.fields;
+        FieldInfo* length_field = (FieldInfo*)fields.get(1);
+        ptr pointer_llvm = LLVMPointerTypeInContext(this.context, 0);
+        ptr i64_type = LLVMIntTypeInContext(this.context, 64);
+        ptr<ptr> parameters = CodeGenerator.array_of(1);
+        ptr<ptr> arguments = CodeGenerator.array_of(1);
+        parameters[0] = pointer_llvm;
+        arguments[0] = data;
+        ptr length = this.call_runtime("strlen", i64_type, parameters, arguments, 1);
+        ptr length_type = this.llvm_type(length_field.type);
+        ptr narrowed = LLVMBuildIntCast2(this.builder, length, length_type, 0, "cstring.length");
+        mut ptr text = LLVMGetUndef(this.llvm_type(type));
+        text = LLVMBuildInsertValue(this.builder, text, data, 0, "cstring.data");
+        text = LLVMBuildInsertValue(this.builder, text, narrowed, 1, "cstring.size");
+        if (fields.length > 2) {
+            FieldInfo* meta_field = (FieldInfo*)fields.get(2);
+            text = LLVMBuildInsertValue(this.builder, text, LLVMConstInt(this.llvm_type(meta_field.type), 1, 0), 2, "cstring.meta");
+        }
+        return Value.create(text, type);
+    }
+
+    unsafe Value* gen_text_value(Node* node, ptr text, u32 type) {
+        return Value.create(this.constant_text_n((u64)node.text_length(), text, type), type);
     }
 
     unsafe Value* gen_constant_text(ptr<i8> content, ptr text, u32 type) {
@@ -14,12 +86,16 @@ impl CodeGenerator {
     }
 
     unsafe ptr constant_text(ptr<i8> content, ptr data, u32 type) {
+        return this.constant_text_n((u64)strlen(content), data, type);
+    }
+
+    unsafe ptr constant_text_n(u64 length, ptr data, u32 type) {
         StructInfo* info = this.struct_of(type);
         PointerList* fields = info.fields;
         FieldInfo* length_field = (FieldInfo*)fields.get(1);
         ptr<ptr> values = CodeGenerator.array_of(3);
         values[0] = data;
-        values[1] = LLVMConstInt(this.llvm_type(length_field.type), (u64)strlen(content), 0);
+        values[1] = LLVMConstInt(this.llvm_type(length_field.type), length, 0);
         if (fields.length > 2) {
             FieldInfo* meta_field = (FieldInfo*)fields.get(2);
             values[2] = LLVMConstInt(this.llvm_type(meta_field.type), 1, 0);
@@ -121,11 +197,13 @@ impl CodeGenerator {
     }
 
     ptr string_constant(ptr<i8> literal) {
-        mut ptr<i8> text = literal;
-        if (text == null) {
-            text = "";
+        if (literal == null) {
+            return this.string_constant_n("", 0);
         }
-        u64 length = (u64)strlen(text);
+        return this.string_constant_n(literal, (u64)strlen(literal));
+    }
+
+    ptr string_constant_n(ptr<i8> text, u64 length) {
         ptr initializer = LLVMConstStringInContext2(this.context, text, length, 0);
         ptr global = LLVMAddGlobal(this.module, LLVMTypeOf(initializer), ".str");
         LLVMSetInitializer(global, initializer);
