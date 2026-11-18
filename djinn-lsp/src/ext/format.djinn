@@ -1,0 +1,432 @@
+namespace djinnc;
+
+// Output of the macro formatter: lines are written lazily, so a line only exists once something is put on it, and
+// every line starts with the indent of the line that holds the macro plus four spaces per nesting level.
+struct Layout {
+    ByteBuffer* out;
+    ptr<i8> lead;
+    i32 lead_length;
+    i32 depth;
+    bool fresh;
+    bool started;
+    i32 last;
+
+    public static unsafe Layout* create(ptr<i8> lead, i32 lead_length) {
+        Layout* layout = (Layout*)calloc(1, sizeof(Layout));
+        layout.out = ByteBuffer.create();
+        layout.lead = lead;
+        layout.lead_length = lead_length;
+        layout.fresh = true;
+        return layout;
+    }
+
+    public unsafe void put(i32 c) {
+        if (this.fresh) {
+            this.out.append_byte(10);
+            this.out.append_slice(this.lead, this.lead_length);
+            for (mut i32 i = 0; i <= this.depth; i = i + 1) {
+                this.out.append("    ");
+            }
+            this.fresh = false;
+            this.started = true;
+        }
+        this.out.append_byte(c);
+        this.last = c;
+    }
+
+    public unsafe void newline() {
+        this.fresh = true;
+    }
+
+    public unsafe ByteBuffer* finish() {
+        if (!this.started) {
+            return (ByteBuffer*)0;
+        }
+        this.out.append_byte(10);
+        this.out.append_slice(this.lead, this.lead_length);
+        return this.out;
+    }
+}
+
+// Re-indents the body of the macros bound to a built-in language (`css!`, `html!`) the way a block is written by hand:
+// one rule or declaration per line for CSS, one element per line (text-only elements stay on one) for markup.
+// Bodies with comments, unbalanced braces or unbalanced tags are left exactly as they are.
+struct Format {
+    const i32 OPEN = 1;
+    const i32 CLOSE = 2;
+    const i32 SELF = 3;
+    const i32 TEXT = 4;
+    const i32 EXPR = 5;
+
+    static unsafe bool blank(i32 c) {
+        return c == 32 || c == 9 || c == 10 || c == 13;
+    }
+
+    // The end (exclusive) of the double-quoted string that starts at 'at', or -1.
+    static unsafe i32 string_end(ptr<i8> t, i32 at, i32 to) {
+        mut i32 i = at + 1;
+        while (i < to) {
+            if (t[i] == 92) {
+                i = i + 2;
+                continue;
+            }
+            if (t[i] == 34) {
+                return i + 1;
+            }
+            i = i + 1;
+        }
+        return 0 - 1;
+    }
+
+    // The end (exclusive) of the `{...}` group that starts at 'at', or -1.
+    static unsafe i32 group_end(ptr<i8> t, i32 at, i32 to) {
+        mut i32 depth = 0;
+        mut i32 i = at;
+        while (i < to) {
+            if (t[i] == 34) {
+                i32 end = Format.string_end(t, i, to);
+                if (end < 0) {
+                    return 0 - 1;
+                }
+                i = end;
+                continue;
+            }
+            if (t[i] == 123) {
+                depth = depth + 1;
+            } else if (t[i] == 125) {
+                depth = depth - 1;
+                if (depth == 0) {
+                    return i + 1;
+                }
+            }
+            i = i + 1;
+        }
+        return 0 - 1;
+    }
+
+    static unsafe ByteBuffer* css(ptr<i8> t, i32 from, i32 to, ptr<i8> lead, i32 lead_length) {
+        Layout* l = Layout.create(lead, lead_length);
+        mut i32 parens = 0;
+        mut bool space = false;
+        mut i32 i = from;
+        while (i < to) {
+            i32 c = (i32)t[i];
+            if (Format.blank(c)) {
+                space = true;
+                i = i + 1;
+                continue;
+            }
+            if (c == 47 && i + 1 < to && (t[i + 1] == 47 || t[i + 1] == 42)) {
+                return (ByteBuffer*)0;
+            }
+            if (c == 125 && parens == 0) {
+                if (l.depth == 0) {
+                    return (ByteBuffer*)0;
+                }
+                l.depth = l.depth - 1;
+                l.newline();
+                l.put(125);
+                l.newline();
+                space = false;
+                i = i + 1;
+                continue;
+            }
+            if (space && !l.fresh) {
+                l.put(32);
+            }
+            space = false;
+            if (c == 34) {
+                i32 end = Format.string_end(t, i, to);
+                if (end < 0) {
+                    return (ByteBuffer*)0;
+                }
+                for (mut i32 k = i; k < end; k = k + 1) {
+                    l.put((i32)t[k]);
+                }
+                i = end;
+                continue;
+            }
+            if (c == 123 && parens == 0) {
+                if (!l.fresh && l.last != 32) {
+                    l.put(32);
+                }
+                l.put(123);
+                l.depth = l.depth + 1;
+                l.newline();
+            } else if (c == 59 && parens == 0) {
+                l.put(59);
+                l.newline();
+            } else {
+                if (c == 40) {
+                    parens = parens + 1;
+                } else if (c == 41 && parens > 0) {
+                    parens = parens - 1;
+                }
+                l.put(c);
+            }
+            i = i + 1;
+        }
+        if (l.depth != 0 || parens != 0) {
+            return (ByteBuffer*)0;
+        }
+        return l.finish();
+    }
+
+    // Whitespace runs outside strings and `{...}` groups become one space; the ends are trimmed; a space before `>` goes.
+    static unsafe bool squeeze(Layout* l, ptr<i8> t, i32 from, i32 to) {
+        mut bool space = false;
+        mut bool wrote = false;
+        mut i32 i = from;
+        while (i < to) {
+            i32 c = (i32)t[i];
+            if (Format.blank(c)) {
+                space = true;
+                i = i + 1;
+                continue;
+            }
+            if (space && wrote && c != 62) {
+                l.put(32);
+            }
+            space = false;
+            wrote = true;
+            mut i32 end = i + 1;
+            if (c == 34) {
+                end = Format.string_end(t, i, to);
+            } else if (c == 123) {
+                end = Format.group_end(t, i, to);
+            }
+            if (end < 0) {
+                return false;
+            }
+            for (mut i32 k = i; k < end; k = k + 1) {
+                l.put((i32)t[k]);
+            }
+            i = end;
+        }
+        return true;
+    }
+
+    // The end (exclusive) of the tag that starts at 'at' (`<` ... `>`), or -1.
+    static unsafe i32 tag_end(ptr<i8> t, i32 at, i32 to) {
+        mut i32 i = at + 1;
+        while (i < to) {
+            if (t[i] == 34) {
+                i32 end = Format.string_end(t, i, to);
+                if (end < 0) {
+                    return 0 - 1;
+                }
+                i = end;
+                continue;
+            }
+            if (t[i] == 123) {
+                i32 end = Format.group_end(t, i, to);
+                if (end < 0) {
+                    return 0 - 1;
+                }
+                i = end;
+                continue;
+            }
+            if (t[i] == 62) {
+                return i + 1;
+            }
+            i = i + 1;
+        }
+        return 0 - 1;
+    }
+
+    static unsafe i32 tag_kind(ptr<i8> t, i32 at, i32 end) {
+        if (t[at + 1] == 47) {
+            return Format.CLOSE;
+        }
+        mut i32 e = at + 1;
+        while (e < end - 1 && !Format.blank((i32)t[e]) && t[e] != 47) {
+            e = e + 1;
+        }
+        if (e == at + 1) {
+            return 0;
+        }
+        mut i32 last = end - 2;
+        while (last > at && Format.blank((i32)t[last])) {
+            last = last - 1;
+        }
+        if (t[last] == 47 || Html.is_void(Strings.duplicate(t + at + 1, e - at - 1))) {
+            return Format.SELF;
+        }
+        return Format.OPEN;
+    }
+
+    static unsafe ByteBuffer* html(ptr<i8> t, i32 from, i32 to, ptr<i8> lead, i32 lead_length) {
+        i32 capacity = to - from + 2;
+        ptr<i32> kinds = (ptr<i32>)calloc((u64)capacity, 4);
+        ptr<i32> starts = (ptr<i32>)calloc((u64)capacity, 4);
+        ptr<i32> ends = (ptr<i32>)calloc((u64)capacity, 4);
+        mut i32 count = 0;
+        mut i32 i = from;
+        while (i < to) {
+            i32 c = (i32)t[i];
+            mut i32 end = i + 1;
+            mut i32 kind = Format.TEXT;
+            if (c == 60) {
+                if (i + 1 >= to || t[i + 1] == 33) {
+                    return (ByteBuffer*)0;
+                }
+                end = Format.tag_end(t, i, to);
+                if (end < 0) {
+                    return (ByteBuffer*)0;
+                }
+                kind = Format.tag_kind(t, i, end);
+                if (kind == 0) {
+                    return (ByteBuffer*)0;
+                }
+            } else if (c == 123) {
+                end = Format.group_end(t, i, to);
+                if (end < 0) {
+                    return (ByteBuffer*)0;
+                }
+                kind = Format.EXPR;
+            } else {
+                while (end < to && t[end] != 60 && t[end] != 123) {
+                    end = end + 1;
+                }
+            }
+            kinds[count] = kind;
+            starts[count] = i;
+            ends[count] = end;
+            count = count + 1;
+            i = end;
+        }
+        Layout* l = Layout.create(lead, lead_length);
+        mut i32 k = 0;
+        while (k < count) {
+            i32 kind = kinds[k];
+            if (kind == Format.TEXT) {
+                if (Format.squeeze(l, t, starts[k], ends[k]) && !l.fresh) {
+                    l.newline();
+                }
+            } else if (kind == Format.EXPR || kind == Format.SELF) {
+                Format.squeeze(l, t, starts[k], ends[k]);
+                l.newline();
+            } else if (kind == Format.CLOSE) {
+                if (l.depth == 0) {
+                    return (ByteBuffer*)0;
+                }
+                l.depth = l.depth - 1;
+                Format.squeeze(l, t, starts[k], ends[k]);
+                l.newline();
+            } else {
+                mut i32 m = k + 1;
+                while (m < count && (kinds[m] == Format.TEXT || kinds[m] == Format.EXPR)) {
+                    m = m + 1;
+                }
+                if (m < count && kinds[m] == Format.CLOSE) {
+                    Format.squeeze(l, t, starts[k], ends[k]);
+                    if (m > k + 1) {
+                        i32 body_from = ends[k];
+                        i32 body_to = starts[m];
+                        mut bool empty = true;
+                        for (mut i32 b = body_from; b < body_to; b = b + 1) {
+                            if (!Format.blank((i32)t[b])) {
+                                empty = false;
+                            }
+                        }
+                        if (!empty) {
+                            if (!Format.squeeze(l, t, body_from, body_to)) {
+                                return (ByteBuffer*)0;
+                            }
+                        }
+                    }
+                    Format.squeeze(l, t, starts[m], ends[m]);
+                    l.newline();
+                    k = m;
+                } else {
+                    Format.squeeze(l, t, starts[k], ends[k]);
+                    l.newline();
+                    l.depth = l.depth + 1;
+                }
+            }
+            k = k + 1;
+        }
+        if (l.depth != 0) {
+            return (ByteBuffer*)0;
+        }
+        return l.finish();
+    }
+
+    static unsafe i32 lead_length(Unit* u, i32 line) {
+        i32 start = u.line_starts[line];
+        mut i32 n = 0;
+        while (start + n < u.length && (u.text[start + n] == 32 || u.text[start + n] == 9)) {
+            n = n + 1;
+        }
+        return n;
+    }
+
+    static unsafe bool same(Unit* u, i32 from, i32 to, ByteBuffer* text) {
+        if (text.length != to - from) {
+            return false;
+        }
+        for (mut i32 i = 0; i < text.length; i = i + 1) {
+            if (text.data[i] != u.text[from + i]) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    public static unsafe ByteBuffer* edits(Unit* u) {
+        ByteBuffer* out = ByteBuffer.create();
+        out.append("[");
+        mut bool any = false;
+        EditorConfig* config = EditorConfig.get();
+        for (mut i32 c = 0; c + 3 < u.code_count; c = c + 1) {
+            if (!u.is_name(c) || !u.is_punct(c + 1, 33)) {
+                continue;
+            }
+            bool opens = u.is_punct(c + 2, 40) || u.is_punct(c + 2, 91) || u.is_punct(c + 2, 123);
+            if (!opens || u.is_word(c - 1, "macro")) {
+                continue;
+            }
+            i32 close = u.match[c + 2];
+            if (close <= c + 2) {
+                continue;
+            }
+            EmbedLanguage* language = config.bound(u.word_at(c));
+            if (language == null) {
+                continue;
+            }
+            i32 from = u.tend[u.code[c + 2]];
+            i32 to = u.tstart[u.code[close]];
+            i32 line = u.line_of(u.tstart[u.code[c]]);
+            i32 lead_length = Format.lead_length(u, line);
+            ptr<i8> lead = u.text + u.line_starts[line];
+            mut ByteBuffer* text = (ByteBuffer*)0;
+            if (language.builtin == EmbedKind.CSS) {
+                text = Format.css(u.text, from, to, lead, lead_length);
+            } else if (language.builtin == EmbedKind.HTML) {
+                text = Format.html(u.text, from, to, lead, lead_length);
+            }
+            if (text != null && !Format.same(u, from, to, text)) {
+                if (any) {
+                    out.append(",");
+                }
+                any = true;
+                i32 from_line = u.line_of(from);
+                i32 to_line = u.line_of(to);
+                out.append("{\"range\":{\"start\":{\"line\":");
+                out.append_int((i64)from_line);
+                out.append(",\"character\":");
+                out.append_int((i64)u.character_of_offset(from_line, from));
+                out.append("},\"end\":{\"line\":");
+                out.append_int((i64)to_line);
+                out.append(",\"character\":");
+                out.append_int((i64)u.character_of_offset(to_line, to));
+                out.append("}},\"newText\":");
+                out.append_json_string(text.cstr());
+                out.append("}");
+            }
+            c = close;
+        }
+        out.append("]");
+        return out;
+    }
+}

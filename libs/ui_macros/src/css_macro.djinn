@@ -1,0 +1,175 @@
+import std::meta;
+import std::types;
+import std::libc;
+import ui::markup;
+
+namespace ui::css;
+
+struct CssState {
+    mut TokenStream input;
+    mut bool failed;
+    mut i32 span;
+    mut str message;
+}
+
+// css!{ ... }: a stylesheet written as CSS, checked while compiling and expanded to the `str` of its text, so it goes
+// wherever a string did (Styles.add, Styles.once, a function returning the sheet, a file written at build time).
+//   css!{ .card { padding: 8px; &:hover { color: red; } } @media (width > 600px) { .card { padding: 16px; } } }
+// Rules, nesting and at-rules are read as blocks; every other statement must be `property: value`, with a known
+// property (custom properties `--x` and vendor prefixes `-webkit-` are always accepted). Strings use double quotes.
+struct CssMacro {
+    public static unsafe TokenStream expand(TokenStream input) {
+        mut CssState state = { .input = input, .failed = false, .span = 0 - 1, .message = "" };
+        mut TokenStream out = TokenStream.create();
+        CssMacro.scan(&state, 0, input.length());
+        if (state.failed) {
+            out.push(Token.error(state.span, state.message));
+            return out;
+        }
+        Tokens.quoted(&out, CssMacro.text(input), 0 - 1);
+        return out;
+    }
+
+    static unsafe void fail(CssState* s, i32 span, str message) {
+        if (!s.failed) {
+            s.failed = true;
+            s.span = span;
+            s.message = message;
+        }
+    }
+
+    static unsafe str text(TokenStream input) {
+        mut Chars chars = Chars.create();
+        for (mut u32 i = 0; i < input.length(); i = i + 1) {
+            Token token = input.get(i);
+            if (token.kind == TokenClass.STRING) {
+                chars.append_byte(34);
+                chars.append(token.text);
+                chars.append_byte(34);
+            } else {
+                chars.append(token.text);
+            }
+            if (i + 1 < input.length() && !token.joint && !CssMacro.tight(token, input.get(i + 1))) {
+                chars.append_byte(32);
+            }
+        }
+        return chars.view();
+    }
+
+    static unsafe bool tight(Token token, Token next) {
+        return token.kind == TokenClass.STRING && next.kind != TokenClass.STRING
+            && (Tokens.is_symbol(next, ";") || Tokens.is_symbol(next, ")") || Tokens.is_symbol(next, ",") || Tokens.is_symbol(next, "]"));
+    }
+
+    // The end of the statement that starts at 'from': its `;`, or the `{` of a block ((...) and [...] are skipped).
+    static unsafe u32 item_end(CssState* s, u32 from, u32 to) {
+        mut u32 i = from;
+        while (i < to) {
+            Token token = s.input.get(i);
+            if (token.kind == TokenClass.OPEN && !Tokens.is_symbol(token, "{")) {
+                i = s.input.matching(i) + 1;
+                continue;
+            }
+            if (token.kind == TokenClass.OPEN || Tokens.is_symbol(token, ";")) {
+                return i;
+            }
+            i = i + 1;
+        }
+        return to;
+    }
+
+    static unsafe void scan(CssState* s, u32 from, u32 to) {
+        mut u32 pos = from;
+        while (pos < to && !s.failed) {
+            u32 end = CssMacro.item_end(s, pos, to);
+            if (end >= to || !s.input.get(end).is_open()) {
+                if (end > pos) {
+                    CssMacro.declaration(s, pos, end);
+                }
+                pos = end + 1;
+                continue;
+            }
+            if (end == pos) {
+                CssMacro.fail(s, s.input.get(end).span, "a rule needs a selector before '{'");
+                return;
+            }
+            u32 close = s.input.matching(end);
+            CssMacro.scan(s, end + 1, close);
+            pos = close + 1;
+        }
+    }
+
+    static unsafe void declaration(CssState* s, u32 from, u32 to) {
+        Token first = s.input.get(from);
+        if (Tokens.is_symbol(first, "@")) {
+            return;
+        }
+        mut u32 colon = from;
+        while (colon < to && !Tokens.is_symbol(s.input.get(colon), ":")) {
+            if (s.input.get(colon).is_open()) {
+                colon = s.input.matching(colon);
+            }
+            colon = colon + 1;
+        }
+        if (colon >= to) {
+            CssMacro.fail(s, first.span, "expected 'property: value' or a rule with a block");
+            return;
+        }
+        if (colon == from) {
+            CssMacro.fail(s, first.span, "a declaration needs a property name before ':'");
+            return;
+        }
+        mut Chars name = Chars.create();
+        for (mut u32 i = from; i < colon; i = i + 1) {
+            name.append(s.input.get(i).text);
+        }
+        str property = name.view();
+        bool custom = property.length > 0 && property.data[0] == 45;
+        if (colon + 1 >= to && !(custom && property.length > 1 && property.data[1] == 45)) {
+            CssMacro.fail(s, first.span, "the property has no value");
+            return;
+        }
+        if (!custom && !CssProperties.known(property)) {
+            mut Chars message = Chars.create();
+            message.append("unknown CSS property '");
+            message.append(property);
+            message.append("'");
+            CssMacro.fail(s, first.span, message.view());
+        }
+    }
+}
+
+// A procedural macro runs in the compiler's JIT, where only the runtime is linked: std methods such as str.contains
+// are not available to it, so the search is written out.
+struct CssProperties {
+    static unsafe bool known(str name) {
+        mut Chars word = Chars.create();
+        word.append_byte(32);
+        for (mut u32 i = 0; i < (u32)name.length; i = i + 1) {
+            mut i8 byte = name.data[i];
+            if (byte >= 65 && byte <= 90) {
+                byte = byte + 32;
+            }
+            word.append_byte(byte);
+        }
+        word.append_byte(32);
+        str needle = word.view();
+        str list = CssProperties.names();
+        mut u32 i = 0;
+        while (i + (u32)needle.length <= (u32)list.length) {
+            mut bool same = true;
+            for (mut u32 k = 0; k < (u32)needle.length && same; k = k + 1) {
+                same = list.data[i + k] == needle.data[k];
+            }
+            if (same) {
+                return true;
+            }
+            i = i + 1;
+        }
+        return false;
+    }
+
+    static str names() {
+        return " accent-color align-content align-items align-self alignment-baseline all anchor-name animation animation-composition animation-delay animation-direction animation-duration animation-fill-mode animation-iteration-count animation-name animation-play-state animation-range animation-range-end animation-range-start animation-timeline animation-timing-function appearance aspect-ratio backdrop-filter backface-visibility background background-attachment background-blend-mode background-clip background-color background-image background-origin background-position background-position-x background-position-y background-repeat background-size baseline-shift block-size border border-block border-block-color border-block-end border-block-end-color border-block-end-style border-block-end-width border-block-start border-block-start-color border-block-start-style border-block-start-width border-block-style border-block-width border-bottom border-bottom-color border-bottom-left-radius border-bottom-right-radius border-bottom-style border-bottom-width border-collapse border-color border-end-end-radius border-end-start-radius border-image border-image-outset border-image-repeat border-image-slice border-image-source border-image-width border-inline border-inline-color border-inline-end border-inline-end-color border-inline-end-style border-inline-end-width border-inline-start border-inline-start-color border-inline-start-style border-inline-start-width border-inline-style border-inline-width border-left border-left-color border-left-style border-left-width border-radius border-right border-right-color border-right-style border-right-width border-spacing border-start-end-radius border-start-start-radius border-style border-top border-top-color border-top-left-radius border-top-right-radius border-top-style border-top-width border-width bottom box-decoration-break box-shadow box-sizing break-after break-before break-inside caption-side caret-color clear clip clip-path clip-rule color color-interpolation color-scheme column-count column-fill column-gap column-rule column-rule-color column-rule-style column-rule-width column-span column-width columns contain contain-intrinsic-block-size contain-intrinsic-height contain-intrinsic-inline-size contain-intrinsic-size contain-intrinsic-width container container-name container-type content content-visibility counter-increment counter-reset counter-set cursor cx cy d direction display dominant-baseline empty-cells fill fill-opacity fill-rule filter flex flex-basis flex-direction flex-flow flex-grow flex-shrink flex-wrap float flood-color flood-opacity font font-family font-feature-settings font-kerning font-language-override font-optical-sizing font-palette font-size font-size-adjust font-stretch font-style font-synthesis font-variant font-variant-alternates font-variant-caps font-variant-east-asian font-variant-ligatures font-variant-numeric font-variant-position font-variation-settings font-weight forced-color-adjust gap grid grid-area grid-auto-columns grid-auto-flow grid-auto-rows grid-column grid-column-end grid-column-start grid-row grid-row-end grid-row-start grid-template grid-template-areas grid-template-columns grid-template-rows hanging-punctuation height hyphenate-character hyphens image-orientation image-rendering initial-letter inline-size inset inset-block inset-block-end inset-block-start inset-inline inset-inline-end inset-inline-start isolation justify-content justify-items justify-self left letter-spacing lighting-color line-break line-clamp line-height list-style list-style-image list-style-position list-style-type margin margin-block margin-block-end margin-block-start margin-bottom margin-inline margin-inline-end margin-inline-start margin-left margin-right margin-top marker marker-end marker-mid marker-start mask mask-clip mask-composite mask-image mask-mode mask-origin mask-position mask-repeat mask-size mask-type max-block-size max-height max-inline-size max-width min-block-size min-height min-inline-size min-width mix-blend-mode object-fit object-position offset offset-anchor offset-distance offset-path offset-rotate opacity order orphans outline outline-color outline-offset outline-style outline-width overflow overflow-anchor overflow-block overflow-clip-margin overflow-inline overflow-wrap overflow-x overflow-y overscroll-behavior overscroll-behavior-block overscroll-behavior-inline overscroll-behavior-x overscroll-behavior-y padding padding-block padding-block-end padding-block-start padding-bottom padding-inline padding-inline-end padding-inline-start padding-left padding-right padding-top page page-break-after page-break-before page-break-inside paint-order perspective perspective-origin place-content place-items place-self pointer-events position position-anchor position-area position-try position-try-fallbacks position-try-order position-visibility print-color-adjust quotes r resize right rotate row-gap ruby-align ruby-position rx ry scale scroll-behavior scroll-margin scroll-margin-block scroll-margin-bottom scroll-margin-inline scroll-margin-left scroll-margin-right scroll-margin-top scroll-padding scroll-padding-block scroll-padding-bottom scroll-padding-inline scroll-padding-left scroll-padding-right scroll-padding-top scroll-snap-align scroll-snap-stop scroll-snap-type scroll-timeline scroll-timeline-axis scroll-timeline-name scrollbar-color scrollbar-gutter scrollbar-width shape-image-threshold shape-margin shape-outside shape-rendering speak stop-color stop-opacity stroke stroke-dasharray stroke-dashoffset stroke-linecap stroke-linejoin stroke-miterlimit stroke-opacity stroke-width tab-size table-layout text-align text-align-last text-anchor text-combine-upright text-decoration text-decoration-color text-decoration-line text-decoration-skip-ink text-decoration-style text-decoration-thickness text-emphasis text-emphasis-color text-emphasis-position text-emphasis-style text-indent text-justify text-orientation text-overflow text-rendering text-shadow text-transform text-underline-offset text-underline-position text-wrap text-wrap-mode text-wrap-style top touch-action transform transform-box transform-origin transform-style transition transition-behavior transition-delay transition-duration transition-property transition-timing-function translate unicode-bidi user-select vector-effect vertical-align view-timeline view-timeline-axis view-timeline-inset view-timeline-name view-transition-name visibility white-space white-space-collapse widows width will-change word-break word-spacing word-wrap writing-mode x y z-index zoom src font-display unicode-range descent-override ascent-override line-gap-override size-adjust syntax inherits initial-value ";
+    }
+}

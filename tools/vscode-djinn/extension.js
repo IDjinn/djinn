@@ -35,7 +35,7 @@ function findServer(context) {
   if (configured) {
     return configured;
   }
-  const candidates = [toolchain.installed("bin", exeName()), path.join(context.extensionPath, "bin", exeName())];
+  const candidates = [path.join(context.extensionPath, "bin", exeName()), toolchain.installed("bin", exeName())];
   for (const folder of vscode.workspace.workspaceFolders || []) {
     candidates.push(path.join(folder.uri.fsPath, "djinn-lsp", "build", exeName()));
   }

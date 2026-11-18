@@ -1,0 +1,242 @@
+namespace djinnc;
+
+// A stylesheet as the `css!` macro of libs/ui_macros reads it: rules and at-rules with blocks, and `property: value;`
+// declarations inside them. The body is lexed as Djinn tokens, so the words are classified here and the structure
+// checked with the same rules the macro applies when compiling.
+struct Css {
+    static unsafe bool wordlike(Unit* u, i32 c) {
+        i32 kind = u.kind_at(c);
+        return kind == Tk.IDENT || kind == Tk.KEYWORD || kind == Tk.TYPE;
+    }
+
+    static unsafe bool touching(Unit* u, i32 a, i32 b) {
+        return u.tend[u.code[a]] == u.tstart[u.code[b]];
+    }
+
+    static unsafe ptr<i8> text_of(Unit* u, i32 from, i32 to) {
+        i32 start = u.tstart[u.code[from]];
+        i32 end = u.tend[u.code[to - 1]];
+        return Strings.duplicate(u.text + start, end - start);
+    }
+
+    static unsafe void mark_range(EmbedContext* context, i32 from, i32 to, i32 type) {
+        for (mut i32 i = from; i < to; i = i + 1) {
+            context.mark(i, type);
+        }
+    }
+
+    // `font-size`, `min-width`: words joined by touching hyphens are one name.
+    static unsafe i32 name_end(Unit* u, i32 c, i32 to) {
+        mut i32 e = c + 1;
+        while (e + 1 < to && u.is_punct(e, 45) && Css.touching(u, e - 1, e) && Css.touching(u, e, e + 1) && (Css.wordlike(u, e + 1) || u.kind_at(e + 1) == Tk.NUMBER)) {
+            e = e + 2;
+        }
+        return e;
+    }
+
+    static unsafe bool group_start(Unit* u, i32 c) {
+        return u.is_punct(c, 40) || u.is_punct(c, 91);
+    }
+
+    static unsafe i32 item_end(Unit* u, i32 from, i32 to) {
+        mut i32 c = from;
+        while (c < to) {
+            if (Css.group_start(u, c) && u.match[c] > c) {
+                c = u.match[c] + 1;
+                continue;
+            }
+            if (u.is_punct(c, 123) || u.is_punct(c, 59)) {
+                return c;
+            }
+            c = c + 1;
+        }
+        return to;
+    }
+
+    public static unsafe void scan(EmbedContext* context, i32 from, i32 to) {
+        Unit* u = context.unit;
+        mut i32 pos = from;
+        while (pos < to) {
+            i32 end = Css.item_end(u, pos, to);
+            if (end >= to || !u.is_punct(end, 123)) {
+                if (end > pos) {
+                    Css.declaration(context, pos, end);
+                }
+                pos = end + 1;
+                continue;
+            }
+            i32 close = u.match[end];
+            if (end == pos) {
+                context.report(end, "css-rule-without-selector", "a rule needs a selector before '{'", 1);
+            } else {
+                Css.prelude(context, pos, end);
+            }
+            if (close <= end || close > to) {
+                return;
+            }
+            Css.scan(context, end + 1, close);
+            pos = close + 1;
+        }
+    }
+
+    // Selectors and the condition of an at-rule.
+    static unsafe void prelude(EmbedContext* context, i32 from, i32 to) {
+        Unit* u = context.unit;
+        bool at_rule = u.is_punct(from, 64);
+        mut i32 c = from;
+        while (c < to) {
+            if (u.is_punct(c, 64) && Css.wordlike(u, c + 1)) {
+                i32 stop = Css.name_end(u, c + 1, to);
+                context.mark(c, ST.DECORATOR);
+                Css.mark_range(context, c + 1, stop, ST.DECORATOR);
+                c = stop;
+            } else if (u.is_punct(c, 46) && Css.wordlike(u, c + 1) && Css.touching(u, c, c + 1)) {
+                i32 stop = Css.name_end(u, c + 1, to);
+                Css.mark_range(context, c + 1, stop, ST.CLASS);
+                c = stop;
+            } else if (u.is_punct(c, 35) && Css.wordlike(u, c + 1) && Css.touching(u, c, c + 1)) {
+                i32 stop = Css.name_end(u, c + 1, to);
+                Css.mark_range(context, c + 1, stop, ST.VARIABLE);
+                c = stop;
+            } else if (u.is_punct(c, 58)) {
+                mut i32 name = c + 1;
+                if (u.is_punct(name, 58)) {
+                    name = name + 1;
+                }
+                if (Css.wordlike(u, name) && Css.touching(u, name - 1, name)) {
+                    i32 stop = Css.name_end(u, name, to);
+                    Css.mark_range(context, name, stop, ST.KEYWORD);
+                    c = stop;
+                } else {
+                    c = c + 1;
+                }
+            } else if (u.is_punct(c, 91) && u.match[c] > c && u.match[c] <= to) {
+                Css.mark_range(context, c + 1, u.match[c], ST.PROPERTY);
+                c = u.match[c] + 1;
+            } else if (Css.wordlike(u, c)) {
+                i32 stop = Css.name_end(u, c, to);
+                mut i32 type = ST.TAG;
+                if (at_rule) {
+                    type = ST.KEYWORD;
+                    if (u.is_punct(stop, 58)) {
+                        type = ST.PROPERTY;
+                    }
+                }
+                Css.mark_range(context, c, stop, type);
+                c = stop;
+            } else {
+                if (u.is_punct(c, 62) || u.is_punct(c, 43) || u.is_punct(c, 126) || u.is_punct(c, 42) || u.is_punct(c, 38)) {
+                    context.mark(c, ST.OPERATOR);
+                }
+                c = c + 1;
+            }
+        }
+    }
+
+    static unsafe void declaration(EmbedContext* context, i32 from, i32 to) {
+        Unit* u = context.unit;
+        if (u.is_punct(from, 64)) {
+            Css.prelude(context, from, to);
+            return;
+        }
+        mut i32 colon = from;
+        while (colon < to && !u.is_punct(colon, 58)) {
+            if (Css.group_start(u, colon) && u.match[colon] > colon) {
+                colon = u.match[colon];
+            }
+            colon = colon + 1;
+        }
+        if (colon >= to) {
+            context.report(from, "css-expected-declaration", "expected 'property: value' or a rule with a block", 1);
+            return;
+        }
+        if (colon == from) {
+            context.report(from, "css-expected-declaration", "a declaration needs a property name before ':'", 1);
+            return;
+        }
+        ptr<i8> property = Css.text_of(u, from, colon);
+        bool custom = property[0] == 45;
+        if (custom) {
+            Css.mark_range(context, from, colon, ST.VARIABLE);
+        } else {
+            Css.mark_range(context, from, colon, ST.PROPERTY);
+            if (!CssProperties.known(property)) {
+                ByteBuffer* message = ByteBuffer.create();
+                message.append("unknown CSS property '");
+                message.append(property);
+                message.append("'");
+                context.report(from, "css-unknown-property", message.cstr(), 1);
+            }
+        }
+        if (colon + 1 >= to && !(custom && property[1] == 45)) {
+            context.report(from, "css-missing-value", "the property has no value", 1);
+            return;
+        }
+        Css.value(context, colon + 1, to);
+    }
+
+    static unsafe void value(EmbedContext* context, i32 from, i32 to) {
+        Unit* u = context.unit;
+        mut i32 c = from;
+        while (c < to) {
+            if (u.is_punct(c, 35) && c + 1 < to && Css.touching(u, c, c + 1)) {
+                mut i32 stop = c + 1;
+                while (stop < to && Css.touching(u, stop - 1, stop) && (Css.wordlike(u, stop) || u.kind_at(stop) == Tk.NUMBER)) {
+                    stop = stop + 1;
+                }
+                Css.mark_range(context, c, stop, ST.STRING);
+                c = stop;
+            } else if (u.is_punct(c, 45) && u.is_punct(c + 1, 45) && Css.wordlike(u, c + 2) && Css.touching(u, c, c + 1) && Css.touching(u, c + 1, c + 2)) {
+                i32 stop = Css.name_end(u, c + 2, to);
+                Css.mark_range(context, c, stop, ST.VARIABLE);
+                c = stop;
+            } else if (Css.wordlike(u, c)) {
+                i32 stop = Css.name_end(u, c, to);
+                mut i32 type = ST.ENUM_MEMBER;
+                if (u.is_punct(stop, 40) && Css.touching(u, stop - 1, stop)) {
+                    type = ST.FUNCTION;
+                } else if (c > from && u.kind_at(c - 1) == Tk.NUMBER && Css.touching(u, c - 1, c)) {
+                    type = ST.TYPE;
+                } else if (c > from && u.is_punct(c - 1, 33)) {
+                    type = ST.KEYWORD;
+                }
+                Css.mark_range(context, c, stop, type);
+                c = stop;
+            } else {
+                c = c + 1;
+            }
+        }
+    }
+}
+
+// The properties the css! macro accepts (custom properties `--x` and vendor prefixes `-webkit-` always are); the same
+// list as libs/ui_macros/src/css_macro.djinn.
+struct CssProperties {
+    static unsafe bool known(ptr<i8> name) {
+        i32 length = strlen(name);
+        ByteBuffer* word = ByteBuffer.create();
+        word.append(" ");
+        for (mut i32 i = 0; i < length; i = i + 1) {
+            mut i32 byte = (i32)name[i];
+            if (byte >= 65 && byte <= 90) {
+                byte = byte + 32;
+            }
+            word.append_char((char)byte);
+        }
+        word.append(" ");
+        ptr<i8> needle = word.cstr();
+        i32 needle_length = strlen(needle);
+        ptr<i8> list = CssProperties.names();
+        i32 list_length = strlen(list);
+        for (mut i32 i = 0; i + needle_length <= list_length; i = i + 1) {
+            if (Strings.equals(list + i, needle_length, needle)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static unsafe ptr<i8> names() {
+        return " accent-color align-content align-items align-self alignment-baseline all anchor-name animation animation-composition animation-delay animation-direction animation-duration animation-fill-mode animation-iteration-count animation-name animation-play-state animation-range animation-range-end animation-range-start animation-timeline animation-timing-function appearance aspect-ratio backdrop-filter backface-visibility background background-attachment background-blend-mode background-clip background-color background-image background-origin background-position background-position-x background-position-y background-repeat background-size baseline-shift block-size border border-block border-block-color border-block-end border-block-end-color border-block-end-style border-block-end-width border-block-start border-block-start-color border-block-start-style border-block-start-width border-block-style border-block-width border-bottom border-bottom-color border-bottom-left-radius border-bottom-right-radius border-bottom-style border-bottom-width border-collapse border-color border-end-end-radius border-end-start-radius border-image border-image-outset border-image-repeat border-image-slice border-image-source border-image-width border-inline border-inline-color border-inline-end border-inline-end-color border-inline-end-style border-inline-end-width border-inline-start border-inline-start-color border-inline-start-style border-inline-start-width border-inline-style border-inline-width border-left border-left-color border-left-style border-left-width border-radius border-right border-right-color border-right-style border-right-width border-spacing border-start-end-radius border-start-start-radius border-style border-top border-top-color border-top-left-radius border-top-right-radius border-top-style border-top-width border-width bottom box-decoration-break box-shadow box-sizing break-after break-before break-inside caption-side caret-color clear clip clip-path clip-rule color color-interpolation color-scheme column-count column-fill column-gap column-rule column-rule-color column-rule-style column-rule-width column-span column-width columns contain contain-intrinsic-block-size contain-intrinsic-height contain-intrinsic-inline-size contain-intrinsic-size contain-intrinsic-width container container-name container-type content content-visibility counter-increment counter-reset counter-set cursor cx cy d direction display dominant-baseline empty-cells fill fill-opacity fill-rule filter flex flex-basis flex-direction flex-flow flex-grow flex-shrink flex-wrap float flood-color flood-opacity font font-family font-feature-settings font-kerning font-language-override font-optical-sizing font-palette font-size font-size-adjust font-stretch font-style font-synthesis font-variant font-variant-alternates font-variant-caps font-variant-east-asian font-variant-ligatures font-variant-numeric font-variant-position font-variation-settings font-weight forced-color-adjust gap grid grid-area grid-auto-columns grid-auto-flow grid-auto-rows grid-column grid-column-end grid-column-start grid-row grid-row-end grid-row-start grid-template grid-template-areas grid-template-columns grid-template-rows hanging-punctuation height hyphenate-character hyphens image-orientation image-rendering initial-letter inline-size inset inset-block inset-block-end inset-block-start inset-inline inset-inline-end inset-inline-start isolation justify-content justify-items justify-self left letter-spacing lighting-color line-break line-clamp line-height list-style list-style-image list-style-position list-style-type margin margin-block margin-block-end margin-block-start margin-bottom margin-inline margin-inline-end margin-inline-start margin-left margin-right margin-top marker marker-end marker-mid marker-start mask mask-clip mask-composite mask-image mask-mode mask-origin mask-position mask-repeat mask-size mask-type max-block-size max-height max-inline-size max-width min-block-size min-height min-inline-size min-width mix-blend-mode object-fit object-position offset offset-anchor offset-distance offset-path offset-rotate opacity order orphans outline outline-color outline-offset outline-style outline-width overflow overflow-anchor overflow-block overflow-clip-margin overflow-inline overflow-wrap overflow-x overflow-y overscroll-behavior overscroll-behavior-block overscroll-behavior-inline overscroll-behavior-x overscroll-behavior-y padding padding-block padding-block-end padding-block-start padding-bottom padding-inline padding-inline-end padding-inline-start padding-left padding-right padding-top page page-break-after page-break-before page-break-inside paint-order perspective perspective-origin place-content place-items place-self pointer-events position position-anchor position-area position-try position-try-fallbacks position-try-order position-visibility print-color-adjust quotes r resize right rotate row-gap ruby-align ruby-position rx ry scale scroll-behavior scroll-margin scroll-margin-block scroll-margin-bottom scroll-margin-inline scroll-margin-left scroll-margin-right scroll-margin-top scroll-padding scroll-padding-block scroll-padding-bottom scroll-padding-inline scroll-padding-left scroll-padding-right scroll-padding-top scroll-snap-align scroll-snap-stop scroll-snap-type scroll-timeline scroll-timeline-axis scroll-timeline-name scrollbar-color scrollbar-gutter scrollbar-width shape-image-threshold shape-margin shape-outside shape-rendering speak stop-color stop-opacity stroke stroke-dasharray stroke-dashoffset stroke-linecap stroke-linejoin stroke-miterlimit stroke-opacity stroke-width tab-size table-layout text-align text-align-last text-anchor text-combine-upright text-decoration text-decoration-color text-decoration-line text-decoration-skip-ink text-decoration-style text-decoration-thickness text-emphasis text-emphasis-color text-emphasis-position text-emphasis-style text-indent text-justify text-orientation text-overflow text-rendering text-shadow text-transform text-underline-offset text-underline-position text-wrap text-wrap-mode text-wrap-style top touch-action transform transform-box transform-origin transform-style transition transition-behavior transition-delay transition-duration transition-property transition-timing-function translate unicode-bidi user-select vector-effect vertical-align view-timeline view-timeline-axis view-timeline-inset view-timeline-name view-transition-name visibility white-space white-space-collapse widows width will-change word-break word-spacing word-wrap writing-mode x y z-index zoom src font-display unicode-range descent-override ascent-override line-gap-override size-adjust syntax inherits initial-value ";
+    }
+}

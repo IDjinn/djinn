@@ -36,6 +36,17 @@ struct Card {
 void use_card() {
     auto d = html! { <Card title="x"/> };
 }
+
+str sheet() {
+    return css! {
+        .card:hover > p { color: #3b82f6; --gap: 4px; margin: -4px auto; }
+        @media (min-width: 600px) { .card { padding: 8px 1.5rem; background: var(--gap) !important; } }
+        .bad { colr: red; }
+        .none { color red; }
+        .empty { margin: ; }
+        { color: blue; }
+    };
+}
 """
 
 failures = []
@@ -85,6 +96,18 @@ check("rule language keyword", at(11, "select") == "keyword" and at(11, "from") 
 check("rule language function", at(11, "count") == "function", found)
 check("rule language plain word", at(11, "users") == "variable", found)
 
+check("css macro name is a macro", at(29, "css") == "macro", found)
+check("css class selector is a class", at(30, "card") == "class", found)
+check("css pseudo class is a keyword", at(30, "hover") == "keyword", found)
+check("css element selector is a tag", at(30, "p") == "tag", found)
+check("css property is a property", at(30, "color") == "property", found)
+check("css custom property is a variable", at(30, "gap") == "variable", found)
+check("css hex color is a string", at(30, "3b82f6") == "string", found)
+check("css keyword value is an enum member", at(30, "auto") == "enumMember", found)
+check("css at-rule is a decorator", at(31, "media") == "decorator", found)
+check("css function is a function", at(31, "var") == "function", found)
+check("css important is a keyword", at(31, "important") == "keyword", found)
+
 definition = client.request("textDocument/definition", {"textDocument": {"uri": uri}, "position": {"line": 25, "character": 29}})
 check("component attribute goes to the struct field", len(definition) == 1 and definition[0]["range"]["start"]["line"] == 21, definition)
 
@@ -95,6 +118,11 @@ check("mismatched closing tag is reported", "html-mismatched-tag" in codes, diag
 check("stray closing tag is reported", "html-unexpected-closing-tag" in codes, diagnostics)
 check("unclosed tag is reported", "html-unclosed-tag" in codes, diagnostics)
 check("well formed markup is clean", not any(d["range"]["start"]["line"] < 12 for d in diagnostics), diagnostics)
+check("unknown css property is reported", "css-unknown-property" in codes, diagnostics)
+check("css declaration without a colon is reported", "css-expected-declaration" in codes, diagnostics)
+check("css property without a value is reported", "css-missing-value" in codes, diagnostics)
+check("css rule without a selector is reported", "css-rule-without-selector" in codes, diagnostics)
+check("well formed css is clean", not any(d["range"]["start"]["line"] in (30, 31) for d in diagnostics), diagnostics)
 client.close()
 print("%d failure(s)" % len(failures))
 sys.exit(1 if failures else 0)
