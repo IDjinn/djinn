@@ -81,6 +81,35 @@ Lowercase tags are native elements, capitalized tags are components (structs wit
 fields, `Node children` receives the children). Text keeps the spaces written next to `{expr}` and drops them at tag
 boundaries (`{" "}` forces one). A component is moved to the heap when mounted and freed with its owner.
 
+## Styles as a macro (`css!`)
+
+`css!{ ... }` is a stylesheet written as CSS. It is read while compiling (rules, nesting, at-rules; every other
+statement must be `property: value` with a known property, custom properties `--x` and vendor prefixes always pass) and
+expands to the `str` of its text, so it goes wherever a string did. The editor highlights and checks it like `html!`
+(`djinn.editor` of `ui_macros`). Strings use double quotes; an unknown property, a missing `:` or value, or a rule
+without a selector is a compile error at that spot.
+
+```djinn
+struct Card {
+    str title;
+
+    public unsafe Node render() {
+        Styles.once(css!{
+            .card { padding: 8px 1.5rem; border-radius: 8px; &:hover { background-color: #f1f5f9; } }
+            @media (min-width: 600px) { .card { padding: 16px; } }
+        });
+        return html!{ <section class="card">{this.title}</section> };
+    }
+}
+```
+
+- A component keeps its sheet next to its `render()` with `Styles.once` (the same text is added a single time however
+  often the component mounts); an app-wide sheet is `Styles.add(css!{...})` at startup.
+- It is still a string: `Styles.add("...")`, a `.css` file read at build time or the output of a tool (Tailwind CLI)
+  work as before, and `css!` can be returned from a function (`static str css() { return css!{...}; }`).
+- Limit: the lexer reads the body as Djinn tokens, so `'single quotes'` and `//` are not CSS here, and a class or
+  identifier named `macro` is read as a macro declaration.
+
 ## Render modes
 
 Declared in code, the most specific wins:
