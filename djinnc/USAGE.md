@@ -91,11 +91,13 @@ Objects are emitted directly through LLVM-C (`LLVMTargetMachineEmitToFile`); the
 
 ### The web target
 
-`djinnc app.djinn --target web -o public/app` (or a project directory) compiles the program to one JavaScript file,
-`public/app.js`, loaded by a plain `<script src="app.js" defer>`. There is no WebAssembly and no runtime to download:
-after the type checker, the JavaScript emitter (`codegen/js`) walks the typed tree and writes only what `main`
-reaches, in front of which it inlines the small runtime (`runtime/js/djinn.js`) and the `.js` files of the bindings
-the program uses.
+`djinnc app.djinn --target web -o public/app` (or a project directory) compiles the program to JavaScript in two
+files: `public/app.js`, the program, loaded by `<script type="module" src="app.js"></script>`, and
+`public/djinn.<hash>.js`, the runtime, which the program imports. There is no WebAssembly: after the type checker, the
+JavaScript emitter (`codegen/js`) walks the typed tree and writes only what `main` reaches into the program. The
+runtime is system code (`runtime/js/djinn.js` and the `.js` files of the libraries the program uses): the same for every
+program built with the same libraries, and it is named after its content, so a page can cache it for good and a new
+build of the program does not invalidate it. The program takes from it only the names it uses.
 
 - A function is a plain JS function (`Point.sum` becomes `app$Point$sum(self)`), a struct value an object literal with
   every field in declaration order (one shape per struct), a `fn` value a JS closure, `str` and `string` JS strings,
@@ -111,6 +113,12 @@ the program uses.
   ... for the arguments and `$*` for all of them; the function itself is never emitted. That is how a binding reaches
   the browser with no wrapper in between: `[Js("$read($this)")] public T get()` makes `count.get()` the call
   `$read(count)`.
+- Islands: an `[Island("Name")]` function is a root of the program besides `main`, and the program registers each one
+  under its name (`$islands`), so a program built from a `[Application(render: server)]` app is its `[Client]` islands
+  and nothing the page itself does. The runtime keeps only the declarations the program reaches. A native server with
+  `--program app.js` (or an `app.js` in `--public`) writes the `<script>` for them and a `modulepreload` of the runtime,
+  sends the runtime with `Cache-Control: immutable` (`static-cache: <seconds>` in the `compiler:` section of `djinn.proj`, available to code as `Build.StaticCache`, a year by default; `--cache <seconds>` on the server wins; never in a debug build) and writes a program of
+  at most 2048 bytes into the page. See `libs/ui/README.md`.
 - Not supported yet (a `WEB_NOT_SUPPORTED` diagnostic says so): pointers and `unsafe` memory, `async`, `throws`, enum
   payloads, variadic packing outside `[Js]` bindings.
 - The platform is `web`, so `name.web.djinn` files and `[Platform(web)]` apply, and `Platform.Web` is true.

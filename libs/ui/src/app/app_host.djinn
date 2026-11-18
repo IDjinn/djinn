@@ -6,18 +6,29 @@ import std::net;
 
 namespace ui;
 
+// -1: not given on the command line, the project's static-cache (Build.StaticCache) stands
+unsafe static mut i64 serve_cache = -1;
+
 // Where App.run takes an application natively, the server side of a web app. With no arguments it renders the page
 // once and prints it. The program's own arguments choose otherwise:
 //   --out <dir>       a static site: every page reachable through links from "/" (and Router.declare) is written to
 //                     <dir>/<path>/index.html, rendered in the app's mode (hydrate pages are still hydrated)
 //   --serve <port>    a small HTTP server (Serve): pages are rendered per request, files come from --public
 //   --public <dir>    where djinn.js, the .wasm module and other files are served from (default: the current dir)
+//   --cache <seconds> how long a browser may keep the runtime (djinn.<hash>.js, named after its content). Default:
+//                     static-cache in djinn.proj, a year when it says nothing (immutable); 0 sends no-store. A debug
+//                     build (-g) never caches it.
+//   --program <file>  the JavaScript program built with --target web, a file of --public (app.js when there is one, for
+//                     a server or static app): pages that hold islands load
+//                     it (and preload the runtime it imports) instead of the WebAssembly host; a program of at most
+//                     2048 bytes is written into the page, one request fewer
 // The web version (app_host.web.djinn) mounts the app in the browser instead.
 struct AppHost {
     public static unsafe sync i32 run<T>(T app, u8 mode) {
         mut i8* out = (i8*)0;
         mut i32 port = 0;
         mut i8* public_dir = (i8*)".";
+        mut i8* program = (i8*)0;
         i32 count = Process.argc();
         for (mut i32 i = 1; i + 1 < count; i = i + 1) {
             i8* name = Process.argv(i) ?? (i8*)"";
@@ -31,7 +42,22 @@ struct AppHost {
             } else if (strcmp_text(name, "--public")) {
                 public_dir = value;
                 i = i + 1;
+            } else if (strcmp_text(name, "--cache")) {
+                serve_cache = (i64)atoi(value);
+                i = i + 1;
+            } else if (strcmp_text(name, "--program")) {
+                program = value;
+                i = i + 1;
             }
+        }
+        if (program != (i8*)0) {
+            if (!ClientProgram.use(public_dir, program)) {
+                printf("ui: cannot use the program '%s' in '%s' (it must import its runtime)\n", program, public_dir);
+                return 1;
+            }
+        } else if (mode == RenderMode.SERVER || mode == RenderMode.STATIC) {
+            // the islands are JavaScript: an app.js in the public directory is the program (WebAssembly is the add-on)
+            ClientProgram.use(public_dir, (i8*)"app.js");
         }
         if (out != (i8*)0) {
             return StaticSite.write<T>(app, mode, out);
@@ -43,6 +69,72 @@ struct AppHost {
         printf("%s\n", html.data);
         html.release();
         return 0;
+    }
+}
+
+// The JavaScript program of the page (--program): where its runtime is, and the program itself when it is small.
+struct ClientProgram {
+    // A program this small is written into the page; the runtime is still fetched, and the page saves the request
+    // for the program.
+    static unsafe u32 inline_limit() {
+        return 2048;
+    }
+
+    static unsafe i32 find(str text, str needle) {
+        for (mut u32 i = 0; i + (u32)needle.length <= (u32)text.length; i = i + 1) {
+            str here = { .data = text.data + i, .length = needle.length };
+            if (Texts.same(here, needle)) {
+                return (i32)i;
+            }
+        }
+        return -1;
+    }
+
+    public static unsafe bool use(i8* public_dir, i8* name) {
+        str root_text = { .data = public_dir, .length = (size)strlen(public_dir) };
+        result<Directory, FsError> opened = Directory.open_root_sync(Path.unchecked(root_text, true));
+        mut string body = "";
+        str file = { .data = name, .length = (size)strlen(name) };
+        mut TextBuffer url = TextBuffer.create();
+        url.append("/");
+        url.append(file);
+        str url_text = { .data = url.data, .length = (size)url.length };
+        bool found = switch opened { Ok root -> Serve.read_file(&root, url_text, &body), Error e -> false };
+        if (!found) {
+            return false;
+        }
+        // the program starts with: import "./djinn.<hash>.js";
+        str text = { .data = body.ptr(), .length = (size)body.length };
+        str marker = "import \"./";
+        i32 at = ClientProgram.find(text, marker);
+        if (at < 0) {
+            return false;
+        }
+        u32 from = (u32)at + (u32)marker.length;
+        mut u32 end = from;
+        while (end < (u32)text.length && text.data[end] != (i8)34) {
+            end = end + 1;
+        }
+        mut TextBuffer runtime = TextBuffer.create();
+        runtime.append("/");
+        str runtime_name = { .data = text.data + from, .length = (size)(end - from) };
+        runtime.append(runtime_name);
+        str runtime_url = { .data = Texts.copy(runtime.data, runtime.length), .length = (size)runtime.length };
+        str program_url = { .data = Texts.copy(url.data, url.length), .length = (size)url.length };
+        mut str inline = "";
+        if ((u32)text.length <= ClientProgram.inline_limit() && ClientProgram.find(text, "</script") < 0) {
+            // the import points at the runtime by its URL, not next to the program
+            mut TextBuffer code = TextBuffer.create();
+            str before = { .data = text.data, .length = (size)at };
+            str after = { .data = text.data + from, .length = (size)((u32)text.length - from) };
+            code.append(before);
+            code.append("import \"/");
+            code.append(after);
+            str kept = { .data = Texts.copy(code.data, code.length), .length = (size)code.length };
+            inline = kept;
+        }
+        Html.set_client_js(program_url, runtime_url, inline);
+        return true;
     }
 }
 
@@ -103,7 +195,7 @@ struct SitePages {
         Mounted mounted = App.mount<T>(app);
         mut Paths links = Paths.create();
         SitePages.collect(mounted.node.id, &links);
-        TextBuffer html = Html.document(mounted.node, mode == RenderMode.HYDRATE);
+        TextBuffer html = Html.document_as(mounted.node, mode == RenderMode.HYDRATE, Build.Debug);
         mounted.unmount();
         Reactive.set_static(false);
         Dom.set_static(false);
@@ -262,6 +354,30 @@ struct Serve {
     }
 
     static unsafe async void send(Socket* client, i32 status, str reason, str type, i8* body, u32 length) {
+        await Serve.send_cached(client, status, reason, type, "no-store", body, length);
+    }
+
+    // The runtime's name is made of its content (djinn.<hash>.js), so a file with that name never changes: it can be
+    // kept for as long as the browser likes.
+    static unsafe bool is_runtime(str path) {
+        str prefix = "/djinn.";
+        if (path.length < prefix.length + 4 || !Serve.ends_with(path, ".js")) {
+            return false;
+        }
+        str start = { .data = path.data, .length = prefix.length };
+        if (!Texts.same(start, prefix)) {
+            return false;
+        }
+        mut u32 dots = 0;
+        for (mut u32 i = 0; i < (u32)path.length; i = i + 1) {
+            if (path.data[i] == (i8)46) {
+                dots = dots + 1;
+            }
+        }
+        return dots == 2;
+    }
+
+    static unsafe async void send_cached(Socket* client, i32 status, str reason, str type, str cache, i8* body, u32 length) {
         mut TextBuffer head = TextBuffer.create();
         head.append("HTTP/1.0 ");
         head.append_number((i64)status);
@@ -272,7 +388,8 @@ struct Serve {
         head.append("Content-Length: ");
         head.append_number((i64)length);
         Serve.header(&head, "");
-        Serve.header(&head, "Cache-Control: no-store");
+        head.append("Cache-Control: ");
+        Serve.header(&head, cache);
         Serve.header(&head, "X-Content-Type-Options: nosniff");
         Serve.header(&head, "Connection: close");
         Serve.header(&head, "");
@@ -291,7 +408,7 @@ struct Serve {
             return;
         }
         if (Serve.is_file(path)) {
-            await Serve.file(client, path, public_dir);
+            await Serve.file(client, path, public_dir, Build.Debug, Build.StaticCache);
             return;
         }
         mut RenderedPage page = SitePages.render<T>(app, mode, path);
@@ -315,13 +432,36 @@ struct Serve {
         return true;
     }
 
-    static unsafe async void file(Socket* client, str path, i8* public_dir) {
+    // The Cache-Control of the runtime: a year and immutable (its name is its content), the time given by --cache, or
+    // no-store in a debug build, where the runtime changes with every build of the app.
+    static unsafe str runtime_cache(bool debug, i32 project) {
+        mut i64 seconds = serve_cache;
+        if (seconds < 0) {
+            seconds = (i64)project;
+        }
+        if (debug || seconds <= 0) {
+            return "no-store";
+        }
+        mut TextBuffer text = TextBuffer.create();
+        text.append("public, max-age=");
+        text.append_number(seconds);
+        text.append(", immutable");
+        str cache = { .data = Texts.copy(text.data, text.length), .length = (size)text.length };
+        text.release();
+        return cache;
+    }
+
+    static unsafe async void file(Socket* client, str path, i8* public_dir, bool debug, i32 project_cache) {
         str root_text = { .data = public_dir, .length = (size)strlen(public_dir) };
         result<Directory, FsError> opened = Directory.open_root_sync(Path.unchecked(root_text, true));
         mut string body = "";
         bool found = switch opened { Ok root -> Serve.read_file(&root, path, &body), Error e -> false };
         if (!found) {
             await Serve.send(client, 404, "Not Found", "text/plain", (i8*)"not found", 9);
+            return;
+        }
+        if (Serve.is_runtime(path)) {
+            await Serve.send_cached(client, 200, "OK", Serve.content_type(path), Serve.runtime_cache(debug, project_cache), body.ptr(), (u32)body.length);
             return;
         }
         await Serve.send(client, 200, "OK", Serve.content_type(path), body.ptr(), (u32)body.length);

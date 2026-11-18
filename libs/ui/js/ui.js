@@ -130,10 +130,58 @@ const $root = (fn) => {
   return node;
 };
 
+// Adoption: a page the server rendered is not built again. While $adopt is set, $el and $txt hand out the nodes
+// the server wrote, in document order, instead of creating new ones; the code that builds the tree then links them
+// as it always does. What the server wrote and what the client builds must be the same tree: when they are not, a
+// $Mismatch is thrown, and the island it happened in (or, outside any island, the page) is rendered again.
+class $Mismatch extends Error {}
+let $adopt = null;
+const $flatten = (nodes, into) => {
+  for (const node of Array.from(nodes)) {
+    if (node.nodeType === 8 || (node.nodeType === 1 && node.localName === "script")) continue;
+    // a debug page is indented: the line break between two blocks is not something the app renders
+    if (node.nodeType === 3 && node.data.includes("\n") && node.data.trim() === "") continue;
+    into.push(node);
+    if (node.nodeType === 1) $flatten(node.childNodes, into);
+  }
+  return into;
+};
+const $el = (tag) => {
+  if ($adopt === null) return document.createElement(tag);
+  const node = $adopt.list[$adopt.at];
+  if (!node || node.nodeType !== 1 || node.localName !== tag) throw new $Mismatch(`expected <${tag}>`);
+  $adopt.at++;
+  node.replaceChildren();
+  return node;
+};
+const $txt = (value) => {
+  if ($adopt === null || value === "") return document.createTextNode(value);
+  const node = $adopt.list[$adopt.at];
+  if (!node || node.nodeType !== 3 || !node.data.startsWith(value)) throw new $Mismatch(`expected the text '${value}'`);
+  if (node.data.length > value.length) $adopt.list.splice($adopt.at + 1, 0, node.splitText(value.length));
+  $adopt.at++;
+  return node;
+};
+const $frag = () => document.createDocumentFragment();
+// The element of the server's page for a component: kept as it is when 'keep', with everything inside it.
+const $claim = (tag, name, keep) => {
+  const node = $adopt.list[$adopt.at];
+  if (!node || node.nodeType !== 1 || node.localName !== tag || node.getAttribute("data-component") !== name) {
+    throw new $Mismatch(`expected <${tag} data-component="${name}">`);
+  }
+  const inside = $flatten(node.childNodes, []);
+  const after = $adopt.list[$adopt.at + 1 + inside.length] || null;
+  $adopt.at++;
+  if (keep) $adopt.at += inside.length; else node.replaceChildren();
+  return { element: node, after };
+};
+// A [Server] or [Static] component: the client keeps the HTML the server sent for it.
+const $serverIsland = (name) => $adopt === null ? $frag() : $claim("dj-server", name, true).element;
+
 // DOM: a Node of the bindings is a real DOM node; a region (if, for, a dynamic child) is the nodes between its
 // creation point and an empty text node that marks its end.
 const $child = (parent, child) => { parent.appendChild(child); return parent; };
-const $text = (parent, value) => { parent.appendChild(document.createTextNode(value)); return parent; };
+const $text = (parent, value) => { parent.appendChild($txt(value)); return parent; };
 const $attr = (node, name, value) => { node.setAttribute(name, value); $attributeMoved(node, name, value, false); return node; };
 // The event a listener is running for: a navigation during a click cancels the browser's own (following the href).
 let $event = null;
@@ -174,9 +222,12 @@ const $attrSignal = (node, name, fn) => {
 };
 const $attrMemo = (node, name, fn) => { const memo = fn(); $effect(() => $setAttr(node, name, $memoRead(memo))); return node; };
 const $insertText = (parent, fn) => {
-  const node = document.createTextNode("");
-  parent.appendChild(node);
-  $effect(() => { const value = $str(fn()); if (node.data !== value) node.data = value; });
+  let node = null;
+  $effect(() => {
+    const value = $str(fn());
+    if (node === null) { node = $txt(value); parent.appendChild(node); }
+    else if (node.data !== value) node.data = value;
+  });
   return parent;
 };
 const $insertSignal = (parent, fn) => $insertText(parent, () => $read(fn()));
@@ -192,7 +243,7 @@ const $collect = (node) => node === null || node === undefined ? [] : node.nodeT
 const $replace = (region, node) => {
   for (const old of region.nodes) old.remove();
   if (node === null || node === undefined) { region.nodes = []; return; }
-  if (typeof node !== "object") node = document.createTextNode($str(node));
+  if (typeof node !== "object") node = $txt($str(node));
   region.nodes = $collect(node);
   region.end.parentNode.insertBefore(node, region.end);
 };
@@ -279,9 +330,65 @@ const $range = (start, end, render) => $list(() => {
 
 const $raw = (html) => { const template = document.createElement("template"); template.innerHTML = html; return template.content; };
 
+// Island props: the server writes the values an island was rendered with in data-props (a JSON object). An island
+// opens its own <dj-island> (the one the page adopts next) and reads its fields from it; a value that is missing or of
+// another type is reported and the declaration's value stays.
+let $propValues = null;
+const $open = [];
+const $propsOpen = (name) => {
+  $propValues = null;
+  if ($adopt === null) { $open.push(null); return; }
+  const frame = $claim("dj-island", name, false);
+  $open.push(frame);
+  const text = frame.element.getAttribute("data-props");
+  if (text === null || text === undefined) return;
+  try {
+    const parsed = JSON.parse(text);
+    if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) $propValues = parsed;
+    else console.warn(`djinn: the props of island ${name} are not an object`);
+  } catch (error) {
+    console.warn(`djinn: the props of island ${name} are not valid JSON`);
+  }
+};
+// The island: its content is built from the server's nodes inside the server's <dj-island>; when that does not match,
+// only this island is built again.
+const $island = (name, build) => {
+  const frame = $open.pop();
+  if (frame === null || frame === undefined) return build();
+  const outer = $adopt;
+  let content, why = "";
+  const root = $root(() => {
+    try { content = build(); } catch (error) { if (!(error instanceof $Mismatch)) throw error; content = undefined; why = error.message; }
+  });
+  if (content === undefined) {
+    $dispose(root);
+    console.warn(`djinn: island ${name} is not what the server rendered (${why}); it is rendered again`);
+    outer.at = frame.after === null ? outer.list.length : outer.list.indexOf(frame.after);
+    $adopt = null;
+    try { content = build(); } finally { $adopt = outer; }
+    frame.element.replaceChildren();
+  } else {
+    $onCleanup(() => $dispose(root));
+  }
+  frame.element.appendChild(content);
+  return frame.element;
+};
+const $propRead = (field, fallback, valid) => {
+  if ($propValues === null || !Object.prototype.hasOwnProperty.call($propValues, field)) return fallback;
+  const value = $propValues[field];
+  if (valid(value)) return value;
+  console.warn(`djinn: the island prop '${field}' has another type than the declaration's; its value is used`);
+  return fallback;
+};
+const $isBool = (value) => typeof value === "boolean";
+const $isI32 = (value) => Number.isInteger(value) && value >= -2147483648 && value <= 2147483647;
+const $isU32 = (value) => Number.isInteger(value) && value >= 0 && value <= 4294967295;
+const $isStr = (value) => typeof value === "string";
+const $propList = (field, fallback, valid) => $propRead(field, fallback, (value) => Array.isArray(value) && value.every(valid));
+
 // The application: the theme stylesheet goes into <head> (unless the server already sent it), and the app is mounted
-// into #app or <body> (CLIENT), or, for a page the server rendered (HYDRATE, SERVER, STATIC), rendered again in
-// place of the server's markup.
+// into #app or <body>. A page the server rendered (HYDRATE, SERVER, STATIC) is adopted: its nodes are kept and given
+// to the app, which only wires them (see $adopt); a page that is not what the app renders is rendered again.
 const $mountApp = (render, mode, theme) => {
   if (!document.querySelector("style[data-djinn]")) {
     const style = document.createElement("style");
@@ -290,11 +397,86 @@ const $mountApp = (render, mode, theme) => {
     document.head.prepend(style);
   }
   const target = document.getElementById("app") || document.body;
-  $root(() => {
-    const node = render();
-    if (mode !== 0) target.replaceChildren();
-    target.appendChild(node);
-  });
+  const page = mode === 0 ? [] : Array.from(target.childNodes).filter((node) => (node.nodeType === 1 && node.localName !== "script") || (node.nodeType === 3 && node.data.trim() !== ""));
+  const mount = () => $root(() => target.appendChild(render()));
+  if (page.length === 0) { mount(); return; }
+  const list = $flatten(page, []);
+  for (const node of page) target.removeChild(node);
+  $adopt = { list, at: 0 };
+  try {
+    $root(() => {
+      const node = render();
+      if ($adopt.at !== list.length) throw new $Mismatch("the page has more than the app renders");
+      target.appendChild(node);
+    });
+  } catch (error) {
+    if (!(error instanceof $Mismatch)) throw error;
+    console.warn(`djinn: the page is not what the server rendered (${error.message}); it is rendered again`);
+    $adopt = null;
+    $open.length = 0;
+    mount();
+  } finally {
+    $adopt = null;
+  }
+};
+
+// A page only the server renders: the program is its islands. Each <dj-island> of the page is built by the island of
+// that name, adopting the server's nodes inside it; an island nobody built a program for is left as the server wrote it.
+// When an island is taken over (data-load, from [Client(load: ...)]): 'load' at once; 'visible' (the default) when it
+// scrolls near the viewport; 'idle' when the browser has nothing else to do; 'interaction' on the first pointer, touch,
+// focus or key event on it (the adoption keeps the server's nodes, so the click that follows finds its listener).
+const $whenToMount = (element, strategy, mount) => {
+  let done = false;
+  const once = () => { if (!done) { done = true; mount(); } };
+  if (strategy === "load") {
+    once();
+  } else if (strategy === "idle") {
+    if (typeof requestIdleCallback === "function") requestIdleCallback(once, { timeout: 2000 });
+    else setTimeout(once, 200);
+  } else if (strategy === "interaction") {
+    const events = ["pointerdown", "touchstart", "mouseover", "focusin", "keydown"];
+    const start = () => {
+      for (const name of events) element.removeEventListener(name, start, true);
+      once();
+    };
+    for (const name of events) element.addEventListener(name, start, true);
+  } else if (typeof IntersectionObserver === "function" && (typeof innerHeight !== "number" || (innerHeight > 0 && innerWidth > 0))) {
+    // a window without a size (a hidden pane, a background tab) never reports an element as visible: it mounts at once
+    const watch = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) { watch.disconnect(); once(); }
+    }, { rootMargin: "200px" });
+    // <dj-island> is display: contents: it has no box of its own and is never reported, so its children are watched
+    const boxes = Array.from(element.children || []);
+    if (boxes.length === 0) { once(); return; }
+    for (const box of boxes) watch.observe(box);
+  } else {
+    once();
+  }
+};
+
+const $mountIslands = (islands) => {
+  for (const element of Array.from(document.querySelectorAll("dj-island"))) {
+    let inside = false;
+    for (let parent = element.parentNode; parent; parent = parent.parentNode) {
+      if (parent.localName === "dj-island") inside = true;
+    }
+    if (inside) continue;
+    const name = element.getAttribute("data-component");
+    const mount = Object.prototype.hasOwnProperty.call(islands, name) ? islands[name] : null;
+    if (mount === null) {
+      console.warn(`djinn: the page has an island ${name} and this program has none of that name`);
+      continue;
+    }
+    $whenToMount(element, element.getAttribute("data-load") || "visible", () => {
+      $adopt = { list: $flatten([element], []), at: 0 };
+      try {
+        $root(() => { mount(); });
+      } finally {
+        $adopt = null;
+        $open.length = 0;
+      }
+    });
+  }
 };
 
 // Theme: data-theme on <html>; the theme stylesheet follows it with light-dark().
@@ -366,14 +548,14 @@ const $attributeMoved = (node, name, value, existed) => {
   else if (existed && name === "data-active" && value === "true") $fade(node, 0, 1, 200);
 };
 const $transition = (show, children) => {
-  const box = document.createElement("div");
+  const box = $el("div");
   box.setAttribute("class", "transition");
   if (children) box.appendChild(children);
   $effect(() => $present(box, $read(show)));
   return box;
 };
 const $outlet = (view) => {
-  const box = document.createElement("div");
+  const box = $el("div");
   box.setAttribute("class", "outlet");
   const region = $region();
   box.appendChild(region.fragment);
@@ -386,12 +568,13 @@ const $outlet = (view) => {
     }
     const path = $read($path);
     $untrack(() => {
-      const page = document.createElement("div");
+      const adopting = $adopt !== null;
+      const page = $el("div");
       page.setAttribute("class", "route");
       page.appendChild(view(path));
       region.end.parentNode.insertBefore(page, region.end);
       region.nodes = region.nodes.filter((node) => node.parentNode).concat([page]);
-      $fade(page, 0, 1, 280, 28 * $direction);
+      if (!adopting) $fade(page, 0, 1, 280, 28 * $direction);
     });
   });
   return box;

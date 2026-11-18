@@ -103,6 +103,15 @@ Declared in code, the most specific wins:
 
 ## On the web (JavaScript)
 
+The web model is islands: the native program writes each page as complete HTML, a `[Client]` struct becomes a
+`<dj-island data-component="Name" data-props='{...}'>` the page's JavaScript takes over, and nothing else is sent: no
+WebAssembly, no whole-page hydration. `[Application]` without `render:` is `render: server`, which is this model;
+`examples/ui-web` is a small site made that way (a counter island that starts at the 5 the server sent, a todo list, a
+theme button) and ships no `.wasm`. What is left to the WebAssembly add-on: `render: client` and `render: hydrate`
+pages built with `--target wasm`, where the browser runs the whole app, and the `kit` components (`Field`, overlays,
+virtual lists), which use the native `Dom` and are not available in the JavaScript program yet (use `<input
+bind:value={...}>`).
+
 `--target web` compiles the app to JavaScript, like Svelte or Solid compile their components: no WebAssembly and no
 virtual DOM. `html!` lowers the markup to builder calls as usual, and on the web each of them is a `[Js]` template of
 the bindings in `libs/ui/js` (`ui.djinn`), so the generated code calls the DOM and the reactive core (`ui.js`)
@@ -144,8 +153,29 @@ djinnc examples/web-app --target web -o build/app --lib-dir build/libs       # w
 - Motion follows the native animation system: `data-open` presents or dismisses (fade, then `data-gone`), an active
   tab panel fades in, a new page fades and slides in while the old one fades out. The theme stylesheet (`ThemeSheet`, `style/theme_sheet.djinn`, shared with the native build) goes into
   `<head>` once.
-- The app mounts into `#app` or `<body>`. A page the server rendered (`hydrate`, `server`, `static`) is rendered again
-  in its place for now: adopting the server's nodes is the WebAssembly host's job until the JavaScript one learns it.
+- The app mounts into `#app` or `<body>`. A page the server rendered (`hydrate`, `server`, `static`) is adopted, not
+  built again: while the app renders, `$el` and `$txt` (what `Node.element` and `Node.text` are on the web) hand out the
+  nodes the server wrote, in document order, and the code that builds the tree links them as it always does, so no element
+  is created and the listeners and signals are wired onto the server's nodes. A `[Server]` / `[Static]` part keeps its
+  `<dj-server>` element with everything inside it, and its code is not in the program. When the client builds another tree
+  than the server wrote, the mismatch is reported (`console.warn`): an island is rendered again from its props (only that
+  island, in its own element), and a mismatch outside the islands renders the page again. The comments an island carries
+  for the WebAssembly host are dropped, and a page without server HTML is built in the browser as before.
+- The program and the runtime are two files. The runtime (`djinn.<hash>.js`: the std bindings and the `.js` files of the
+  libraries, `ui.js` for this one) is system code, the same for every program built with the same libraries, named after
+  its content so a page can cache it for good; the program (`app.js`, the user's code and what it reaches) is an ES module
+  that imports it and takes from it only the names it uses: `<script type="module" src="app.js">`.
+
+- Island props: the fields of a `[Client]` struct are its props. Natively the server writes them in the island's
+  `data-props` as a JSON object (`<dj-island data-component="Counter" data-props="{&quot;start&quot;:5}">`, the JSON
+  escaped for the attribute); on the web the island reads them from its own element and starts from those values, not
+  from the declaration's. A prop is a `bool`, `i32`, `u32`, `str` or a `slice` of those, any other field type is a
+  compile error at the field, and a value that is missing or of another type is reported (`console.warn`) and the
+  declaration's value stays. An island claims the next `<dj-island>` of its name in document order, adopts its content,
+  and, if the server's HTML is not what its props render, is built again from the props. The WebAssembly add-on builds
+  an island from its declaration.
+
+- Loading islands: `[Client(load: ...)]` chooses when the page's JavaScript takes an island over. `visible` (the default) waits until the island is near the viewport, `load` is at once, `idle` waits for an idle browser and `interaction` for the first pointer, touch, focus or key event on it; until then the island is the server's HTML, which already works as a page. The native server (`--program app.js --public <dir>`) writes a `modulepreload` of the runtime and the program's `<script type="module">`; a program of at most 2048 bytes travels inside the page, and a page without islands has no `<script>` at all. The runtime's name is its content hash, so it is served with `Cache-Control: immutable` for `static-cache` seconds (`djinn.proj`, a year by default; `--cache` on the server overrides it; a debug build never caches it). Not done: one module per island (the program is a single file and the runtime is most of the bytes), and the program itself is not minified.
 
 `examples/web-app` uses all of it and `tests/djinnc/web.sh` drives it on a fake DOM under Node.js.
 
@@ -158,15 +188,16 @@ builds. Natively it is the server; with `--target wasm` it is the client:
 djinnc libs/ui_macros -o build/libs/ui_macros.djlib --std-dir std            # macros run on the host
 djinnc libs/ui -o build/libs/ui.djlib --std-dir std                           # the server side
 djinnc libs/ui -o build/libs/wasm32-unknown-unknown/ui.djlib --std-dir std --target wasm
-djinnc examples/ui-web -o build/site/server --std-dir std
-djinnc examples/ui-web -o build/site/public/app.wasm --std-dir std --target wasm   # also copies djinn.js
+djinnc tests/web/ui/hydrate -o build/site/server --std-dir std
+djinnc tests/web/ui/hydrate -o build/site/public/app.wasm --std-dir std --target wasm   # also copies djinn.js
 ```
 
 The native program prints the page (no arguments), writes a static site (`--out <dir>`: "/" and every page its
 internal links reach, plus `Router.declare(path)`; `<dir>` is relative) or serves it (`--serve <port>`, with files
 such as `djinn.js` and the `.wasm` from `--public <dir>`; a development server, one request at a time). A page the
 client takes over loads `<script type="module" src="/djinn.js" data-wasm="/app.wasm">`; `Html.set_client` changes the
-paths.
+paths. (A server or static app whose public directory holds an `app.js`, or that is given `--program`, loads the
+JavaScript islands instead.)
 
 In the browser the app runs in the page by mode: `client` builds the DOM, `hydrate` adopts the server's HTML without
 creating a node (it builds its tree without touching the page, then claims each server node in document order), and
@@ -188,7 +219,7 @@ creating a node (it builds its tree without touching the page, then claims each 
 
 `tests/djinnc/ui_web.sh` builds all of it and runs `tests/web/ui` under Node.js on a small DOM
 (`tests/web/fake_dom.js`): client rendering, hydration, islands, the static site and `examples/ui-web` end to end.
-Not yet: island props (an island is built from its declaration, not from the server's values), a mismatch between
+Not yet on this add-on: island props (see below, they exist on the JavaScript target), a mismatch between
 the page and the program is reported but not repaired, and `Serve` handles one request at a time.
 
 ## Styles (`src/style`)

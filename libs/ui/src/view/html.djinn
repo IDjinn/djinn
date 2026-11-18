@@ -5,43 +5,181 @@ namespace ui;
 
 unsafe static mut str html_client_script = "";
 unsafe static mut str html_client_module = "";
+unsafe static mut str html_program = "";
+unsafe static mut str html_runtime = "";
+unsafe static mut str html_inline = "";
 
 // Writes the retained tree as HTML. With markers (hydration), fragments are wrapped in '<!--[-->' / '<!--]-->' and
 // elements with listeners carry 'data-dj', so the client can adopt the nodes; without them the HTML is plain.
 struct Html {
     public static unsafe TextBuffer render(Node root, bool markers) {
         mut TextBuffer out = TextBuffer.create();
-        Html.write(&out, root.id, markers);
+        Html.write(&out, root.id, markers, -1);
         return out;
     }
 
     // A whole page: the document element with its attributes (data-theme), the theme and author stylesheets in a
     // <style> (with every '</' broken so no sheet can close the tag), and the content in <body>.
     public static unsafe TextBuffer document(Node content, bool markers) {
+        return Html.document_as(content, markers, false);
+    }
+
+    // The page of the app: Html.document_as with 'pretty' set by the build of the app (App.render_document passes
+    // Build.Debug from the app's own generic code, since this library is built once, for every app).
+    // A debug build writes the page for a person to read: one element per line, indented, and the stylesheet as the
+    // author wrote it. A release build writes the smallest page: no whitespace between elements, a minified
+    // stylesheet. Both are the same tree, and the client adopts either (see $flatten in ui.js).
+    public static unsafe TextBuffer document_as(Node content, bool markers, bool pretty) {
         mut TextBuffer out = TextBuffer.create();
-        out.append("<!doctype html><html");
+        out.append("<!doctype html>");
+        if (pretty) {
+            out.append("\n");
+        }
+        out.append("<html");
         Html.attributes(&out, Dom.document());
-        out.append("><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><meta name=\"color-scheme\" content=\"light dark\"><meta name=\"text-scale\" content=\"scale\"><style data-djinn>");
+        out.append(">");
+        Html.line(&out, pretty, 1);
+        out.append("<head>");
+        Html.line(&out, pretty, 2);
+        out.append("<meta charset=\"utf-8\">");
+        Html.line(&out, pretty, 2);
+        out.append("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">");
+        Html.line(&out, pretty, 2);
+        out.append("<meta name=\"color-scheme\" content=\"light dark\">");
+        Html.line(&out, pretty, 2);
+        out.append("<meta name=\"text-scale\" content=\"scale\">");
+        Html.line(&out, pretty, 2);
+        out.append("<style data-djinn>");
         StyleEngine* engine = Styles.engine();
         for (mut u32 i = 0; i < engine.sheets.count; i = i + 1) {
             StyleSheet* sheet = engine.sheets.get(i);
             if (sheet.origin == StyleOrigin.BROWSER || sheet.rules.count == 0) {
                 continue;
             }
-            Html.stylesheet(&out, sheet.source);
+            Html.stylesheet(&out, sheet.source, !pretty);
         }
         out.append("</style>");
-        if (markers || Html.has_island(content.id)) {
+        if ((markers || Html.has_island(content.id)) && html_program.length > 0) {
+            // the JavaScript islands: the runtime is fetched with the page (a preload), not after the program is parsed
+            Html.line(&out, pretty, 2);
+            out.append("<link rel=\"modulepreload\" href=\"");
+            out.append_escaped(html_runtime.data, (u32)html_runtime.length, true);
+            out.append("\">");
+            Html.line(&out, pretty, 2);
+            if (html_inline.length > 0) {
+                out.append("<script type=\"module\">");
+                out.append(html_inline);
+                out.append("</script>");
+            } else {
+                out.append("<script type=\"module\" src=\"");
+                out.append_escaped(html_program.data, (u32)html_program.length, true);
+                out.append("\"></script>");
+            }
+        } else if (markers || Html.has_island(content.id)) {
+            Html.line(&out, pretty, 2);
             out.append("<script type=\"module\" src=\"");
             out.append_escaped(Html.client_script().data, (u32)Html.client_script().length, true);
             out.append("\" data-wasm=\"");
             out.append_escaped(Html.client_module().data, (u32)Html.client_module().length, true);
             out.append("\"></script>");
         }
-        out.append("</head><body>");
-        Html.write(&out, content.id, markers);
-        out.append("</body></html>");
+        Html.line(&out, pretty, 1);
+        out.append("</head>");
+        Html.line(&out, pretty, 1);
+        out.append("<body>");
+        if (pretty && Html.is_block_child(content.id)) {
+            if (Dom.kind(content.id) == DomKind.FRAGMENT && !markers) {
+                Html.lines(&out, content.id, markers, 2);
+            } else {
+                Html.line(&out, true, 2);
+                Html.write(&out, content.id, markers, 2);
+            }
+            Html.line(&out, true, 1);
+        } else {
+            Html.write(&out, content.id, markers, -1);
+        }
+        out.append("</body>");
+        Html.line(&out, pretty, 0);
+        out.append("</html>");
+        if (pretty) {
+            out.append("\n");
+        }
         return out;
+    }
+
+    // A line break and the indentation of 'level' (two spaces each), when the page is written for reading.
+    static unsafe void line(TextBuffer* out, bool pretty, i32 level) {
+        if (!pretty) {
+            return;
+        }
+        out.append("\n");
+        for (mut i32 i = 0; i < level; i = i + 1) {
+            out.append("  ");
+        }
+    }
+
+    // Elements that sit in a line of text: whitespace around them is a space on the screen, so the page never
+    // breaks a line next to one.
+    static unsafe bool is_inline(str tag) {
+        return Texts.same(tag, "a") || Texts.same(tag, "abbr") || Texts.same(tag, "audio") || Texts.same(tag, "b")
+            || Texts.same(tag, "bdi") || Texts.same(tag, "bdo") || Texts.same(tag, "br") || Texts.same(tag, "button")
+            || Texts.same(tag, "canvas") || Texts.same(tag, "cite") || Texts.same(tag, "code") || Texts.same(tag, "data")
+            || Texts.same(tag, "dfn") || Texts.same(tag, "em") || Texts.same(tag, "embed") || Texts.same(tag, "i")
+            || Texts.same(tag, "iframe") || Texts.same(tag, "img") || Texts.same(tag, "input") || Texts.same(tag, "kbd")
+            || Texts.same(tag, "label") || Texts.same(tag, "mark") || Texts.same(tag, "meter") || Texts.same(tag, "object")
+            || Texts.same(tag, "output") || Texts.same(tag, "picture") || Texts.same(tag, "progress") || Texts.same(tag, "q")
+            || Texts.same(tag, "s") || Texts.same(tag, "samp") || Texts.same(tag, "select") || Texts.same(tag, "slot")
+            || Texts.same(tag, "small") || Texts.same(tag, "span") || Texts.same(tag, "strong") || Texts.same(tag, "sub")
+            || Texts.same(tag, "sup") || Texts.same(tag, "svg") || Texts.same(tag, "textarea") || Texts.same(tag, "time")
+            || Texts.same(tag, "u") || Texts.same(tag, "var") || Texts.same(tag, "video") || Texts.same(tag, "wbr");
+    }
+
+    // Elements whose content is text the page must keep exactly.
+    static unsafe bool keeps_whitespace(str tag) {
+        return Texts.same(tag, "pre") || Texts.same(tag, "textarea") || Texts.same(tag, "script") || Texts.same(tag, "style");
+    }
+
+    // A node that can have a line of its own: a block element, or a component or fragment made only of those.
+    static unsafe bool is_block_child(u32 id) {
+        u8 kind = Dom.kind(id);
+        if (kind == DomKind.ELEMENT) {
+            return !Html.is_inline(Dom.tag(id));
+        }
+        if (kind == DomKind.ISLAND || kind == DomKind.SERVER_SLOT || kind == DomKind.FRAGMENT) {
+            return Html.breaks(id);
+        }
+        return false;
+    }
+
+    // Whether the children of 'id' can each be written on a line of their own without changing the page: there are
+    // some, and every one is a block (no text and no inline element, where a line break would show as a space).
+    static unsafe bool breaks(u32 id) {
+        mut u32 child = Dom.first_child(id);
+        if (child == 0) {
+            return false;
+        }
+        while (child != 0) {
+            if (!Html.is_block_child(child)) {
+                return false;
+            }
+            child = Dom.next_sibling(child);
+        }
+        return true;
+    }
+
+    // The children of 'id', one per line at 'level'; a fragment without markers is only a grouping, so its children
+    // take its place.
+    static unsafe void lines(TextBuffer* out, u32 id, bool markers, i32 level) {
+        mut u32 child = Dom.first_child(id);
+        while (child != 0) {
+            if (Dom.kind(child) == DomKind.FRAGMENT && !markers) {
+                Html.lines(out, child, markers, level);
+            } else {
+                Html.line(out, true, level);
+                Html.write(out, child, markers, level);
+            }
+            child = Dom.next_sibling(child);
+        }
     }
 
     // Where a page that the client takes over (hydration, islands) loads the program from: djinn.js and the
@@ -49,6 +187,15 @@ struct Html {
     public static unsafe void set_client(str script, str module) {
         html_client_script = script;
         html_client_module = module;
+    }
+
+    // The page loads the JavaScript islands (--target web) instead of the WebAssembly host: 'program' is the URL of the
+    // program, 'runtime' the URL of the runtime it imports (a preload), and 'inline' the program's text when it is small
+    // enough to travel in the page (its import already points at the runtime's URL), or empty.
+    public static unsafe void set_client_js(str program, str runtime, str inline) {
+        html_program = program;
+        html_runtime = runtime;
+        html_inline = inline;
     }
 
     public static unsafe str client_script() {
@@ -79,18 +226,59 @@ struct Html {
         return false;
     }
 
-    static unsafe void stylesheet(TextBuffer* out, str css) {
+    // 'minify' drops comments and the whitespace that does not separate two tokens (around '{', '}', ';', ',' and
+    // ':'), and keeps strings as they are.
+    static unsafe void stylesheet(TextBuffer* out, str css, bool minify) {
+        mut i8 quote = 0;
+        mut bool space = false;
+        mut i8 last = 0;
         for (mut u32 i = 0; i < (u32)css.length; i = i + 1) {
             i8 c = css.data[i];
-            if (c == 60 && i + 1 < (u32)css.length && css.data[i + 1] == 47) {
-                out.append("<\\/");
-                i = i + 1;
-                continue;
-            }
             if (c == 0) {
                 continue;
             }
+            if (minify && quote == 0) {
+                if (c == 47 && i + 1 < (u32)css.length && css.data[i + 1] == 42) {
+                    i = i + 2;
+                    while (i + 1 < (u32)css.length && !(css.data[i] == 42 && css.data[i + 1] == 47)) {
+                        i = i + 1;
+                    }
+                    i = i + 1;
+                    space = true;
+                    continue;
+                }
+                if (c == 32 || c == 9 || c == 10 || c == 13) {
+                    space = true;
+                    continue;
+                }
+                bool closes = c == 123 || c == 125 || c == 59 || c == 44 || c == 41 || c == 62 || c == 126;
+                bool opened = last == 123 || last == 125 || last == 59 || last == 44 || last == 58 || last == 40 || last == 62 || last == 126 || last == 0;
+                if (space && !closes && !opened) {
+                    out.append_byte(32);
+                }
+                space = false;
+            }
+            if (quote != 0) {
+                if (c == 92 && i + 1 < (u32)css.length) {
+                    out.append_byte(c);
+                    i = i + 1;
+                    out.append_byte(css.data[i]);
+                    continue;
+                }
+                if (c == quote) {
+                    quote = 0;
+                }
+            } else if (c == 34 || c == 39) {
+                quote = c;
+            }
+            if (c == 60 && i + 1 < (u32)css.length && css.data[i + 1] == 47) {
+                out.append("<\\/");
+                i = i + 1;
+                last = 47;
+                continue;
+            }
             out.append_byte(c);
+            last = c;
         }
     }
 
@@ -100,15 +288,22 @@ struct Html {
             || Texts.same(tag, "col") || Texts.same(tag, "source") || Texts.same(tag, "wbr");
     }
 
-    static unsafe void children(TextBuffer* out, u32 id, bool markers) {
+    // The content of 'id' at 'level' (-1: no line breaks at all). When every child is a block, each takes a line and
+    // the closing tag goes back to the level of the opening one; otherwise it is written as it is.
+    static unsafe void children(TextBuffer* out, u32 id, bool markers, i32 level) {
+        if (level >= 0 && Html.breaks(id)) {
+            Html.lines(out, id, markers, level + 1);
+            Html.line(out, true, level);
+            return;
+        }
         mut u32 child = Dom.first_child(id);
         while (child != 0) {
-            Html.write(out, child, markers);
+            Html.write(out, child, markers, -1);
             child = Dom.next_sibling(child);
         }
     }
 
-    static unsafe void write(TextBuffer* out, u32 id, bool markers) {
+    static unsafe void write(TextBuffer* out, u32 id, bool markers, i32 level) {
         u8 kind = Dom.kind(id);
         if (kind == DomKind.TEXT) {
             str text = Dom.text_of(id);
@@ -124,7 +319,7 @@ struct Html {
             if (markers) {
                 out.append("<!--[-->");
             }
-            Html.children(out, id, markers);
+            Html.children(out, id, markers, level);
             if (markers) {
                 out.append("<!--]-->");
             }
@@ -138,9 +333,22 @@ struct Html {
             }
             str name = Dom.tag(id);
             out.append_escaped(name.data, (u32)name.length, true);
-            out.append("\">");
+            out.append("\"");
+            str props = Dom.text_of(id);
+            if (kind == DomKind.ISLAND && props.length > 0) {
+                out.append(" data-props=\"");
+                out.append_escaped(props.data, (u32)props.length, true);
+                out.append("\"");
+            }
+            str load = Dom.attr(id, "data-load");
+            if (kind == DomKind.ISLAND && load.length > 0) {
+                out.append(" data-load=\"");
+                out.append_escaped(load.data, (u32)load.length, true);
+                out.append("\"");
+            }
+            out.append(">");
             // an island is hydrated even in a page that is not, so its content always carries the markers
-            Html.children(out, id, markers || kind == DomKind.ISLAND);
+            Html.children(out, id, markers || kind == DomKind.ISLAND, level);
             if (kind == DomKind.ISLAND) {
                 out.append("</dj-island>");
             } else {
@@ -164,7 +372,11 @@ struct Html {
         if (Html.is_void(tag)) {
             return;
         }
-        Html.children(out, id, markers);
+        if (Html.keeps_whitespace(tag)) {
+            Html.children(out, id, markers, -1);
+        } else {
+            Html.children(out, id, markers, level);
+        }
         out.append("</");
         out.append(tag);
         out.append(">");

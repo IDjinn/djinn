@@ -14,6 +14,7 @@ export class Node {
     }
 
     get firstChild() { return this.childNodes[0] || null; }
+    get children() { return this.childNodes.filter((child) => child.nodeType === 1); }
     get lastChild() { return this.childNodes[this.childNodes.length - 1] || null; }
 
     get nextSibling() {
@@ -65,6 +66,11 @@ export class Node {
         if (!this.listeners) this.listeners = new Map();
         if (!this.listeners.has(type)) this.listeners.set(type, []);
         this.listeners.get(type).push(listener);
+    }
+
+    removeEventListener(type, listener) {
+        const list = this.listeners && this.listeners.get(type);
+        if (list && list.includes(listener)) list.splice(list.indexOf(listener), 1);
     }
 
     get textContent() {
