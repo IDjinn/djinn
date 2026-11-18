@@ -380,9 +380,42 @@ impl TypeChecker {
             || type == this.core_type("AttributeList") || type == this.core_type("NameList");
     }
 
+    bool is_byte_pointer(u32 type) {
+        return type == Types.byte_pointer() || type == Types.raw_pointer_to(Types.integer(8, true));
+    }
+
+    bool mark_text_conversion(Node* value, u32 passed, u32 wanted) {
+        if (this.is_byte_pointer(wanted) && value.kind() != NodeKind::NULL_LITERAL) {
+            if (passed == this.core_type("str")) {
+                value.set_text_conversion(3);
+                return true;
+            }
+            if (passed == this.core_type("string")) {
+                value.set_text_conversion(4);
+                return true;
+            }
+        }
+        bool bytes = this.is_byte_pointer(passed);
+        if (!bytes || value.kind() == NodeKind::NULL_LITERAL || value.kind() == NodeKind::STRING_LITERAL) {
+            return false;
+        }
+        if (wanted == this.core_type("str")) {
+            value.set_text_conversion(1);
+            return true;
+        }
+        if (wanted == this.core_type("string")) {
+            value.set_text_conversion(2);
+            return true;
+        }
+        return false;
+    }
+
     void require_argument_shape(Node* argument, u32 passed, u32 wanted) {
         this.require_safe_pointer(argument, passed, wanted);
         this.require_explicit_cast(argument, passed, wanted);
+        if (this.mark_text_conversion(argument, passed, wanted)) {
+            return;
+        }
         if (wanted == 0 || passed == wanted || wanted == this.core_type("object") || this.wraps_pointer(passed, wanted)) {
             return;
         }
@@ -403,6 +436,9 @@ impl TypeChecker {
     void require_value_type(Node* value, u32 passed, u32 wanted) {
         this.require_safe_pointer(value, passed, wanted);
         this.require_explicit_cast(value, passed, wanted);
+        if (this.mark_text_conversion(value, passed, wanted)) {
+            return;
+        }
         if (passed == 0 || wanted == 0 || passed == wanted || wanted == this.core_type("object") || this.wraps_pointer(passed, wanted)) {
             return;
         }
