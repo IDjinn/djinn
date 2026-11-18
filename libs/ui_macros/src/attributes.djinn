@@ -73,6 +73,119 @@ struct Items {
         }
     }
 
+    // The types a [Client] prop is made of.
+    static unsafe bool is_prop_scalar(Token type) {
+        return type.matches("bool") || type.matches("i32") || type.matches("u32") || type.matches("str");
+    }
+
+    // What a [Client] prop of these type tokens is called in Props (add_<kind> / get_<kind>), or "" when it cannot
+    // be sent to the page: bool, i32, u32, str and a slice of those.
+    public static unsafe str prop_kind(TokenStream item, u32 first, u32 end) {
+        mut u32 start = first;
+        while (start < end && (item.get(start).matches("public") || item.get(start).matches("private")
+            || item.get(start).matches("internal") || item.get(start).matches("mut"))) {
+            start = start + 1;
+        }
+        if (end - start == 1 && Items.is_prop_scalar(item.get(start))) {
+            return item.get(start).text;
+        }
+        if (end - start == 4 && item.get(start).matches("slice") && Tokens.is_symbol(item.get(start + 1), "<")
+            && Tokens.is_symbol(item.get(start + 3), ">") && Items.is_prop_scalar(item.get(start + 2))) {
+            return Items.prop_word("slice_", item.get(start + 2).text);
+        }
+        str none = "";
+        return none;
+    }
+
+    // The fields of an island are its props. Writes, for each one, the statement that adds it to the JSON the server
+    // sends ('native') and the initializer that reads it back on the web ('web'); returns false (with an error in
+    // 'native') when a field has a type that cannot be serialized.
+    public static unsafe bool props(TokenStream* native, TokenStream* web, TokenStream item, u32 open, u32 close, u32* count) {
+        mut u32 start = open + 1;
+        count[0] = 0;
+        while (start < close) {
+            mut u32 i = start;
+            mut bool method = false;
+            mut bool constant = false;
+            while (i < close) {
+                Token token = item.get(i);
+                if (token.kind == TokenClass.OPEN) {
+                    u32 matched = item.matching(i);
+                    if (token.matches("{")) {
+                        method = true;
+                        i = matched + 1;
+                        break;
+                    }
+                    i = matched + 1;
+                    continue;
+                }
+                if (Tokens.is_symbol(token, "=>")) {
+                    method = true;
+                }
+                if (token.matches("static") || token.matches("const")) {
+                    constant = true;
+                }
+                i = i + 1;
+                if (Tokens.is_symbol(token, ";")) {
+                    break;
+                }
+            }
+            if (!method && !constant && i >= start + 3) {
+                Token name = item.get(i - 2);
+                str kind = Items.prop_kind(item, start, i - 2);
+                if (kind.length == 0) {
+                    native.push(Token.error(name.span, "[Client]: a prop is a bool, i32, u32, str or a slice of those (it is sent to the page as JSON); this field has another type"));
+                    return false;
+                }
+                i32 span = name.span;
+                Tokens.ident(native, "IslandProps", span);
+                Tokens.punct(native, ".", span);
+                Tokens.ident(native, Items.prop_word("add_", kind), span);
+                Tokens.open(native, "(", span);
+                Tokens.punct(native, "&", span);
+                Tokens.ident(native, "dj_props", span);
+                Tokens.punct(native, ",", span);
+                Tokens.quoted(native, name.text, span);
+                Tokens.punct(native, ",", span);
+                Tokens.keyword(native, "this", span);
+                Tokens.punct(native, ".", span);
+                native.push(name);
+                Tokens.close(native, ")", span);
+                Tokens.punct(native, ";", span);
+                if (count[0] > 0) {
+                    Tokens.punct(web, ",", span);
+                }
+                Tokens.punct(web, ".", span);
+                web.push(name);
+                Tokens.punct(web, "=", span);
+                Tokens.ident(web, "IslandProps", span);
+                Tokens.punct(web, ".", span);
+                Tokens.ident(web, Items.prop_word("get_", kind), span);
+                Tokens.open(web, "(", span);
+                Tokens.quoted(web, name.text, span);
+                Tokens.punct(web, ",", span);
+                Tokens.keyword(web, "this", span);
+                Tokens.punct(web, ".", span);
+                web.push(name);
+                Tokens.close(web, ")", span);
+                count[0] = count[0] + 1;
+            }
+            start = i;
+        }
+        return true;
+    }
+
+    // "add_" or "get_" followed by the kind, as one identifier.
+    public static unsafe str prop_word(str prefix, str kind) {
+        i32 length = (i32)(prefix.length + kind.length);
+        i8* data = (i8*)__djinn_alloc((size_long)(length + 1));
+        memcpy((void*)data, (void*)prefix.data, (size_long)prefix.length);
+        memcpy((void*)(data + prefix.length), (void*)kind.data, (size_long)kind.length);
+        data[length] = 0;
+        str word = { .data = data, .length = (size)length };
+        return word;
+    }
+
     // The item with its 'render' method renamed, so a generated 'render' can wrap it.
     public static unsafe void renamed(TokenStream* out, TokenStream item, u32 open, u32 close, str replacement) {
         mut bool done = false;
@@ -104,6 +217,17 @@ struct Items {
         Tokens.close(out, ")", span);
         Tokens.open(out, "{", span);
         Tokens.keyword(out, "return", span);
+    }
+
+    // 'public unsafe Node render() {'
+    public static unsafe void method_open(TokenStream* out, i32 span) {
+        Tokens.ident(out, "public", span);
+        Tokens.keyword(out, "unsafe", span);
+        Tokens.ident(out, "Node", span);
+        Tokens.ident(out, "render", span);
+        Tokens.open(out, "(", span);
+        Tokens.close(out, ")", span);
+        Tokens.open(out, "{", span);
     }
 
     public static unsafe void render_close(TokenStream* out, i32 span) {
@@ -138,7 +262,8 @@ struct Items {
 }
 
 struct Attributes {
-    // [Application(render: client | hydrate | server | static)] adds the entry point that runs the app.
+    // [Application(render: client | hydrate | server | static)] adds the entry point that runs the app. Without render the
+    // app is server: HTML from the server and JavaScript only for its [Client] islands.
     public static unsafe TokenStream application(TokenStream args, TokenStream item) {
         mut TokenStream out = TokenStream.create();
         out.append(item);
@@ -149,7 +274,7 @@ struct Attributes {
         }
         Token title = item.get(name);
         str mode = Items.argument(args, "render");
-        mut str constant = "CLIENT";
+        mut str constant = "SERVER";
         if (mode.length > 0) {
             if (MacroTexts.same(mode, "client")) {
                 constant = "CLIENT";
@@ -165,13 +290,19 @@ struct Attributes {
             }
         }
         i32 span = title.span;
+        // a page only the server renders is not run by the client at all: on the JavaScript web target the program is
+        // the islands it holds (see [Client]), so the page's own code is not part of it (App.islands)
+        mut str entry = "run";
+        if (MacroTexts.same(constant, "SERVER") || MacroTexts.same(constant, "STATIC")) {
+            entry = "islands";
+        }
         Tokens.ident(&out, "i32", span);
         Tokens.ident(&out, "main", span);
         Tokens.open(&out, "(", span);
         Tokens.close(&out, ")", span);
         Tokens.open(&out, "{", span);
         Tokens.keyword(&out, "return", span);
-        Tokens.path(&out, "App", "run", span);
+        Tokens.path(&out, "App", entry, span);
         Tokens.punct(&out, "<", span);
         out.push(title);
         Tokens.punct(&out, ">", span);
@@ -218,7 +349,9 @@ struct Attributes {
         return out;
     }
 
-    // [Client]: an island inside a server-rendered page; the client hydrates only these.
+    // [Client]: an island inside a server-rendered page. Natively the island writes its fields as JSON props in
+    // data-props; on the web it reads them back from its own element (the declaration's values stay when there are
+    // none), so the client builds the island with the values the server rendered it with.
     public static unsafe TokenStream client(TokenStream args, TokenStream item) {
         mut TokenStream out = TokenStream.create();
         u32 name = Items.name_at(item);
@@ -228,21 +361,128 @@ struct Attributes {
             return out;
         }
         Token title = item.get(name);
+        i32 span = title.span;
         u32 close = item.matching(open);
+        // [Client(load: visible | load | idle | interaction)]: when the page's JavaScript takes the island over;
+        // visible (when it scrolls into view) is the default and is not written
+        str load = Items.argument(args, "load");
+        if (load.length > 0 && !MacroTexts.same(load, "load") && !MacroTexts.same(load, "visible") && !MacroTexts.same(load, "idle") && !MacroTexts.same(load, "interaction")) {
+            out.push(Token.error(0 - 1, "[Client]: load is visible, load, idle or interaction"));
+            return out;
+        }
+        mut TokenStream native = TokenStream.create();
+        mut TokenStream web = TokenStream.create();
+        mut u32 count = 0;
+        if (!Items.props(&native, &web, item, open, close, &count)) {
+            return native;
+        }
         Items.renamed(&out, item, open, close, "render_island_content");
-        Items.render_open(&out, title.span);
-        Tokens.path(&out, "View", "island", title.span);
-        Tokens.open(&out, "(", title.span);
+
+        // natively: the props are written as JSON
+        Items.platform(&out, "native", span);
+        Items.method_open(&out, span);
+        Tokens.keyword(&out, "mut", span);
+        Tokens.ident(&out, "TextBuffer", span);
+        Tokens.ident(&out, "dj_props", span);
+        Tokens.punct(&out, "=", span);
+        Tokens.path(&out, "IslandProps", "begin", span);
+        Tokens.open(&out, "(", span);
+        Tokens.close(&out, ")", span);
+        Tokens.punct(&out, ";", span);
+        out.append(native);
+        Tokens.keyword(&out, "return", span);
+        Tokens.path(&out, "View", "island_props", span);
+        Tokens.open(&out, "(", span);
         Items.quoted_name(&out, title);
-        Tokens.punct(&out, ",", title.span);
-        Tokens.keyword(&out, "this", title.span);
-        Tokens.punct(&out, ".", title.span);
-        Tokens.ident(&out, "render_island_content", title.span);
-        Tokens.open(&out, "(", title.span);
-        Tokens.close(&out, ")", title.span);
-        Tokens.close(&out, ")", title.span);
-        Items.render_close(&out, title.span);
-        Tokens.close(&out, "}", title.span);
+        Tokens.punct(&out, ",", span);
+        Tokens.path(&out, "IslandProps", "finish", span);
+        Tokens.open(&out, "(", span);
+        Tokens.punct(&out, "&", span);
+        Tokens.ident(&out, "dj_props", span);
+        Tokens.close(&out, ")", span);
+        Tokens.punct(&out, ",", span);
+        if (MacroTexts.same(load, "visible")) {
+            Tokens.quoted(&out, "", span);
+        } else {
+            Tokens.quoted(&out, load, span);
+        }
+        Tokens.punct(&out, ",", span);
+        Tokens.keyword(&out, "this", span);
+        Tokens.punct(&out, ".", span);
+        Tokens.ident(&out, "render_island_content", span);
+        Tokens.open(&out, "(", span);
+        Tokens.close(&out, ")", span);
+        Tokens.close(&out, ")", span);
+        Tokens.punct(&out, ";", span);
+        Tokens.close(&out, "}", span);
+
+        // on the web: the island is built from the props the server sent
+        Items.platform(&out, "web", span);
+        Items.method_open(&out, span);
+        Tokens.path(&out, "IslandProps", "open", span);
+        Tokens.open(&out, "(", span);
+        Items.quoted_name(&out, title);
+        Tokens.close(&out, ")", span);
+        Tokens.punct(&out, ";", span);
+        if (count > 0) {
+            out.push(title);
+            Tokens.ident(&out, "dj_island", span);
+            Tokens.punct(&out, "=", span);
+            Tokens.open(&out, "{", span);
+            out.append(web);
+            Tokens.close(&out, "}", span);
+            Tokens.punct(&out, ";", span);
+        }
+        Tokens.keyword(&out, "return", span);
+        Tokens.path(&out, "View", "island", span);
+        Tokens.open(&out, "(", span);
+        Items.quoted_name(&out, title);
+        Tokens.punct(&out, ",", span);
+        if (count > 0) {
+            Tokens.ident(&out, "dj_island", span);
+        } else {
+            Tokens.keyword(&out, "this", span);
+        }
+        Tokens.punct(&out, ".", span);
+        Tokens.ident(&out, "render_island_content", span);
+        Tokens.open(&out, "(", span);
+        Tokens.close(&out, ")", span);
+        Tokens.close(&out, ")", span);
+        Tokens.punct(&out, ";", span);
+        Tokens.close(&out, "}", span);
+
+        // the program mounts each island it holds on the <dj-island> of its name: this is how the island is reached
+        // when the page's own code is not part of the program
+        Items.platform(&out, "web", span);
+        Tokens.open(&out, "[", span);
+        Tokens.ident(&out, "Island", span);
+        Tokens.open(&out, "(", span);
+        Items.quoted_name(&out, title);
+        Tokens.close(&out, ")", span);
+        Tokens.close(&out, "]", span);
+        Tokens.ident(&out, "public", span);
+        Tokens.keyword(&out, "static", span);
+        Tokens.keyword(&out, "unsafe", span);
+        Tokens.ident(&out, "Node", span);
+        Tokens.ident(&out, "dj_mount", span);
+        Tokens.open(&out, "(", span);
+        Tokens.close(&out, ")", span);
+        Tokens.open(&out, "{", span);
+        out.push(title);
+        Tokens.ident(&out, "dj_blank", span);
+        Tokens.punct(&out, "=", span);
+        Tokens.open(&out, "{", span);
+        Tokens.close(&out, "}", span);
+        Tokens.punct(&out, ";", span);
+        Tokens.keyword(&out, "return", span);
+        Tokens.ident(&out, "dj_blank", span);
+        Tokens.punct(&out, ".", span);
+        Tokens.ident(&out, "render", span);
+        Tokens.open(&out, "(", span);
+        Tokens.close(&out, ")", span);
+        Tokens.punct(&out, ";", span);
+        Tokens.close(&out, "}", span);
+        Tokens.close(&out, "}", span);
         return out;
     }
 

@@ -48,7 +48,7 @@ for app in client hydrate islands; do
     build "$app-web" "tests/web/ui/$app" -o "$out/$app/app.wasm" "${flags[@]}" --target wasm
 done
 mkdir -p "$out/example/public"
-build example-web examples/ui-web -o "$out/example/public/app.wasm" "${flags[@]}" --target wasm
+build example-web examples/ui-web -o "$out/example/public/app" "${flags[@]}" --target web
 build example-native examples/ui-web -o "$out/example/server$exe" "${native_flags[@]}"
 for app in hydrate islands; do
     build "$app-native" "tests/web/ui/$app" -o "$out/$app/server$exe" "${native_flags[@]}"
@@ -56,16 +56,21 @@ for app in hydrate islands; do
 done
 
 # the static site: "/" and every page its links reach
-(cd "$out/example" && "./server$exe" --out site > ssg.log 2>&1) || { cat "$out/example/ssg.log"; fail "the static site must be written"; }
+(cd "$out/example" && "./server$exe" --out site --public public > ssg.log 2>&1) || { cat "$out/example/ssg.log"; fail "the static site must be written"; }
 for page in index.html todos/index.html about/index.html; do
     [ -f "$out/example/site/$page" ] || fail "the static site must have $page"
 done
 grep -q 'Built natively' "$out/example/site/about/index.html" || fail "a [Server] part is in the static page"
+grep -q 'Built natively' "$out/example/public/app.js" && fail "and its code is not in the JavaScript"
+ls "$out/example/public" | grep -q '\.wasm$' && fail "the example ships no WebAssembly"
+grep -q 'data-wasm' "$out/example/site/index.html" && fail "and its pages do not ask for the WebAssembly host"
+grep -q 'data-props="{&quot;start&quot;:5}"' "$out/example/site/index.html" || fail "the counter island carries its props"
+grep -q 'modulepreload' "$out/example/site/index.html" || fail "the page loads the JavaScript islands"
 
 node tests/web/ui/client.mjs "$out/client/app.wasm" || fail "client"
 node tests/web/ui/hydrate.mjs "$out/hydrate/index.html" "$out/hydrate/app.wasm" hydrate || fail "hydrate"
 node tests/web/ui/hydrate.mjs "$out/islands/index.html" "$out/islands/app.wasm" islands || fail "islands"
 
-node tests/web/ui/example.mjs "$out/example/site/index.html" "$out/example/public/app.wasm" || fail "example"
+node tests/web/ui/example.mjs "$out/example/site" "$out/example/public/app.js" || fail "example"
 
 echo "PASS ui_web"

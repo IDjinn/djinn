@@ -5,9 +5,11 @@ import std::libc;
 
 namespace webapp;
 
-// One program, two builds: natively it is the server (it prints the page, writes a static site with --out <dir> or
-// serves it with --serve <port>), and with --target wasm it is the client that hydrates that page in the browser.
-[Application(render: hydrate)]
+// One program, two builds: natively it is the server (it prints a page, writes a static site with --out <dir> or serves
+// it with --serve <port>), and with --target web it is only the islands: the [Client] structs below, compiled to
+// JavaScript. The pages are plain HTML; each island is taken over by the browser when its [Client(load: ...)] says
+// and nothing else is sent. No WebAssembly.
+[Application(render: server)]
 struct WebApp {
     public unsafe Node render() {
         return html!{
@@ -15,7 +17,7 @@ struct WebApp {
                 <header class="cluster">
                     <strong>Djinn on the web</strong>
                     <Navigator routes="/=Home|/todos=Todos|/about=About"/>
-                    <button id="theme" on_click={() => Theme.toggle()}>theme</button>
+                    <ThemeButton/>
                 </header>
                 <Outlet view={(str path) => WebApp.page(path)}/>
             </div>
@@ -33,48 +35,99 @@ struct WebApp {
     }
 }
 
+// Starts when the first pointer or key event reaches it: until then it is the button the server wrote.
+[Client(load: interaction)]
+struct ThemeButton {
+    public unsafe Node render() {
+        return html!{ <button id="theme" on_click={() => Theme.toggle()}>theme</button> };
+    }
+}
+
 struct Home {
     public unsafe Node render() {
-        signal<i32> count = state(0);
         return html!{
             <section class="stack">
                 <h1>Home</h1>
-                <p>This page was rendered by the server and hydrated by WebAssembly: the button already works.</p>
-                <div class="cluster">
-                    <output id="count">{count}</output>
-                    <button id="inc" class="primary" on_click={() => count.set(count.get() + 1)}>add one</button>
-                    {if (count.get() >= 3) { <small>that is a lot of clicks</small> }}
-                </div>
+                <p>This page is HTML written by the server. Only the counter below is JavaScript, and it starts from the 5 the server sent.</p>
+                <Counter start={5}/>
             </section>
+        };
+    }
+}
+
+// An island: its fields are its props, written by the server in data-props and read back by the browser.
+[Client]
+struct Counter {
+    i32 start;
+
+    public unsafe Node render() {
+        signal<i32> count = state(this.start);
+        return html!{
+            <div class="cluster">
+                <output id="count">{count}</output>
+                <button id="inc" class="primary" on_click={() => count.set(count.get() + 1)}>add one</button>
+                {if (count.get() >= 8) { <small>that is a lot of clicks</small> }}
+            </div>
         };
     }
 }
 
 struct Todos {
     public unsafe Node render() {
-        signal<str> draft = state<str>("");
-        signal<slice<str>> items = state<slice<str>>(Todos.start());
         return html!{
             <section class="stack">
                 <h1>Todos</h1>
-                <div class="cluster">
-                    <Field label="New item" placeholder="something to do" value={draft}/>
-                    <button id="add" on_click={() => Todos.add(items, draft)}>add</button>
-                </div>
-                <ul id="todos">{for (str item in items.get()) { <li>{item}</li> }}</ul>
-                <small>{(i32)items.get().length} item(s)</small>
+                <TodoList/>
             </section>
         };
     }
+}
 
+// Waits until the browser is idle: the list is there to read before it can be edited.
+[Client(load: idle)]
+struct TodoList {
+    public unsafe Node render() {
+        signal<str> draft = state<str>("");
+        signal<slice<str>> items = state<slice<str>>(TodoList.start());
+        return html!{
+            <div class="stack">
+                <div class="cluster">
+                    <input id="draft" placeholder="something to do" bind:value={draft}/>
+                    <button id="add" on_click={() => TodoList.add(items, draft)}>add</button>
+                </div>
+                <ul id="todos">{for (str item in items.get()) { <li>{item}</li> }}</ul>
+                <small>{(i32)items.get().length} item(s)</small>
+            </div>
+        };
+    }
+
+    // The list is built with Arrays in the browser and by hand on the server: each platform has its own bindings.
+    [Platform(web)]
+    static slice<str> start() {
+        slice<str> none = Arrays.empty<str>();
+        return Arrays.append<str>(Arrays.append<str>(none, "send HTML"), "take over the islands");
+    }
+
+    [Platform(web)]
+    static void add(signal<slice<str>> items, signal<str> draft) {
+        str text = draft.get();
+        if (text.length == 0) {
+            return;
+        }
+        items.set(Arrays.append<str>(items.peek(), text));
+        draft.set("");
+    }
+
+    [Platform(native)]
     static unsafe slice<str> start() {
         str* list = (str*)__djinn_alloc_zeroed((size_long)(2 * sizeof(str)));
-        list[0] = "hydrate the page";
-        list[1] = "write the static site";
+        list[0] = "send HTML";
+        list[1] = "take over the islands";
         slice<str> made = { .data = list, .length = 2 };
         return made;
     }
 
+    [Platform(native)]
     static unsafe void add(signal<slice<str>> items, signal<str> draft) {
         str text = draft.get();
         if (text.length == 0) {
@@ -94,7 +147,7 @@ struct Todos {
     }
 }
 
-// Rendered by the server only: the client keeps the HTML it received and never runs this code.
+// Rendered by the server only: this code is not in the JavaScript.
 [Server]
 struct BuildInfo {
     public unsafe Node render() {
@@ -107,7 +160,7 @@ struct About {
         return html!{
             <section class="stack">
                 <h1>About</h1>
-                <p>Djinn compiles the same components to a native window (Vulkan), to HTML on a server and to WebAssembly in a page.</p>
+                <p>Djinn compiles the same components to a native window (Vulkan) and to HTML on a server with JavaScript islands in the page.</p>
                 <BuildInfo/>
             </section>
         };
