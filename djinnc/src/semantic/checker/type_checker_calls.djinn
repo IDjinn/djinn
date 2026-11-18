@@ -418,6 +418,52 @@ impl TypeChecker {
         }
     }
 
+    unsafe bool provided_by_core(StructInfo* owner) {
+        return owner != null && owner.node != null && (Attributes.has(owner.node, "intrinsic") || Attributes.has(owner.node, "no_mangle"));
+    }
+
+    // 2 for a struct declared in extern "JS", 4 for extern "C", 0 otherwise.
+    unsafe i32 extern_kind_of(StructInfo* owner) {
+        if (owner == null || owner.node == null || owner.node.kind() != NodeKind::STRUCT_DECL) {
+            return 0;
+        }
+        return owner.node.op() & 6;
+    }
+
+    unsafe void check_abstract_call(Node* callee, FunctionInfo* info) {
+        if (!info.is_abstract || this.provided_by_core(info.owner)) {
+            return;
+        }
+        i32 kind = this.extern_kind_of(info.owner);
+        if (kind == 2) {
+            if (!Target.is_web()) {
+                this.error_code(callee, DiagnosticErrors.ABSTRACT_CALL, "an extern \"JS\" binding is only available with --target web");
+            }
+            return;
+        }
+        if (kind == 4) {
+            if (Target.is_web()) {
+                this.error_code(callee, DiagnosticErrors.ABSTRACT_CALL, "an extern \"C\" binding is not available with --target web");
+            }
+            return;
+        }
+        if (Target.is_web() && info.node != null && Attributes.has(info.node, "Js")) {
+            return;
+        }
+        this.error_code(callee, DiagnosticErrors.ABSTRACT_CALL, "an abstract method has no implementation for this target");
+    }
+
+    unsafe void check_abstract_instantiation(Node* at, StructInfo* owner) {
+        if (owner.node == null || owner.node.kind() != NodeKind::STRUCT_DECL || (owner.node.op() & 7) == 0 || this.provided_by_core(owner)) {
+            return;
+        }
+        if ((owner.node.op() & 6) != 0) {
+            this.error_code(at, DiagnosticErrors.ABSTRACT_INSTANTIATION, "an extern struct cannot be instantiated; a value comes from a binding that returns it");
+            return;
+        }
+        this.error_code(at, DiagnosticErrors.ABSTRACT_INSTANTIATION, "an abstract struct cannot be instantiated");
+    }
+
     u32 constructor_owner_type(Node* at, u32 type) {
         SymbolTable* symbols = this.symbols;
         if (!Types.is_struct(type) || symbols.enum_of_type(type) != null) {
@@ -433,6 +479,7 @@ impl TypeChecker {
         }
         SymbolTable* symbols = this.symbols;
         StructInfo* owner = symbols.struct_at(Types.struct_index(type));
+        this.check_abstract_instantiation(node, owner);
         FunctionInfo* constructor = this.check_constructor_arguments(node, owner);
         callee.set_symbol(SymbolKind.CONSTRUCTOR, (ptr)constructor);
         return type;
@@ -445,6 +492,7 @@ impl TypeChecker {
         }
         SymbolTable* symbols = this.symbols;
         StructInfo* owner = symbols.struct_at(Types.struct_index(type));
+        this.check_abstract_instantiation(node, owner);
         FunctionInfo* constructor = this.check_constructor_arguments(node, owner);
         node.set_symbol(SymbolKind.CONSTRUCTOR, (ptr)constructor);
         return Types.pointer_to(type);
@@ -591,6 +639,7 @@ impl TypeChecker {
             this.error_code(callee, DiagnosticErrors.UNDECLARED_FUNCTION, "call to an undeclared function");
             return Types.i32_type();
         }
+        this.check_abstract_call(callee, info);
 
         if (!this.can_access(info)) {
             this.error_code(callee, DiagnosticErrors.PRIVATE_ACCESS, "call to a private function from outside its type or namespace");

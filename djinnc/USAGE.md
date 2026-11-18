@@ -138,6 +138,7 @@ app.wasm`.
   processes, sockets and threads fail as error values.
 - A synchronous wait (`.sync`, or a sync function that awaits) works only while nothing waits for a timer; otherwise it
   fails with a runtime error. Make the caller async.
+- `extern "JS" { struct ... }` and `extern "C" { struct ... }` declare interop structs (see GRAMMAR.md); `"JS"` and `"C"` are languages, any other string is a module.
 - `extern "mod" { ... }` imports its functions from the WebAssembly module `mod` (`extern "C"` and plain `extern` stay
   C functions); `[Export("name")]` exports a function under that name. Both mean nothing on other targets.
 - `libs/ui` builds for the web too: the page is the real DOM (see libs/ui/README.md).
