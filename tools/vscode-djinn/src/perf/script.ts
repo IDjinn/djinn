@@ -28,6 +28,9 @@ export interface ScriptOptions {
   perfBin: string;
   env: Record<string, string>;
   cwd?: string;
+  /** Libraries the project lists in djinn.proj (without std), and the folder holding their sources. */
+  libs?: string[];
+  libsDir?: string;
 }
 
 interface RecordOptions {
@@ -83,9 +86,25 @@ function allocationLines(options: RecordOptions): string[] {
   ];
 }
 
+/** Builds std and the libraries of the project for Linux into $WORK/libs, in the order the project lists them. */
+function libraryLines(libs: string[], libsDir: string | undefined): string[] {
+  if (libs.length === 0 || !libsDir) {
+    return [];
+  }
+  const flags = '--runtime-dir "$RUNTIME_DIR" --runtime-lib "$HOME_DIR/bin/libdjinn_runtime.a"';
+  const fail = (what: string): string => `{ echo "[djinn] could not build ${what} for Linux:"; grep -v -E '^djinnc: (lexed|parsed|generated|compiling|wrote)' "$WORK/lib.log"; exit 1; }`;
+  return [
+    `echo "[djinn] building std and ${libs.join(", ")} for Linux"`,
+    `rm -rf "$WORK/libs"; mkdir -p "$WORK/libs"`,
+    `mapfile -t STD_SOURCES < <(find "$STD_DIR" -name '*.djinn' | sort)`,
+    `"$HOME_DIR/bin/djinnc" "\${STD_SOURCES[@]}" --library -o "$WORK/libs/std.djlib" ${flags} > "$WORK/lib.log" 2>&1 || ${fail("std")}`,
+    ...libs.map((lib) => `"$HOME_DIR/bin/djinnc" ${shellQuote(toolchain.toWslPath(`${libsDir}/${lib}`))} -o "$WORK/libs/${lib}.djlib" --lib-dir "$WORK/libs" --std-dir "$STD_DIR" ${flags} > "$WORK/lib.log" 2>&1 || ${fail(lib)}`),
+  ];
+}
+
 /** The bash script that compiles the program for Linux, records it with perf and converts the samples. */
 export function script(options: ScriptOptions): string {
-  const { distroBin, paths, sources, name, args, duration, frequency, output, callGraph, mode, optimization, perfBin, env, cwd } = options;
+  const { distroBin, paths, sources, name, args, duration, frequency, output, callGraph, mode, optimization, perfBin, env, cwd, libs = [], libsDir } = options;
   const event = mode === "pages" ? "-e page-faults -c 1" : `-e cpu-clock -F ${frequency}`;
   const stopNote = duration > 0 ? `, stops after ${duration}s` : ", until the program exits or you run Djinn: Stop profiling";
   const lines = [
@@ -103,7 +122,8 @@ export function script(options: ScriptOptions): string {
     `cp -f "$RUNTIME_LIB" "$HOME_DIR/bin/libdjinn_runtime.a"`,
     `chmod +x "$HOME_DIR/bin/djinnc"`,
     `echo "[djinn] compiling for Linux with debug info"`,
-    `"$HOME_DIR/bin/djinnc" ${sources.map(shellQuote).join(" ")} -o "$WORK/app" -g -${optimization} --std --std-dir "$STD_DIR" --runtime-dir "$RUNTIME_DIR" --runtime-lib "$HOME_DIR/bin/libdjinn_runtime.a" > "$WORK/build.log" 2>&1 && BUILD=0 || BUILD=$?`,
+    ...libraryLines(libs, libsDir),
+    `"$HOME_DIR/bin/djinnc" ${sources.map(shellQuote).join(" ")} -o "$WORK/app" -g -${optimization} ${libs.length > 0 ? '--lib-dir "$WORK/libs" --std-dir "$STD_DIR"' : '--std --std-dir "$STD_DIR"'} --runtime-dir "$RUNTIME_DIR" --runtime-lib "$HOME_DIR/bin/libdjinn_runtime.a" > "$WORK/build.log" 2>&1 && BUILD=0 || BUILD=$?`,
     `if [ "$BUILD" != 0 ] || [ ! -x "$WORK/app" ]; then echo "[djinn] the Linux build failed (djinnc exit code $BUILD). Compiler: $HOME_DIR/bin/djinnc. Full output:"; grep -v -E '^djinnc: (lexed|parsed|generated)' "$WORK/build.log" || true; echo "[djinn] log: $WORK/build.log"; exit 1; fi`,
     `echo "[djinn] recording with perf (${frequency} Hz${stopNote})"`,
     `rm -f "$WORK/perf.data"`,

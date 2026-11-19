@@ -56,6 +56,23 @@ function runnerFor(overrides: Partial<PerfRunner> = {}): PerfRunner {
   };
 }
 
+/** Libraries (other than std) a project lists in djinn.proj and that the Djinn checkout has sources for. */
+function projectLibraries(target: string): { libs: string[]; libsDir?: string } {
+  const manifest = path.join(target, "djinn.proj");
+  if (!fs.existsSync(manifest) || !fs.statSync(target).isDirectory()) {
+    return { libs: [] };
+  }
+  const text = fs.readFileSync(manifest, "utf8");
+  const block = /libs:\s*\[([^\]]*)\]/.exec(text);
+  const names = block ? [...block[1].matchAll(/['"]([^'"]+)['"]/g)].map((match) => match[1]).filter((name) => name !== "std") : [];
+  const root = toolchain.repoRoot();
+  const libsDir = root ? path.join(root, "libs") : undefined;
+  if (names.length > 0 && (!libsDir || names.some((name) => !fs.existsSync(path.join(libsDir, name))))) {
+    throw new Error(`The project uses libraries (${names.join(", ")}) whose sources were not found in a Djinn checkout's libs/ folder, so they cannot be built for Linux.`);
+  }
+  return { libs: names, libsDir };
+}
+
 function argumentsText(value: string | string[] | undefined, fallback: string | undefined): string {
   if (Array.isArray(value)) {
     return value.map((item) => shellQuote(item)).join(" ");
@@ -116,6 +133,7 @@ export function prepare(target: string, mode: PerfMode, overrides: PerfOverrides
     distroBin: runnerConfig.workDir,
     paths,
     sources: sourcesFor(target),
+    ...projectLibraries(target),
     name: `${plan.name.replace(/[^A-Za-z0-9_.-]/g, "_")}_${optimization}`,
     args: argumentsText(overrides.args, settings.get<string>("perf.arguments")),
     duration: overrides.duration !== undefined ? overrides.duration : Number(settings.get("perf.duration") || 0),
