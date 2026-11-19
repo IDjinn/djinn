@@ -50,12 +50,11 @@ impl CodeGenerator {
             }
             if (existing != null) {
                 info.function = existing;
+                this.apply_allocation(info);
             } else {
                 info.function = LLVMAddFunction(this.module, symbol, info.function_type);
                 this.apply_attributes(info);
-                if (info.is_extern && CodeGenerator.is_runtime_allocator(symbol)) {
-                    this.mark_allocator(info.function, symbol);
-                }
+                this.apply_allocation(info);
                 if (!info.is_extern) {
                     this.share_definition(info);
                 }
@@ -483,12 +482,12 @@ impl CodeGenerator {
     }
 
     void add_function_attribute(ptr function, ptr<i8> name) {
-        this.add_attribute(function, 4294967295, name, 0);
+        this.add_attribute(function, AttributeIndex.FUNCTION, name, 0);
     }
 
     unsafe void add_string_attribute(ptr function, ptr<i8> key, ptr<i8> value) {
         ptr attribute = LLVMCreateStringAttribute(this.context, key, (u32)strlen(key), value, (u32)strlen(value));
-        LLVMAddAttributeAtIndex(function, 4294967295, attribute);
+        LLVMAddAttributeAtIndex(function, AttributeIndex.FUNCTION, attribute);
     }
 
     // On the web, an extern "module" function is a WebAssembly import of that module and an [Export] function an
@@ -511,37 +510,102 @@ impl CodeGenerator {
         }
     }
 
-    unsafe ptr allocator_function(ptr<i8> name, ptr function_type) {
+    unsafe ptr allocator_function(ptr<i8> name, ptr function_type, bool zeroed, i32 align_index) {
         mut ptr allocator = LLVMGetNamedFunction(this.module, name);
         if (allocator == null) {
             allocator = LLVMAddFunction(this.module, name, function_type);
         }
-        this.mark_allocator(allocator, name);
+        mut ptr<i8> family = "djinn";
+        if (align_index >= 0) {
+            family = "djinn_aligned";
+        }
+        this.mark_allocation(allocator, AllocKind.ALLOC, family, zeroed, 0, -1, align_index);
         return allocator;
     }
 
-    unsafe void mark_allocator(ptr function, ptr<i8> name) {
-        if (LLVMGetStringAttributeAtIndex(function, 4294967295, "alloc-family", 12) != null) {
+    unsafe void mark_allocation(ptr function, i32 role, ptr<i8> family, bool zeroed, i32 size_index, i32 pointer_index, i32 align_index) {
+        if (LLVMGetStringAttributeAtIndex(function, AttributeIndex.FUNCTION, "alloc-family", 12) != null) {
             return;
         }
-        mut i32 kind = AllocKind.ALLOC | AllocKind.ZEROED;
-        mut ptr<i8> family = "djinn";
-        if (Strings.same(name, "__djinn_alloc")) {
-            kind = AllocKind.ALLOC | AllocKind.UNINITIALIZED;
-        } else if (Strings.same(name, "__djinn_malloc_aligned")) {
-            family = "djinn_aligned";
+        mut i32 kind = role;
+        mut u64 memory = AllocKind.INACCESSIBLE_MEMORY;
+        if (role == AllocKind.ALLOC) {
+            if (zeroed) {
+                kind = kind | AllocKind.ZEROED;
+            } else {
+                kind = kind | AllocKind.UNINITIALIZED;
+            }
         }
-        this.add_attribute(function, 0, "noalias", 0);
+        if (role != AllocKind.FREE && align_index >= 0) {
+            kind = kind | AllocKind.ALIGNED;
+            this.add_attribute(function, (u32)(align_index + 1), "allocalign", 0);
+        }
+        if (role != AllocKind.ALLOC) {
+            memory = AllocKind.ARGUMENT_AND_INACCESSIBLE_MEMORY;
+        }
+        if (pointer_index >= 0) {
+            this.add_attribute(function, (u32)(pointer_index + 1), "allocptr", 0);
+        }
+        if (role != AllocKind.FREE) {
+            this.add_attribute(function, AttributeIndex.RETURN, "noalias", 0);
+            if (size_index >= 0) {
+                this.add_attribute(function, AttributeIndex.FUNCTION, "allocsize", ((u64)size_index << 32) | AllocKind.NO_COUNT_PARAMETER);
+            }
+        }
         this.add_function_attribute(function, "nounwind");
-        this.add_attribute(function, 4294967295, "allockind", (u64)kind);
-        this.add_attribute(function, 4294967295, "allocsize", AllocKind.SIZE_IN_FIRST_PARAMETER);
-        this.add_attribute(function, 4294967295, "memory", AllocKind.INACCESSIBLE_MEMORY);
+        this.add_attribute(function, AttributeIndex.FUNCTION, "allockind", (u64)kind);
+        this.add_attribute(function, AttributeIndex.FUNCTION, "memory", memory);
         FloatEnvironment.add_string_attribute(this, function, "alloc-family", family);
     }
 
-    static bool is_runtime_allocator(ptr<i8> name) {
-        return Strings.same(name, "__djinn_alloc") || Strings.same(name, "__djinn_alloc_zeroed")
-            || Strings.same(name, "__djinn_malloc") || Strings.same(name, "__djinn_malloc_aligned");
+    unsafe void apply_allocation(FunctionInfo* info) {
+        if (info.node == null) {
+            return;
+        }
+        mut i32 role = 0;
+        mut ptr<i8> family = "djinn";
+        mut bool zeroed = false;
+        PointerList* uses = Attributes.of(info.node);
+        for (mut i32 i = 0; i < uses.length; i = i + 1) {
+            AttributeUse* use = (AttributeUse*)uses.get(i);
+            if (Strings.same(use.name, "AllocFn")) {
+                role = AllocKind.ALLOC;
+            } else if (Strings.same(use.name, "ReallocFn")) {
+                role = AllocKind.REALLOC;
+            } else if (Strings.same(use.name, "FreeFn")) {
+                role = AllocKind.FREE;
+            } else if (Strings.same(use.name, "AllocZeroed")) {
+                zeroed = true;
+                continue;
+            } else {
+                continue;
+            }
+            if (use.text_arg != null) {
+                family = use.text_arg;
+            }
+        }
+        if (role != 0) {
+            this.mark_allocation(info.function, role, family, zeroed, this.parameter_index(info, "AllocSize"), this.parameter_index(info, "AllocPtr"), this.parameter_index(info, "AllocAlign"));
+        }
+    }
+
+    unsafe i32 parameter_index(FunctionInfo* info, ptr<i8> attribute) {
+        Node* declaration = info.node;
+        mut i32 slot = 0;
+        if (info.is_instance) {
+            slot = 1;
+        }
+        for (mut i32 i = 0; i < declaration.count(); i = i + 1) {
+            Node* parameter = declaration.child(i);
+            if (parameter.kind() != NodeKind::PARAMETER) {
+                continue;
+            }
+            if (Attributes.has(parameter, attribute)) {
+                return slot;
+            }
+            slot = slot + 1;
+        }
+        return -1;
     }
 
     unsafe void apply_parameter_attributes(FunctionInfo* info) {
@@ -590,7 +654,7 @@ impl CodeGenerator {
         }
         if (!info.is_extern) {
             this.add_function_attribute(info.function, "nounwind");
-            this.add_attribute(info.function, 4294967295, "uwtable", 2);
+            this.add_attribute(info.function, AttributeIndex.FUNCTION, "uwtable", 2);
         }
         if (info.must_progress) {
             this.add_function_attribute(info.function, "mustprogress");
@@ -608,9 +672,9 @@ impl CodeGenerator {
                     this.add_function_attribute(info.function, "inlinehint");
                 }
             } else if (Strings.equals(use.name, (i32)strlen(use.name), "Const")) {
-                this.add_attribute(info.function, 4294967295, "memory", 0);
+                this.add_attribute(info.function, AttributeIndex.FUNCTION, "memory", 0);
             } else if (Strings.equals(use.name, (i32)strlen(use.name), "Pure")) {
-                this.add_attribute(info.function, 4294967295, "memory", 1365);
+                this.add_attribute(info.function, AttributeIndex.FUNCTION, "memory", 1365);
             } else if (use.text_arg != null && Strings.equals(use.name, (i32)strlen(use.name), "Llvm")) {
                 this.add_function_attribute(info.function, use.text_arg);
             } else if (Strings.same(use.name, "NonNull")) {
