@@ -20,6 +20,7 @@ struct HostState {
     mut u32 gpu_height;
     mut bool dirty;
     mut u32 hover;
+    mut DevTools* tools;
 }
 
 unsafe static mut u64 host_state_address = 0;
@@ -451,6 +452,8 @@ struct WinHost {
             }
             WinHost.chrome(s, (f32)w, (f32)h);
             u64 t1 = WinHost.ticks(s);
+            mut u64 draw_us = 0;
+            mut u64 present_us = 0;
             if (s.gpu != (VulkanRenderer*)0) {
                 // a size change makes the first attempt rebuild the swapchain; drawing again at once keeps the window
                 // from showing a stale or stretched frame while the edge is dragged
@@ -460,6 +463,7 @@ struct WinHost {
                     s.dirty = !VulkanRenderer.draw(s.gpu, &s.list, w, h);
                     attempts = 2;
                 }
+                draw_us = WinHost.ticks(s) - t1;
                 if (getenv("DJINN_UI_TRACE") != (i8*)0) {
                     printf("gpu client %ux%u swapchain %ux%u attempts %u shown %d vertices %u
 ", w, h, s.gpu.width, s.gpu.height, attempts, (i32)(!s.dirty), s.list.count);
@@ -470,12 +474,15 @@ struct WinHost {
                 u64 t2 = WinHost.ticks(s);
                 WinHost.present(s.window, &s.canvas);
                 u64 t3 = WinHost.ticks(s);
+                draw_us = t2 - t1;
+                present_us = t3 - t2;
                 if (getenv("DJINN_UI_TRACE") != (i8*)0) {
                     printf("frame %ux%u layout+paint %llu raster %llu present %llu (us)
 ", w, h, t1 - t0, t2 - t1, t3 - t2);
                 }
                 s.dirty = false;
             }
+            DevTools.frame(s.tools, t1 - t0, draw_us, present_us, s.list.count, w, h);
             s.stamp = Dom.stamp() + Animation.version() + Scroll.version();
             s.epoch = Dom.epoch();
         }
@@ -483,20 +490,29 @@ struct WinHost {
 
     // Runs one app in a window until it is closed. Returns the exit code.
     public static unsafe i32 run<T>(T app, str title, u32 width, u32 height) {
+        // DJINN_UI_DEVTOOLS shows the metrics screen (see devtools.djinn) in the console of the process
+        mut DevTools* tools = (DevTools*)0;
+        if (getenv("DJINN_UI_DEVTOOLS") != (i8*)0) {
+            tools = DevTools.create();
+        }
         SetProcessDPIAware();
         GdiFonts.install();
         WinClipboard.install();
         Scroll.set_smooth(true);
+        mut u64 stage_start = DevTools.now();
         Mounted mounted = App.mount<T>(app);
+        DevTools.stage(tools, "mount", stage_start);
         // the window size is given in CSS pixels
         f64 device = WinHost.scale();
         Styles.set_device_scale(device);
         u32 scaled_width = (u32)((f64)width * device);
         u32 scaled_height = (u32)((f64)height * device);
+        stage_start = DevTools.now();
         void* window = WinHost.open(title, scaled_width, scaled_height);
         if (window == (void*)0) {
             return 1;
         }
+        DevTools.stage(tools, "window", stage_start);
         WinHost.shape(window);
         f32 cap = WinHost.caption();
         HostState* state = (HostState*)__djinn_alloc_zeroed((size_long)sizeof(HostState));
@@ -505,6 +521,8 @@ struct WinHost {
         state.list = DisplayList.create();
         state.canvas = Canvas.create(1, 1);
         state.dirty = true;
+        state.tools = tools;
+        stage_start = DevTools.now();
         // Vulkan is the default; the software rasterizer is used only when no Vulkan device is available (or when
         // DJINN_UI_CPU is set, to compare or debug).
         if (getenv("DJINN_UI_CPU") == (i8*)0) {
@@ -517,6 +535,7 @@ struct WinHost {
 ");
             }
         }
+        DevTools.stage(tools, "gpu", stage_start);
         host_state_address = (u64)state;
         void* message = Raw.make(64);
         mut u32 pressed = 0;
@@ -648,11 +667,13 @@ struct WinHost {
                     busy = true;
                 }
             }
+            DevTools.tick(tools);
             if (!busy) {
                 Sleep(8);
             }
         }
         host_state_address = 0;
+        DevTools.close(tools);
         if (state.gpu != (VulkanRenderer*)0) {
             VulkanRenderer.release(state.gpu);
         }
