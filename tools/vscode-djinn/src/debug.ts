@@ -35,6 +35,30 @@ function nativeConfiguration(config: LaunchConfig, program: string, cwd: string)
   };
 }
 
+/**
+ * The `djinn` debug type only forwards to the native debugger (cppvsdbg/cppdbg) from the configuration provider, so its own
+ * session never talks DAP. A descriptor is still registered so VS Code never reports "cannot find a debug adapter for djinn".
+ */
+export class DebugAdapterFactory implements vscode.DebugAdapterDescriptorFactory {
+  createDebugAdapterDescriptor(): vscode.DebugAdapterDescriptor {
+    const messages = new vscode.EventEmitter<vscode.DebugProtocolMessage>();
+    const adapter: vscode.DebugAdapter = {
+      onDidSendMessage: messages.event,
+      handleMessage: (message) => {
+        const request = message as { seq: number; type: string; command?: string };
+        if (request.type === "request") {
+          messages.fire({ type: "response", request_seq: request.seq, seq: 0, success: true, command: request.command } as vscode.DebugProtocolMessage);
+          if (request.command === "initialize") {
+            messages.fire({ type: "event", event: "terminated", seq: 0 } as vscode.DebugProtocolMessage);
+          }
+        }
+      },
+      dispose: () => messages.dispose(),
+    };
+    return new vscode.DebugAdapterInlineImplementation(adapter);
+  }
+}
+
 export class DebugProvider implements vscode.DebugConfigurationProvider {
   provideDebugConfigurations(): vscode.DebugConfiguration[] {
     return [

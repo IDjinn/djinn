@@ -1,5 +1,5 @@
 import * as vscode from "vscode";
-import { DebugProvider } from "./debug";
+import { DebugAdapterFactory, DebugProvider } from "./debug";
 import { InlineDiagnostics } from "./diagnostics";
 import { Profiling } from "./profiling";
 import { ServerClient } from "./server";
@@ -36,6 +36,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     diagnostics,
     ...profiling.register(),
     vscode.debug.registerDebugConfigurationProvider("djinn", new DebugProvider()),
+    vscode.debug.registerDebugAdapterDescriptorFactory("djinn", new DebugAdapterFactory()),
     vscode.tasks.registerTaskProvider("djinn", taskProvider(getInfo)),
     vscode.commands.registerCommand("djinn.install", () => runSetup("install")),
     vscode.commands.registerCommand("djinn.update", () => runSetup("update")),
