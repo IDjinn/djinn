@@ -1,6 +1,67 @@
 #include "runtime_internal.h"
 
+#include <stdatomic.h>
+#ifdef _WIN32
+#include <malloc.h>
+#elif defined(__APPLE__)
+#include <malloc/malloc.h>
+#else
+#include <malloc.h>
+#endif
+
 Logger* logger;
+
+// Allocation statistics (see __djinn_alloc_stats): every block that goes through the allocator below is counted, with
+// the size the heap really reserved for it, so a free can take the same number back out. Relaxed atomics: the
+// counters are read for display, they order nothing.
+static _Atomic uint64_t djinn_stat_allocs;
+static _Atomic uint64_t djinn_stat_frees;
+static _Atomic uint64_t djinn_stat_total_bytes;
+static _Atomic uint64_t djinn_stat_live_bytes;
+static _Atomic uint64_t djinn_stat_peak_bytes;
+
+static size_t djinn_usable_size(void* pointer)
+{
+#ifdef _WIN32
+    return _msize(pointer);
+#elif defined(__APPLE__)
+    return malloc_size(pointer);
+#else
+    return malloc_usable_size(pointer);
+#endif
+}
+
+static void djinn_stat_grow(size_t bytes)
+{
+    uint64_t live = atomic_fetch_add_explicit(&djinn_stat_live_bytes, bytes, memory_order_relaxed) + bytes;
+    uint64_t peak = atomic_load_explicit(&djinn_stat_peak_bytes, memory_order_relaxed);
+    while (live > peak && !atomic_compare_exchange_weak_explicit(&djinn_stat_peak_bytes, &peak, live, memory_order_relaxed, memory_order_relaxed)) {
+    }
+}
+
+static void djinn_stat_alloc(void* chunk)
+{
+    size_t bytes = djinn_usable_size(chunk);
+    atomic_fetch_add_explicit(&djinn_stat_allocs, 1, memory_order_relaxed);
+    atomic_fetch_add_explicit(&djinn_stat_total_bytes, bytes, memory_order_relaxed);
+    djinn_stat_grow(bytes);
+}
+
+static void djinn_stat_free(void* pointer)
+{
+    atomic_fetch_add_explicit(&djinn_stat_frees, 1, memory_order_relaxed);
+    atomic_fetch_sub_explicit(&djinn_stat_live_bytes, djinn_usable_size(pointer), memory_order_relaxed);
+}
+
+// out[0..4] = blocks allocated, blocks freed, bytes allocated in all, bytes alive now, the most bytes alive at once.
+void __djinn_alloc_stats(uint64_t* out)
+{
+    out[0] = atomic_load_explicit(&djinn_stat_allocs, memory_order_relaxed);
+    out[1] = atomic_load_explicit(&djinn_stat_frees, memory_order_relaxed);
+    out[2] = atomic_load_explicit(&djinn_stat_total_bytes, memory_order_relaxed);
+    out[3] = atomic_load_explicit(&djinn_stat_live_bytes, memory_order_relaxed);
+    out[4] = atomic_load_explicit(&djinn_stat_peak_bytes, memory_order_relaxed);
+}
 
 int64_t __djinn_unix_timestamp_ms(void)
 {
@@ -16,6 +77,7 @@ void __djinn_free(void* pointer)
         return;
     }
     DJINN_TRACE("de-allocating heap memory at %p", pointer);
+    djinn_stat_free(pointer);
     free(pointer);
 }
 
@@ -29,14 +91,27 @@ void __djinn_closure_drop(void* env)
     if (drop != NULL) {
         drop(env);
     }
+    djinn_stat_free(env);
     free(env);
 }
 
 DJINN_ATTR_REALLOC
 void* __djinn_realloc(void* pointer, size_t new_size)
 {
+    size_t before = pointer != NULL ? djinn_usable_size(pointer) : 0;
     void* chunk = realloc(pointer, new_size);
     DJINN_ASSERT(chunk, "Out of memory");
+    if (pointer == NULL) {
+        djinn_stat_alloc(chunk);
+    } else {
+        size_t after = djinn_usable_size(chunk);
+        atomic_fetch_add_explicit(&djinn_stat_total_bytes, after > before ? after - before : 0, memory_order_relaxed);
+        if (after >= before) {
+            djinn_stat_grow(after - before);
+        } else {
+            atomic_fetch_sub_explicit(&djinn_stat_live_bytes, before - after, memory_order_relaxed);
+        }
+    }
     DJINN_TRACE("re-allocated size %zu on heap at %p", new_size, chunk);
     return chunk;
 }
@@ -47,6 +122,7 @@ void* __djinn_alloc(size_t size)
     DJINN_ASSERT(size > 0, "Size need be greater than zero!");
     void* chunk = malloc(size);
     DJINN_ASSERT(chunk, "Out of memory");
+    djinn_stat_alloc(chunk);
     DJINN_TRACE("allocated size %zu on heap at %p", size, chunk);
     return chunk;
 }
@@ -57,6 +133,7 @@ void* __djinn_alloc_zeroed(size_t size)
     DJINN_ASSERT(size > 0, "Size need be greater than zero!");
     void* chunk = calloc(1, size);
     DJINN_ASSERT(chunk, "Out of memory");
+    djinn_stat_alloc(chunk);
     DJINN_TRACE("allocated zeroed size %zu on heap at %p", size, chunk);
     return chunk;
 }
@@ -76,6 +153,7 @@ void* __djinn_malloc_aligned(size_t size, size_t alignment)
     if (alignment < sizeof(void*)) alignment = sizeof(void*);
     void* raw = calloc(1, size + alignment + sizeof(void*));
     DJINN_ASSERT(raw, "Out of memory");
+    djinn_stat_alloc(raw);
     uintptr_t address = ((uintptr_t)raw + sizeof(void*) + alignment - 1) & ~((uintptr_t)alignment - 1);
     ((void**)address)[-1] = raw;
     DJINN_TRACE("allocated size %zu aligned to %zu on heap at %p", size, alignment, (void*)address);
@@ -86,7 +164,9 @@ void __djinn_free_aligned(void* pointer)
 {
     if (!pointer) return;
     DJINN_TRACE("de-allocating aligned heap memory at %p", pointer);
-    free(((void**)pointer)[-1]);
+    void* raw = ((void**)pointer)[-1];
+    djinn_stat_free(raw);
+    free(raw);
 }
 
 #ifdef _WIN32

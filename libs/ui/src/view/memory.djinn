@@ -1,0 +1,61 @@
+import std::types;
+import std::libc;
+
+namespace ui;
+
+// What the retained parts of the UI hold, estimated from the capacity of their tables (the bytes they reserved, which
+// is what the allocator sees), for a dev tools screen. It reads, it never allocates.
+struct UiMemory {
+    const u32 PARTS = 5;
+
+    // out[0] = the tree's nodes, attributes, listeners and the text they own
+    // out[1] = the font system: glyph table and atlas image
+    // out[2] = the cascade: per-node computed styles, the style cache and the stylesheets' tables
+    // out[3] = nodes alive in the tree
+    // out[4] = stylesheets installed
+    public static unsafe void report(u64* out) {
+        for (mut u32 i = 0; i < UiMemory.PARTS; i = i + 1) {
+            out[i] = 0;
+        }
+        if (dom_tree != null) {
+            DomTree* tree = (DomTree*)dom_tree;
+            mut u64 bytes = (u64)tree.capacity * sizeof(DomNode) + (u64)tree.attr_capacity * sizeof(DomAttr);
+            bytes = bytes + (u64)tree.listener_capacity * (sizeof(Listener) + sizeof(ListenerInfo));
+            for (mut u32 i = 1; i < tree.count; i = i + 1) {
+                DomNode* node = &tree.nodes[i];
+                if (node.kind != DomKind.FREE) {
+                    bytes = bytes + (u64)node.text_length;
+                }
+            }
+            for (mut u32 i = 1; i < tree.attr_count; i = i + 1) {
+                bytes = bytes + (u64)tree.attrs[i].length;
+            }
+            out[0] = bytes;
+            out[3] = (u64)tree.live;
+        }
+        if (font_system != null) {
+            FontSystem* fonts = (FontSystem*)font_system;
+            out[1] = (u64)fonts.table_size * sizeof(Glyph) + (u64)fonts.atlas.width * (u64)fonts.atlas.height;
+        }
+        if (style_engine != null) {
+            StyleEngine* engine = (StyleEngine*)style_engine;
+            mut u64 bytes = (u64)engine.capacity * (sizeof(Style) + 8);
+            if (engine.slots != null) {
+                bytes = bytes + 1024 * sizeof(StyleSlot);
+            }
+            bytes = bytes + (u64)engine.scratch.capacity * sizeof(CascadeEntry);
+            for (mut u32 i = 0; i < engine.sheets.count; i = i + 1) {
+                StyleSheet* sheet = engine.sheets.get(i);
+                bytes = bytes + (u64)sheet.source.length;
+                bytes = bytes + (u64)sheet.declarations.capacity * sizeof(CssDeclaration);
+                bytes = bytes + (u64)sheet.rules.capacity * sizeof(CssRule);
+                bytes = bytes + (u64)sheet.index.capacity * sizeof(RuleKey);
+                bytes = bytes + (u64)sheet.always.capacity * 4;
+                bytes = bytes + (u64)sheet.media.capacity * sizeof(MediaQuery);
+                bytes = bytes + (u64)sheet.features.capacity * sizeof(MediaFeature);
+            }
+            out[2] = bytes;
+            out[4] = (u64)engine.sheets.count;
+        }
+    }
+}

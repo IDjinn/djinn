@@ -94,6 +94,9 @@ void* __djinn_malloc_aligned(size_t size, size_t alignment);
 
 void __djinn_free_aligned(void* pointer);
 
+// Allocation statistics: out[0..4] = blocks allocated, blocks freed, bytes allocated in all, bytes alive, peak bytes alive.
+void __djinn_alloc_stats(uint64_t* out);
+
 #define DJINN_IO_FILE_READ   0
 #define DJINN_IO_FILE_WRITE  1
 #define DJINN_IO_ACCEPT      2

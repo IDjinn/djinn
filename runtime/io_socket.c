@@ -112,7 +112,7 @@ DWORD WINAPI djinn_socket_poller_thread_func(LPVOID arg)
         {
             DJINN_TRACE("WARNING: no waiting_coro for IO type=%d", req->type);
         }
-        free(req);
+        __djinn_free(req);
     }
 
     return 0;
@@ -214,7 +214,7 @@ void* djinn_socket_poller_thread_func(void* arg)
                 if (req->waiting_coro)
                     djinn_enqueue_task(&djinn_rt.ready_queue, req->waiting_coro);
 
-                free(req);
+                __djinn_free(req);
             }
         }
     }
@@ -339,7 +339,7 @@ int64_t __djinn_async_accept(int64_t server_sock, int64_t* out_result, void* cor
     if (req->accepted_socket == INVALID_SOCKET)
     {
         DJINN_TRACE("WSASocket for accept failed: %d", WSAGetLastError());
-        free(req);
+        __djinn_free(req);
         return -1;
     }
 
@@ -360,7 +360,7 @@ int64_t __djinn_async_accept(int64_t server_sock, int64_t* out_result, void* cor
     {
         DJINN_TRACE("AcceptEx failed: %d", WSAGetLastError());
         closesocket(req->accepted_socket);
-        free(req);
+        __djinn_free(req);
         return -1;
     }
 #else
@@ -372,7 +372,7 @@ int64_t __djinn_async_accept(int64_t server_sock, int64_t* out_result, void* cor
         if (epoll_ctl(djinn_rt.epoll_fd, EPOLL_CTL_MOD, (int)server_sock, &ev) < 0)
         {
             DJINN_TRACE("epoll_ctl for accept failed: %d", errno);
-            free(req);
+            __djinn_free(req);
             return -1;
         }
     }
@@ -429,7 +429,7 @@ int64_t __djinn_async_connect(int64_t socket_fd, const char* address, int port, 
     if (!ok && WSAGetLastError() != ERROR_IO_PENDING)
     {
         DJINN_TRACE("ConnectEx failed: %d", WSAGetLastError());
-        free(req);
+        __djinn_free(req);
         return -1;
     }
 #else
@@ -437,7 +437,7 @@ int64_t __djinn_async_connect(int64_t socket_fd, const char* address, int port, 
     if (ret < 0 && errno != EINPROGRESS)
     {
         DJINN_TRACE("connect failed: %d", errno);
-        free(req);
+        __djinn_free(req);
         return -1;
     }
 
@@ -447,7 +447,7 @@ int64_t __djinn_async_connect(int64_t socket_fd, const char* address, int port, 
         req->completed = 1;
         __djinn_mark_waiting(coro);
         djinn_enqueue_task(&djinn_rt.ready_queue, coro);
-        free(req);
+        __djinn_free(req);
         return 0;
     }
 
@@ -457,7 +457,7 @@ int64_t __djinn_async_connect(int64_t socket_fd, const char* address, int port, 
     if (epoll_ctl(djinn_rt.epoll_fd, EPOLL_CTL_ADD, (int)socket_fd, &ev) < 0)
     {
         DJINN_TRACE("epoll_ctl for connect failed: %d", errno);
-        free(req);
+        __djinn_free(req);
         return -1;
     }
 #endif
@@ -493,7 +493,7 @@ int64_t __djinn_async_send(int64_t socket_fd, void* buffer, int64_t count, int64
     if (ret == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING)
     {
         DJINN_TRACE("WSASend failed: %d", WSAGetLastError());
-        free(req);
+        __djinn_free(req);
         return -1;
     }
 #else
@@ -505,7 +505,7 @@ int64_t __djinn_async_send(int64_t socket_fd, void* buffer, int64_t count, int64
         if (epoll_ctl(djinn_rt.epoll_fd, EPOLL_CTL_MOD, (int)socket_fd, &ev) < 0)
         {
             DJINN_TRACE("epoll_ctl for send failed: %d", errno);
-            free(req);
+            __djinn_free(req);
             return -1;
         }
     }
@@ -557,7 +557,7 @@ int64_t __djinn_async_recv(int64_t socket_fd, void* buffer, int64_t count, int64
         if (epoll_ctl(djinn_rt.epoll_fd, EPOLL_CTL_MOD, (int)socket_fd, &ev) < 0)
         {
             DJINN_TRACE("epoll_ctl for recv failed: %d", errno);
-            free(req);
+            __djinn_free(req);
             return -1;
         }
     }

@@ -1,0 +1,574 @@
+import std::types;
+import std::libc;
+import std::io;
+import std::sys;
+import ui;
+
+namespace win32;
+
+extern "C" {
+    // the runtime's allocation counters: blocks allocated, blocks freed, bytes allocated in all, bytes alive, peak bytes alive
+    void __djinn_alloc_stats(u64* out);
+}
+
+// A small dev tools for the native host, drawn as a text UI in the console of the process: frame rate and the time
+// of every stage of a frame (layout and paint, draw, present), the CPU the process uses, its memory, the size of the
+// scene and how long the start-up stages took. It is off by default; WinHost.run turns it on when DJINN_UI_DEVTOOLS
+// is set. The frames are measured where they are made (WinHost.render calls DevTools.frame), the process figures are
+// read twice a second (GetProcessTimes, GetProcessMemoryInfo) and the screen is redrawn in place on the console's
+// alternate screen, which the console gives back when the window closes.
+struct DevTools {
+    const u32 HISTORY = 56;
+    const u32 STAGES = 8;
+    const i32 OUT = 8192;
+    const u64 REFRESH = 500000;
+    // the time a frame has to fit in to hold 60 frames a second, in milliseconds
+    const f64 BUDGET = 16.667;
+
+    mut u64 started;
+    mut u64 refreshed;
+    mut u64 last_cpu_wall;
+    mut f64 last_user;
+    mut f64 last_kernel;
+    mut u32 cores;
+    mut bool open;
+
+    // what the frames drawn since the last refresh add up to
+    mut u32 frames;
+    mut u64 total_frames;
+    mut f64 sum_layout;
+    mut f64 sum_draw;
+    mut f64 sum_present;
+    mut f64 worst;
+    mut f32* history;
+    mut void* scratch;
+    mut i8* screen;
+    mut u32 head;
+
+    // the allocator, as it stood when the frame in progress began (mark) and what the frames since the last refresh took
+    mut u64 mark_allocs;
+    mut u64 mark_frees;
+    mut u64 mark_bytes;
+    mut u64 sum_allocs;
+    mut u64 sum_frees;
+    mut u64 sum_bytes;
+    mut u64 worst_allocs;
+    mut u64 worst_bytes;
+    mut u64 heap_allocs;
+    mut u64 heap_frees;
+    mut u64 heap_total;
+    mut u64 heap_live;
+    mut u64 heap_peak;
+    mut u64 refresh_allocs;
+    mut u64 refresh_live_blocks;
+    // what the screen shows
+    mut f64 per_frame_allocs;
+    mut f64 per_frame_frees;
+    mut f64 per_frame_bytes;
+    mut f64 allocs_per_second;
+    mut f64 growth_per_second;
+    mut u64 shown_worst_allocs;
+    mut u64 shown_worst_bytes;
+    // what the UI keeps (UiMemory.report) and the display list's reserved vertices
+    mut u64 ui_tree;
+    mut u64 ui_fonts;
+    mut u64 ui_styles;
+    mut u64 ui_nodes;
+    mut u64 ui_sheets;
+    mut u64 ui_list;
+
+    // what the screen shows, set at each refresh
+    mut f64 fps;
+    mut f64 avg_layout;
+    mut f64 avg_draw;
+    mut f64 avg_present;
+    mut f64 busy;
+    mut f64 cpu_user;
+    mut f64 cpu_kernel;
+    mut f64 shown_worst;
+    mut u64 working_set;
+    mut u64 peak_working_set;
+    mut u64 private_bytes;
+    mut u32 page_faults;
+    mut u32 vertices;
+    mut u32 width;
+    mut u32 height;
+
+    // the start-up stages: a name (a string literal) and the milliseconds it took
+    mut u32 stage_count;
+    mut void** stage_names;
+    mut f64* stage_ms;
+
+    public static unsafe u64 now() {
+        mut i64 counter = 0;
+        mut i64 frequency = 1;
+        QueryPerformanceCounter(&counter);
+        QueryPerformanceFrequency(&frequency);
+        return (u64)((f64)counter * 1000000.0 / (f64)frequency);
+    }
+
+    public static unsafe DevTools* create() {
+        DevTools* d = (DevTools*)__djinn_alloc_zeroed((size_long)sizeof(DevTools));
+        d.started = DevTools.now();
+        d.refreshed = d.started;
+        d.last_cpu_wall = d.started;
+        // the buffers every sample and every redraw reuse: the dev tools itself allocates nothing once it runs, so
+        // what the HEAP block counts is the application's
+        d.scratch = __djinn_alloc_zeroed(128);
+        d.screen = (i8*)__djinn_alloc_zeroed((size_long)DevTools.OUT);
+        d.history = (f32*)__djinn_alloc_zeroed((size_long)(DevTools.HISTORY * sizeof(f32)));
+        d.stage_names = (void**)__djinn_alloc_zeroed((size_long)(DevTools.STAGES * 8));
+        d.stage_ms = (f64*)__djinn_alloc_zeroed((size_long)(DevTools.STAGES * 8));
+        d.cores = 1;
+        i8* count = getenv("NUMBER_OF_PROCESSORS");
+        if (count != (i8*)0) {
+            i32 parsed = atoi(count);
+            if (parsed > 0) {
+                d.cores = (u32)parsed;
+            }
+        }
+        // the console only reads escape sequences when its output mode says so
+        void* out = GetStdHandle(4294967285);
+        void* mode = Raw.make(4);
+        if (out != (void*)0 && GetConsoleMode(out, mode) != 0) {
+            SetConsoleMode(out, Raw.get_u32(mode, 0) | 4);
+        }
+        __djinn_free(mode);
+        DevTools.sample_cpu(d, true);
+        return d;
+    }
+
+    // Records how long a start-up stage took (milliseconds since 'since', a DevTools.now() value).
+    public static unsafe void stage(DevTools* d, i8* name, u64 since) {
+        if (d == (DevTools*)0 || d.stage_count >= DevTools.STAGES) {
+            return;
+        }
+        d.stage_names[d.stage_count] = (void*)name;
+        d.stage_ms[d.stage_count] = (f64)(DevTools.now() - since) / 1000.0;
+        d.stage_count = d.stage_count + 1;
+    }
+
+    // Called when a frame starts: remembers the allocator's counters, so that frame() can tell what the frame took.
+    public static unsafe void mark(DevTools* d) {
+        if (d == (DevTools*)0) {
+            return;
+        }
+        u64* stats = (u64*)d.scratch;
+        __djinn_alloc_stats(stats);
+        d.mark_allocs = stats[0];
+        d.mark_frees = stats[1];
+        d.mark_bytes = stats[2];
+    }
+
+    // One frame that was drawn: the microseconds of its three stages and the size of the scene.
+    public static unsafe void frame(DevTools* d, u64 layout, u64 draw, u64 present, u32 vertices, u32 width, u32 height) {
+        if (d == (DevTools*)0) {
+            return;
+        }
+        f64 layout_ms = (f64)layout / 1000.0;
+        f64 draw_ms = (f64)draw / 1000.0;
+        f64 present_ms = (f64)present / 1000.0;
+        f64 total = layout_ms + draw_ms + present_ms;
+        if (d.total_frames == 0) {
+            d.stage_names[d.stage_count % DevTools.STAGES] = (void*)"first frame";
+            d.stage_ms[d.stage_count % DevTools.STAGES] = total;
+            if (d.stage_count < DevTools.STAGES) {
+                d.stage_count = d.stage_count + 1;
+            }
+        }
+        u64* stats = (u64*)d.scratch;
+        __djinn_alloc_stats(stats);
+        u64 allocs = stats[0] - d.mark_allocs;
+        u64 frees = stats[1] - d.mark_frees;
+        u64 bytes = stats[2] - d.mark_bytes;
+        d.sum_allocs = d.sum_allocs + allocs;
+        d.sum_frees = d.sum_frees + frees;
+        d.sum_bytes = d.sum_bytes + bytes;
+        if (bytes > d.worst_bytes) {
+            d.worst_bytes = bytes;
+            d.worst_allocs = allocs;
+        }
+        d.frames = d.frames + 1;
+        d.total_frames = d.total_frames + 1;
+        d.sum_layout = d.sum_layout + layout_ms;
+        d.sum_draw = d.sum_draw + draw_ms;
+        d.sum_present = d.sum_present + present_ms;
+        if (total > d.worst) {
+            d.worst = total;
+        }
+        d.history[d.head] = (f32)total;
+        d.head = (d.head + 1) % DevTools.HISTORY;
+        d.vertices = vertices;
+        d.width = width;
+        d.height = height;
+    }
+
+    // CPU time of the process (user, kernel) in microseconds: GetProcessTimes counts 100 ns units.
+    static unsafe void sample_cpu(DevTools* d, bool first) {
+        void* times = d.scratch;
+        GetProcessTimes(GetCurrentProcess(), times, times + 8, times + 16, times + 24);
+        f64 kernel = (f64)Raw.get_u64(times, 16) / 10.0;
+        f64 user = (f64)Raw.get_u64(times, 24) / 10.0;
+        u64 wall = DevTools.now();
+        if (!first && wall > d.last_cpu_wall) {
+            f64 span = (f64)(wall - d.last_cpu_wall) * (f64)d.cores;
+            d.cpu_user = (user - d.last_user) * 100.0 / span;
+            d.cpu_kernel = (kernel - d.last_kernel) * 100.0 / span;
+        }
+        d.last_user = user;
+        d.last_kernel = kernel;
+        d.last_cpu_wall = wall;
+    }
+
+    // PROCESS_MEMORY_COUNTERS_EX: PageFaultCount@4, PeakWorkingSetSize@8, WorkingSetSize@16, PrivateUsage@72.
+    static unsafe void sample_memory(DevTools* d) {
+        void* counters = d.scratch;
+        Raw.put_u32(counters, 0, 80);
+        K32GetProcessMemoryInfo(GetCurrentProcess(), counters, 80);
+        d.page_faults = Raw.get_u32(counters, 4);
+        d.peak_working_set = Raw.get_u64(counters, 8);
+        d.working_set = Raw.get_u64(counters, 16);
+        d.private_bytes = Raw.get_u64(counters, 72);
+    }
+
+    // Called from the message loop: twice a second it reads the process figures, averages the frames of that span
+    // and redraws the screen.
+    public static unsafe void tick(DevTools* d) {
+        if (d == (DevTools*)0) {
+            return;
+        }
+        u64 now = DevTools.now();
+        if (now - d.refreshed < DevTools.REFRESH) {
+            return;
+        }
+        f64 span = (f64)(now - d.refreshed);
+        d.refreshed = now;
+        if (d.frames > 0) {
+            f64 count = (f64)d.frames;
+            d.avg_layout = d.sum_layout / count;
+            d.avg_draw = d.sum_draw / count;
+            d.avg_present = d.sum_present / count;
+        } else {
+            d.avg_layout = 0.0;
+            d.avg_draw = 0.0;
+            d.avg_present = 0.0;
+        }
+        d.fps = (f64)d.frames * 1000000.0 / span;
+        d.busy = (d.sum_layout + d.sum_draw + d.sum_present) * 1000.0 * 100.0 / span;
+        d.shown_worst = d.worst;
+        if (d.frames > 0) {
+            f64 n = (f64)d.frames;
+            d.per_frame_allocs = (f64)d.sum_allocs / n;
+            d.per_frame_frees = (f64)d.sum_frees / n;
+            d.per_frame_bytes = (f64)d.sum_bytes / n;
+        } else {
+            d.per_frame_allocs = 0.0;
+            d.per_frame_frees = 0.0;
+            d.per_frame_bytes = 0.0;
+        }
+        d.shown_worst_allocs = d.worst_allocs;
+        d.shown_worst_bytes = d.worst_bytes;
+        d.sum_allocs = 0;
+        d.sum_frees = 0;
+        d.sum_bytes = 0;
+        d.worst_allocs = 0;
+        d.worst_bytes = 0;
+        u64* stats = (u64*)d.scratch;
+        __djinn_alloc_stats(stats);
+        d.heap_allocs = stats[0];
+        d.heap_frees = stats[1];
+        d.heap_total = stats[2];
+        d.heap_live = stats[3];
+        d.heap_peak = stats[4];
+        u64 live_blocks = d.heap_allocs - d.heap_frees;
+        d.allocs_per_second = (f64)(d.heap_allocs - d.refresh_allocs) * 1000000.0 / span;
+        d.growth_per_second = ((f64)live_blocks - (f64)d.refresh_live_blocks) * 1000000.0 / span;
+        d.refresh_allocs = d.heap_allocs;
+        d.refresh_live_blocks = live_blocks;
+        u64* parts = (u64*)d.scratch;
+        UiMemory.report(parts);
+        d.ui_tree = parts[0];
+        d.ui_fonts = parts[1];
+        d.ui_styles = parts[2];
+        d.ui_nodes = parts[3];
+        d.ui_sheets = parts[4];
+        d.frames = 0;
+        d.sum_layout = 0.0;
+        d.sum_draw = 0.0;
+        d.sum_present = 0.0;
+        d.worst = 0.0;
+        DevTools.sample_cpu(d, false);
+        DevTools.sample_memory(d);
+        DevTools.draw(d);
+    }
+
+    // Gives the console back: leaves the alternate screen and shows the cursor again.
+    public static unsafe void close(DevTools* d) {
+        if (d == (DevTools*)0) {
+            return;
+        }
+        if (d.open) {
+            i8* out = i8[16];
+            mut i32 pos = DevTools.csi(out, 0);
+            pos = DevTools.put(out, pos, "?25h");
+            pos = DevTools.csi(out, pos);
+            pos = DevTools.put(out, pos, "?1049l");
+            write(1, out, (u64)pos);
+        }
+        __djinn_free(d.scratch);
+        __djinn_free((void*)d.screen);
+        __djinn_free((void*)d.history);
+        __djinn_free((void*)d.stage_names);
+        __djinn_free((void*)d.stage_ms);
+        __djinn_free((void*)d);
+    }
+
+    // ---- drawing -----------------------------------------------------------------------------------------------
+
+    static unsafe i32 csi(i8* out, i32 pos) {
+        out[pos] = 27;
+        out[pos + 1] = 91;
+        return pos + 2;
+    }
+
+    static unsafe i32 put(i8* out, i32 pos, i8* text) {
+        mut i32 length = (i32)strlen(text);
+        i32 room = DevTools.OUT - pos - 8;
+        if (length > room) {
+            length = room;
+        }
+        if (length <= 0) {
+            return pos;
+        }
+        memcpy(out + pos, text, (u64)length);
+        return pos + length;
+    }
+
+    // A color or style (SGR) code.
+    static unsafe i32 sgr(i8* out, i32 pos, i32 code) {
+        mut i32 p = DevTools.csi(out, pos);
+        p = Spectre.writeNumber(out, p, code);
+        out[p] = 109;
+        return p + 1;
+    }
+
+    // The end of a line: clear what an older, longer line left, and move down.
+    static unsafe i32 eol(i8* out, i32 pos) {
+        mut i32 p = DevTools.csi(out, pos);
+        out[p] = 75;
+        out[p + 1] = 10;
+        return p + 2;
+    }
+
+    static unsafe i32 glyph(i8* out, i32 pos, u32 b0, u32 b1, u32 b2) {
+        out[pos] = (i8)(u8)b0;
+        out[pos + 1] = (i8)(u8)b1;
+        out[pos + 2] = (i8)(u8)b2;
+        return pos + 3;
+    }
+
+    static i32 color_of(f64 fraction) {
+        if (fraction < 0.5) {
+            return 32;
+        }
+        if (fraction < 1.0) {
+            return 33;
+        }
+        return 31;
+    }
+
+    // A bar of 'width' cells filled to 'fraction' (0 to 1), green, yellow or red by how full it is.
+    static unsafe i32 bar(i8* out, i32 pos, f64 fraction, i32 width, bool graded, i32 plain) {
+        mut f64 clamped = fraction;
+        if (clamped < 0.0) {
+            clamped = 0.0;
+        }
+        if (clamped > 1.0) {
+            clamped = 1.0;
+        }
+        i32 filled = (i32)(clamped * (f64)width + 0.5);
+        mut i32 p = pos;
+        mut i32 tint = plain;
+        if (graded) {
+            tint = DevTools.color_of(fraction);
+        }
+        p = DevTools.sgr(out, p, tint);
+        for (mut i32 i = 0; i < filled; i = i + 1) {
+            p = DevTools.glyph(out, p, 0xE2, 0x96, 0x88);
+        }
+        p = DevTools.sgr(out, p, 90);
+        for (mut i32 i = filled; i < width; i = i + 1) {
+            p = DevTools.glyph(out, p, 0xE2, 0x96, 0x91);
+        }
+        return DevTools.sgr(out, p, 0);
+    }
+
+    // The last frames as a row of eight-level blocks, oldest first; the tallest block is the slowest frame (and
+    // never less than the 60 fps budget, so a calm app does not look busy).
+    static unsafe i32 spark(i8* out, i32 pos, DevTools* d) {
+        mut f32 top = (f32)DevTools.BUDGET;
+        for (mut u32 i = 0; i < DevTools.HISTORY; i = i + 1) {
+            if (d.history[i] > top) {
+                top = d.history[i];
+            }
+        }
+        mut i32 p = DevTools.sgr(out, pos, 36);
+        for (mut u32 i = 0; i < DevTools.HISTORY; i = i + 1) {
+            f32 value = d.history[(d.head + i) % DevTools.HISTORY];
+            mut u32 level = (u32)(value / top * (f32)8.0);
+            if (level > 7) {
+                level = 7;
+            }
+            if (value <= (f32)0.0) {
+                p = DevTools.glyph(out, p, 0xE2, 0x96, 0x81);
+            } else {
+                p = DevTools.glyph(out, p, 0xE2, 0x96, 0x81 + level);
+            }
+        }
+        return DevTools.sgr(out, p, 0);
+    }
+
+    static unsafe i32 stage_line(i8* out, i32 pos, i8* name, f64 ms) {
+        mut i32 p = pos;
+        mut i32 room = DevTools.OUT - p - 8;
+        p = p + (i32)snprintf(out + p, (size_long)room, "   %-16s ", name);
+        p = DevTools.bar(out, p, ms / DevTools.BUDGET, 28, true, 32);
+        room = DevTools.OUT - p - 8;
+        p = p + (i32)snprintf(out + p, (size_long)room, " %6.2f ms", ms);
+        return DevTools.eol(out, p);
+    }
+
+    static unsafe void draw(DevTools* d) {
+        i8* out = d.screen;
+        mut i32 p = 0;
+        if (!d.open) {
+            d.open = true;
+            p = DevTools.csi(out, p);
+            p = DevTools.put(out, p, "?1049h");
+            p = DevTools.csi(out, p);
+            p = DevTools.put(out, p, "?25l");
+        }
+        p = DevTools.csi(out, p);
+        p = DevTools.put(out, p, "H");
+
+        u64 seconds = (DevTools.now() - d.started) / 1000000;
+        p = DevTools.sgr(out, p, 1);
+        p = DevTools.sgr(out, p, 44);
+        p = p + (i32)snprintf(out + p, (size_long)(DevTools.OUT - p - 8), " Djinn DevTools   window %ux%u   up %llu:%02llu   %u cores ",
+            d.width, d.height, seconds / 60, seconds % 60, d.cores);
+        p = DevTools.sgr(out, p, 0);
+        p = DevTools.eol(out, p);
+        p = DevTools.eol(out, p);
+
+        f64 frame_ms = d.avg_layout + d.avg_draw + d.avg_present;
+        p = DevTools.sgr(out, p, 1);
+        p = DevTools.put(out, p, " FRAMES");
+        p = DevTools.sgr(out, p, 0);
+        p = p + (i32)snprintf(out + p, (size_long)(DevTools.OUT - p - 8), "   %.1f fps   %.2f ms a frame   worst %.2f ms   %llu drawn",
+            d.fps, frame_ms, d.shown_worst, d.total_frames);
+        p = DevTools.eol(out, p);
+        p = DevTools.put(out, p, "   ");
+        p = DevTools.spark(out, p, d);
+        p = DevTools.sgr(out, p, 90);
+        p = DevTools.put(out, p, "  last frames (tallest: slowest)");
+        p = DevTools.sgr(out, p, 0);
+        p = DevTools.eol(out, p);
+        p = DevTools.eol(out, p);
+
+        p = DevTools.sgr(out, p, 1);
+        p = DevTools.put(out, p, " STAGES");
+        p = DevTools.sgr(out, p, 90);
+        p = DevTools.put(out, p, "   average per frame, the bar is the 16.7 ms of 60 fps");
+        p = DevTools.sgr(out, p, 0);
+        p = DevTools.eol(out, p);
+        p = DevTools.stage_line(out, p, "layout + paint", d.avg_layout);
+        p = DevTools.stage_line(out, p, "draw", d.avg_draw);
+        p = DevTools.stage_line(out, p, "present", d.avg_present);
+        p = p + (i32)snprintf(out + p, (size_long)(DevTools.OUT - p - 8), "   %-16s ", "time busy");
+        p = DevTools.bar(out, p, d.busy / 100.0, 28, true, 32);
+        p = p + (i32)snprintf(out + p, (size_long)(DevTools.OUT - p - 8), " %5.1f %%", d.busy);
+        p = DevTools.eol(out, p);
+        p = DevTools.eol(out, p);
+
+        f64 cpu = d.cpu_user + d.cpu_kernel;
+        p = DevTools.sgr(out, p, 1);
+        p = DevTools.put(out, p, " CPU");
+        p = DevTools.sgr(out, p, 0);
+        p = DevTools.put(out, p, "      ");
+        p = DevTools.bar(out, p, cpu / 100.0, 28, true, 32);
+        p = p + (i32)snprintf(out + p, (size_long)(DevTools.OUT - p - 8), " %5.1f %%   user %.1f %%   kernel %.1f %%",
+            cpu, d.cpu_user, d.cpu_kernel);
+        p = DevTools.eol(out, p);
+
+        f64 megabyte = 1048576.0;
+        mut f64 share = 0.0;
+        if (d.peak_working_set > 0) {
+            share = (f64)d.working_set / (f64)d.peak_working_set;
+        }
+        p = DevTools.sgr(out, p, 1);
+        p = DevTools.put(out, p, " MEMORY");
+        p = DevTools.sgr(out, p, 0);
+        p = DevTools.put(out, p, "   ");
+        p = DevTools.bar(out, p, share, 28, false, 35);
+        p = p + (i32)snprintf(out + p, (size_long)(DevTools.OUT - p - 8), " %.1f MB   peak %.1f MB   private %.1f MB   %u page faults",
+            (f64)d.working_set / megabyte, (f64)d.peak_working_set / megabyte, (f64)d.private_bytes / megabyte, d.page_faults);
+        p = DevTools.eol(out, p);
+
+        // the allocator: what is alive now against the peak, how many blocks, and what a frame costs
+        // what the process holds that the allocator never saw: the GPU driver, the system libraries, the code
+        mut f64 outside = 0.0;
+        if (d.private_bytes > d.heap_live) {
+            outside = (f64)(d.private_bytes - d.heap_live);
+        }
+        mut f64 heap_share = 0.0;
+        if (d.heap_peak > 0) {
+            heap_share = (f64)d.heap_live / (f64)d.heap_peak;
+        }
+        p = DevTools.sgr(out, p, 1);
+        p = DevTools.put(out, p, " HEAP");
+        p = DevTools.sgr(out, p, 0);
+        p = DevTools.put(out, p, "     ");
+        p = DevTools.bar(out, p, heap_share, 28, false, 35);
+        p = p + (i32)snprintf(out + p, (size_long)(DevTools.OUT - p - 8), " %.2f MB   peak %.2f MB   %llu blocks   %.1f MB outside the heap",
+            (f64)d.heap_live / megabyte, (f64)d.heap_peak / megabyte, d.heap_allocs - d.heap_frees, outside / megabyte);
+        p = DevTools.eol(out, p);
+        p = DevTools.put(out, p, "          ");
+        p = p + (i32)snprintf(out + p, (size_long)(DevTools.OUT - p - 8), "%.0f allocs/s   blocks alive %+.0f/s   %llu allocs, %llu frees, %.1f MB in all",
+            d.allocs_per_second, d.growth_per_second, d.heap_allocs, d.heap_frees, (f64)d.heap_total / megabyte);
+        p = DevTools.eol(out, p);
+        p = DevTools.put(out, p, "          ");
+        p = p + (i32)snprintf(out + p, (size_long)(DevTools.OUT - p - 8), "a frame: %.1f allocs %.1f frees %.1f KB   worst %llu allocs %.1f KB",
+            d.per_frame_allocs, d.per_frame_frees, d.per_frame_bytes / 1024.0, d.shown_worst_allocs, (f64)d.shown_worst_bytes / 1024.0);
+        p = DevTools.eol(out, p);
+        p = DevTools.put(out, p, "          ");
+        p = p + (i32)snprintf(out + p, (size_long)(DevTools.OUT - p - 8), "kept by the ui: %.2f MB tree (%llu nodes)   %.2f MB fonts   %.2f MB styles (%llu sheets)   %.2f MB vertices",
+            (f64)d.ui_tree / megabyte, d.ui_nodes, (f64)d.ui_fonts / megabyte, (f64)d.ui_styles / megabyte, d.ui_sheets, (f64)d.ui_list / megabyte);
+        p = DevTools.eol(out, p);
+        p = DevTools.eol(out, p);
+
+        p = DevTools.sgr(out, p, 1);
+        p = DevTools.put(out, p, " SCENE");
+        p = DevTools.sgr(out, p, 0);
+        p = p + (i32)snprintf(out + p, (size_long)(DevTools.OUT - p - 8), "    %u vertices (%u triangles)   %.1f MB of vertex data",
+            d.vertices, d.vertices / 3, (f64)d.vertices * (f64)sizeof(Vertex) / megabyte);
+        p = DevTools.eol(out, p);
+
+        p = DevTools.sgr(out, p, 1);
+        p = DevTools.put(out, p, " START");
+        p = DevTools.sgr(out, p, 0);
+        p = DevTools.put(out, p, "    ");
+        for (mut u32 i = 0; i < d.stage_count; i = i + 1) {
+            p = p + (i32)snprintf(out + p, (size_long)(DevTools.OUT - p - 8), "%s %.1f ms   ", (i8*)d.stage_names[i], d.stage_ms[i]);
+        }
+        p = DevTools.eol(out, p);
+        p = DevTools.eol(out, p);
+        p = DevTools.sgr(out, p, 90);
+        p = DevTools.put(out, p, " close the window to leave");
+        p = DevTools.sgr(out, p, 0);
+        p = DevTools.eol(out, p);
+        // and clear whatever is left below
+        p = DevTools.csi(out, p);
+        p = DevTools.put(out, p, "J");
+        write(1, out, (u64)p);
+    }
+}

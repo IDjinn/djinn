@@ -1,5 +1,6 @@
 import std::types;
 import std::libc;
+import std::math;
 import ui;
 import vulkan;
 
@@ -18,7 +19,8 @@ struct HostState {
     mut u32 gpu_width;
     mut u32 gpu_height;
     mut bool dirty;
-    mut u32 tint;
+    mut u32 hover;
+    mut DevTools* tools;
 }
 
 unsafe static mut u64 host_state_address = 0;
@@ -43,6 +45,65 @@ unsafe i64 djinn_window_proc(void* window, u32 message, u64 param, i64 extra) {
     }
     if (message == 20) {
         return 1;
+    }
+    // 131 is WM_NCCALCSIZE: the client area is the whole window, the frame is drawn by the host (see chrome)
+    if (message == 131) {
+        if (param != 0 && IsZoomed(window) != 0) {
+            // a maximized window overhangs the screen by its frame: keep the content on the screen
+            void* area = (void*)extra;
+            i32 around = GetSystemMetrics(92);
+            i32 across = GetSystemMetrics(32) + around;
+            i32 down = GetSystemMetrics(33) + around;
+            Raw.put_i32(area, 0, Raw.get_i32(area, 0) + across);
+            Raw.put_i32(area, 4, Raw.get_i32(area, 4) + down);
+            Raw.put_i32(area, 8, Raw.get_i32(area, 8) - across);
+            Raw.put_i32(area, 12, Raw.get_i32(area, 12) - down);
+        }
+        return 0;
+    }
+    // 132 is WM_NCHITTEST: edges resize, the strip on top drags and its three buttons are the system ones
+    if (message == 132) {
+        return WinHost.hit_test(window, extra);
+    }
+    // 160 is WM_NCMOUSEMOVE, 674 is WM_NCMOUSELEAVE: which caption button is under the pointer
+    if (message == 160 && host_state_address != 0) {
+        HostState* current = (HostState*)host_state_address;
+        mut u32 over = 0;
+        if (param == 8 || param == 9 || param == 20) {
+            over = (u32)param;
+        }
+        if (over != current.hover) {
+            current.hover = over;
+            current.dirty = true;
+        }
+        void* track = Raw.make(24);
+        Raw.put_u32(track, 0, 24);
+        Raw.put_u32(track, 4, 18);
+        Raw.put_ptr(track, 8, window);
+        TrackMouseEvent(track);
+        __djinn_free(track);
+    }
+    if (message == 674 && host_state_address != 0) {
+        HostState* current = (HostState*)host_state_address;
+        current.hover = 0;
+        current.dirty = true;
+    }
+    // 161 / 162 are WM_NCLBUTTONDOWN / UP: the buttons act on release, with no system tracking loop
+    if ((message == 161 || message == 162) && (param == 8 || param == 9 || param == 20)) {
+        if (message == 162) {
+            if (param == 8) {
+                ShowWindow(window, 6);
+            } else if (param == 9) {
+                if (IsZoomed(window) != 0) {
+                    ShowWindow(window, 9);
+                } else {
+                    ShowWindow(window, 3);
+                }
+            } else {
+                PostMessageA(window, 16, 0, 0);
+            }
+        }
+        return 0;
     }
     return DefWindowProcA(window, message, param, extra);
 }
@@ -197,41 +258,169 @@ struct WinHost {
         return Raw.get_u64(s.rect, 16) / 10;
     }
 
-    // The title bar takes the page's own colors, so the window reads as one surface and follows the theme: the caption
-    // is the page background, its text and the dark mode flag follow how light that background is. Windows before 11
-    // keep the default bar (they ignore the colors, and 10 only honors the dark flag).
-    static unsafe void tint_title(HostState* s) {
-        u32 page = Painter.canvas_color(Dom.document());
-        if ((page & 255) == 0) {
-            return;
+    // The height of the strip drawn on top of the page: the title bar, in physical pixels.
+    public static unsafe f32 caption() {
+        return (f32)(u32)(36.0 * Styles.device_scale());
+    }
+
+    // What WM_NCHITTEST answers: HTCLIENT (1), HTCAPTION (2), HTMINBUTTON (8), HTMAXBUTTON (9), HTCLOSE (20) or one
+    // of the edges and corners (10 .. 17) that resize.
+    static unsafe i64 hit_test(void* window, i64 extra) {
+        void* rect = Raw.make(16);
+        GetWindowRect(window, rect);
+        f32 left = (f32)Raw.get_i32(rect, 0);
+        f32 top = (f32)Raw.get_i32(rect, 4);
+        f32 width = (f32)Raw.get_i32(rect, 8) - left;
+        f32 height = (f32)Raw.get_i32(rect, 12) - top;
+        __djinn_free(rect);
+        f32 x = WinHost.low_word((u64)extra) - left;
+        f32 y = WinHost.low_word(((u64)extra) >> 16) - top;
+        f32 scale = (f32)Styles.device_scale();
+        f32 cap = WinHost.caption();
+        f32 button = (f32)46.0 * scale;
+        if (y >= (f32)0.0 && y < cap && x >= width - button * (f32)3.0 && x < width) {
+            if (x >= width - button) {
+                return 20;
+            }
+            if (x >= width - button * (f32)2.0) {
+                return 9;
+            }
+            return 8;
         }
-        u32 key = page | 0xFF000000;
-        if (key == s.tint) {
-            return;
+        if (IsZoomed(window) == 0) {
+            f32 edge = (f32)6.0 * scale;
+            bool at_left = x < edge;
+            bool at_right = x >= width - edge;
+            bool at_top = y < edge;
+            bool at_bottom = y >= height - edge;
+            if (at_top && at_left) {
+                return 13;
+            }
+            if (at_top && at_right) {
+                return 14;
+            }
+            if (at_bottom && at_left) {
+                return 16;
+            }
+            if (at_bottom && at_right) {
+                return 17;
+            }
+            if (at_left) {
+                return 10;
+            }
+            if (at_right) {
+                return 11;
+            }
+            if (at_top) {
+                return 12;
+            }
+            if (at_bottom) {
+                return 15;
+            }
         }
-        s.tint = key;
-        u32 red = page & 255;
-        u32 green = (page >> 8) & 255;
-        u32 blue = (page >> 16) & 255;
-        bool dark = (red * 299 + green * 587 + blue * 114) / 1000 < 128;
+        if (y < cap) {
+            return 2;
+        }
+        return 1;
+    }
+
+    // Rounded corners and no accent-colored border: the system frame is gone (WM_NCCALCSIZE), the window only keeps
+    // its shadow and, on Windows 11, the rounding of its corners (DWMWA_WINDOW_CORNER_PREFERENCE 33 = round, and
+    // DWMWA_BORDER_COLOR 34 = none).
+    static unsafe void shape(void* window) {
         void* value = Raw.make(4);
-        mut u32 flag = 0;
-        if (dark) {
-            flag = 1;
-        }
-        Raw.put_u32(value, 0, flag);
-        DwmSetWindowAttribute(s.window, 20, value, 4);
-        // COLORREF is 0x00BBGGRR, the same byte order as the canvas colors
-        Raw.put_u32(value, 0, page & 0x00FFFFFF);
-        DwmSetWindowAttribute(s.window, 35, value, 4);
-        DwmSetWindowAttribute(s.window, 34, value, 4);
-        mut u32 ink = 0x00202020;
-        if (dark) {
-            ink = 0x00F2F2F2;
-        }
-        Raw.put_u32(value, 0, ink);
-        DwmSetWindowAttribute(s.window, 36, value, 4);
+        Raw.put_u32(value, 0, 2);
+        DwmSetWindowAttribute(window, 33, value, 4);
+        Raw.put_u32(value, 0, 0xFFFFFFFE);
+        DwmSetWindowAttribute(window, 34, value, 4);
         __djinn_free(value);
+    }
+
+    // A straight line of 'thick' px as two triangles.
+    static unsafe void segment(DisplayList* list, f32 x0, f32 y0, f32 x1, f32 y1, f32 thick, u32 color) {
+        f32 dx = x1 - x0;
+        f32 dy = y1 - y0;
+        f32 length = Math.sqrt(dx * dx + dy * dy);
+        if (length <= (f32)0.0) {
+            return;
+        }
+        f32 nx = (f32)0.0 - dy / length * thick / (f32)2.0;
+        f32 ny = dx / length * thick / (f32)2.0;
+        f32 u = DisplayList.solid_u();
+        list.push(x0 + nx, y0 + ny, u, u, color);
+        list.push(x1 + nx, y1 + ny, u, u, color);
+        list.push(x0 - nx, y0 - ny, u, u, color);
+        list.push(x1 + nx, y1 + ny, u, u, color);
+        list.push(x1 - nx, y1 - ny, u, u, color);
+        list.push(x0 - nx, y0 - ny, u, u, color);
+    }
+
+    // The title bar and the window outline, drawn by the host over the page: the page's own background, the three
+    // caption buttons (minimize, maximize or restore, close; the close one turns red under the pointer) and a one
+    // pixel border that follows the rounded corners.
+    static unsafe void chrome(HostState* s, f32 width, f32 height) {
+        DisplayList* list = &s.list;
+        f32 scale = (f32)Styles.device_scale();
+        f32 cap = WinHost.caption();
+        u32 page = Painter.canvas_color(Dom.document());
+        mut u32 background = 0x101114FF;
+        if ((page & 255) != 0) {
+            background = page;
+        }
+        u32 red = (background >> 24) & 255;
+        u32 green = (background >> 16) & 255;
+        u32 blue = (background >> 8) & 255;
+        bool dark = (red * 299 + green * 587 + blue * 114) / 1000 < 128;
+        mut u32 ink = 0x202020FF;
+        if (dark) {
+            ink = 0xF2F2F2FF;
+        }
+        bool zoomed = IsZoomed(s.window) != 0;
+        list.fill((f32)0.0, (f32)0.0, width, cap, DisplayList.gpu_color(background, (f32)1.0));
+        f32 button = (f32)46.0 * scale;
+        f32 half = (f32)5.0 * scale;
+        mut f32 thick = (f32)(u32)scale;
+        if (thick < (f32)1.0) {
+            thick = (f32)1.0;
+        }
+        for (mut u32 i = 0; i < 3; i = i + 1) {
+            mut u32 code = 8;
+            if (i == 1) {
+                code = 9;
+            } else if (i == 2) {
+                code = 20;
+            }
+            f32 left = width - button * (f32)(3 - i);
+            bool over = s.hover == code;
+            mut u32 glyph = DisplayList.gpu_color(ink, (f32)1.0);
+            if (over && code == 20) {
+                list.fill(left, (f32)0.0, button, cap, DisplayList.gpu_color(0xC42B1CFF, (f32)1.0));
+                glyph = DisplayList.gpu_color(0xFFFFFFFF, (f32)1.0);
+            } else if (over) {
+                list.fill(left, (f32)0.0, button, cap, DisplayList.gpu_color(ink, (f32)0.1));
+            }
+            f32 cx = left + button / (f32)2.0;
+            f32 cy = cap / (f32)2.0;
+            if (code == 8) {
+                list.fill(cx - half, cy, half * (f32)2.0, thick, glyph);
+            } else if (code == 9 && !zoomed) {
+                list.ring(cx - half, cy - half, half * (f32)2.0, half * (f32)2.0, scale, thick, glyph);
+            } else if (code == 9) {
+                f32 q = half * (f32)1.6;
+                f32 o = (f32)2.0 * scale;
+                f32 a = cx - half;
+                f32 b = cy - half + o * (f32)1.5;
+                list.ring(a, b, q, q, scale, thick, glyph);
+                list.fill(a + o, b - o, q, thick, glyph);
+                list.fill(a + o + q - thick, b - o, thick, q, glyph);
+            } else {
+                WinHost.segment(list, cx - half, cy - half, cx + half, cy + half, thick, glyph);
+                WinHost.segment(list, cx + half, cy - half, cx - half, cy + half, thick, glyph);
+            }
+        }
+        if (!zoomed) {
+            list.ring((f32)0.0, (f32)0.0, width, height, (f32)8.0 * scale, thick, DisplayList.gpu_color(ink, (f32)0.16));
+        }
     }
 
     // Draws a frame when something changed: the size, the DOM or an explicit request (dirty).
@@ -253,10 +442,19 @@ struct WinHost {
             s.dirty = true;
         }
         if (s.dirty || Dom.stamp() + Animation.version() + Scroll.version() != s.stamp || Dom.epoch() != s.epoch) {
+            DevTools.mark(s.tools);
             mut u64 t0 = WinHost.ticks(s);
-            Painter.frame(&s.list, (f32)w, (f32)h);
-            WinHost.tint_title(s);
+            // the page is laid out below the title bar: its triangles move down by the bar's height
+            f32 cap = WinHost.caption();
+            Painter.frame(&s.list, (f32)w, (f32)h - cap);
+            for (mut u32 i = 0; i < s.list.count; i = i + 1) {
+                Vertex* vertex = &s.list.vertices[i];
+                vertex.y = vertex.y + cap;
+            }
+            WinHost.chrome(s, (f32)w, (f32)h);
             u64 t1 = WinHost.ticks(s);
+            mut u64 draw_us = 0;
+            mut u64 present_us = 0;
             if (s.gpu != (VulkanRenderer*)0) {
                 // a size change makes the first attempt rebuild the swapchain; drawing again at once keeps the window
                 // from showing a stale or stretched frame while the edge is dragged
@@ -266,6 +464,7 @@ struct WinHost {
                     s.dirty = !VulkanRenderer.draw(s.gpu, &s.list, w, h);
                     attempts = 2;
                 }
+                draw_us = WinHost.ticks(s) - t1;
                 if (getenv("DJINN_UI_TRACE") != (i8*)0) {
                     printf("gpu client %ux%u swapchain %ux%u attempts %u shown %d vertices %u
 ", w, h, s.gpu.width, s.gpu.height, attempts, (i32)(!s.dirty), s.list.count);
@@ -276,11 +475,17 @@ struct WinHost {
                 u64 t2 = WinHost.ticks(s);
                 WinHost.present(s.window, &s.canvas);
                 u64 t3 = WinHost.ticks(s);
+                draw_us = t2 - t1;
+                present_us = t3 - t2;
                 if (getenv("DJINN_UI_TRACE") != (i8*)0) {
                     printf("frame %ux%u layout+paint %llu raster %llu present %llu (us)
 ", w, h, t1 - t0, t2 - t1, t3 - t2);
                 }
                 s.dirty = false;
+            }
+            DevTools.frame(s.tools, t1 - t0, draw_us, present_us, s.list.count, w, h);
+            if (s.tools != (DevTools*)0) {
+                s.tools.ui_list = (u64)s.list.capacity * sizeof(Vertex);
             }
             s.stamp = Dom.stamp() + Animation.version() + Scroll.version();
             s.epoch = Dom.epoch();
@@ -289,26 +494,39 @@ struct WinHost {
 
     // Runs one app in a window until it is closed. Returns the exit code.
     public static unsafe i32 run<T>(T app, str title, u32 width, u32 height) {
+        // DJINN_UI_DEVTOOLS shows the metrics screen (see devtools.djinn) in the console of the process
+        mut DevTools* tools = (DevTools*)0;
+        if (getenv("DJINN_UI_DEVTOOLS") != (i8*)0) {
+            tools = DevTools.create();
+        }
         SetProcessDPIAware();
         GdiFonts.install();
         WinClipboard.install();
         Scroll.set_smooth(true);
+        mut u64 stage_start = DevTools.now();
         Mounted mounted = App.mount<T>(app);
+        DevTools.stage(tools, "mount", stage_start);
         // the window size is given in CSS pixels
         f64 device = WinHost.scale();
         Styles.set_device_scale(device);
         u32 scaled_width = (u32)((f64)width * device);
         u32 scaled_height = (u32)((f64)height * device);
+        stage_start = DevTools.now();
         void* window = WinHost.open(title, scaled_width, scaled_height);
         if (window == (void*)0) {
             return 1;
         }
+        DevTools.stage(tools, "window", stage_start);
+        WinHost.shape(window);
+        f32 cap = WinHost.caption();
         HostState* state = (HostState*)__djinn_alloc_zeroed((size_long)sizeof(HostState));
         state.window = window;
         state.rect = Raw.make(32);
         state.list = DisplayList.create();
         state.canvas = Canvas.create(1, 1);
         state.dirty = true;
+        state.tools = tools;
+        stage_start = DevTools.now();
         // Vulkan is the default; the software rasterizer is used only when no Vulkan device is available (or when
         // DJINN_UI_CPU is set, to compare or debug).
         if (getenv("DJINN_UI_CPU") == (i8*)0) {
@@ -321,6 +539,7 @@ struct WinHost {
 ");
             }
         }
+        DevTools.stage(tools, "gpu", stage_start);
         host_state_address = (u64)state;
         void* message = Raw.make(64);
         mut u32 pressed = 0;
@@ -337,7 +556,7 @@ struct WinHost {
                 u64 param = Raw.get_u64(message, 24);
                 u64 key = Raw.get_u64(message, 16);
                 f32 x = WinHost.low_word(param);
-                f32 y = WinHost.low_word(param >> 16);
+                f32 y = WinHost.low_word(param >> 16) - cap;
                 if (kind == WinHost.WM_QUIT) {
                     running = false;
                 } else if (kind == WinHost.WM_LBUTTONDOWN) {
@@ -375,6 +594,10 @@ struct WinHost {
                 } else if (kind == WinHost.WM_MOUSEMOVE) {
                     pointer_x = x;
                     pointer_y = y;
+                    if (state.hover != 0) {
+                        state.hover = 0;
+                        state.dirty = true;
+                    }
                     if (editing != 0) {
                         Edit.drag(editing, x);
                     }
@@ -448,11 +671,13 @@ struct WinHost {
                     busy = true;
                 }
             }
+            DevTools.tick(tools);
             if (!busy) {
                 Sleep(8);
             }
         }
         host_state_address = 0;
+        DevTools.close(tools);
         if (state.gpu != (VulkanRenderer*)0) {
             VulkanRenderer.release(state.gpu);
         }

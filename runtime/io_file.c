@@ -54,7 +54,7 @@ DWORD WINAPI djinn_file_io_thread_func(LPVOID arg)
             {
                 djinn_enqueue_task(&djinn_rt.ready_queue, req->waiting_coro);
             }
-            free(req);
+            __djinn_free(req);
         }
         else
         {
