@@ -59,7 +59,7 @@ and an application whose `targets` are wider than those of a library it uses (`t
 
 A compiler reads libraries written by a compiler of the same major.minor version (offset 28; the patch is ignored) and
 rejects others with a message naming the compiler that wrote them: build the library again. The header also stores a hash of
-the interface section (offset 96, same hash). A consumer refuses a library whose interface does not match it (`is stale`), and
+the interface section (offset 96, same hash). The header hash (offset 104) seals the header and the section table, so a flipped version, flag or section offset is refused as `corrupted` before anything else is read; `--inspect-lib` prints `header hash: ok` or `DAMAGED`. A consumer refuses a library whose interface does not match the interface hash (`is stale`), and
 `--inspect-lib` prints it. A hash of 0 (libraries from before the field) is not checked. The format version (offset 8)
 still guards the layout itself.
 
@@ -77,7 +77,8 @@ still guards the layout itself.
 | 32 | 32 | version label, NUL padded free text (`0.1.0-dev`, `0.2.0-rc.1`, `nightly`...), for display |
 | 64 | 32 | build id, NUL padded free text (commit hash...) |
 | 96 | 8 | interface hash: checksum of the interface section (0 in libraries written before it existed) |
-| 104 | 24 | reserved, zero |
+| 104 | 8 | header hash: text hash of bytes 0..end of the section table with these 8 bytes zeroed (0 in libraries written before it existed; a reader then skips the check) |
+| 112 | 16 | reserved, zero |
 
 Section table: one 32 byte entry per section: `u32 kind, u32 pad, u64 offset, u64 size, u64 checksum`.
 
@@ -151,7 +152,7 @@ LLVM), a warning is printed and the library is used without inlining. `--inspect
 - Reflection synergy: a reflection section with the type/attribute tables so `--inspect-lib` lists reflected types,
   fields and attributes, and registry-style lookups across several libraries.
 
-- Library depending on other libraries (manifest has no dependency list; header bytes 96..127 are reserved for it).
+- Library depending on other libraries (manifest has no dependency list; header bytes 112..127 are reserved for it).
 - Per-function dead stripping of the std object (it is linked whole).
 - `.djni` interface-only files.
 - Static variable initializers and global constructors across libraries (header globals are declarations only).

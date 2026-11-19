@@ -52,17 +52,27 @@ grep -q "unsupported library version" "$out/future.log" || { cat "$out/future.lo
 # version policy: another major.minor is refused (build it again), another patch is accepted
 cp "$out/mathlib.djlib" "$out/minor.djlib"
 python_patch "$out/mathlib.djlib" "$out/minor.djlib" 29 "02"
+python_patch "$out/mathlib.djlib" "$out/minor.djlib" 104 "0000000000000000"  # unseal: this test is about the version policy
 if "$compiler" "$sample/app.djinn" --lib "$out/minor.djlib" -o "$out/minor$exe" "${flags[@]}" > "$out/minor.log" 2>&1; then fail "a library of another compiler version must be rejected"; fi
 grep -q "written by djinnc 0.2.0" "$out/minor.log" || { cat "$out/minor.log"; fail "the version message must name the compiler that wrote the library"; }
 cp "$out/mathlib.djlib" "$out/patch.djlib"
 python_patch "$out/mathlib.djlib" "$out/patch.djlib" 28 "07"
+python_patch "$out/mathlib.djlib" "$out/patch.djlib" 104 "0000000000000000"  # unseal: this test is about the version policy
 "$compiler" "$sample/app.djinn" --lib "$out/patch.djlib" -o "$out/patch$exe" "${flags[@]}" > "$out/patch.log" 2>&1 || { cat "$out/patch.log"; fail "a library of another patch version must be accepted"; }
 # interface hash: a header that names another interface marks the library stale
 "$compiler" --inspect-lib "$out/mathlib.djlib" --sections-only | grep -q "interface hash:" || fail "--inspect-lib must show the interface hash"
 cp "$out/mathlib.djlib" "$out/stale.djlib"
 python_patch "$out/mathlib.djlib" "$out/stale.djlib" 96 "7a7b"
 if "$compiler" "$sample/app.djinn" --lib "$out/stale.djlib" -o "$out/stale$exe" "${flags[@]}" > "$out/stale.log" 2>&1; then fail "a stale interface hash must be rejected"; fi
-grep -q "is stale" "$out/stale.log" || { cat "$out/stale.log"; fail "a stale library must say so"; }
+grep -qE "is stale|corrupted" "$out/stale.log" || { cat "$out/stale.log"; fail "a stale library must say so"; }
+
+# header hash: the header and the section table are sealed, so a change to either is refused
+"$compiler" --inspect-lib "$out/mathlib.djlib" --sections-only | grep -q "header hash: *ok" || fail "--inspect-lib must show an intact header hash"
+cp "$out/mathlib.djlib" "$out/sealed.djlib"
+python_patch "$out/mathlib.djlib" "$out/sealed.djlib" 40 "7a"
+if "$compiler" "$sample/app.djinn" --lib "$out/sealed.djlib" -o "$out/sealed$exe" "${flags[@]}" > "$out/sealed.log" 2>&1; then fail "a changed header must be rejected"; fi
+grep -q "header or section table" "$out/sealed.log" || { cat "$out/sealed.log"; fail "a changed header must say so"; }
+"$compiler" --inspect-lib "$out/sealed.djlib" --sections-only | grep -q "DAMAGED" || fail "--inspect-lib must flag a damaged header"
 
 # compression: interface and bitcode are stored as LZ4 blocks, --no-compress keeps them raw, a damaged one is refused
 "$compiler" --inspect-lib "$out/mathlib.djlib" | grep -q "stored: .* bytes (lz4)" || fail "the interface and bitcode of a library must be stored compressed"

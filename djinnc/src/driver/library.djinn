@@ -50,6 +50,8 @@ struct Library {
     const i32 LABEL_OFFSET = 32;
     const i32 BUILD_ID_OFFSET = 64;
     const i32 INTERFACE_HASH_OFFSET = 96;
+    // text hash of the header and the section table (this field read as zero): 0 in libraries written before it existed
+    const i32 HEADER_HASH_OFFSET = 104;
     const i32 TEXT_FIELD_SIZE = 32;
     const i32 SECTION_MANIFEST = 1;
     const i32 SECTION_INTERFACE = 2;
@@ -175,6 +177,36 @@ struct Library {
             value = (value << 8) | (u64)(u8)data[offset + i];
         }
         return value;
+    }
+
+    // Hash of the header and the section table of a stored library, with the hash field itself counted as zero. It covers
+    // what locates and describes every section, which the per-section checksums cannot.
+    static unsafe u64 head_checksum(ptr<i8> data, i32 length) {
+        i32 count = (i32)Library.get_u32(data, 20);
+        i32 table = (i32)Library.get_u32(data, 24);
+        i32 end = table + count * Library.ENTRY_SIZE;
+        if (table < Library.HEADER_SIZE || count < 0 || count > 64 || end > length) {
+            return 0;
+        }
+        ptr<i8> copy = (ptr<i8>)Memory.zalloc((u64)end + 1);
+        memcpy(copy, data, (u64)end);
+        for (mut i32 i = 0; i < 8; i = i + 1) {
+            copy[Library.HEADER_HASH_OFFSET + i] = (i8)0;
+        }
+        return TextHash.of(copy, end);
+    }
+
+    // Records the header-and-table hash in the header of a library being written (the buffer holds the header and the table).
+    static unsafe void seal_head(ByteBuffer* out) {
+        ByteBuffer* field = ByteBuffer.create();
+        Library.put_u64(field, Library.head_checksum(out.data, out.length));
+        memcpy(out.data + Library.HEADER_HASH_OFFSET, field.data, 8);
+    }
+
+    // True when the header and table match the hash the header records (always true without one).
+    static unsafe bool head_intact(ptr<i8> data, i32 length) {
+        u64 recorded = Library.get_u64(data, Library.HEADER_HASH_OFFSET);
+        return recorded == 0 || recorded == Library.head_checksum(data, length);
     }
 
     // Checksum of a section of the library whose header is `header`: the text hash when the header says so.
@@ -835,6 +867,8 @@ struct Library {
             Library.put_u64(out, TextHash.of(data, size));
             offset = offset + (u64)size;
         }
+        // seal the header and the section table
+        Library.seal_head(out);
         out.append_slice(manifest.data, manifest.length);
         out.append_slice(iface_stored.data, iface_stored.length);
         out.append_slice(object, object_length);
@@ -1233,6 +1267,10 @@ struct Library {
                 (i32)(Library.COMPILER_VERSION >> 16), (i32)((Library.COMPILER_VERSION >> 8) & 255), (i32)(Library.COMPILER_VERSION & 255));
             return -1;
         }
+        if (!Library.head_intact(data, length)) {
+            logger_error(Log.get(), "djinnc: '%s' is corrupted (its header or section table does not match the recorded hash)", path);
+            return -1;
+        }
         data = Library.expand(data, &length, path);
         if (data == null) {
             return -1;
@@ -1423,6 +1461,13 @@ struct Library {
             out.append("  interface hash: ");
             out.append_unsigned(Library.get_u64(data, Library.INTERFACE_HASH_OFFSET));
             out.append_byte(10);
+        }
+        if (Library.get_u64(stored, Library.HEADER_HASH_OFFSET) != 0) {
+            mut ptr<i8> state = "ok";
+            if (!Library.head_intact(stored, stored_length)) {
+                state = "DAMAGED";
+            }
+            Library.field(out, "header hash: ", state, strlen(state));
         }
         i32 platforms = Library.platforms_of(data, manifest_offset, manifest_size);
         if (platforms != 0) {
