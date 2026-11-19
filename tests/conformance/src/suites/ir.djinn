@@ -434,7 +434,7 @@ i32 main() {
     void ExternAllocatorsAreMarked() {
         str source = """
 extern "C" {
-    void* __djinn_alloc(u64 size);
+    [AllocFn("djinn")] void* __djinn_alloc([AllocSize] u64 size);
 }
 
 i32 main() {
@@ -445,7 +445,65 @@ i32 main() {
     }
 }
 """;
-        Verify.source(source).with_std().emits_ir(Expected.ir_contains("declare noalias ptr @__djinn_alloc(i64)").and_ir_contains("allockind(\"alloc,uninitialized\")"));
+        Verify.source(source).emits_ir(Expected.ir_contains("declare noalias ptr @__djinn_alloc(i64)").and_ir_contains("allockind(\"alloc,uninitialized\")"));
+    }
+
+    [Test]
+    void ExternFreeIsMarked() {
+        str source = """
+extern "C" {
+    [AllocFn("djinn")] void* __djinn_alloc([AllocSize] u64 size);
+    [FreeFn("djinn")] void __djinn_free([AllocPtr] void* pointer);
+}
+
+i32 main() {
+    unsafe {
+        i8* memory = (i8*)__djinn_alloc(8);
+        __djinn_free((void*)memory);
+    }
+    return 0;
+}
+""";
+        Verify.source(source).emits_ir(Expected.ir_contains("declare void @__djinn_free(ptr allocptr)").and_ir_contains("allockind(\"free\") memory(argmem: readwrite, inaccessiblemem: readwrite)").and_ir_contains("\"alloc-family\"=\"djinn\""));
+    }
+
+    [Test]
+    void ExternReallocIsMarked() {
+        str source = """
+extern "C" {
+    [AllocFn("djinn")] void* __djinn_alloc([AllocSize] u64 size);
+    [ReallocFn("djinn")] void* __djinn_realloc([AllocPtr] void* pointer, [AllocSize] u64 new_size);
+}
+
+i32 main() {
+    unsafe {
+        mut i8* memory = (i8*)__djinn_alloc(8);
+        memory = (i8*)__djinn_realloc((void*)memory, 16);
+        return (i32)memory[0];
+    }
+}
+""";
+        Verify.source(source).emits_ir(Expected.ir_contains("declare noalias ptr @__djinn_realloc(ptr allocptr, i64)").and_ir_contains("allockind(\"realloc\") allocsize(1) memory(argmem: readwrite, inaccessiblemem: readwrite)"));
+    }
+
+    [Test]
+    void ExternAlignedAllocatorIsMarked() {
+        str source = """
+extern "C" {
+    [AllocFn("djinn_aligned"), AllocZeroed] void* __djinn_malloc_aligned([AllocSize] u64 size, [AllocAlign] u64 alignment);
+    [FreeFn("djinn_aligned")] void __djinn_free_aligned([AllocPtr] void* pointer);
+}
+
+i32 main() {
+    unsafe {
+        i8* memory = (i8*)__djinn_malloc_aligned(8, 32);
+        i32 value = (i32)memory[0];
+        __djinn_free_aligned((void*)memory);
+        return value;
+    }
+}
+""";
+        Verify.source(source).emits_ir(Expected.ir_contains("declare noalias ptr @__djinn_malloc_aligned(i64, i64 allocalign)").and_ir_contains("allockind(\"alloc,zeroed,aligned\") allocsize(0)").and_ir_contains("\"alloc-family\"=\"djinn_aligned\"").and_ir_contains("declare void @__djinn_free_aligned(ptr allocptr)"));
     }
 
     [Test]
