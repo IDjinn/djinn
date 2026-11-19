@@ -409,6 +409,13 @@ close when you choose and on Escape; `List` and `Table` scroll past 16rem (the `
 (`libs/ui/src/input/hit.djinn`) keeps `:hover` and `:active` on the tree: the host calls `Pointer.move(id)`,
 `press(id)` and `release()` as the mouse does, which is also what the tooltip and the hover colors use.
 
+## shadcn components
+
+`libs/ui/src/kit/shadcn.djinn` ports the rest of the shadcn/ui set to the Djinn theme (same source on every native host and on the web target): `Card` with `CardHeader`, `CardTitle`, `CardDescription`,
+`CardContent`, `CardFooter`; `Badge` (`variant` "", "secondary", "destructive", "outline"); `Alert` (`title`, `description`, `variant` "" / "destructive"); `Separator`
+(`vertical`); `Skeleton` (`wide`, `pulse` for the looping fade, which keeps the window redrawing); `Progress` (`value` 0-100, drawn in steps of 5); `Avatar` (`initials`); `Label`; `Kbd`; `Toggle` (`pressed` signal, `variant` "outline");
+`RadioGroup` (`options="S|M|L"`, `index` signal); `AccordionItem` (`title`, `open`) and `Breadcrumb` (`items="Home|Docs|Page"`). Also `Collapsible`, `Popover` (button + floating panel), `AlertDialog` (`confirm`, `on_confirm`), `Sheet` (`side` "right" / "left" / "top" / "bottom"), `Pagination` (`pages`, `page` signal), `Slider` (0-100 in steps of 5: click the track, or Left / Right / Home / End) and `Textarea` (binds a `signal<str>` like `Field`; natively it edits as one line for now). They are styled by the tokens (`--ui-*`), so an app restyles them like the rest.
+
 ## Router and animation
 
 `Router` (`libs/ui/src/router/router.djinn`) keeps a history of paths: `Router.start(path)`, `navigate`, `back`,
