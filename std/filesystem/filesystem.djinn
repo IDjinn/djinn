@@ -146,13 +146,13 @@ struct File : Disposable {
         while (true) {
             if (length == capacity) {
                 if (length > max_bytes) {
-                    unsafe { free(data); }
+                    unsafe { __djinn_free(data); }
                     return result::Error(FsError::FileTooLarge());
                 }
                 capacity = capacity * 2;
                 i8* grown = fs_grow_bytes(data, capacity);
                 if (!fs_is_set(grown)) {
-                    unsafe { free(data); }
+                    unsafe { __djinn_free(data); }
                     return result::Error(FsError::OutOfMemory());
                 }
                 data = grown;
@@ -162,17 +162,17 @@ struct File : Disposable {
             if (request >= 0) { std::builtin::coro.suspend(); }
             i64 step = fs_collect(request);
             if (step < 0) {
-                unsafe { free(data); }
+                unsafe { __djinn_free(data); }
                 return result::Error(fs_error_from_code(0 - step));
             }
             if (step == 0) { break; }
             length = length + step;
             if (length > max_bytes) {
-                unsafe { free(data); }
+                unsafe { __djinn_free(data); }
                 return result::Error(FsError::FileTooLarge());
             }
         }
-        return result::Ok({ .data = data, .length = (size)length, .meta = 0 });
+        return result::Ok({ .data = data, .length = (size)length, .meta = StringMeta.heap() });
     }
 
     public async result<i64, FsError> seek_start(i64 offset) {
@@ -283,23 +283,23 @@ struct File : Disposable {
         }
         mut i64 length = 0;
         unsafe {
-            mut i8* data = (i8*)malloc((size_long)capacity);
+            mut i8* data = (i8*)__djinn_alloc_zeroed((size_long)capacity);
             if (data == (i8*)0) { return result::Error(FsError::OutOfMemory()); }
             while (true) {
                 if (length == capacity) {
-                    if (length > max_bytes) { free(data); return result::Error(FsError::FileTooLarge()); }
+                    if (length > max_bytes) { __djinn_free(data); return result::Error(FsError::FileTooLarge()); }
                     capacity = capacity * 2;
-                    i8* grown = (i8*)realloc(data, (size_long)capacity);
-                    if (grown == (i8*)0) { free(data); return result::Error(FsError::OutOfMemory()); }
+                    i8* grown = (i8*)__djinn_realloc(data, (size_long)capacity);
+                    if (grown == (i8*)0) { __djinn_free(data); return result::Error(FsError::OutOfMemory()); }
                     data = grown;
                 }
                 i64 step = Native.read(this.handle, data + length, capacity - length);
-                if (step < 0) { free(data); return result::Error(fs_error_from_code(0 - step)); }
+                if (step < 0) { __djinn_free(data); return result::Error(fs_error_from_code(0 - step)); }
                 if (step == 0) { break; }
                 length = length + step;
-                if (length > max_bytes) { free(data); return result::Error(FsError::FileTooLarge()); }
+                if (length > max_bytes) { __djinn_free(data); return result::Error(FsError::FileTooLarge()); }
             }
-            return result::Ok({ .data = data, .length = (size)length, .meta = 0 });
+            return result::Ok({ .data = data, .length = (size)length, .meta = StringMeta.heap() });
         }
     }
 
@@ -342,27 +342,27 @@ struct File : Disposable {
 }
 
 unsafe i64 fs_file_size(i64 handle) {
-    i64* out = (i64*)malloc(32);
+    i64* out = (i64*)__djinn_alloc_zeroed(32);
     if (out == (i64*)0) { return -1; }
     i64 code = Native.fstat(handle, out);
     i64 size = out[1];
-    free(out);
+    __djinn_free(out);
     if (code < 0) { return -1; }
     return size;
 }
 
 unsafe result<Metadata, FsError> fs_metadata_from(i64 code, i64* out) {
     if (code < 0) {
-        free(out);
+        __djinn_free(out);
         return result::Error(fs_error_from_code(0 - code));
     }
     Metadata value = { .kind = fs_kind_from_code(out[0]), .size = out[1], .modified_ns = out[2], .permissions = (i32)out[3] };
-    free(out);
+    __djinn_free(out);
     return result::Ok(value);
 }
 
 unsafe result<Metadata, FsError> fs_metadata_of(i64 handle) {
-    i64* out = (i64*)malloc(32);
+    i64* out = (i64*)__djinn_alloc_zeroed(32);
     if (out == (i64*)0) { return result::Error(FsError::OutOfMemory()); }
     return fs_metadata_from(Native.fstat(handle, out), out);
 }
@@ -381,7 +381,7 @@ struct DirEntries : Disposable {
         if (this.list > 0) {
             unsafe {
                 Native.list_free(this.list);
-                free(this.cursor);
+                __djinn_free(this.cursor);
             }
             this.list = 0;
         }
@@ -669,7 +669,7 @@ struct Directory : Disposable {
         if (this.handle < 0) { return result::Error(FsError::Closed()); }
         if (path.absolute) { return result::Error(FsError::AbsolutePath()); }
         unsafe {
-            i64* out = (i64*)malloc(32);
+            i64* out = (i64*)__djinn_alloc_zeroed(32);
             if (out == (i64*)0) { return result::Error(FsError::OutOfMemory()); }
             return fs_metadata_from(Native.stat(this.handle, path.text, 0, out), out);
         }
@@ -679,7 +679,7 @@ struct Directory : Disposable {
         if (this.handle < 0) { return result::Error(FsError::Closed()); }
         if (path.absolute) { return result::Error(FsError::AbsolutePath()); }
         unsafe {
-            i64* out = (i64*)malloc(32);
+            i64* out = (i64*)__djinn_alloc_zeroed(32);
             if (out == (i64*)0) { return result::Error(FsError::OutOfMemory()); }
             return fs_metadata_from(Native.stat(this.handle, path.text, 64, out), out);
         }
@@ -735,7 +735,7 @@ struct Directory : Disposable {
         unsafe {
             i64 code = Native.list_open(this.handle);
             if (code < 0) { return result::Error(fs_error_from_code(0 - code)); }
-            ListCursor* cursor = (ListCursor*)malloc(sizeof(ListCursor));
+            ListCursor* cursor = (ListCursor*)__djinn_alloc_zeroed(sizeof(ListCursor));
             if (cursor == (ListCursor*)0) {
                 Native.list_free(code);
                 return result::Error(FsError::OutOfMemory());
@@ -788,19 +788,19 @@ result<bool, FsError> fs_dir_or_exists(Metadata info) {
 
 result<bool, FsError> fs_write_atomic(i64 dir, str leaf, str data) {
     unsafe {
-        i8* name = (i8*)malloc(320);
+        i8* name = (i8*)__djinn_alloc_zeroed(320);
         if (name == (i8*)0) { return result::Error(FsError::OutOfMemory()); }
         mut i64 opened = -2;
         mut str temp = { .data = name, .length = 0 };
         mut i32 attempt = 0;
         while (opened == -2 && attempt < 16) {
             i64 length = Native.temp_name(leaf, name, 320);
-            if (length < 0) { free(name); return result::Error(fs_error_from_code(0 - length)); }
+            if (length < 0) { __djinn_free(name); return result::Error(fs_error_from_code(0 - length)); }
             temp = { .data = name, .length = (size)length };
             opened = Native.open_file(dir, temp, 10, 384);
             attempt = attempt + 1;
         }
-        if (opened < 0) { free(name); return result::Error(fs_error_from_code(0 - opened)); }
+        if (opened < 0) { __djinn_free(name); return result::Error(fs_error_from_code(0 - opened)); }
 
         mut i64 failure = 0;
         mut i64 done = 0;
@@ -820,10 +820,10 @@ result<bool, FsError> fs_write_atomic(i64 dir, str leaf, str data) {
         if (failure == 0) { failure = Native.rename(dir, temp, dir, leaf, true); }
         if (failure < 0) {
             Native.remove(dir, temp, false);
-            free(name);
+            __djinn_free(name);
             return result::Error(fs_error_from_code(0 - failure));
         }
-        free(name);
+        __djinn_free(name);
         Native.sync_dir(dir);
         return result::Ok(true);
     }
@@ -845,7 +845,7 @@ async i64 fs_file_size_async(i64 handle) {
     mut i64 size = -1;
     unsafe {
         if (code >= 0) { size = out[1]; }
-        free(out);
+        __djinn_free(out);
     }
     return size;
 }
@@ -861,7 +861,7 @@ async result<bool, FsError> fs_write_atomic_async(i64 dir, str leaf, str data) {
         mut i64 length = 0;
         unsafe { length = Native.temp_name(leaf, name, 320); }
         if (length < 0) {
-            unsafe { free(name); }
+            unsafe { __djinn_free(name); }
             return result::Error(fs_error_from_code(0 - length));
         }
         temp = { .data = name, .length = (size)length };
@@ -872,7 +872,7 @@ async result<bool, FsError> fs_write_atomic_async(i64 dir, str leaf, str data) {
         attempt = attempt + 1;
     }
     if (opened < 0) {
-        unsafe { free(name); }
+        unsafe { __djinn_free(name); }
         return result::Error(fs_error_from_code(0 - opened));
     }
 
@@ -913,10 +913,10 @@ async result<bool, FsError> fs_write_atomic_async(i64 dir, str leaf, str data) {
         unsafe { request = Native.submit_remove(dir, temp, false, task); }
         if (request >= 0) { std::builtin::coro.suspend(); }
         i64 ignored = fs_collect(request);
-        unsafe { free(name); }
+        unsafe { __djinn_free(name); }
         return result::Error(fs_error_from_code(0 - failure));
     }
-    unsafe { free(name); }
+    unsafe { __djinn_free(name); }
     mut i64 flush = 0;
     unsafe { flush = Native.submit_sync_dir(dir, task); }
     if (flush >= 0) { std::builtin::coro.suspend(); }
@@ -925,19 +925,19 @@ async result<bool, FsError> fs_write_atomic_async(i64 dir, str leaf, str data) {
 }
 
 unsafe i64* fs_new_stat() {
-    return (i64*)malloc(32);
+    return (i64*)__djinn_alloc_zeroed(32);
 }
 
 unsafe i8* fs_new_bytes(i64 size) {
-    return (i8*)malloc((size_long)size);
+    return (i8*)__djinn_alloc_zeroed((size_long)size);
 }
 
 unsafe i8* fs_grow_bytes(i8* data, i64 size) {
-    return (i8*)realloc(data, (size_long)size);
+    return (i8*)__djinn_realloc(data, (size_long)size);
 }
 
 unsafe ListCursor* fs_new_cursor() {
-    return (ListCursor*)malloc(sizeof(ListCursor));
+    return (ListCursor*)__djinn_alloc_zeroed(sizeof(ListCursor));
 }
 
 unsafe bool fs_is_set(void* pointer) {

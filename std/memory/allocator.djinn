@@ -13,25 +13,25 @@ constexpr struct allocator {
     pool* pool_source;
 
     public static unsafe allocator heap() {
-        allocator result = { .kind = 0, .arena_source = (arena*)0, .pool_source = (pool*)0 };
+        allocator result = { .kind = allocator.HEAP, .arena_source = (arena*)0, .pool_source = (pool*)0 };
         return result;
     }
 
     public static unsafe allocator from_arena(arena* source) {
-        allocator result = { .kind = 1, .arena_source = source, .pool_source = (pool*)0 };
+        allocator result = { .kind = allocator.ARENA, .arena_source = source, .pool_source = (pool*)0 };
         return result;
     }
 
     public static unsafe allocator from_pool(pool* source) {
-        allocator result = { .kind = 2, .arena_source = (arena*)0, .pool_source = source };
+        allocator result = { .kind = allocator.POOL, .arena_source = (arena*)0, .pool_source = source };
         return result;
     }
 
-    public unsafe i8* alloc(u64 size) {
-        if (this.kind == 1) {
+    [Inline] public unsafe i8* alloc(u64 size) {
+        if (this.kind == allocator.ARENA) {
             return this.arena_source.alloc(size, 16);
         }
-        if (this.kind == 2) {
+        if (this.kind == allocator.POOL) {
             Debug.assert(size <= this.pool_source.block_size(), "allocator - request is larger than the pool block size");
             return this.pool_source.acquire();
         }
@@ -39,10 +39,10 @@ constexpr struct allocator {
     }
 
     public unsafe i8* resize(i8* pointer, u64 old_size, u64 new_size) {
-        if (this.kind == 0) {
+        if (this.kind == allocator.HEAP) {
             return (i8*)__djinn_realloc((void*)pointer, new_size);
         }
-        if (this.kind == 2) {
+        if (this.kind == allocator.POOL) {
             Debug.assert(new_size <= this.pool_source.block_size(), "allocator - request is larger than the pool block size");
             if (pointer != (i8*)0) {
                 return pointer;
@@ -56,13 +56,13 @@ constexpr struct allocator {
         return grown;
     }
 
-    public unsafe void release(i8* pointer, u64 size) {
+    [Inline] public unsafe void release(i8* pointer, u64 size) {
         if (pointer == (i8*)0) {
             return;
         }
-        if (this.kind == 0) {
+        if (this.kind == allocator.HEAP) {
             __djinn_free((void*)pointer);
-        } else if (this.kind == 2) {
+        } else if (this.kind == allocator.POOL) {
             this.pool_source.release(pointer);
         }
     }
