@@ -483,6 +483,105 @@ struct Publisher {
         }
     }
 
+    static unsafe i32 punct(Unit* u, i32 token) {
+        if (token < 0 || token >= u.token_count || u.tkind[token] != Tk.PUNCT || u.tend[token] - u.tstart[token] != 1) {
+            return 0;
+        }
+        return (i32)u.text[u.tstart[token]];
+    }
+
+    // The index of the token that opens the group closed at `close` ( ')' ']' '>' ), or -1.
+    static unsafe i32 opener_of(Unit* u, i32 close) {
+        i32 shut = Publisher.punct(u, close);
+        mut i32 open = 40;
+        if (shut == 93) {
+            open = 91;
+        } else if (shut == 62) {
+            open = 60;
+        }
+        mut i32 depth = 0;
+        mut i32 at = close;
+        while (at >= 0) {
+            i32 c = Publisher.punct(u, at);
+            if (c == shut) {
+                depth = depth + 1;
+            } else if (c == open) {
+                depth = depth - 1;
+                if (depth == 0) {
+                    return at;
+                }
+            } else if (c == 59 || c == 123 || c == 125) {
+                return 0 - 1;
+            }
+            at = at - 1;
+        }
+        return 0 - 1;
+    }
+
+    // A diagnostic anchored on the '(' of a call covers the whole call: callee, arguments and the closing ')'.
+    static unsafe void widen_call(Unit* u, ptr<i32> from, ptr<i32> to) {
+        i32 paren = u.token_at_offset(from[0]);
+        if (paren < 0 || Publisher.punct(u, paren) != 40) {
+            return;
+        }
+        mut i32 depth = 0;
+        mut i32 end = paren;
+        while (end < u.token_count) {
+            i32 c = Publisher.punct(u, end);
+            if (c == 40) {
+                depth = depth + 1;
+            } else if (c == 41) {
+                depth = depth - 1;
+                if (depth == 0) {
+                    break;
+                }
+            }
+            end = end + 1;
+        }
+        if (end >= u.token_count) {
+            return;
+        }
+        mut i32 first = paren;
+        mut i32 at = paren - 1;
+        mut bool operand = true;
+        while (at >= 0) {
+            i32 c = Publisher.punct(u, at);
+            if (operand) {
+                i32 kind = u.tkind[at];
+                if (kind == Tk.IDENT || kind == Tk.TYPE || kind == Tk.KEYWORD) {
+                    first = at;
+                    at = at - 1;
+                    operand = false;
+                } else if (c == 41 || c == 93 || c == 62) {
+                    i32 open = Publisher.opener_of(u, at);
+                    if (open < 0) {
+                        break;
+                    }
+                    first = open;
+                    at = open - 1;
+                    mut i32 kind_before = 0;
+                    if (at >= 0) {
+                        kind_before = u.tkind[at];
+                    }
+                    if (kind_before == Tk.IDENT || kind_before == Tk.TYPE) {
+                        first = at;
+                        at = at - 1;
+                    }
+                    operand = false;
+                } else {
+                    break;
+                }
+            } else if (c == 46 || c == 58) {
+                at = at - 1;
+                operand = true;
+            } else {
+                break;
+            }
+        }
+        from[0] = u.tstart[first];
+        to[0] = u.tend[end];
+    }
+
     static unsafe ptr<i8> with_hint(Unit* u, CDiag* diag, i32 offset) {
         ptr<i8> replacement = Suggest.for_diagnostic(u, diag.code, offset);
         if (replacement == null) {
@@ -516,6 +615,10 @@ struct Publisher {
                     mut i32 start = from;
                     Publisher.narrow(u, diag, &start, &to);
                     from = start;
+                    if (diag.code != null && Strings.equals(diag.code, strlen(diag.code), "E6003")) {
+                        Publisher.widen_call(u, &start, &to);
+                        from = start;
+                    }
                     if (to <= from) {
                         to = from + 1;
                     }

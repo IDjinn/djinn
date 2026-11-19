@@ -96,12 +96,17 @@ function invocation(target: string, options: BuildOptions): CompilerInvocation {
   }
   if (process.platform === "win32") {
     args.push("--lld");
+    // Import libraries of the native libraries (vulkan-1.lib) ship in the installed toolchain's native/ folder; a library
+    // folder built in a checkout has no native/ next to it.
+    const native = toolchain.installed("native");
+    if (native) {
+      args.push(`-L${native}`);
+    }
   }
   if (options.mode === "check") {
     args.push("--check");
-  } else if (options.mode === "run" && !plan.isLibrary) {
-    args.push("--run");
   }
+  // "run" builds a real executable (the platform files for the host are picked) and the caller starts it; `--run` would JIT it.
   if (options.mode !== "check") {
     if (settings.get<boolean>("build.debugInfo") || options.debug) {
       args.push("-g");
@@ -125,6 +130,65 @@ export function ensureOutputDirectory(target: string, options: BuildOptions): Bu
   const { plan } = invocation(target, options);
   fs.mkdirSync(plan.outputDirectory, { recursive: true });
   return plan;
+}
+
+function spawnCompiler(compiler: string, args: string[], cwd: string, onOutput?: (text: string) => void): Promise<{ code: number | null; text: string }> {
+  return new Promise((resolve, reject) => {
+    const child = cp.spawn(compiler, args, { env: toolchain.environment(), cwd });
+    let text = "";
+    const collect = (chunk: Buffer): void => {
+      const value = chunk.toString();
+      text += value;
+      if (onOutput) {
+        onOutput(value);
+      }
+    };
+    child.stdout.on("data", collect);
+    child.stderr.on("data", collect);
+    child.on("error", reject);
+    child.on("close", (code) => resolve({ code, text }));
+  });
+}
+
+/**
+ * Builds the libraries a project lists in djinn.proj that are missing from the library directory, from the sources in a
+ * Djinn checkout's libs/ folder, in the order the project lists them (a library may import the ones before it).
+ */
+export async function ensureLibraries(target: string, options: BuildOptions, onOutput?: (text: string) => void): Promise<void> {
+  const plan = describe(target);
+  const libDir = toolchain.libDir();
+  const root = toolchain.repoRoot();
+  const std = toolchain.stdDir(options.info);
+  const compiler = toolchain.compiler(options.info);
+  if (!plan.isDirectory || !libDir || !root || !compiler || !fs.existsSync(path.join(libDir, "std.djlib"))) {
+    return;
+  }
+  const manifest = path.join(target, "djinn.proj");
+  if (!fs.existsSync(manifest)) {
+    return;
+  }
+  const block = /libs:\s*\[([^\]]*)\]/.exec(fs.readFileSync(manifest, "utf8"));
+  const names = block ? [...block[1].matchAll(/['"]([^'"]+)['"]/g)].map((match) => match[1]).filter((name) => name !== "std") : [];
+  for (const name of names) {
+    const output = path.join(libDir, `${name}.djlib`);
+    const source = path.join(root, "libs", name);
+    if (fs.existsSync(output) || !fs.existsSync(source)) {
+      continue;
+    }
+    onOutput?.(`> building library ${name} (missing from ${libDir})\n`);
+    const args = [source, "-o", output, "--lib-dir", libDir];
+    if (std) {
+      args.push("--std-dir", std);
+    }
+    if (process.platform === "win32") {
+      args.push("--lld");
+    }
+    const result = await spawnCompiler(compiler, args, root, onOutput);
+    if (result.code !== 0) {
+      const errors = result.text.split("\n").filter((line) => line.includes("error")).slice(0, 5).join("\n");
+      throw new Error(`Building the library ${name} failed:\n${errors || `djinnc exited with ${result.code}`}`);
+    }
+  }
 }
 
 export function run(target: string, options: BuildOptions, onOutput?: (text: string) => void): Promise<{ plan: BuildPlan; text: string }> {

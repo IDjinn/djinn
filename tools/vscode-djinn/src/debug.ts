@@ -2,8 +2,9 @@ import * as fs from "fs";
 import * as path from "path";
 import * as vscode from "vscode";
 import * as build from "./build";
+import { runTask } from "./tasks";
 import * as toolchain from "./toolchain";
-import { LaunchConfig } from "./types";
+import { LaunchConfig, ServerInfo } from "./types";
 
 function nativeConfiguration(config: LaunchConfig, program: string, cwd: string): vscode.DebugConfiguration {
   const name = config.name || "Djinn: Debug";
@@ -60,9 +61,13 @@ export class DebugAdapterFactory implements vscode.DebugAdapterDescriptorFactory
 }
 
 export class DebugProvider implements vscode.DebugConfigurationProvider {
+  constructor(private readonly getInfo: () => Promise<ServerInfo | undefined>) {}
+
   provideDebugConfigurations(): vscode.DebugConfiguration[] {
     return [
       { type: "djinn", request: "launch", name: "Djinn: Debug project", args: [] },
+      { type: "djinn", request: "launch", name: "Djinn: Build project", mode: "build" },
+      { type: "djinn", request: "launch", name: "Djinn: Build and run project", mode: "run", args: [] },
       { type: "djinn", request: "launch", name: "Djinn: Profile CPU", mode: "profile", target: "${workspaceFolder}", args: [], profile: { kind: "cpu", optimization: "O2" } },
     ];
   }
@@ -88,6 +93,10 @@ export class DebugProvider implements vscode.DebugConfigurationProvider {
       vscode.window.showWarningMessage("Open a Djinn file or folder first.");
       return undefined;
     }
+    if (config.mode === "build" || config.mode === "run") {
+      await runTask(config.mode, this.getInfo, target);
+      return undefined;
+    }
     if (build.describe(target).isLibrary) {
       vscode.window.showWarningMessage("This project is a library (.djlib): it has no entry point to run or debug.");
       return undefined;
@@ -98,7 +107,8 @@ export class DebugProvider implements vscode.DebugConfigurationProvider {
       if (config.build !== false) {
         output.show(true);
         output.appendLine(`> building ${target} with debug info`);
-        const result = await build.run(target, { mode: "build", debug: true }, (text) => output.append(text));
+        await build.ensureLibraries(target, { mode: "build", debug: true, info: await this.getInfo() }, (text) => output.append(text));
+        const result = await build.run(target, { mode: "build", debug: true, info: await this.getInfo() }, (text) => output.append(text));
         program = program || result.plan.program;
       } else {
         program = program || build.describe(target).program;

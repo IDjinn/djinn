@@ -35,7 +35,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     output,
     diagnostics,
     ...profiling.register(),
-    vscode.debug.registerDebugConfigurationProvider("djinn", new DebugProvider()),
+    vscode.debug.registerDebugConfigurationProvider("djinn", new DebugProvider(getInfo)),
     vscode.debug.registerDebugAdapterDescriptorFactory("djinn", new DebugAdapterFactory()),
     vscode.tasks.registerTaskProvider("djinn", taskProvider(getInfo)),
     vscode.commands.registerCommand("djinn.install", () => runSetup("install")),

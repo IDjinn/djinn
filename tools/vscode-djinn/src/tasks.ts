@@ -1,3 +1,4 @@
+import * as path from "path";
 import * as vscode from "vscode";
 import * as build from "./build";
 import * as toolchain from "./toolchain";
@@ -22,6 +23,22 @@ export async function saveActiveEditor(): Promise<void> {
   }
 }
 
+let libraryOutput: vscode.OutputChannel | undefined;
+
+/** Builds the project's libraries that are missing from the library directory, showing the compiler output in the Djinn Build channel. */
+async function ensureLibraries(target: string, info: ServerInfo | undefined): Promise<void> {
+  libraryOutput = libraryOutput || vscode.window.createOutputChannel("Djinn Build");
+  const output = libraryOutput;
+  let shown = false;
+  await build.ensureLibraries(target, { info }, (text) => {
+    if (!shown) {
+      output.show(true);
+      shown = true;
+    }
+    output.append(text);
+  });
+}
+
 /** Builds, runs or checks the active project (or `explicitTarget`) in a shell task. */
 export async function runTask(mode: BuildMode, getInfo: () => Promise<ServerInfo | undefined>, explicitTarget?: string): Promise<void> {
   const target = toolchain.resolveTarget(explicitTarget);
@@ -33,6 +50,7 @@ export async function runTask(mode: BuildMode, getInfo: () => Promise<ServerInfo
   let line: string;
   try {
     const info = await getInfo();
+    await ensureLibraries(target, info);
     build.ensureOutputDirectory(target, { mode, info });
     line = build.commandLine(target, { mode, info });
   } catch (error) {
@@ -48,7 +66,37 @@ export async function runTask(mode: BuildMode, getInfo: () => Promise<ServerInfo
     "$djinnc"
   );
   task.presentationOptions = presentation;
-  await vscode.tasks.executeTask(task);
+  const execution = await vscode.tasks.executeTask(task);
+  if (mode === "run") {
+    startAfterBuild(execution, target, firstFolder());
+  }
+}
+
+/** When the build task of a "run" ends successfully, starts the program it produced in its own task so its output stays visible. */
+function startAfterBuild(buildExecution: vscode.TaskExecution, target: string, folder: vscode.WorkspaceFolder | undefined): void {
+  const listener = vscode.tasks.onDidEndTaskProcess((event) => {
+    if (event.execution !== buildExecution) {
+      return;
+    }
+    listener.dispose();
+    if (event.exitCode !== 0) {
+      return;
+    }
+    const plan = build.describe(target);
+    if (plan.isLibrary) {
+      vscode.window.showWarningMessage("This project is a library (.djlib): it has no entry point to run.");
+      return;
+    }
+    const run = new vscode.Task(
+      { type: "djinn", command: "run", target },
+      folder || vscode.TaskScope.Workspace,
+      "djinn run program",
+      "djinn",
+      new vscode.ShellExecution({ value: plan.program, quoting: vscode.ShellQuoting.Strong }, [], { cwd: path.dirname(plan.program), env: toolchain.environment() })
+    );
+    run.presentationOptions = { ...presentation, clear: false };
+    void vscode.tasks.executeTask(run);
+  });
 }
 
 interface DjinnTaskDefinition extends vscode.TaskDefinition {
