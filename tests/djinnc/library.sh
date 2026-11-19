@@ -49,6 +49,43 @@ python_patch "$out/mathlib.djlib" "$out/future.djlib" 8 "02"
 if "$compiler" "$sample/app.djinn" --lib "$out/future.djlib" -o "$out/future$exe" "${flags[@]}" > "$out/future.log" 2>&1; then fail "a greater format version must be rejected"; fi
 grep -q "unsupported library version" "$out/future.log" || { cat "$out/future.log"; fail "a greater format version must say so"; }
 
+# version policy: another major.minor is refused (build it again), another patch is accepted
+cp "$out/mathlib.djlib" "$out/minor.djlib"
+python_patch "$out/mathlib.djlib" "$out/minor.djlib" 29 "02"
+python_patch "$out/mathlib.djlib" "$out/minor.djlib" 104 "0000000000000000"  # unseal: this test is about the version policy
+if "$compiler" "$sample/app.djinn" --lib "$out/minor.djlib" -o "$out/minor$exe" "${flags[@]}" > "$out/minor.log" 2>&1; then fail "a library of another compiler version must be rejected"; fi
+grep -q "written by djinnc 0.2.0" "$out/minor.log" || { cat "$out/minor.log"; fail "the version message must name the compiler that wrote the library"; }
+cp "$out/mathlib.djlib" "$out/patch.djlib"
+python_patch "$out/mathlib.djlib" "$out/patch.djlib" 28 "07"
+python_patch "$out/mathlib.djlib" "$out/patch.djlib" 104 "0000000000000000"  # unseal: this test is about the version policy
+"$compiler" "$sample/app.djinn" --lib "$out/patch.djlib" -o "$out/patch$exe" "${flags[@]}" > "$out/patch.log" 2>&1 || { cat "$out/patch.log"; fail "a library of another patch version must be accepted"; }
+# interface hash: a header that names another interface marks the library stale
+"$compiler" --inspect-lib "$out/mathlib.djlib" --sections-only | grep -q "interface hash:" || fail "--inspect-lib must show the interface hash"
+cp "$out/mathlib.djlib" "$out/stale.djlib"
+python_patch "$out/mathlib.djlib" "$out/stale.djlib" 96 "7a7b"
+if "$compiler" "$sample/app.djinn" --lib "$out/stale.djlib" -o "$out/stale$exe" "${flags[@]}" > "$out/stale.log" 2>&1; then fail "a stale interface hash must be rejected"; fi
+grep -qE "is stale|corrupted" "$out/stale.log" || { cat "$out/stale.log"; fail "a stale library must say so"; }
+
+# header hash: the header and the section table are sealed, so a change to either is refused
+"$compiler" --inspect-lib "$out/mathlib.djlib" --sections-only | grep -q "header hash: *ok" || fail "--inspect-lib must show an intact header hash"
+cp "$out/mathlib.djlib" "$out/sealed.djlib"
+python_patch "$out/mathlib.djlib" "$out/sealed.djlib" 40 "7a"
+if "$compiler" "$sample/app.djinn" --lib "$out/sealed.djlib" -o "$out/sealed$exe" "${flags[@]}" > "$out/sealed.log" 2>&1; then fail "a changed header must be rejected"; fi
+grep -q "header or section table" "$out/sealed.log" || { cat "$out/sealed.log"; fail "a changed header must say so"; }
+"$compiler" --inspect-lib "$out/sealed.djlib" --sections-only | grep -q "DAMAGED" || fail "--inspect-lib must flag a damaged header"
+
+# compression: interface and bitcode are stored as LZ4 blocks, --no-compress keeps them raw, a damaged one is refused
+"$compiler" --inspect-lib "$out/mathlib.djlib" | grep -q "stored: .* bytes (lz4)" || fail "the interface and bitcode of a library must be stored compressed"
+"$compiler" "$sample/mathlib.djinn" --library --no-compress -o "$out/raw.djlib" "${flags[@]}" > "$out/raw.log" 2>&1 || { cat "$out/raw.log"; fail "library --no-compress must build"; }
+if "$compiler" --inspect-lib "$out/raw.djlib" | grep -q "(lz4)"; then fail "--no-compress must store the sections raw"; fi
+[ "$(stat -c %s "$out/raw.djlib")" -gt "$(stat -c %s "$out/mathlib.djlib")" ] || fail "the compressed library must be smaller than the raw one"
+"$compiler" "$sample/app.djinn" --lib "$out/raw.djlib" -o "$out/raw_app$exe" "${flags[@]}" > "$out/raw_app.log" 2>&1 || { cat "$out/raw_app.log"; fail "an app must build against a raw library"; }
+size=$(stat -c %s "$out/mathlib.djlib")
+cp "$out/mathlib.djlib" "$out/damaged.djlib"
+python_patch "$out/mathlib.djlib" "$out/damaged.djlib" $((size - 3)) "5a5a5a"
+if "$compiler" "$sample/app.djinn" --lib "$out/damaged.djlib" -o "$out/damaged$exe" "${flags[@]}" > "$out/damaged.log" 2>&1; then fail "a damaged compressed section must be rejected"; fi
+grep -q "corrupted" "$out/damaged.log" || { cat "$out/damaged.log"; fail "a damaged compressed section must say corrupted"; }
+
 # --- features across the boundary
 cat > "$out/features_lib.djinn" <<'SOURCE'
 namespace featurelib;
@@ -223,5 +260,93 @@ done
 plain=$("$compiler" --inspect-lib "$out/fast_o0.djlib" --sections-only | grep -o 'bitcode: *[0-9]*' | grep -o '[0-9]*$')
 debug=$("$compiler" --inspect-lib "$out/fast_g.djlib" --sections-only | grep -o 'bitcode: *[0-9]*' | grep -o '[0-9]*$')
 [ $((debug * 10)) -le $((plain * 12)) ] && [ $((plain * 10)) -le $((debug * 12)) ] || fail "the bitcode must not depend on -g (plain $plain bytes, -g $debug bytes)"
+
+# incremental rebuild: the same sources keep the existing file (same bytes and timestamp), a change rewrites it
+"$compiler" "$out/fastlib.djinn" --library -o "$out/again.djlib" -O3 "${flags[@]}" > "$out/again.log" 2>&1 || { cat "$out/again.log"; fail "library again must build"; }
+cp -p "$out/again.djlib" "$out/again.keep"
+sleep 1
+"$compiler" "$out/fastlib.djinn" --library -o "$out/again.djlib" -O3 "${flags[@]}" > "$out/again2.log" 2>&1 || { cat "$out/again2.log"; fail "library again must rebuild"; }
+cmp -s "$out/again.djlib" "$out/again.keep" || fail "an unchanged library must keep its bytes"
+[ ! "$out/again.djlib" -nt "$out/again.keep" ] || fail "an unchanged library must keep its timestamp"
+sed 's/ 3 + 1/ 5 + 1/' "$out/fastlib.djinn" > "$out/fastlib2.djinn"
+cmp -s "$out/fastlib.djinn" "$out/fastlib2.djinn" && fail "the incremental test needs a different source"
+"$compiler" "$out/fastlib2.djinn" --library -o "$out/again.djlib" -O3 "${flags[@]}" > "$out/again3.log" 2>&1 || { cat "$out/again3.log"; fail "library again must rebuild after a change"; }
+cmp -s "$out/again.djlib" "$out/again.keep" && fail "a changed library must be rewritten"
+
+# --- supported platforms: `targets:` in djinn.proj, stored in the library and checked by consumers
+if [ -n "$exe" ]; then host=windows; other=linux; other_triple=x86_64-unknown-linux-gnu; else host=linux; other=windows; other_triple=x86_64-pc-windows-msvc; fi
+tgt="$out/targets"
+mkdir -p "$tgt/hostlib/src" "$tgt/otherlib/src" "$tgt/anylib/src" "$tgt/both/src" "$tgt/bad/src"
+for name in hostlib otherlib anylib; do
+    printf 'namespace %s;
+
+public i32 value() {
+    return 7;
+}
+' "$name" > "$tgt/$name/src/lib.djinn"
+done
+write_proj() { # <dir> <name> <targets line or empty> <library-mode>
+    printf 'project: "%s"
+
+compiler:
+  library-mode: %s
+%s  output:
+    file: "%s.djlib"
+    directory: "."
+  libs: []
+' "$2" "$4" "$3" "$2" > "$1/djinn.proj"
+}
+write_proj "$tgt/hostlib" hostlib "  targets: [$host]
+" true
+write_proj "$tgt/otherlib" otherlib "  targets: [$other]
+" true
+write_proj "$tgt/anylib" anylib "" true
+for name in hostlib otherlib anylib; do
+    "$compiler" "$tgt/$name" -o "$tgt/$name.djlib" "${flags[@]}" > "$tgt/$name.log" 2>&1 && continue
+    # a library for the other platform cannot be built here: the project refuses first
+    [ "$name" = otherlib ] && grep -q "the project supports $other; building for $host" "$tgt/$name.log" && continue
+    cat "$tgt/$name.log"; fail "library project $name must build"
+done
+"$compiler" --inspect-lib "$tgt/hostlib.djlib" | grep -q "targets: *$host" || fail "--inspect-lib must list the targets of the library"
+"$compiler" --inspect-lib "$tgt/anylib.djlib" | grep -q "targets:" && fail "a library without targets must not list any"
+printf 'namespace app;
+import hostlib;
+
+i32 main() {
+    return hostlib::value() - 7;
+}
+' > "$tgt/app.djinn"
+"$compiler" "$tgt/app.djinn" --lib "$tgt/hostlib.djlib" -o "$tgt/app$exe" "${flags[@]}" > "$tgt/app.log" 2>&1 || { cat "$tgt/app.log"; fail "an app must build against a library for this platform"; }
+# a library for another platform: a clear message, not a link error
+"$compiler" "$tgt/app.djinn" --lib "$tgt/hostlib.djlib" --target "$other_triple" --emit-ir -o "$tgt/cross" "${flags[@]}" > "$tgt/cross.log" 2>&1 && fail "a library must not be accepted for another platform"
+grep -q "supports $host; building for $other" "$tgt/cross.log" || { cat "$tgt/cross.log"; fail "the message must name the platforms the library supports"; }
+# the project itself must support the platform being built for
+printf 'namespace both;
+
+i32 main() {
+    return 0;
+}
+' > "$tgt/both/src/main.djinn"
+write_proj "$tgt/both" both "  targets: [$other]
+" false
+"$compiler" "$tgt/both" -o "$tgt/both$exe" "${flags[@]}" > "$tgt/both.log" 2>&1 && fail "a project must refuse a platform outside its targets"
+grep -q "the project supports $other; building for $host" "$tgt/both.log" || { cat "$tgt/both.log"; fail "the project message must name both platforms"; }
+# an app can not claim more platforms than its libraries support
+write_proj "$tgt/both" both "  targets: [$host, $other]
+  libs: ['hostlib']
+" false
+"$compiler" "$tgt/both" -o "$tgt/both$exe" --lib-dir "$tgt" "${flags[@]}" > "$tgt/wide.log" 2>&1 && fail "an app must not claim platforms its libraries lack"
+grep -q "supports only $host" "$tgt/wide.log" || { cat "$tgt/wide.log"; fail "the message must name the library that narrows the targets"; }
+# an unknown word is an error
+printf 'namespace bad;
+
+i32 main() {
+    return 0;
+}
+' > "$tgt/bad/src/main.djinn"
+write_proj "$tgt/bad" bad "  targets: [plan9]
+" false
+"$compiler" "$tgt/bad" -o "$tgt/bad$exe" "${flags[@]}" > "$tgt/bad.log" 2>&1 && fail "an unknown platform word must be an error"
+grep -q "unknown platform 'plan9'" "$tgt/bad.log" || { cat "$tgt/bad.log"; fail "the message must name the unknown word"; }
 
 echo "library: ok"

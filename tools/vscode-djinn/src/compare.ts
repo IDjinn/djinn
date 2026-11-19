@@ -1,27 +1,39 @@
-const fs = require("fs");
-const path = require("path");
-const profile = require("./profile");
+import * as fs from "fs";
+import * as path from "path";
+import * as profile from "./profile";
 
-function levelOf(file) {
+interface Run {
+  file: string;
+  label: string;
+  model: profile.ProfileModel;
+}
+
+export interface TableOptions {
+  projectOnly?: boolean;
+  limit?: number;
+}
+
+export function levelOf(file: string): string {
   const match = /-(O[0-3sz])(?:-[a-z]+)?\.txt$/.exec(file);
   return match ? match[1] : path.basename(file, ".txt").replace(/^profile-/, "");
 }
 
-function load(file, projectRoot) {
+function load(file: string, projectRoot: string | undefined): Run {
   const model = profile.parse(fs.readFileSync(file, "utf8"), { projectRoot });
   return { file, label: levelOf(file), model };
 }
 
-function ratio(first, last) {
+function ratio(first: number, last: number): string {
   if (!first || !last) {
     return "-";
   }
   return `${(last / first).toFixed(2)}x`;
 }
 
-function table(files, projectRoot, options = {}) {
+/** A text table of per-function sample counts for profiles recorded at different optimization levels. */
+export function table(files: string[], projectRoot: string | undefined, options: TableOptions = {}): string {
   const runs = files.map((file) => load(file, projectRoot));
-  const names = new Map();
+  const names = new Map<string, number>();
   for (const run of runs) {
     for (const entry of run.model.functions) {
       if (options.projectOnly && !entry.project) {
@@ -32,9 +44,9 @@ function table(files, projectRoot, options = {}) {
   }
   const ordered = [...names.entries()].sort((a, b) => b[1] - a[1]).slice(0, options.limit || 40).map(([name]) => name);
   const width = Math.min(60, Math.max(8, ...ordered.map((name) => name.length)));
-  const clip = (text) => (text.length > width ? `${text.slice(0, width - 1)}…` : text.padEnd(width));
+  const clip = (text: string): string => (text.length > width ? `${text.slice(0, width - 1)}…` : text.padEnd(width));
 
-  const lines = [];
+  const lines: string[] = [];
   lines.push("Optimization comparison (CPU samples per function; same wall time per run)");
   lines.push("");
   lines.push(`${"function".padEnd(width)}  ${runs.map((run) => `${run.label.padStart(9)} ${"%".padStart(6)}`).join("  ")}  ${`${runs[runs.length - 1].label}/${runs[0].label}`.padStart(9)}`);
@@ -61,5 +73,3 @@ function table(files, projectRoot, options = {}) {
   lines.push("so each level runs to completion, and compare the total samples: fewer samples for the same work means faster code.");
   return lines.join("\n") + "\n";
 }
-
-module.exports = { table, levelOf };

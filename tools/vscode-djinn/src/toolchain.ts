@@ -1,35 +1,36 @@
-const fs = require("fs");
-const os = require("os");
-const path = require("path");
-const vscode = require("vscode");
+import * as fs from "fs";
+import * as os from "os";
+import * as path from "path";
+import * as vscode from "vscode";
+import { ServerInfo } from "./types";
 
 let extensionPath = "";
 
-function init(context) {
+export function init(context: vscode.ExtensionContext): void {
   extensionPath = context.extensionPath;
 }
 
-function settings() {
+export function settings(): vscode.WorkspaceConfiguration {
   return vscode.workspace.getConfiguration("djinn");
 }
 
-function exists(candidate) {
-  return candidate && fs.existsSync(candidate);
+export function exists(candidate: string | undefined): boolean {
+  return Boolean(candidate) && fs.existsSync(candidate as string);
 }
 
-function bundled(...parts) {
+export function bundled(...parts: string[]): string | undefined {
   const candidate = path.join(extensionPath, ...parts);
   return fs.existsSync(candidate) ? candidate : undefined;
 }
 
-function exe(name) {
+export function exe(name: string): string {
   return process.platform === "win32" ? `${name}.exe` : name;
 }
 
-function repoRoot() {
-  const starts = [...(vscode.workspace.workspaceFolders || []).map((folder) => folder.uri.fsPath), extensionPath];
+export function repoRoot(): string | undefined {
+  const starts: string[] = [...(vscode.workspace.workspaceFolders || []).map((folder) => folder.uri.fsPath), extensionPath];
   for (const start of starts) {
-    let dir = start;
+    let dir: string = start;
     while (dir) {
       if (exists(path.join(dir, "djinnc", "djinn.proj")) && exists(path.join(dir, "std")) && exists(path.join(dir, "runtime"))) {
         return dir;
@@ -44,7 +45,7 @@ function repoRoot() {
   return undefined;
 }
 
-function inRepo(...parts) {
+function inRepo(...parts: string[]): string | undefined {
   const root = repoRoot();
   const candidate = root ? path.join(root, ...parts) : undefined;
   return candidate && fs.existsSync(candidate) ? candidate : undefined;
@@ -52,7 +53,7 @@ function inRepo(...parts) {
 
 // The toolchain put in place by the installer (installer/install.sh, installer/install.ps1):
 // <home>/current -> versions/<tag> with bin, lib, runtime and std. The auto update swaps `current`.
-function installHome() {
+export function installHome(): string {
   if (process.env.DJINN_HOME) {
     return process.env.DJINN_HOME;
   }
@@ -62,31 +63,31 @@ function installHome() {
   return path.join(os.homedir(), ".djinn");
 }
 
-function installed(...parts) {
+export function installed(...parts: string[]): string | undefined {
   const candidate = path.join(installHome(), "current", ...parts);
   return fs.existsSync(candidate) ? candidate : undefined;
 }
 
-function firstExisting(...candidates) {
+function firstExisting(...candidates: (string | undefined)[]): string | undefined {
   return candidates.find((candidate) => candidate && fs.existsSync(candidate));
 }
 
-function compiler(info) {
-  return settings().get("compilerPath") || installed("bin", exe("djinnc")) || bundled("bin", exe("djinnc")) || (info && info.compiler) || inRepo("djinnc", "build", exe("djinnc")) || "";
+export function compiler(info?: ServerInfo): string {
+  return settings().get<string>("compilerPath") || installed("bin", exe("djinnc")) || bundled("bin", exe("djinnc")) || (info && info.compiler) || inRepo("djinnc", "build", exe("djinnc")) || "";
 }
 
-function stdDir(info) {
-  return settings().get("stdDir") || installed("std") || bundled("toolchain", "std") || (info && info.stdDir) || inRepo("std") || "";
+export function stdDir(info?: ServerInfo): string {
+  return settings().get<string>("stdDir") || installed("std") || bundled("toolchain", "std") || (info && info.stdDir) || inRepo("std") || "";
 }
 
-function runtimeDir(info) {
-  return settings().get("runtimeDir") || installed("runtime") || bundled("toolchain", "runtime") || (info && info.runtimeDir) || inRepo("runtime") || "";
+export function runtimeDir(info?: ServerInfo): string {
+  return settings().get<string>("runtimeDir") || installed("runtime") || bundled("toolchain", "runtime") || (info && info.runtimeDir) || inRepo("runtime") || "";
 }
 
-function runtimeLib() {
+export function runtimeLib(): string {
   const name = process.platform === "win32" ? "djinn_runtime.lib" : "libdjinn_runtime.a";
   return (
-    settings().get("runtimeLib") ||
+    settings().get<string>("runtimeLib") ||
     installed("lib", name) ||
     bundled("toolchain", name) ||
     inRepo("build", "runtime", name) ||
@@ -95,9 +96,9 @@ function runtimeLib() {
   );
 }
 
-function libDir() {
+export function libDir(): string {
   return (
-    settings().get("libDir") ||
+    settings().get<string>("libDir") ||
     (installed("lib", "std.djlib") ? installed("lib") : undefined) ||
     bundled("toolchain") ||
     firstExisting(...["build/bootstrap/libs", "build/libs"].map((relative) => inRepo(...relative.split("/")))) ||
@@ -105,13 +106,13 @@ function libDir() {
   );
 }
 
-function linuxCompiler() {
-  return settings().get("perf.compiler") || bundled("toolchain", "linux", "djinnc") || inRepo("djinnc", "build", "djinnc") || "";
+export function linuxCompiler(): string {
+  return settings().get<string>("perf.compiler") || bundled("toolchain", "linux", "djinnc") || inRepo("djinnc", "build", "djinnc") || "";
 }
 
-function linuxRuntimeLib() {
+export function linuxRuntimeLib(): string {
   return (
-    settings().get("perf.runtimeLib") ||
+    settings().get<string>("perf.runtimeLib") ||
     bundled("toolchain", "linux", "libdjinn_runtime.a") ||
     inRepo("build", "runtime", "libdjinn_runtime.a") ||
     inRepo("build", "bootstrap", "runtime", "libdjinn_runtime.a") ||
@@ -119,22 +120,27 @@ function linuxRuntimeLib() {
   );
 }
 
-function allocationReport() {
+export function allocationReport(): string {
   return bundled("scripts", "alloc_report.py") || "";
 }
 
-function llvmBin() {
-  const configured = settings().get("llvmBinDir");
+export function llvmBin(): string {
+  const configured = settings().get<string>("llvmBinDir");
   if (configured) {
     return configured;
   }
-  const roots = [process.env.ProgramFiles, process.env["ProgramFiles(x86)"]].filter(Boolean);
+  const roots = [process.env.ProgramFiles, process.env["ProgramFiles(x86)"]].filter((root): root is string => Boolean(root));
   const candidate = roots.map((root) => path.join(root, "LLVM", "bin")).find((directory) => fs.existsSync(directory));
   return process.platform === "win32" && candidate ? candidate : "";
 }
 
-function environment() {
-  const env = { ...process.env };
+export function environment(): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (value !== undefined) {
+      env[key] = value;
+    }
+  }
   const llvm = llvmBin();
   if (llvm) {
     env.PATH = `${llvm}${path.delimiter}${env.PATH || ""}`;
@@ -142,7 +148,7 @@ function environment() {
   return env;
 }
 
-function toWslPath(windowsPath) {
+export function toWslPath(windowsPath: string): string {
   const match = /^([A-Za-z]):[\\/](.*)$/.exec(windowsPath);
   if (!match) {
     return windowsPath.replace(/\\/g, "/");
@@ -150,7 +156,7 @@ function toWslPath(windowsPath) {
   return `/mnt/${match[1].toLowerCase()}/${match[2].replace(/\\/g, "/")}`;
 }
 
-function fromWslPath(wslPath) {
+export function fromWslPath(wslPath: string): string | undefined {
   const match = /^\/mnt\/([a-z])\/(.*)$/.exec(wslPath);
   if (!match) {
     return undefined;
@@ -158,12 +164,12 @@ function fromWslPath(wslPath) {
   return `${match[1].toUpperCase()}:\\${match[2].replace(/\//g, "\\")}`;
 }
 
-function inside(child, parent) {
+function inside(child: string, parent: string): boolean {
   const relative = path.relative(parent, child);
   return relative !== "" && !relative.startsWith("..") && !path.isAbsolute(relative);
 }
 
-function findProject(start) {
+function findProject(start: string): string | undefined {
   let dir = start;
   while (dir) {
     if (fs.existsSync(path.join(dir, "djinn.proj"))) {
@@ -178,7 +184,7 @@ function findProject(start) {
   return undefined;
 }
 
-function resolveTarget(explicit) {
+export function resolveTarget(explicit?: string): string | undefined {
   if (explicit) {
     return explicit;
   }
@@ -195,35 +201,10 @@ function resolveTarget(explicit) {
   return fallback && !isInsideExtension(fallback) ? fallback : undefined;
 }
 
-function isInsideExtension(file) {
+export function isInsideExtension(file: string): boolean {
   const resolved = path.resolve(file);
   if (/[\\/]extensions[\\/][^\\/]*djinn-lang[^\\/]*(?:[\\/]|$)/i.test(resolved)) {
     return true;
   }
   return Boolean(extensionPath) && (resolved === path.resolve(extensionPath) || inside(resolved, path.resolve(extensionPath)));
 }
-
-module.exports = {
-  installHome,
-  installed,
-  repoRoot,
-  linuxCompiler,
-  linuxRuntimeLib,
-  allocationReport,
-  resolveTarget,
-  isInsideExtension,
-  init,
-  settings,
-  exists,
-  bundled,
-  exe,
-  compiler,
-  stdDir,
-  runtimeDir,
-  runtimeLib,
-  libDir,
-  llvmBin,
-  environment,
-  toWslPath,
-  fromWslPath,
-};

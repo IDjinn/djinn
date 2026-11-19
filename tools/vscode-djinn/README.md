@@ -14,12 +14,14 @@ The extension looks for the tools in this order: the setting, a copy bundled in 
 Working from a checkout:
 
 1. Build the language server: `djinn-lsp/build.sh <djinnc> [runtime dir]`.
-2. `npm install` in this folder, then run the extension from VS Code (F5), or package it with `npx @vscode/vsce package` and install the `.vsix`.
+2. `npm install` in this folder, then run the extension from VS Code (F5, which compiles it first), or package it with `npx @vscode/vsce package` (it compiles first too) and install the `.vsix`. The source is TypeScript under `src/` (compiled to `out/`): `npm run watch` recompiles on save and `npm run typecheck` only checks types.
 3. For project builds, make `std.djlib` and the runtime library available (`tools/build_std.sh`, `tools/build_runtime.sh`) and point `djinn.libDir` and `djinn.runtimeLib` at them. Without `std.djlib` the standard library is compiled from source.
 
 Settings: `djinn.server.path`, `djinn.compilerPath`, `djinn.runtimeDir`, `djinn.stdDir`, `djinn.runtimeLib`, `djinn.libDir`, `djinn.llvmBinDir`, `djinn.build.*`, `djinn.debug.optimization`, `djinn.perf.*`.
 
 ## Profile with perf
+
+`Djinn: Profile (CPU, memory, pages, levels)` is the single entry point. `Djinn: Detect perf setup` finds where perf runs (the host on Linux, each WSL distribution on Windows), including the real binary under `/usr/lib/linux-tools/` when the Ubuntu wrapper fails on a WSL kernel, and checks CPU sampling, page faults, uprobes and `python3` (needed for allocations). It can pin the choice in `djinn.perf.runner`, `djinn.perf.distro` and `djinn.perf.path`; with `auto` (default) the first working one is used, and when none works the error says why and offers the install command.
 
 `perf` runs on Linux: natively on a Linux host, or through WSL on Windows. The program is compiled for Linux with debug info, recorded, and the result is imported (nothing is injected into the binary). Needs `perf`, `objdump`/`addr2line` (binutils) and, for allocation profiling, `python3` on the Linux side.
 
