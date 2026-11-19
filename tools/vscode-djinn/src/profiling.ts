@@ -5,10 +5,11 @@ import * as vscode from "vscode";
 import { AssemblyView, SCHEME as assemblyScheme } from "./assembly";
 import * as compare from "./compare";
 import * as perf from "./perf";
+import * as detect from "./perf/detect";
 import * as profile from "./profile";
 import { firstFolder, saveActiveEditor, taskPresentation } from "./tasks";
 import * as toolchain from "./toolchain";
-import { AllocationMetric, LaunchConfig, PerfMode, PerfOverrides, PerfRunner, ServerInfo } from "./types";
+import { AllocationMetric, LaunchConfig, PerfCandidate, PerfMode, PerfOverrides, PerfRunner, ServerInfo } from "./types";
 
 interface MetricChoice {
   id: AllocationMetric;
@@ -50,6 +51,7 @@ export class Profiling implements vscode.Disposable {
   private allocationMetric: AllocationMetric = "alloc";
   private projectOnly = false;
   private activeRunner: PerfRunner | undefined;
+  private readonly perfOutput = vscode.window.createOutputChannel("Djinn Perf");
 
   constructor(private readonly getInfo: () => Promise<ServerInfo | undefined>) {
     void vscode.commands.executeCommand("setContext", "djinn.profile.projectOnly", false);
@@ -80,6 +82,10 @@ export class Profiling implements vscode.Disposable {
       command("djinn.perf.projectOnly", () => this.setProjectOnly(true)),
       command("djinn.perf.projectOnly.off", () => this.setProjectOnly(false)),
       command("djinn.perf.stop", () => this.stop()),
+      this.perfOutput,
+      vscode.workspace.onDidChangeConfiguration((event) => event.affectsConfiguration("djinn.perf") && detect.forget()),
+      command("djinn.perf.profile", () => this.pickProfile()),
+      command("djinn.perf.detect", () => this.detectSetup()),
       command("djinn.perf.record", () => this.record("cpu")),
       command("djinn.perf.recordMemory", () => this.record("alloc")),
       command("djinn.perf.recordPages", () => this.record("pages")),
@@ -156,9 +162,13 @@ export class Profiling implements vscode.Disposable {
       return undefined;
     }
     await saveActiveEditor();
+    const runner = await this.chooseRunner(mode, options.runner);
+    if (!runner) {
+      return undefined;
+    }
     let prepared: perf.PreparedRun;
     try {
-      prepared = perf.prepare(target, mode, { ...options, info: await this.getInfo() });
+      prepared = perf.prepare(target, mode, { ...options, runner, info: await this.getInfo() });
     } catch (error) {
       vscode.window.showErrorMessage(`Could not prepare the perf run: ${error instanceof Error ? error.message : String(error)}`);
       return undefined;
@@ -187,6 +197,81 @@ export class Profiling implements vscode.Disposable {
         }
       });
     });
+  }
+
+  /** The runner for `mode`: what a launch configuration spells out, else what detection finds. Explains and returns undefined when none works. */
+  private async chooseRunner(mode: PerfMode, explicit: Partial<PerfRunner> | undefined): Promise<Partial<PerfRunner> | undefined> {
+    if (explicit && (explicit.type || explicit.distro || explicit.perf)) {
+      return explicit;
+    }
+    const detection = await vscode.window.withProgress({ location: vscode.ProgressLocation.Window, title: "Djinn: looking for perf" }, () => detect.detectCached());
+    const usable = detection.candidates.find((candidate) => detect.unsupported(candidate, mode) === undefined);
+    if (usable) {
+      return { ...explicit, ...usable.runner };
+    }
+    const reasons = [
+      ...detection.problems,
+      ...detection.candidates.map((candidate) => `${candidate.label}: ${detect.unsupported(candidate, mode) || "unusable"}`),
+    ];
+    const install = detection.candidates.find((candidate) => !candidate.found && candidate.install)?.install;
+    const buttons = ["Show details", ...(install ? ["Copy install command"] : []), ...(mode === "alloc" && detection.best ? ["Profile pages instead"] : [])];
+    const answer = await vscode.window.showErrorMessage(`Djinn: ${mode === "alloc" ? "allocation profiling" : "perf"} is not available. ${reasons[0] || ""}`, ...buttons);
+    if (answer === "Show details") {
+      await this.detectSetup(true);
+    } else if (answer === "Copy install command" && install) {
+      await vscode.env.clipboard.writeText(install);
+      vscode.window.showInformationMessage("Install command copied. Run it in the Linux shell (WSL on Windows), then Djinn: Detect perf setup.");
+    } else if (answer === "Profile pages instead") {
+      void this.record("pages");
+    }
+    return undefined;
+  }
+
+  /** Reports every perf found and lets the user pin the one to use. */
+  private async detectSetup(fromError = false): Promise<void> {
+    const detection = await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: "Djinn: detecting perf" }, () => detect.detectCached(true));
+    this.perfOutput.clear();
+    detect.describe(detection).forEach((line) => this.perfOutput.appendLine(line));
+    this.perfOutput.show(true);
+    const usable = detection.candidates.filter((candidate) => candidate.found);
+    if (usable.length === 0 || fromError) {
+      return;
+    }
+    const picked = await vscode.window.showQuickPick(
+      usable.map((candidate: PerfCandidate) => ({
+        label: candidate.label,
+        description: candidate.version || "",
+        detail: `cpu ${candidate.cpu ? "yes" : "no"}, pages ${candidate.pages ? "yes" : "no"}, allocations ${candidate.allocations ? "yes" : "no"}${candidate.issues.length ? ` - ${candidate.issues[0]}` : ""}`,
+        candidate,
+      })),
+      { placeHolder: "Use this perf for profiling (Esc keeps automatic detection)" }
+    );
+    if (!picked) {
+      return;
+    }
+    const config = toolchain.settings();
+    const { runner } = picked.candidate;
+    await config.update("perf.runner", runner.type, vscode.ConfigurationTarget.Global);
+    await config.update("perf.distro", runner.distro, vscode.ConfigurationTarget.Global);
+    await config.update("perf.path", runner.perf === "perf" ? "" : runner.perf, vscode.ConfigurationTarget.Global);
+    vscode.window.showInformationMessage(`Djinn: profiling uses ${picked.candidate.label}.`);
+  }
+
+  /** One entry point for every profile kind. */
+  private async pickProfile(): Promise<void> {
+    const picked = await vscode.window.showQuickPick(
+      [
+        { label: "$(flame) CPU", detail: "Where the time goes, per function and line", run: () => this.record("cpu") },
+        { label: "$(database) Memory allocations", detail: "Bytes allocated, leaked or alive at peak, per call site", run: () => this.record("alloc") },
+        { label: "$(pie-chart) Touched memory pages", detail: "Page faults: how much memory the program actually uses", run: () => this.record("pages") },
+        { label: "$(git-compare) Compare optimization levels", detail: "CPU profile of the same program at several -O levels", run: () => this.recordLevels() },
+        { label: "$(search) Detect perf setup", detail: "Which perf and WSL distribution are used", run: () => this.detectSetup() },
+      ],
+      { placeHolder: "What do you want to profile?" }
+    );
+    if (picked) {
+      await picked.run();
+    }
   }
 
   private async showComparison(files: string[], root: string | undefined): Promise<void> {

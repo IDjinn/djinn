@@ -46,6 +46,30 @@ export interface PerfRunner {
 }
 
 export type PerfMode = "cpu" | "alloc" | "pages";
+
+/** One place perf can run (the host, or a WSL distribution) and what it can do there. */
+export interface PerfCandidate {
+  label: string;
+  runner: PerfRunner;
+  version?: string;
+  kernel?: string;
+  os?: string;
+  found: boolean;
+  cpu: boolean;
+  pages: boolean;
+  allocations: boolean;
+  paranoid?: number;
+  issues: string[];
+  install?: string;
+}
+
+export interface PerfDetection {
+  candidates: PerfCandidate[];
+  /** The first candidate that can sample the CPU. */
+  best?: PerfCandidate;
+  problems: string[];
+  at: number;
+}
 export type AllocationMetric = "alloc" | "live" | "peak" | "count";
 export type MemoryUnit = false | true | "bytes" | "count";
 

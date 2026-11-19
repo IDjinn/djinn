@@ -37,9 +37,9 @@ function runnerFor(overrides: Partial<PerfRunner> = {}): PerfRunner {
   return {
     type: overrides.type || (process.platform === "win32" ? "wsl" : "native"),
     distro: overrides.distro || settings.get<string>("perf.distro") || "",
-    user: overrides.user || "root",
+    user: overrides.user || settings.get<string>("perf.user") || "root",
     sudo: overrides.sudo === true,
-    perf: overrides.perf || "perf",
+    perf: overrides.perf || settings.get<string>("perf.path") || "perf",
     workDir: overrides.workDir || "$HOME/.djinn-perf",
   };
 }

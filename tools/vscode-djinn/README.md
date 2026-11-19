@@ -21,6 +21,8 @@ Settings: `djinn.server.path`, `djinn.compilerPath`, `djinn.runtimeDir`, `djinn.
 
 ## Profile with perf
 
+`Djinn: Profile (CPU, memory, pages, levels)` is the single entry point. `Djinn: Detect perf setup` finds where perf runs (the host on Linux, each WSL distribution on Windows), including the real binary under `/usr/lib/linux-tools/` when the Ubuntu wrapper fails on a WSL kernel, and checks CPU sampling, page faults, uprobes and `python3` (needed for allocations). It can pin the choice in `djinn.perf.runner`, `djinn.perf.distro` and `djinn.perf.path`; with `auto` (default) the first working one is used, and when none works the error says why and offers the install command.
+
 `perf` runs on Linux: natively on a Linux host, or through WSL on Windows. The program is compiled for Linux with debug info, recorded, and the result is imported (nothing is injected into the binary). Needs `perf`, `objdump`/`addr2line` (binutils) and, for allocation profiling, `python3` on the Linux side.
 
 Because the profiled build is made on Linux, the extension needs a Linux `djinnc` and `libdjinn_runtime.a`: set `djinn.perf.compiler` and `djinn.perf.runtimeLib` (build them on Linux, see `tools/bootstrap.sh` and `tools/build_runtime.sh`), or bundle them in `toolchain/linux/`.
