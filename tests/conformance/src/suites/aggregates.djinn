@@ -545,12 +545,12 @@ struct IndexAccessTests {
     void BasicRead() {
         str source = """
 unsafe i32 main() {
-    i32* data = malloc(12);
+    i32* data = __djinn_alloc_zeroed(12);
     data[0] = 10;
     data[1] = 20;
     data[2] = 30;
     i32 val = data[1];
-    free(data);
+    __djinn_free(data);
     return val;
 }
 """;
@@ -561,10 +561,10 @@ unsafe i32 main() {
     void Write() {
         str source = """
 unsafe i32 main() {
-    i32* data = malloc(12);
+    i32* data = __djinn_alloc_zeroed(12);
     data[0] = 42;
     i32 val = data[0];
-    free(data);
+    __djinn_free(data);
     return val;
 }
 """;
@@ -575,12 +575,12 @@ unsafe i32 main() {
     void WithMalloc() {
         str source = """
 unsafe i32 main() {
-    i32* nums = malloc(20);
+    i32* nums = __djinn_alloc_zeroed(20);
     for (mut i32 i = 0; i < 5; i = i + 1) {
         nums[i] = i * 10;
     }
     i32 res = nums[3];
-    free(nums);
+    __djinn_free(nums);
     return res;
 }
 """;
@@ -591,11 +591,11 @@ unsafe i32 main() {
     void I8Pointer() {
         str source = """
 unsafe i32 main() {
-    i8* buf = malloc(4);
+    i8* buf = __djinn_alloc_zeroed(4);
     buf[0] = 65;
     buf[1] = 66;
     i32 val = buf[0];
-    free(buf);
+    __djinn_free(buf);
     return val;
 }
 """;
@@ -823,6 +823,30 @@ unsafe i32 main() {
     }
 
     [Test]
+    void StackArrayStartsZeroedEveryTime() {
+        // each pass of the loop dirties the array; the next pass must see zeroes again (the fill runs where the expression runs)
+        str source = """
+unsafe i32 main() {
+    mut i32 dirty = 0;
+    for (mut i32 pass = 0; pass < 3; pass = pass + 1) {
+        i32* arr = i32[16];
+        i8* bytes = i8[33];
+        for (mut i32 i = 0; i < 16; i = i + 1) {
+            dirty = dirty + arr[i];
+            arr[i] = 7;
+        }
+        for (mut i32 i = 0; i < 33; i = i + 1) {
+            dirty = dirty + (i32)bytes[i];
+            bytes[i] = 9;
+        }
+    }
+    return dirty;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(0));
+    }
+
+    [Test]
     void WriteAndReadMultiple() {
         str source = """
 unsafe i32 main() {
@@ -869,7 +893,7 @@ struct StringTests {
     void StructDefinition() {
         str source = """
 unsafe i32 main() {
-    string s = { .data = (i8*)0, .length = 0, .meta = 1 };
+    string s = { .data = (i8*)0, .length = 0, .meta = StringMeta.literal() };
     return (i32)s.length;
 }
 """;
@@ -880,7 +904,7 @@ unsafe i32 main() {
     void IsEmptyMethod() {
         str source = """
 unsafe i32 main() {
-    string s = { .data = (i8*)0, .length = 0, .meta = 1 };
+    string s = { .data = (i8*)0, .length = 0, .meta = StringMeta.literal() };
     if (s.is_empty()) {
         return 1;
     }
@@ -903,7 +927,7 @@ i32 main() {
     if (!joined.is_static()) {
         result = result + 2;
     }
-    return result + (i32)literal.meta * 4;
+    return result + (i32)literal.meta.bits * 4;
 }
 """;
         Verify.source(source).with_std().runs(Expected.exit(7));

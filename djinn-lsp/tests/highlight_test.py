@@ -32,6 +32,13 @@ struct Box<TKey, T> {
 macro shout! {
     (loud, local expression target, expression condition) => { condition && target.go() }
 }
+
+attribute Traced(AttributeTarget.Function);
+
+struct Holder {
+    i32 attribute;
+    void run() { i32 attribute = 1; }
+}
 """
 
 failures = []
@@ -76,6 +83,10 @@ check("macro arm word is an enum member", at(21, "loud") and at(21, "loud")[0] =
 check("macro fragment kind is a keyword", at(21, "expression") and at(21, "expression")[0] == "keyword", found)
 check("macro parameter is a parameter", at(21, "target") and at(21, "target")[0] == "parameter", found)
 check("macro parameter used in the body is a parameter", found.get((21, "condition"), [None])[-1] and found[(21, "condition")][-1][0] == "parameter", found)
+check("top-level attribute is a keyword", at(24, "attribute") and at(24, "attribute")[0] == "keyword", found)
+check("attribute name is a decorator", at(24, "Traced") and at(24, "Traced")[0] == "decorator", found)
+check("attribute inside a struct is not a keyword", not (at(27, "attribute") and at(27, "attribute")[0] == "keyword"), found)
+check("attribute inside a function body is not a keyword", not (at(28, "attribute") and at(28, "attribute")[0] == "keyword"), found)
 client.close()
 print("%d failure(s)" % len(failures))
 sys.exit(1 if failures else 0)

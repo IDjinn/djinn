@@ -75,14 +75,16 @@ constexpr struct Numbers {
             return optional::Empty();
         }
         mut u64 result = 0;
+        // result * radix + digit fits in u64 exactly when result < max_before, or result == max_before and digit <= max_digit.
+        u64 max_before = u64.MAX_VALUE / radix;
+        u64 max_digit = u64.MAX_VALUE % radix;
         for (mut size i = 0u; i < length; i = i + 1u) {
             i8 raw = data[i];
             i32 digit = Chars.digit_value((char)(i32)raw);
             if (digit < 0 || (u64)digit >= radix) {
                 return optional::Empty();
             }
-            u64 limit = (18446744073709551615 - (u64)digit) / radix;
-            if (result > limit) {
+            if (result > max_before || (result == max_before && (u64)digit > max_digit)) {
                 return optional::Empty();
             }
             result = result * radix + (u64)digit;
@@ -127,13 +129,20 @@ constexpr struct Numbers {
         if (length == 0u) {
             return optional::Empty();
         }
-        i8* copy = __djinn_alloc((u64)length + 1);
+        // strtod needs a NUL-terminated copy: short numbers use the stack, long ones the heap.
+        bool on_stack = length < 64u;
+        mut i8* copy = i8[64];
+        if (!on_stack) {
+            copy = __djinn_alloc((u64)length + 1);
+        }
         memcpy(copy, data, length);
         copy[length] = 0;
         mut i8* end = copy;
         f64 value = strtod(copy, &end);
         bool whole = end == &copy[length];
-        __djinn_free(copy);
+        if (!on_stack) {
+            __djinn_free(copy);
+        }
         if (!whole) {
             return optional::Empty();
         }

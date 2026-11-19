@@ -36,14 +36,17 @@ struct arena : Disposable {
         }
     }
 
-    public unsafe i8* alloc(u64 size, u64 alignment) {
+    // The fast path is a mask, a compare and a bump; growing a block lives in _grow (cold) so this stays inlinable.
+    [ForceInline] public unsafe i8* alloc(u64 size, u64 alignment) {
         Debug.assert(alignment != 0 && alignment <= arena.MAX_ALIGNMENT && (alignment & (alignment - 1)) == 0, "arena::alloc - alignment must be a power of two up to 16");
         mut arena_block* block = this.head;
-        mut u64 start = (block.used + alignment - 1) / alignment * alignment;
-        if (start + size > block.size) {
+        u64 mask = alignment - 1;
+        mut u64 start = (block.used + mask) & ~mask;
+        // start can pass block.size by the alignment padding, and size is caller-controlled: compare without adding.
+        if (start > block.size || size > block.size - start) {
             this._grow(size + alignment);
             block = this.head;
-            start = (block.used + alignment - 1) / alignment * alignment;
+            start = (block.used + mask) & ~mask;
         }
         block.used = start + size;
         this.allocated_bytes = this.allocated_bytes + size;
@@ -51,13 +54,13 @@ struct arena : Disposable {
         return base + start;
     }
 
-    public unsafe i8* alloc_zeroed(u64 size, u64 alignment) {
+    [ForceInline] public unsafe i8* alloc_zeroed(u64 size, u64 alignment) {
         i8* memory = this.alloc(size, alignment);
         memset(memory, 0, size);
         return memory;
     }
 
-    public unsafe arena_mark mark() {
+    [ForceInline] public unsafe arena_mark mark() {
         arena_mark point = { .block = this.head, .used = this.head.used };
         return point;
     }
@@ -83,11 +86,11 @@ struct arena : Disposable {
         this.allocated_bytes = 0;
     }
 
-    public u64 allocated() {
+    [ForceInline] public u64 allocated() {
         return this.allocated_bytes;
     }
 
-    public u64 reserved() {
+    [ForceInline] public u64 reserved() {
         return this.reserved_bytes;
     }
 
@@ -101,6 +104,8 @@ struct arena : Disposable {
         this.allocated_bytes = 0;
     }
 
+    [Cold]
+    [NoInline]
     unsafe void _grow(u64 needed) {
         mut u64 size = this.block_size;
         if (size < arena.MAX_BLOCK_SIZE) {

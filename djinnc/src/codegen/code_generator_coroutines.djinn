@@ -268,7 +268,19 @@ impl CodeGenerator {
         if (LLVMIsConstant(count) == 0) {
             allocator = this.builder;
         }
-        return Value.create(LLVMBuildArrayAlloca(allocator, this.llvm_type(element), count, "stack"), node.value_type());
+        return Value.create(this.zeroed_stack(allocator, this.llvm_type(element), count), node.value_type());
+    }
+
+    // A stack array starts zeroed (like `new` and array literals), so reading it before writing it is defined and a hash or a
+    // checksum over a partly filled buffer is deterministic. The fill runs at the point of the expression (not in the entry
+    // block), so each execution of a loop body gets fresh zeroes; LLVM drops it for the bytes that are written first.
+    // A future keyword may ask for an uninitialized array.
+    unsafe ptr zeroed_stack(ptr allocator, ptr element_type, ptr count) {
+        ptr memory = LLVMBuildArrayAlloca(allocator, element_type, count, "stack");
+        ptr bytes = LLVMBuildMul(this.builder, LLVMBuildIntCast2(this.builder, LLVMSizeOf(element_type), LLVMIntTypeInContext(this.context, 64), 0, "stack.element"), count, "stack.bytes");
+        ptr zero = LLVMConstInt(LLVMIntTypeInContext(this.context, 8), 0, 0);
+        LLVMBuildMemSet(this.builder, memory, zero, bytes, LLVMABIAlignmentOfType(this.layout_data, element_type));
+        return memory;
     }
 
     unsafe Value* gen_intrinsic(Node* node) {
@@ -282,7 +294,7 @@ impl CodeGenerator {
             if (LLVMIsConstant(count) == 0) {
                 allocator = this.builder;
             }
-            return Value.create(LLVMBuildArrayAlloca(allocator, this.llvm_type(element), count, "stack"), node.value_type());
+            return Value.create(this.zeroed_stack(allocator, this.llvm_type(element), count), node.value_type());
         }
         if (id >= Intrinsic.FIELDS && id <= Intrinsic.INTERFACES) {
             return this.gen_member_query(id, (u32)(u64)node.symbol(), node.value_type());

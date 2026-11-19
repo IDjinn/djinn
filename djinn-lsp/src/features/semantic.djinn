@@ -243,6 +243,30 @@ struct Semantic {
         return 0 - 1;
     }
 
+    // `attribute` is a contextual keyword: only the top level of a file declares one (`attribute Name(...);`,
+    // `attribute Name { ... }`), so the word is a keyword there (and the name a decorator); inside any `{ }` block, or as the
+    // name of something (`[attribute]`, a variable called attribute), it stays a plain identifier.
+    static unsafe void mark_attributes(Unit* u, ptr<i8> over) {
+        mut i32 c = 0;
+        while (c < u.code_count) {
+            if (u.is_punct(c, 123) && u.match[c] > c) {
+                c = u.match[c] + 1;
+                continue;
+            }
+            bool declaration = u.is_word(c, "attribute") && c + 2 < u.code_count
+                && u.kind_at(c + 1) == Tk.IDENT
+                && (u.is_punct(c + 2, 40) || u.is_punct(c + 2, 123) || u.is_punct(c + 2, 59))
+                && !(c > 0 && u.is_punct(c - 1, 91));
+            if (declaration) {
+                over[c] = (i8)(ST.KEYWORD + 1);
+                over[c + 1] = (i8)(ST.DECORATOR + 1);
+                c = c + 2;
+                continue;
+            }
+            c = c + 1;
+        }
+    }
+
     // Highlights macro declarations: `macro name! { (word, local expression a, type T) => { body } }`.
     // over[c] holds a token type + 1 for the code tokens that get a fixed colour.
     static unsafe void mark_macros(Unit* u, ptr<i8> over) {
@@ -332,6 +356,7 @@ struct Semantic {
         mut i32 mods = 0;
         ptr<i8> over = (ptr<i8>)Memory.zalloc((u64)u.code_count + 8);
         Semantic.mark_macros(u, over);
+        Semantic.mark_attributes(u, over);
         Embedded.mark(u, over);
         for (mut i32 c = 0; c < u.code_count; c = c + 1) {
             i32 raw = u.code[c];

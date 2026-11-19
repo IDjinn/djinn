@@ -9,37 +9,55 @@ struct Text {
     public static unsafe string join(array<str>* parts, str separator) {
         string_builder builder = string_builder();
         u32w count = (u32w)parts.length();
+        if (count != 0w) {
+            mut u64 total = (u64)separator.length * ((u64)count - 1);
+            for (mut u32w i = 0w; i < count; i = i + 1w) {
+                total = total + (u64)parts.get((size)i).length;
+            }
+            builder.reserve((size)total);
+        }
         for (mut u32w i = 0w; i < count; i = i + 1w) {
             if (i != 0w) {
                 builder.append(separator);
             }
             builder.append(parts.get((size)i));
         }
-        return builder.to_string();
+        return builder.into_string();
     }
 
-    public static unsafe string from_i64(i64 value) {
-        string_builder builder = string_builder();
-        builder.append_i64(value);
-        return builder.to_string();
+    // A heap string with a NUL terminator holding a copy of the bytes (one allocation, no builder).
+    [Inline] public static unsafe string copy_of(i8* data, size length) {
+        if (length == 0u) {
+            return string.EMPTY();
+        }
+        i8* copy = __djinn_alloc((u64)length + 1);
+        memcpy((void*)copy, (void*)data, (u64)length);
+        copy[length] = 0;
+        return { .data = copy, .length = length, .meta = StringMeta.heap() };
     }
 
-    public static unsafe string from_u64(u64 value) {
-        string_builder builder = string_builder();
-        builder.append_u64(value);
-        return builder.to_string();
+    [Inline] public static unsafe string from_i64(i64 value) {
+        i8* digits = i8[24];
+        size count = Numbers.format_i64(digits, value);
+        return Text.copy_of(digits, count);
     }
 
-    public static unsafe string from_hex(u64 value) {
-        string_builder builder = string_builder();
-        builder.append_hex(value);
-        return builder.to_string();
+    [Inline] public static unsafe string from_u64(u64 value) {
+        i8* digits = i8[24];
+        size count = Numbers.format_u64(digits, value);
+        return Text.copy_of(digits, count);
     }
 
-    public static unsafe string from_char(char value) {
-        string_builder builder = string_builder();
-        builder.append_char(value);
-        return builder.to_string();
+    [Inline] public static unsafe string from_hex(u64 value) {
+        i8* digits = i8[24];
+        size count = Numbers.format_radix(digits, value, 16, false);
+        return Text.copy_of(digits, count);
+    }
+
+    [Inline] public static unsafe string from_char(char value) {
+        i8* bytes = i8[4];
+        size count = encodeChar(bytes, value);
+        return Text.copy_of(bytes, count);
     }
 
     public static constexpr size utf8_width(i8 lead) {
@@ -81,12 +99,13 @@ impl Textual for str, string {
         if (needle.length > this.length - position) {
             return false;
         }
-        for (mut size i = 0u; i < needle.length; i = i + 1u) {
-            if (this.data[position + i] != needle.data[i]) {
-                return false;
-            }
+        if (needle.length == 0u) {
+            return true;
         }
-        return true;
+        if (this.data[position] != needle.data[0]) {
+            return false;
+        }
+        return memcmp((void*)&this.data[position], (void*)needle.data, (size_long)needle.length) == 0;
     }
 
     unsafe array<str> split(str separator) {
@@ -113,11 +132,7 @@ impl Textual for str, string {
     }
 
     unsafe array<str> splitChar(char separator) {
-        mut u64 buffer = 0;
-        i8* bytes = (i8*)&buffer;
-        size count = encodeChar(bytes, separator);
-        str encoded = { .data = bytes, .length = count };
-        return this.split(encoded);
+        return this.split(encodeCharText(separator));
     }
 
     unsafe i32 count(str needle) {
@@ -141,19 +156,25 @@ impl Textual for str, string {
         string_builder builder = string_builder();
         if (from.length == 0u) {
             builder.append(this.asStr());
-            return builder.to_string();
+            return builder.into_string();
         }
+        builder.reserve(this.length);
+        mut size run = 0u;
         mut size i = 0u;
         while (i < this.length) {
             if (this.matchesAt(i, from)) {
+                str before = { .data = &this.data[run], .length = i - run };
+                builder.append(before);
                 builder.append(to);
                 i = i + from.length;
+                run = i;
             } else {
-                builder.append_byte(this.data[i]);
                 i = i + 1u;
             }
         }
-        return builder.to_string();
+        str rest = { .data = &this.data[run], .length = this.length - run };
+        builder.append(rest);
+        return builder.into_string();
     }
 
     unsafe str trimPrefix(str prefix) {
@@ -179,7 +200,7 @@ impl Textual for str, string {
             builder.append_char(fill);
         }
         builder.append(this.asStr());
-        return builder.to_string();
+        return builder.into_string();
     }
 
     unsafe string padRight(size width, char fill) {
@@ -189,7 +210,7 @@ impl Textual for str, string {
         for (mut size i = have; i < width; i = i + 1u) {
             builder.append_char(fill);
         }
-        return builder.to_string();
+        return builder.into_string();
     }
 
     unsafe array<str> lines() {
@@ -235,36 +256,47 @@ impl Textual for str, string {
 
     unsafe string repeat(size times) {
         string_builder builder = string_builder();
+        if (times != 0u && this.length != 0u && (u64)times <= u64.MAX_VALUE / (u64)this.length) {
+            builder.reserve(this.length * times);
+        }
         for (mut size i = 0u; i < times; i = i + 1u) {
             builder.append(this.asStr());
         }
-        return builder.to_string();
+        return builder.into_string();
     }
 
     unsafe string toUpper() {
-        string_builder builder = string_builder();
+        if (this.length == 0u) {
+            return string.EMPTY();
+        }
+        i8* out = __djinn_alloc((u64)this.length + 1);
         for (mut size i = 0u; i < this.length; i = i + 1u) {
             i8 value = this.data[i];
             if (value >= 97 && value <= 122) {
-                builder.append_byte(value - 32);
+                out[i] = value - 32;
             } else {
-                builder.append_byte(value);
+                out[i] = value;
             }
         }
-        return builder.to_string();
+        out[this.length] = 0;
+        return { .data = out, .length = this.length, .meta = StringMeta.heap() };
     }
 
     unsafe string toLower() {
-        string_builder builder = string_builder();
+        if (this.length == 0u) {
+            return string.EMPTY();
+        }
+        i8* out = __djinn_alloc((u64)this.length + 1);
         for (mut size i = 0u; i < this.length; i = i + 1u) {
             i8 value = this.data[i];
             if (value >= 65 && value <= 90) {
-                builder.append_byte(value + 32);
+                out[i] = value + 32;
             } else {
-                builder.append_byte(value);
+                out[i] = value;
             }
         }
-        return builder.to_string();
+        out[this.length] = 0;
+        return { .data = out, .length = this.length, .meta = StringMeta.heap() };
     }
 
     unsafe optional<i64> parseI64() {

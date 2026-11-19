@@ -238,7 +238,7 @@ struct str {
         return { .data = (i8*)text, .length = (size)strlen((i8*)text) };
     }
 
-    operator get[](str text, size index) -> i8 {
+    [ForceInline] operator get[](str text, size index) -> i8 {
         bounds_check(index, text.length);
         unsafe {
             return text.data[index];
@@ -276,23 +276,78 @@ where T : Hashable, Equatable {
     }
 }
 
+// The 32-bit tag of a string: 4 flag bits, then a 28-bit cached hash (0 = not computed yet).
+// The layout is fixed: the compiler builds literals with bits = 1 (STATIC), and the core runtime's string frees its bytes
+// exactly when bit 0 is clear. A heap string is bits = 0.
+//   bit 0 STATIC    the bytes live in the binary (a literal): never freed
+//   bit 1 INTERNED  the bytes belong to an interner: never freed
+//   bit 2 ASCII     every byte is below 128 (set only when known)
+//   bit 3           reserved
+struct StringMeta {
+    u32 bits;
+
+    public const u32 STATIC = 1;
+    public const u32 INTERNED = 2;
+    public const u32 ASCII = 4;
+    public const u32 FLAGS_MASK = 15;
+    public const u32 HASH_SHIFT = 4;
+
+    [ForceInline] public static constexpr StringMeta heap() {
+        return { .bits = 0 };
+    }
+
+    [ForceInline] public static constexpr StringMeta literal() {
+        return { .bits = StringMeta.STATIC };
+    }
+
+    [ForceInline] public static constexpr StringMeta of_flags(u32 flags) {
+        return { .bits = flags & StringMeta.FLAGS_MASK };
+    }
+
+    [ForceInline] public constexpr bool is_static() {
+        return (this.bits & StringMeta.STATIC) != 0;
+    }
+
+    [ForceInline] public constexpr bool is_interned() {
+        return (this.bits & StringMeta.INTERNED) != 0;
+    }
+
+    [ForceInline] public constexpr bool is_ascii() {
+        return (this.bits & StringMeta.ASCII) != 0;
+    }
+
+    // True when the string owns heap bytes that disposable() must free.
+    [ForceInline] public constexpr bool is_owned() {
+        return (this.bits & (StringMeta.STATIC | StringMeta.INTERNED)) == 0;
+    }
+
+    // The cached 28-bit hash, or 0 when it was not computed.
+    [ForceInline] public constexpr u32 hash() {
+        return this.bits >> StringMeta.HASH_SHIFT;
+    }
+
+    [ForceInline] public constexpr StringMeta with_hash(u32 hash) {
+        return { .bits = (this.bits & StringMeta.FLAGS_MASK) | (hash << StringMeta.HASH_SHIFT) };
+    }
+}
+
 struct string : Disposable {
     i8* data;
     size length;
-    u32 meta;
+    StringMeta meta;
 
     public void disposable() {
-        if ((this.meta & 1) == 0) {
+        if (this.meta.is_owned()) {
             __djinn_free(this.data);
         }
     }
 
-    [ForceInline] public static string EMPTY() {
-        return { .data = "", .length = 0u, .meta = 1 };
+    [ForceInline] public static constexpr string EMPTY() {
+        return { .data = "", .length = 0u, .meta = StringMeta.literal() };
     }
 
     public bool is_static() {
-        return (this.meta & 1) != 0;
+        return this.meta.is_static();
     }
 
     public bool is_empty() {
@@ -303,7 +358,7 @@ struct string : Disposable {
         return this.data;
     }
 
-    operator get[](string text, size index) -> i8 {
+    [ForceInline] operator get[](string text, size index) -> i8 {
         bounds_check(index, text.length);
         unsafe {
             return text.data[index];
@@ -322,8 +377,16 @@ struct string : Disposable {
     }
 }
 
-bool isSpace(i8 c) {
+[ForceInline] bool isSpace(i8 c) {
     return c == 32 || c == 9 || c == 10 || c == 13;
+}
+
+[ForceInline] bool isSpace(char c) {
+    // Only ASCII whitespace counts; larger code points must not wrap into the i8 range.
+    if ((u32)c > 127) {
+        return false;
+    }
+    return isSpace((i8)c);
 }
 
 size encodeChar(i8* out, char value) {
@@ -352,45 +415,31 @@ size encodeChar(i8* out, char value) {
     }
 }
 
+// Views value as UTF-8 text. ForceInline keeps the i8[4] stack array in the caller's frame, so the str stays valid while the caller runs.
+[ForceInline] str encodeCharText(char value) {
+    unsafe {
+        i8* out = i8[4];
+        size count = encodeChar(out, value);
+        str encoded = { .data = out, .length = count };
+        return encoded;
+    }
+}
+
 impl Hashable for str, string {
     bool startsWith(char value) {
-        unsafe {
-            mut u64 buffer = 0;
-            i8* bytes = (i8*)&buffer;
-            size count = encodeChar(bytes, value);
-            str encoded = { .data = bytes, .length = count };
-            return this.startsWith(encoded);
-        }
+        return this.startsWith(encodeCharText(value));
     }
 
     bool endsWith(char value) {
-        unsafe {
-            mut u64 buffer = 0;
-            i8* bytes = (i8*)&buffer;
-            size count = encodeChar(bytes, value);
-            str encoded = { .data = bytes, .length = count };
-            return this.endsWith(encoded);
-        }
+        return this.endsWith(encodeCharText(value));
     }
 
     i32 indexOf(char value) {
-        unsafe {
-            mut u64 buffer = 0;
-            i8* bytes = (i8*)&buffer;
-            size count = encodeChar(bytes, value);
-            str encoded = { .data = bytes, .length = count };
-            return this.indexOf(encoded);
-        }
+        return this.indexOf(encodeCharText(value));
     }
 
     i32 lastIndexOf(char value) {
-        unsafe {
-            mut u64 buffer = 0;
-            i8* bytes = (i8*)&buffer;
-            size count = encodeChar(bytes, value);
-            str encoded = { .data = bytes, .length = count };
-            return this.lastIndexOf(encoded);
-        }
+        return this.lastIndexOf(encodeCharText(value));
     }
 
     bool contains(char value) {
@@ -573,7 +622,7 @@ impl Hashable for str, string {
         unsafe {
             data_buffer[length] = 0;
         }
-        return { .data = data_buffer, .length = (u32)length, .meta = 0 };
+        return { .data = data_buffer, .length = (u32)length, .meta = StringMeta.heap() };
     }
 
     string concat(string left, string right) {
@@ -588,7 +637,7 @@ impl Hashable for str, string {
         unsafe {
             new_data[new_len] = 0;
         }
-        return { .data = new_data, .length = new_len, .meta = 0 };
+        return { .data = new_data, .length = new_len, .meta = StringMeta.heap() };
     }
 }
 
@@ -613,8 +662,7 @@ bool charEqualsText(char value, i8* data, u32 length) {
         if (code < 128) {
             return length == 1 && data[0] == (i8)code;
         }
-        mut u64 buffer = 0;
-        i8* bytes = (i8*)&buffer;
+        i8* bytes = i8[4];
         size count = encodeChar(bytes, value);
         if (count != length) {
             return false;
