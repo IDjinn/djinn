@@ -3,6 +3,8 @@ import std::libc;
 
 namespace ui;
 
+// The width of the page bar the last frame was laid out beside (0 without one).
+unsafe static mut f32 painter_last_gutter = 0.0;
 unsafe static mut ptr painter_lines = null;
 unsafe static mut u32 painter_line_capacity = 0;
 
@@ -96,25 +98,46 @@ struct Painter {
     // A document taller than the window is laid out again without the strip of the page bar, as a browser does.
     public static unsafe f32 frame(DisplayList* list, f32 width, f32 height) {
         u32 document = Dom.document();
-        Layout.compute(document, width, height);
-        list.clear();
-        mut f32 total = Layout.box(document).height;
+        u32 root = Painter.root_element(document);
+        mut f32 total = (f32)0.0;
         mut f32 used = width;
         mut f32 gutter = (f32)0.0;
-        u32 root = Painter.root_element(document);
-        if (root != 0 && total > height + (f32)0.5) {
-            Style* root_style = Styles.of(root);
-            if (root_style.overflow != Keyword.HIDDEN) {
-                gutter = Layout.bar_width(root_style);
-            }
-            if (gutter > (f32)0.0 && gutter < width) {
-                used = width - gutter;
-                Layout.compute(document, used, height);
-                total = Layout.box(document).height;
-            } else {
-                gutter = (f32)0.0;
+        mut bool settled = false;
+        // The layout cache holds one width, so laying out at the full width and then again beside the page bar would
+        // throw it away every frame. A page that had a bar last frame is laid out beside it first (same width as
+        // then: a cache hit while only the scroll moves); it keeps the bar while it still overflows.
+        if (root != 0 && painter_last_gutter > (f32)0.0 && painter_last_gutter < width) {
+            used = width - painter_last_gutter;
+            Layout.compute(document, used, height);
+            total = Layout.box(document).height;
+            if (total > height + (f32)0.5) {
+                Style* kept = Styles.of(root);
+                if (kept.overflow != Keyword.HIDDEN && Layout.bar_width(kept) == painter_last_gutter) {
+                    gutter = painter_last_gutter;
+                    settled = true;
+                }
             }
         }
+        if (!settled) {
+            used = width;
+            Layout.compute(document, width, height);
+            total = Layout.box(document).height;
+            if (root != 0 && total > height + (f32)0.5) {
+                Style* root_style = Styles.of(root);
+                if (root_style.overflow != Keyword.HIDDEN) {
+                    gutter = Layout.bar_width(root_style);
+                }
+                if (gutter > (f32)0.0 && gutter < width) {
+                    used = width - gutter;
+                    Layout.compute(document, used, height);
+                    total = Layout.box(document).height;
+                } else {
+                    gutter = (f32)0.0;
+                }
+            }
+        }
+        painter_last_gutter = gutter;
+        list.clear();
         Bars.set_page(width, gutter);
         Scroll.page_limit(total - height, height);
         Scroll.page_limit_x(Layout.box(document).content_width - used, used);

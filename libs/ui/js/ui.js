@@ -602,6 +602,6 @@ const $addStyles = (css) => {
 
 const $bindField = (root, signal) => {
   if (!signal) return root;
-  const input = root.querySelector ? root.querySelector("input") : null;
+  const input = root.querySelector ? root.querySelector("input, textarea") : null;
   return input ? ($bindValue(input, signal), root) : root;
 };
