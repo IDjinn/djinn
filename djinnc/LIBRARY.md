@@ -15,6 +15,8 @@ djinnc lib.djinn --emit-lib-view -o view.txt     # build + inspection text (used
 
 `DJINN_BUILD_ID` is stored in the header as the build id when set (commit hash, CI number...).
 
+Rebuilding a library whose manifest, interface, object and bitcode are byte for byte the same (and the same compiler) leaves the existing file untouched, so its timestamp does not change and build systems do not rebuild the consumers. The build id is not compared.
+
 ## Projects
 
 A `djinn.proj` builds a library with `library-mode: true`. `libs:` lists what the project uses: `std`, or a name that resolves
@@ -131,5 +133,4 @@ LLVM), a warning is printed and the library is used without inlining. `--inspect
 - Static variable initializers and global constructors across libraries (header globals are declarations only).
 - Reflection method pointers (`funcPtr`) and `[Reflect]` tables of library types when mixed with `--reflect-all`.
 - Cross-target libraries in one file (one interface, several objects per triple). Today each target has its own `.djlib`: while cross-compiling, `<lib-dir>/<triple>/<name>.djlib` is preferred over `<lib-dir>/<name>.djlib`, and a library built for the host is loaded only for its procedural macros (they run in the JIT; nothing of it is linked), which is how `ui_macros` serves a web build. A prebuilt std is `<lib-dir>/<triple>/std.djlib`; without it the std is compiled from source.
-- Incremental rebuild: skip packing when interface and object checksums are unchanged.
 - Compression of the interface and object sections.

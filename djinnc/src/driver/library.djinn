@@ -808,7 +808,47 @@ struct Library {
         if (bitcode != null) {
             out.append_slice(bitcode, bitcode_length);
         }
+        if (Library.same_content(options.output, out.data, out.length)) {
+            // nothing changed (interface, object, bitcode and manifest are byte for byte the same): keep the
+            // existing file so its timestamp stays and build systems do not rebuild every consumer
+            logger_info(Log.get(), "djinnc: library '%s' is up to date", options.output);
+            return true;
+        }
         return Files.write_bytes(options.output, out.data, out.length);
+    }
+
+    // True when the file already holds a library with the same header (up to the label) and sections that store
+    // the same bytes as the new one. The build id is not compared.
+    static unsafe bool same_content(ptr<i8> path, ptr<i8> data, i32 length) {
+        i32 old_length = 0;
+        ptr<i8> old = Files.read_bytes(path, &old_length);
+        if (old == null) {
+            return false;
+        }
+        if (old_length != length || Library.get_u32(old, 20) != Library.get_u32(data, 20)) {
+            return false;
+        }
+        // format, flags, compiler version and label must match, so a new compiler always rewrites the file
+        for (mut i32 h = 0; h < 64; h = h + 1) {
+            if (old[h] != data[h]) {
+                return false;
+            }
+        }
+        i32 count = (i32)Library.get_u32(data, 20);
+        i32 table = (i32)Library.get_u32(data, 24);
+        for (mut i32 s = 0; s < count; s = s + 1) {
+            i32 entry = table + s * Library.ENTRY_SIZE;
+            if (entry + Library.ENTRY_SIZE > length || entry + Library.ENTRY_SIZE > old_length) {
+                return false;
+            }
+            // kind, size and checksum of the stored section (the offset follows from the sizes)
+            if (Library.get_u32(old, entry) != Library.get_u32(data, entry)
+                || Library.get_u64(old, entry + 16) != Library.get_u64(data, entry + 16)
+                || Library.get_u64(old, entry + 24) != Library.get_u64(data, entry + 24)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     static unsafe bool section(ptr<i8> data, i32 length, i32 kind, ptr<i32> offset, ptr<i32> size) {

@@ -224,4 +224,16 @@ plain=$("$compiler" --inspect-lib "$out/fast_o0.djlib" --sections-only | grep -o
 debug=$("$compiler" --inspect-lib "$out/fast_g.djlib" --sections-only | grep -o 'bitcode: *[0-9]*' | grep -o '[0-9]*$')
 [ $((debug * 10)) -le $((plain * 12)) ] && [ $((plain * 10)) -le $((debug * 12)) ] || fail "the bitcode must not depend on -g (plain $plain bytes, -g $debug bytes)"
 
+# incremental rebuild: the same sources keep the existing file (same bytes and timestamp), a change rewrites it
+"$compiler" "$out/fastlib.djinn" --library -o "$out/again.djlib" -O3 "${flags[@]}" > "$out/again.log" 2>&1 || { cat "$out/again.log"; fail "library again must build"; }
+cp -p "$out/again.djlib" "$out/again.keep"
+sleep 1
+"$compiler" "$out/fastlib.djinn" --library -o "$out/again.djlib" -O3 "${flags[@]}" > "$out/again2.log" 2>&1 || { cat "$out/again2.log"; fail "library again must rebuild"; }
+cmp -s "$out/again.djlib" "$out/again.keep" || fail "an unchanged library must keep its bytes"
+[ ! "$out/again.djlib" -nt "$out/again.keep" ] || fail "an unchanged library must keep its timestamp"
+sed 's/ 3 + 1/ 5 + 1/' "$out/fastlib.djinn" > "$out/fastlib2.djinn"
+cmp -s "$out/fastlib.djinn" "$out/fastlib2.djinn" && fail "the incremental test needs a different source"
+"$compiler" "$out/fastlib2.djinn" --library -o "$out/again.djlib" -O3 "${flags[@]}" > "$out/again3.log" 2>&1 || { cat "$out/again3.log"; fail "library again must rebuild after a change"; }
+cmp -s "$out/again.djlib" "$out/again.keep" && fail "a changed library must be rewritten"
+
 echo "library: ok"
