@@ -49,6 +49,7 @@ struct Library {
     const u32 COMPILER_VERSION = 256;
     const i32 LABEL_OFFSET = 32;
     const i32 BUILD_ID_OFFSET = 64;
+    const i32 INTERFACE_HASH_OFFSET = 96;
     const i32 TEXT_FIELD_SIZE = 32;
     const i32 SECTION_MANIFEST = 1;
     const i32 SECTION_INTERFACE = 2;
@@ -777,6 +778,8 @@ struct Library {
             build_id = "";
         }
         Library.put_fixed(out, build_id);
+        // checksum of the interface section: a consumer checks that the interface it parses is the one the header names
+        Library.put_u64(out, Library.checksum(iface.data, iface.length));
         while (out.length < Library.HEADER_SIZE) {
             out.append_byte(0);
         }
@@ -1052,6 +1055,15 @@ struct Library {
             logger_error(Log.get(), "djinnc: '%s' has an unsupported library version", path);
             return -1;
         }
+        // Version policy: a library is read only by a compiler of the same major.minor version (the patch does not
+        // change the interface or the object conventions). Libraries of other versions must be built again.
+        u32 written_by = Library.get_u32(data, 28);
+        if ((written_by >> 8) != (Library.COMPILER_VERSION >> 8)) {
+            logger_error(Log.get(), "djinnc: '%s' was written by djinnc %d.%d.%d, this is djinnc %d.%d.%d; build the library again with this compiler", path,
+                (i32)(written_by >> 16), (i32)((written_by >> 8) & 255), (i32)(written_by & 255),
+                (i32)(Library.COMPILER_VERSION >> 16), (i32)((Library.COMPILER_VERSION >> 8) & 255), (i32)(Library.COMPILER_VERSION & 255));
+            return -1;
+        }
         i32 interface_offset = 0;
         i32 interface_size = 0;
         i32 object_offset = 0;
@@ -1063,6 +1075,12 @@ struct Library {
             && Library.section(data, length, Library.SECTION_OBJECT, &object_offset, &object_size);
         if (!intact) {
             logger_error(Log.get(), "djinnc: '%s' is corrupted", path);
+            return -1;
+        }
+        // the header names the interface it was built with (0 in libraries written before the field existed)
+        u64 interface_hash = Library.get_u64(data, Library.INTERFACE_HASH_OFFSET);
+        if (interface_hash != 0 && interface_hash != Library.checksum(data + interface_offset, interface_size)) {
+            logger_error(Log.get(), "djinnc: '%s' is stale: its interface does not match the one recorded in the header; build the library again", path);
             return -1;
         }
         if ((Library.get_u32(data, 16) & (u32)Library.FLAG_STD) != 0 && !options.use_std && !Target.is_js()) {
@@ -1211,6 +1229,11 @@ struct Library {
         Library.field(out, "version:    ", data + Library.LABEL_OFFSET, strlen(data + Library.LABEL_OFFSET));
         if (data[Library.BUILD_ID_OFFSET] != 0) {
             Library.field(out, "build id:   ", data + Library.BUILD_ID_OFFSET, strlen(data + Library.BUILD_ID_OFFSET));
+        }
+        if (Library.get_u64(data, Library.INTERFACE_HASH_OFFSET) != 0) {
+            out.append("  interface hash: ");
+            out.append_unsigned(Library.get_u64(data, Library.INTERFACE_HASH_OFFSET));
+            out.append_byte(10);
         }
         mut ptr<i8> needs_std = "no";
         if ((flags & (u32)Library.FLAG_STD) != 0) {

@@ -49,6 +49,21 @@ python_patch "$out/mathlib.djlib" "$out/future.djlib" 8 "02"
 if "$compiler" "$sample/app.djinn" --lib "$out/future.djlib" -o "$out/future$exe" "${flags[@]}" > "$out/future.log" 2>&1; then fail "a greater format version must be rejected"; fi
 grep -q "unsupported library version" "$out/future.log" || { cat "$out/future.log"; fail "a greater format version must say so"; }
 
+# version policy: another major.minor is refused (build it again), another patch is accepted
+cp "$out/mathlib.djlib" "$out/minor.djlib"
+python_patch "$out/mathlib.djlib" "$out/minor.djlib" 29 "02"
+if "$compiler" "$sample/app.djinn" --lib "$out/minor.djlib" -o "$out/minor$exe" "${flags[@]}" > "$out/minor.log" 2>&1; then fail "a library of another compiler version must be rejected"; fi
+grep -q "written by djinnc 0.2.0" "$out/minor.log" || { cat "$out/minor.log"; fail "the version message must name the compiler that wrote the library"; }
+cp "$out/mathlib.djlib" "$out/patch.djlib"
+python_patch "$out/mathlib.djlib" "$out/patch.djlib" 28 "07"
+"$compiler" "$sample/app.djinn" --lib "$out/patch.djlib" -o "$out/patch$exe" "${flags[@]}" > "$out/patch.log" 2>&1 || { cat "$out/patch.log"; fail "a library of another patch version must be accepted"; }
+# interface hash: a header that names another interface marks the library stale
+"$compiler" --inspect-lib "$out/mathlib.djlib" --sections-only | grep -q "interface hash:" || fail "--inspect-lib must show the interface hash"
+cp "$out/mathlib.djlib" "$out/stale.djlib"
+python_patch "$out/mathlib.djlib" "$out/stale.djlib" 96 "7a7b"
+if "$compiler" "$sample/app.djinn" --lib "$out/stale.djlib" -o "$out/stale$exe" "${flags[@]}" > "$out/stale.log" 2>&1; then fail "a stale interface hash must be rejected"; fi
+grep -q "is stale" "$out/stale.log" || { cat "$out/stale.log"; fail "a stale library must say so"; }
+
 # --- features across the boundary
 cat > "$out/features_lib.djinn" <<'SOURCE'
 namespace featurelib;

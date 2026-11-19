@@ -41,6 +41,14 @@ compiler:
 A library can be built on another one. A `.djlib` has no dependency list, so the final program lists all of them.
 Import a library after `namespace`: an `import` above it does not expose the names.
 
+## Version policy
+
+A compiler reads libraries written by a compiler of the same major.minor version (offset 28; the patch is ignored) and
+rejects others with a message naming the compiler that wrote them: build the library again. The header also stores a hash of
+the interface section (offset 96). A consumer refuses a library whose interface does not match it (`is stale`), and
+`--inspect-lib` prints it. A hash of 0 (libraries from before the field) is not checked. The format version (offset 8)
+still guards the layout itself.
+
 ## File layout (all integers little-endian)
 
 | Offset | Size | Field |
@@ -54,7 +62,8 @@ Import a library after `namespace`: an `import` above it does not expose the nam
 | 28 | 4 | compiler version, `major<<16 \| minor<<8 \| patch` (256 = 0.1.0), for comparison |
 | 32 | 32 | version label, NUL padded free text (`0.1.0-dev`, `0.2.0-rc.1`, `nightly`...), for display |
 | 64 | 32 | build id, NUL padded free text (commit hash...) |
-| 96 | 32 | reserved, zero |
+| 96 | 8 | interface hash: FNV-1a-64 of the interface section (0 in libraries written before it existed) |
+| 104 | 24 | reserved, zero |
 
 Section table: one 32 byte entry per section: `u32 kind, u32 pad, u64 offset, u64 size, u64 FNV-1a-64 checksum`.
 
@@ -127,7 +136,6 @@ LLVM), a warning is printed and the library is used without inlining. `--inspect
   fields and attributes, and registry-style lookups across several libraries.
 
 - Library depending on other libraries (manifest has no dependency list; header bytes 96..127 are reserved for it).
-- Version policy: reject libraries from an incompatible compiler version, and check the interface hash.
 - Per-function dead stripping of the std object (it is linked whole).
 - `.djni` interface-only files.
 - Static variable initializers and global constructors across libraries (header globals are declarations only).
