@@ -14,7 +14,8 @@ struct OverlayPage {
             <main>
                 <Select label="Size" options="Small|Medium|Large" index={size}/>
                 <output id="chosen">{Choices.nth("Small|Medium|Large", size.get())}</output>
-                <Menu label="File" items="Open|Save|Quit" on_pick={(i32 i) => picked = i}/>
+                <Menu label="File" items="Open|Save|Quit" on_pick={(i32 i) => picked = i} keep_label={true}/>
+                <Menu label="Edit" items="Cut|Copy" on_pick={(i32 i) => picked = i}/>
                 <Tooltip text="Saves the file"><button id="saver">Save</button></Tooltip>
                 <Table>
                     <Row header={true}><span>Name</span><span>Size</span></Row>
@@ -118,6 +119,33 @@ struct OverlayTests {
         app.unmount();
     }
 
+    // A click at the middle of a node, found the way the window host does: by hit-testing the laid-out frame.
+    static unsafe void click_at(u32 node) {
+        LayoutBox* box = Layout.box(node);
+        u32 hit = Hit.at(box.left + box.width / (f32)2.0, box.top + box.height / (f32)2.0);
+        Expect.is_true(hit != 0, "the click lands on something");
+        Dom.dispatch(hit, "click");
+    }
+
+    [Test]
+    unsafe void a_select_survives_changing_its_value_while_painting_frames() {
+        Router.start("/");
+        Mounted app = App.mount<OverlayPage>(OverlayTests.page());
+        mut DisplayList list = DisplayList.create();
+        Painter.frame(&list, (f32)600.0, (f32)600.0);
+        for (i32 round in 0..8) {
+            u32 button = OverlayTests.search(app.node.id, "button", "aria-haspopup", "listbox");
+            OverlayTests.click_at(button);
+            Painter.frame(&list, (f32)600.0, (f32)600.0);
+            u32 popup = OverlayTests.search(app.node.id, "div", "role", "listbox");
+            i32 wanted = (round * 2) % 3;
+            OverlayTests.click_at(OverlayTests.nth_child(popup, "button", "role", "option", (u32)wanted));
+            Painter.frame(&list, (f32)600.0, (f32)600.0);
+        }
+        list.release();
+        app.unmount();
+    }
+
     [Test]
     unsafe void a_menu_reports_the_picked_item() {
         picked = -1;
@@ -125,6 +153,35 @@ struct OverlayTests {
         u32 popup = OverlayTests.search(app.node.id, "div", "role", "menu");
         Dom.dispatch(OverlayTests.nth_child(popup, "button", "role", "menuitem", 1), "click");
         Expect.equal(1, (i64)picked);
+        app.unmount();
+    }
+
+    // The handler lives in the menu's props: picking must not hand it (and free its environment) to a callee.
+    [Test]
+    unsafe void a_menu_keeps_reporting_picks_after_the_first() {
+        Mounted app = App.mount<OverlayPage>(OverlayTests.page());
+        u32 popup = OverlayTests.search(app.node.id, "div", "role", "menu");
+        for (i32 round in 0..6) {
+            picked = -1;
+            Dom.dispatch(OverlayTests.nth_child(popup, "button", "role", "menuitem", (u32)(round % 3)), "click");
+            Expect.equal((i64)(round % 3), (i64)picked);
+        }
+        app.unmount();
+    }
+
+    static unsafe str caption_of(u32 root, u32 n) {
+        u32 button = OverlayTests.nth_child(root, "button", "aria-haspopup", "menu", n);
+        return Dom.text_of(Dom.first_child(Dom.first_child(button)));
+    }
+
+    [Test]
+    unsafe void a_menu_shows_the_pick_unless_it_keeps_its_label() {
+        Mounted app = App.mount<OverlayPage>(OverlayTests.page());
+        Dom.dispatch(OverlayTests.nth_child(app.node.id, "button", "role", "menuitem", 1), "click");
+        Expect.is_true(Texts.same(OverlayTests.caption_of(app.node.id, 0), "File"), "keep_label keeps the label");
+        Expect.is_true(Texts.same(OverlayTests.caption_of(app.node.id, 1), "Edit"), "the label shows until something is picked");
+        Dom.dispatch(OverlayTests.nth_child(app.node.id, "button", "role", "menuitem", 4), "click");
+        Expect.is_true(Texts.same(OverlayTests.caption_of(app.node.id, 1), "Copy"), "the picked item replaces the label");
         app.unmount();
     }
 

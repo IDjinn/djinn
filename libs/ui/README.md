@@ -402,7 +402,7 @@ select / menu, tooltip, tables, and two-way binding of a field's value to a sign
 
 ## More kit components
 
-`Select` (`label`, `options="One|Two|Three"`, `index` signal), `Menu` (`label`, `items="Open|Save"`, `on_pick(i32)`),
+`Select` (`label`, `options="One|Two|Three"`, `index` signal), `Menu` (`label`, `items="Open|Save"`, `on_pick(i32)`, `keep_label` to keep the label instead of showing the last pick),
 `Tooltip` (`text`, children; shows on hover or focus), `List` / `Item`, `Table` / `Row` (`header`; cells share the
 width) and `Navigator` (`routes="/=Home|/settings=Settings"`, marks the current page with `aria-current`). The popups
 close when you choose and on Escape; `List` and `Table` scroll past 16rem (the `.scroll` class). `Pointer`
