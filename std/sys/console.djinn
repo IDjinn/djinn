@@ -56,13 +56,30 @@ struct ConsoleFormat {
                 }
                 this.placeholder();
             } else {
-                if (this.length >= this.capacity) {
+                // A run of plain text goes out in one memcpy: up to the next placeholder, the end of the buffer, or (when lines
+                // are flushed) the end of the line.
+                mut size left = this.format.length - this.position;
+                size room = (size)(this.capacity - this.length);
+                if (room < left) {
+                    left = room;
+                }
+                mut size run = 0u;
+                mut bool endOfLine = false;
+                while (run < left && !endOfLine) {
+                    i8 next = this.format.data[this.position + run];
+                    if (next == 123) {
+                        break;
+                    }
+                    run = run + 1u;
+                    endOfLine = next == 10 && this.lineFlush;
+                }
+                if (run == 0u) {
                     return;
                 }
-                this.buffer[this.length] = current;
-                this.length = this.length + 1;
-                this.position = this.position + 1u;
-                if (current == 10 && this.lineFlush) {
+                memcpy(this.buffer + this.length, this.format.data + this.position, (u64)run);
+                this.length = this.length + (i32)run;
+                this.position = this.position + run;
+                if (endOfLine) {
                     return;
                 }
             }
@@ -202,7 +219,11 @@ struct Console {
     }
 
     public static unsafe str format(str format, ...args) {
-        mut i32 capacity = bufSize;
+        // Short formats get a short buffer (the text plus room for one number per placeholder run); it doubles when needed.
+        mut i32 capacity = (i32)format.length + 2 * ConsoleFormat.NUMBER_ROOM;
+        if (capacity > bufSize) {
+            capacity = bufSize;
+        }
         mut i8* buffer = (i8*)__djinn_alloc((u64)capacity);
         mut ConsoleFormat cursor = ConsoleFormat(format, args, buffer, capacity, false);
         cursor.fill();
@@ -213,9 +234,8 @@ struct Console {
             cursor.capacity = capacity;
             cursor.fill();
         }
-        if (cursor.length >= capacity) {
-            buffer = (i8*)__djinn_realloc(buffer, (u64)capacity + 1);
-        }
+        // Shrink to the exact size plus the NUL, so a short result does not keep a large buffer.
+        buffer = (i8*)__djinn_realloc(buffer, (u64)cursor.length + 1);
         buffer[cursor.length] = 0;
         return { .data = buffer, .length = (u32)cursor.length };
     }

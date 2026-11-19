@@ -18,11 +18,17 @@ struct string_builder : Disposable {
         }
     }
 
-    public unsafe void reserve(size extra) {
+    // Fast path only (a compare), so appends stay small and inlinable; the allocation lives in grow.
+    [ForceInline] public unsafe void reserve(size extra) {
         u64 needed = (u64)this.length + (u64)extra;
-        if (needed <= (u64)this.capacity) {
-            return;
+        if (needed > (u64)this.capacity) {
+            this.grow(needed);
         }
+    }
+
+    [Cold]
+    [NoInline]
+    unsafe void grow(u64 needed) {
         mut u64 grown = 16;
         if (this.capacity != 0u) {
             grown = (u64)this.capacity * 2;
@@ -35,12 +41,18 @@ struct string_builder : Disposable {
     }
 
     public unsafe void append(str value) {
+        if (value.length == 0u) {
+            return;
+        }
         this.reserve(value.length);
         memcpy((void*)&this.data[this.length], (void*)value.data, (u64)value.length);
         this.length = this.length + value.length;
     }
 
     public unsafe void append_string(string value) {
+        if (value.length == 0u) {
+            return;
+        }
         this.reserve(value.length);
         memcpy((void*)&this.data[this.length], (void*)value.data, (u64)value.length);
         this.length = this.length + value.length;
@@ -97,14 +109,32 @@ struct string_builder : Disposable {
         return { .data = this.data, .length = this.length };
     }
 
+    // Moves the bytes into a string without copying them (one realloc down to length + 1) and leaves the builder empty,
+    // so the builder can still be reused or disposed. Prefer it over to_string when the builder is not needed afterwards.
+    [Inline] public unsafe string into_string() {
+        if (this.length == 0u) {
+            return string.EMPTY();
+        }
+        i8* owned = (i8*)__djinn_realloc((void*)this.data, (u64)this.length + 1);
+        owned[this.length] = 0;
+        string result = { .data = owned, .length = this.length, .meta = StringMeta.heap() };
+        this.data = (i8*)0;
+        this.length = 0u;
+        this.capacity = 0u;
+        return result;
+    }
+
     public unsafe string to_string() {
+        if (this.length == 0u) {
+            return string.EMPTY();
+        }
         u64 capacity = (u64)this.length + 1;
         i8* copy = __djinn_alloc(capacity);
         if (this.length != 0u) {
             memcpy((void*)copy, (void*)this.data, (u64)this.length);
         }
         copy[this.length] = 0;
-        return { .data = copy, .length = this.length, .meta = 0 };
+        return { .data = copy, .length = this.length, .meta = StringMeta.heap() };
     }
 
     public unsafe void disposable() {

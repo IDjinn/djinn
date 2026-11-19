@@ -68,7 +68,7 @@ impl CodeGenerator {
         text = LLVMBuildInsertValue(this.builder, text, narrowed, 1, "cstring.size");
         if (fields.length > 2) {
             FieldInfo* meta_field = (FieldInfo*)fields.get(2);
-            text = LLVMBuildInsertValue(this.builder, text, LLVMConstInt(this.llvm_type(meta_field.type), 1, 0), 2, "cstring.meta");
+            text = LLVMBuildInsertValue(this.builder, text, this.static_meta(meta_field.type), 2, "cstring.meta");
         }
         return Value.create(text, type);
     }
@@ -98,9 +98,23 @@ impl CodeGenerator {
         values[1] = LLVMConstInt(this.llvm_type(length_field.type), length, 0);
         if (fields.length > 2) {
             FieldInfo* meta_field = (FieldInfo*)fields.get(2);
-            values[2] = LLVMConstInt(this.llvm_type(meta_field.type), 1, 0);
+            values[2] = this.static_meta(meta_field.type);
         }
         return LLVMConstNamedStruct(this.llvm_type(type), values, (u32)fields.length);
+    }
+
+    // The tag of a text literal: bit 0 (STATIC). The field is an integer (the core runtime's string) or a struct whose
+    // first field is the integer (std's StringMeta).
+    unsafe ptr static_meta(u32 type) {
+        ptr llvm = this.llvm_type(type);
+        if (LLVMGetTypeKind(llvm) != 10) {
+            return LLVMConstInt(llvm, 1, 0);
+        }
+        StructInfo* inner = this.struct_of(type);
+        FieldInfo* bits_field = (FieldInfo*)inner.fields.get(0);
+        ptr<ptr> values = CodeGenerator.array_of(1);
+        values[0] = LLVMConstInt(this.llvm_type(bits_field.type), 1, 0);
+        return LLVMConstNamedStruct(llvm, values, 1);
     }
 
     ptr call_runtime(ptr<i8> name, ptr return_type, ptr<ptr> parameters, ptr<ptr> arguments, i32 count) {

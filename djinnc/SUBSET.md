@@ -245,7 +245,7 @@ keeps the block for diagnostics but injects nothing. A target that is not declar
 ## Variadic parameters, stack arrays and coroutine primitives
 - `T... name` (last parameter) receives the extra arguments as `arr<T>`; for `object... name` each argument is boxed. In `std`, `...name`
   with no type means `object... name`. `...` without a name stays a C variadic (externs).
-- `i8[n]` allocates `n` elements on the stack and yields `i8*`.
+- `i8[n]` allocates `n` zeroed elements on the stack (the fill runs where the expression executes, so a loop body gets fresh zeroes each time) and yields `i8*`.
 - Constants of the enclosing struct can be used without the type name inside its methods.
 - A bodyless method must be `abstract` itself, sit in an `abstract` struct (the `[intrinsic]` and `[no_mangle]` structs in the std are `abstract` too) or sit in a struct of an `extern "C"` / `extern "JS"` block. Interop bindings use `extern`: `extern "JS" { struct Input { [Js("$key.code")] public static i32 key(); } }` (`[Js]` template, only with `--target web`) and `extern "C" { struct Libc { [Symbol("abs")] public static i32 magnitude(i32 v); } }`; these structs are opaque handles with no fields or constructors, an abstract/extern call with no provider for the target is `E3069`, instantiating one `E3068`, and a method without `[Js]`/`[Symbol]` `E3070`. The `coro` primitives (`handle`, `suspend`, `done`, `resume`,
   `destroy`) of an `[intrinsic]` struct map to the LLVM coroutine intrinsics.
