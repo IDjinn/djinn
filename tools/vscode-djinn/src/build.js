@@ -50,8 +50,10 @@ function describe(target, options) {
   const name = project && project.name ? project.name : path.basename(target, ".djinn");
   const outputDirectory = project && project.outputDirectory ? path.resolve(root, project.outputDirectory) : path.join(root, "build");
   const outputFile = project && project.outputFile ? project.outputFile : name;
-  const program = path.join(outputDirectory, toolchain.exe(outputFile));
-  return { settings, isDirectory, project, root, name, outputDirectory, program };
+  const isLibrary = Boolean(project && project.libraryMode);
+  // A library is a .djlib, never an executable: it has no entry point to run or debug.
+  const program = path.join(outputDirectory, isLibrary ? (/\.djlib$/i.test(outputFile) ? outputFile : `${outputFile}.djlib`) : toolchain.exe(outputFile));
+  return { settings, isDirectory, project, root, name, outputDirectory, program, isLibrary };
 }
 
 function arguments_(target, options) {
@@ -92,7 +94,7 @@ function arguments_(target, options) {
   }
   if (options.mode === "check") {
     args.push("--check");
-  } else if (options.mode === "run") {
+  } else if (options.mode === "run" && !plan.isLibrary) {
     args.push("--run");
   }
   if (options.mode !== "check") {

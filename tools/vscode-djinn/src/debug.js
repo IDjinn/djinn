@@ -64,6 +64,10 @@ class DebugProvider {
       return undefined;
     }
 
+    if (build.describe(target, {}).isLibrary) {
+      vscode.window.showWarningMessage("This project is a library (.djlib): it has no entry point to run or debug.");
+      return undefined;
+    }
     const output = vscode.window.createOutputChannel("Djinn Build");
     let program = config.program;
     try {
