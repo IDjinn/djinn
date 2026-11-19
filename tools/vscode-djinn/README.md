@@ -14,7 +14,7 @@ The extension looks for the tools in this order: the setting, a copy bundled in 
 Working from a checkout:
 
 1. Build the language server: `djinn-lsp/build.sh <djinnc> [runtime dir]`.
-2. `npm install` in this folder, then run the extension from VS Code (F5), or package it with `npx @vscode/vsce package` and install the `.vsix`.
+2. `npm install` in this folder, then run the extension from VS Code (F5, which compiles it first), or package it with `npx @vscode/vsce package` (it compiles first too) and install the `.vsix`. The source is TypeScript under `src/` (compiled to `out/`): `npm run watch` recompiles on save and `npm run typecheck` only checks types.
 3. For project builds, make `std.djlib` and the runtime library available (`tools/build_std.sh`, `tools/build_runtime.sh`) and point `djinn.libDir` and `djinn.runtimeLib` at them. Without `std.djlib` the standard library is compiled from source.
 
 Settings: `djinn.server.path`, `djinn.compilerPath`, `djinn.runtimeDir`, `djinn.stdDir`, `djinn.runtimeLib`, `djinn.libDir`, `djinn.llvmBinDir`, `djinn.build.*`, `djinn.debug.optimization`, `djinn.perf.*`.

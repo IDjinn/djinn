@@ -1,14 +1,11 @@
-const fs = require("fs");
-const path = require("path");
-const vscode = require("vscode");
-const build = require("./build");
-const toolchain = require("./toolchain");
+import * as fs from "fs";
+import * as path from "path";
+import * as vscode from "vscode";
+import * as build from "./build";
+import * as toolchain from "./toolchain";
+import { LaunchConfig } from "./types";
 
-function targetFor(config) {
-  return toolchain.resolveTarget(config.target);
-}
-
-function nativeConfiguration(config, program, cwd) {
+function nativeConfiguration(config: LaunchConfig, program: string, cwd: string): vscode.DebugConfiguration {
   const name = config.name || "Djinn: Debug";
   const args = config.args || [];
   if (process.platform === "win32") {
@@ -38,33 +35,36 @@ function nativeConfiguration(config, program, cwd) {
   };
 }
 
-class DebugProvider {
-  provideDebugConfigurations() {
+export class DebugProvider implements vscode.DebugConfigurationProvider {
+  provideDebugConfigurations(): vscode.DebugConfiguration[] {
     return [
       { type: "djinn", request: "launch", name: "Djinn: Debug project", args: [] },
       { type: "djinn", request: "launch", name: "Djinn: Profile CPU", mode: "profile", target: "${workspaceFolder}", args: [], profile: { kind: "cpu", optimization: "O2" } },
     ];
   }
 
-  resolveDebugConfiguration(folder, config) {
+  resolveDebugConfiguration(_folder: vscode.WorkspaceFolder | undefined, config: vscode.DebugConfiguration): vscode.DebugConfiguration {
     if (!config.type) {
       return { type: "djinn", request: "launch", name: "Djinn: Debug project", args: [] };
     }
     return config;
   }
 
-  async resolveDebugConfigurationWithSubstitutedVariables(folder, config) {
+  async resolveDebugConfigurationWithSubstitutedVariables(
+    folder: vscode.WorkspaceFolder | undefined,
+    debugConfig: vscode.DebugConfiguration
+  ): Promise<undefined> {
+    const config = debugConfig as LaunchConfig;
     if (config.mode === "profile") {
       await vscode.commands.executeCommand("djinn.perf.launch", config);
       return undefined;
     }
-    const target = targetFor(config);
+    const target = toolchain.resolveTarget(config.target);
     if (!target) {
       vscode.window.showWarningMessage("Open a Djinn file or folder first.");
       return undefined;
     }
-
-    if (build.describe(target, {}).isLibrary) {
+    if (build.describe(target).isLibrary) {
       vscode.window.showWarningMessage("This project is a library (.djlib): it has no entry point to run or debug.");
       return undefined;
     }
@@ -74,18 +74,18 @@ class DebugProvider {
       if (config.build !== false) {
         output.show(true);
         output.appendLine(`> building ${target} with debug info`);
-        const result = await build.run(target, { mode: "build", debug: true, info: undefined }, (text) => output.append(text));
+        const result = await build.run(target, { mode: "build", debug: true }, (text) => output.append(text));
         program = program || result.plan.program;
       } else {
-        program = program || build.describe(target, {}).program;
+        program = program || build.describe(target).program;
       }
     } catch (error) {
-      output.appendLine(String(error.message || error));
+      output.appendLine(error instanceof Error ? error.message : String(error));
       vscode.window.showErrorMessage("Djinn build failed. See the Djinn Build output.");
       return undefined;
     }
 
-    if (!fs.existsSync(program)) {
+    if (!program || !fs.existsSync(program)) {
       vscode.window.showErrorMessage(`Program not found: ${program}`);
       return undefined;
     }
@@ -93,12 +93,8 @@ class DebugProvider {
     const native = nativeConfiguration(config, program, cwd);
     const started = await vscode.debug.startDebugging(folder, native);
     if (!started) {
-      vscode.window.showErrorMessage(
-        `Could not start the ${native.type} debugger. Install the "C/C++" extension (ms-vscode.cpptools).`
-      );
+      vscode.window.showErrorMessage(`Could not start the ${native.type} debugger. Install the "C/C++" extension (ms-vscode.cpptools).`);
     }
     return undefined;
   }
 }
-
-module.exports = { DebugProvider };
