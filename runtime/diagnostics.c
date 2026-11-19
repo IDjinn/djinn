@@ -601,6 +601,54 @@ __attribute__((noinline)) static void djinn_native_stack(const int skip)
 
 static LPTOP_LEVEL_EXCEPTION_FILTER djinn_previous_filter;
 
+// A crash writes a minidump next to the trace: <DJINN_CRASH_DUMP_DIR or the working directory>\<program>-<pid>.dmp, which
+// Visual Studio and WinDbg open (and VS Code's cppvsdbg: "dumpPath"). DJINN_CRASH_DUMP=0 turns it off, =full keeps all
+// the memory of the process (large), anything else keeps the stacks, the modules and the memory they point to.
+static void djinn_write_crash_dump(EXCEPTION_POINTERS* info)
+{
+    const char* mode = getenv("DJINN_CRASH_DUMP");
+    if (mode != NULL && strcmp(mode, "0") == 0) return;
+    char path[MAX_PATH + 64];
+    const char* directory = getenv("DJINN_CRASH_DUMP_DIR");
+    if (directory != NULL && directory[0] != 0)
+    {
+        snprintf(path, sizeof path, "%s\\", directory);
+    }
+    else
+    {
+        path[0] = 0;
+    }
+    char program[MAX_PATH] = "djinn";
+    char full[MAX_PATH];
+    if (GetModuleFileNameA(NULL, full, sizeof full) > 0)
+    {
+        const char* name = strrchr(full, '\\');
+        snprintf(program, sizeof program, "%s", name != NULL ? name + 1 : full);
+        char* dot = strrchr(program, '.');
+        if (dot != NULL) *dot = 0;
+    }
+    const size_t used = strlen(path);
+    snprintf(path + used, sizeof path - used, "%s-%lu.dmp", program, (unsigned long)GetCurrentProcessId());
+    const HANDLE file = CreateFileA(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE)
+    {
+        fprintf(stderr, "djinn crash: cannot create the dump '%s'\n", path);
+        return;
+    }
+    MINIDUMP_EXCEPTION_INFORMATION exception;
+    exception.ThreadId = GetCurrentThreadId();
+    exception.ExceptionPointers = info;
+    exception.ClientPointers = FALSE;
+    const int everything = mode != NULL && strcmp(mode, "full") == 0;
+    const MINIDUMP_TYPE type = (MINIDUMP_TYPE)(everything
+        ? (MiniDumpWithFullMemory | MiniDumpWithHandleData | MiniDumpWithThreadInfo | MiniDumpWithFullMemoryInfo)
+        : (MiniDumpWithDataSegs | MiniDumpWithHandleData | MiniDumpWithThreadInfo | MiniDumpWithIndirectlyReferencedMemory | MiniDumpWithFullMemoryInfo));
+    const BOOL written = MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), file, type, info != NULL ? &exception : NULL, NULL, NULL);
+    CloseHandle(file);
+    if (written) fprintf(stderr, "djinn crash: wrote the dump '%s'\n", path);
+    else fprintf(stderr, "djinn crash: could not write the dump '%s' (error %lu)\n", path, (unsigned long)GetLastError());
+}
+
 static LONG WINAPI djinn_crash_filter(EXCEPTION_POINTERS* info)
 {
     EXCEPTION_RECORD* record = info->ExceptionRecord;
@@ -615,6 +663,7 @@ static LONG WINAPI djinn_crash_filter(EXCEPTION_POINTERS* info)
     if (record->NumberParameters >= 2)
         fprintf(stderr, "  access type %llu address %p\n", (unsigned long long)record->ExceptionInformation[0], (void*)record->ExceptionInformation[1]);
     djinn_native_stack(1);
+    djinn_write_crash_dump(info);
     if (djinn_previous_filter != NULL) return djinn_previous_filter(info);
     return EXCEPTION_CONTINUE_SEARCH;
 }
@@ -628,6 +677,7 @@ __attribute__((constructor)) static void djinn_install_crash_trace(void)
 #include <signal.h>
 #include <dlfcn.h>
 #include <elf.h>
+#include <sys/resource.h>
 
 extern const Elf64_Ehdr __ehdr_start __attribute__((weak));
 
@@ -677,6 +727,18 @@ static void djinn_crash_signal(const int signal_number)
 
 __attribute__((constructor)) static void djinn_install_crash_trace(void)
 {
+    // The default action of the signal (re-raised by the handler) writes a core file; raise the soft limit so it is not 0.
+    // DJINN_CRASH_DUMP=0 leaves the limit alone.
+    const char* dump = getenv("DJINN_CRASH_DUMP");
+    if (dump == NULL || strcmp(dump, "0") != 0)
+    {
+        struct rlimit core;
+        if (getrlimit(RLIMIT_CORE, &core) == 0 && core.rlim_cur != core.rlim_max)
+        {
+            core.rlim_cur = core.rlim_max;
+            setrlimit(RLIMIT_CORE, &core);
+        }
+    }
     const int signals[] = {SIGSEGV, SIGBUS, SIGFPE, SIGILL};
     for (size_t i = 0; i < sizeof signals / sizeof signals[0]; i++)
     {

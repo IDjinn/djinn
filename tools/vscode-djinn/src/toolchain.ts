@@ -86,14 +86,10 @@ export function runtimeDir(info?: ServerInfo): string {
 
 export function runtimeLib(): string {
   const name = process.platform === "win32" ? "djinn_runtime.lib" : "libdjinn_runtime.a";
-  return (
-    settings().get<string>("runtimeLib") ||
-    installed("lib", name) ||
-    bundled("toolchain", name) ||
-    inRepo("build", "runtime", name) ||
-    inRepo("build", "bootstrap", "runtime", name) ||
-    ""
-  );
+  const fromRepo = inRepo("build", "runtime", name) || inRepo("build", "bootstrap", "runtime", name);
+  // Libraries built in a checkout (build/libs) pair with the checkout's runtime: the installed one can be older and miss symbols they use.
+  const checkoutLibs = !installed("lib", "std.djlib") && !bundled("toolchain") && libDir() !== "";
+  return settings().get<string>("runtimeLib") || (checkoutLibs ? fromRepo : undefined) || installed("lib", name) || bundled("toolchain", name) || fromRepo || "";
 }
 
 export function libDir(): string {
