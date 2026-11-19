@@ -76,7 +76,7 @@ Modifiers (`private`, `async`, `sync`, `unsafe`) are kept in the text, so a cons
 
 - Build: bodies are recorded by the parser (`Library.record_body`); the object is produced with no entry point and
   with core/std definitions demoted to declarations; sections are packed and checksummed.
-- Consume: interface files are unpacked into tokens and parsed as header sources (`SourceFile.is_header`); their macros are collected with every
+- Consume: interface files are unpacked into tokens and parsed as header sources (`SourceFile.is_library_interface`); their macros are collected with every
   other macro before parsing and are visible to files that import the library namespace. Tokens a macro expands keep the
   call site, so declarations it produces in the consumer are not treated as header declarations. Header
   functions become `extern`, header globals become declarations; the object is extracted next to the output and
@@ -132,5 +132,4 @@ LLVM), a warning is printed and the library is used without inlining. `--inspect
 - Reflection method pointers (`funcPtr`) and `[Reflect]` tables of library types when mixed with `--reflect-all`.
 - Cross-target libraries in one file (one interface, several objects per triple). Today each target has its own `.djlib`: while cross-compiling, `<lib-dir>/<triple>/<name>.djlib` is preferred over `<lib-dir>/<name>.djlib`, and a library built for the host is loaded only for its procedural macros (they run in the JIT; nothing of it is linked), which is how `ui_macros` serves a web build. A prebuilt std is `<lib-dir>/<triple>/std.djlib`; without it the std is compiled from source.
 - Incremental rebuild: skip packing when interface and object checksums are unchanged.
-- Rename `is_header` to something that does not read as "C header" (it marks a library interface source).
 - Compression of the interface and object sections.
