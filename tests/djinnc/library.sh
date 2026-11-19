@@ -263,4 +263,80 @@ cmp -s "$out/fastlib.djinn" "$out/fastlib2.djinn" && fail "the incremental test 
 "$compiler" "$out/fastlib2.djinn" --library -o "$out/again.djlib" -O3 "${flags[@]}" > "$out/again3.log" 2>&1 || { cat "$out/again3.log"; fail "library again must rebuild after a change"; }
 cmp -s "$out/again.djlib" "$out/again.keep" && fail "a changed library must be rewritten"
 
+# --- supported platforms: `targets:` in djinn.proj, stored in the library and checked by consumers
+if [ -n "$exe" ]; then host=windows; other=linux; other_triple=x86_64-unknown-linux-gnu; else host=linux; other=windows; other_triple=x86_64-pc-windows-msvc; fi
+tgt="$out/targets"
+mkdir -p "$tgt/hostlib/src" "$tgt/otherlib/src" "$tgt/anylib/src" "$tgt/both/src" "$tgt/bad/src"
+for name in hostlib otherlib anylib; do
+    printf 'namespace %s;
+
+public i32 value() {
+    return 7;
+}
+' "$name" > "$tgt/$name/src/lib.djinn"
+done
+write_proj() { # <dir> <name> <targets line or empty> <library-mode>
+    printf 'project: "%s"
+
+compiler:
+  library-mode: %s
+%s  output:
+    file: "%s.djlib"
+    directory: "."
+  libs: []
+' "$2" "$4" "$3" "$2" > "$1/djinn.proj"
+}
+write_proj "$tgt/hostlib" hostlib "  targets: [$host]
+" true
+write_proj "$tgt/otherlib" otherlib "  targets: [$other]
+" true
+write_proj "$tgt/anylib" anylib "" true
+for name in hostlib otherlib anylib; do
+    "$compiler" "$tgt/$name" -o "$tgt/$name.djlib" "${flags[@]}" > "$tgt/$name.log" 2>&1 && continue
+    # a library for the other platform cannot be built here: the project refuses first
+    [ "$name" = otherlib ] && grep -q "the project supports $other; building for $host" "$tgt/$name.log" && continue
+    cat "$tgt/$name.log"; fail "library project $name must build"
+done
+"$compiler" --inspect-lib "$tgt/hostlib.djlib" | grep -q "targets: *$host" || fail "--inspect-lib must list the targets of the library"
+"$compiler" --inspect-lib "$tgt/anylib.djlib" | grep -q "targets:" && fail "a library without targets must not list any"
+printf 'namespace app;
+import hostlib;
+
+i32 main() {
+    return hostlib::value() - 7;
+}
+' > "$tgt/app.djinn"
+"$compiler" "$tgt/app.djinn" --lib "$tgt/hostlib.djlib" -o "$tgt/app$exe" "${flags[@]}" > "$tgt/app.log" 2>&1 || { cat "$tgt/app.log"; fail "an app must build against a library for this platform"; }
+# a library for another platform: a clear message, not a link error
+"$compiler" "$tgt/app.djinn" --lib "$tgt/hostlib.djlib" --target "$other_triple" --emit-ir -o "$tgt/cross" "${flags[@]}" > "$tgt/cross.log" 2>&1 && fail "a library must not be accepted for another platform"
+grep -q "supports $host; building for $other" "$tgt/cross.log" || { cat "$tgt/cross.log"; fail "the message must name the platforms the library supports"; }
+# the project itself must support the platform being built for
+printf 'namespace both;
+
+i32 main() {
+    return 0;
+}
+' > "$tgt/both/src/main.djinn"
+write_proj "$tgt/both" both "  targets: [$other]
+" false
+"$compiler" "$tgt/both" -o "$tgt/both$exe" "${flags[@]}" > "$tgt/both.log" 2>&1 && fail "a project must refuse a platform outside its targets"
+grep -q "the project supports $other; building for $host" "$tgt/both.log" || { cat "$tgt/both.log"; fail "the project message must name both platforms"; }
+# an app can not claim more platforms than its libraries support
+write_proj "$tgt/both" both "  targets: [$host, $other]
+  libs: ['hostlib']
+" false
+"$compiler" "$tgt/both" -o "$tgt/both$exe" --lib-dir "$tgt" "${flags[@]}" > "$tgt/wide.log" 2>&1 && fail "an app must not claim platforms its libraries lack"
+grep -q "supports only $host" "$tgt/wide.log" || { cat "$tgt/wide.log"; fail "the message must name the library that narrows the targets"; }
+# an unknown word is an error
+printf 'namespace bad;
+
+i32 main() {
+    return 0;
+}
+' > "$tgt/bad/src/main.djinn"
+write_proj "$tgt/bad" bad "  targets: [plan9]
+" false
+"$compiler" "$tgt/bad" -o "$tgt/bad$exe" "${flags[@]}" > "$tgt/bad.log" 2>&1 && fail "an unknown platform word must be an error"
+grep -q "unknown platform 'plan9'" "$tgt/bad.log" || { cat "$tgt/bad.log"; fail "the message must name the unknown word"; }
+
 echo "library: ok"

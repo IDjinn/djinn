@@ -10,11 +10,11 @@ struct Lz4 {
     const i32 MATCH_FIND_LIMIT = 12;
     const i32 MAX_OFFSET = 65535;
 
-    static unsafe u32 read32(ptr<i8> data, i32 at) {
+    [ForceInline] static unsafe u32 read32(ptr<i8> data, i32 at) {
         return (u32)(u8)data[at] | ((u32)(u8)data[at + 1] << 8) | ((u32)(u8)data[at + 2] << 16) | ((u32)(u8)data[at + 3] << 24);
     }
 
-    static unsafe void put_length(ByteBuffer* out, i32 extra) {
+    [ForceInline] static unsafe void put_length(ByteBuffer* out, i32 extra) {
         mut i32 rest = extra;
         while (rest >= 255) {
             out.append_byte(255);
@@ -24,7 +24,7 @@ struct Lz4 {
     }
 
     // Writes one sequence: `literals` bytes from `from`, then a match (offset, length) unless length is 0 (the last one).
-    static unsafe void emit(ByteBuffer* out, ptr<i8> from, i32 literals, i32 offset, i32 match_length) {
+    [InlineHint] static unsafe void emit(ByteBuffer* out, ptr<i8> from, i32 literals, i32 offset, i32 match_length) {
         mut i32 token = 0;
         if (literals >= 15) {
             token = 15 << 4;
@@ -54,7 +54,7 @@ struct Lz4 {
         }
     }
 
-    public static unsafe void compress(ptr<i8> source, i32 length, ByteBuffer* out) {
+    [Hot] public static unsafe void compress(ptr<i8> source, i32 length, ByteBuffer* out) {
         ptr<i32> table = (ptr<i32>)Memory.zalloc((u64)(4 << Lz4.HASH_BITS));
         mut i32 anchor = 0;
         mut i32 at = 0;
@@ -82,7 +82,7 @@ struct Lz4 {
     }
 
     // Decodes a block that must produce exactly `raw_length` bytes into `target`. False on any malformed input.
-    public static unsafe bool decompress(ptr<i8> source, i32 length, ptr<i8> target, i32 raw_length) {
+    [Hot] public static unsafe bool decompress(ptr<i8> source, i32 length, ptr<i8> target, i32 raw_length) {
         mut i32 in_at = 0;
         mut i32 out_at = 0;
         while (in_at < length) {
@@ -143,8 +143,14 @@ struct Lz4 {
             if (matched > raw_length - out_at) {
                 return false;
             }
-            for (mut i32 i = 0; i < matched; i = i + 1) {
-                target[out_at + i] = target[out_at - offset + i];
+            if (offset >= matched) {
+                // the copy does not overlap itself
+                memcpy(target + out_at, target + out_at - offset, (u64)matched);
+            } else {
+                // overlapping: bytes written by this copy are read again (a run of the last `offset` bytes)
+                for (mut i32 i = 0; i < matched; i = i + 1) {
+                    target[out_at + i] = target[out_at - offset + i];
+                }
             }
             out_at = out_at + matched;
         }

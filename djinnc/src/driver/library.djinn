@@ -766,6 +766,9 @@ struct Library {
             Library.put_text(manifest, link, strlen(link));
         }
 
+        // the platforms the library supports (0 = any), after the links
+        Library.put_u32(manifest, (u32)options.target_mask);
+
         mut u32 flags = (u32)Library.FLAG_TEXT_HASH;
         if (options.use_std) {
             flags = flags | (u32)Library.FLAG_STD;
@@ -845,6 +848,49 @@ struct Library {
             return true;
         }
         return Files.write_bytes(options.output, out.data, out.length);
+    }
+
+    // The platforms a library supports (bits of Target.platform_mask, 0 = any): the u32 after the link list of the
+    // manifest, absent in libraries written before it existed.
+    static unsafe i32 platforms_of(ptr<i8> data, i32 manifest_offset, i32 manifest_size) {
+        i32 end = manifest_offset + manifest_size;
+        i32 name_length = (i32)Library.get_u32(data, manifest_offset);
+        i32 triple_at = manifest_offset + 4 + name_length;
+        i32 links_at = triple_at + 4 + (i32)Library.get_u32(data, triple_at) + 4;
+        if (links_at + 4 > end) {
+            return 0;
+        }
+        mut i32 pending = (i32)Library.get_u32(data, links_at);
+        mut i32 cursor = links_at + 4;
+        while (pending > 0 && cursor + 4 <= end) {
+            cursor = cursor + 4 + (i32)Library.get_u32(data, cursor);
+            pending = pending - 1;
+        }
+        if (cursor + 4 > end) {
+            return 0;
+        }
+        return (i32)Library.get_u32(data, cursor);
+    }
+
+    // The library must support the platform being built for, and every platform the project supports.
+    static unsafe bool check_platforms(Options* options, ptr<i8> path, ptr<i8> data, i32 manifest_offset, i32 manifest_size) {
+        i32 mask = Library.platforms_of(data, manifest_offset, manifest_size);
+        if (mask == 0) {
+            return true;
+        }
+        ByteBuffer* supported = ByteBuffer.create();
+        Target.append_platforms(supported, mask);
+        if ((mask & Target.platform_bit()) == 0) {
+            logger_error(Log.get(), "djinnc: library '%s' supports %s; building for %s", path, supported.cstr(), Target.platform_name());
+            return false;
+        }
+        if (options.target_mask != 0 && (options.target_mask & mask) != options.target_mask) {
+            ByteBuffer* wanted = ByteBuffer.create();
+            Target.append_platforms(wanted, options.target_mask);
+            logger_error(Log.get(), "djinnc: the project supports %s, but library '%s' supports only %s", wanted.cstr(), path, supported.cstr());
+            return false;
+        }
+        return true;
     }
 
     // The bytes to store for a section: the data itself, or `u32 raw size` + an LZ4 block when that is smaller
@@ -1222,6 +1268,10 @@ struct Library {
         // and nothing of it is linked into the program.
         bool for_target = Strings.equals(data + triple_at + 4, triple_size, Target.triple());
         bool macros_only = !for_target && !Target.is_native() && Strings.equals(data + triple_at + 4, triple_size, Target.host_triple());
+        // a library that names the platforms it supports says so, instead of failing later at link time
+        if (!Library.check_platforms(options, path, data, manifest_offset, manifest_size)) {
+            return -1;
+        }
         if (!for_target && !macros_only) {
             logger_error(Log.get(), "djinnc: '%s' targets a different triple than '%s'", path, Target.triple());
             return -1;
@@ -1373,6 +1423,12 @@ struct Library {
             out.append("  interface hash: ");
             out.append_unsigned(Library.get_u64(data, Library.INTERFACE_HASH_OFFSET));
             out.append_byte(10);
+        }
+        i32 platforms = Library.platforms_of(data, manifest_offset, manifest_size);
+        if (platforms != 0) {
+            ByteBuffer* names = ByteBuffer.create();
+            Target.append_platforms(names, platforms);
+            Library.field(out, "targets:    ", names.data, names.length);
         }
         mut ptr<i8> needs_std = "no";
         if ((flags & (u32)Library.FLAG_STD) != 0) {

@@ -45,6 +45,16 @@ Import a library after `namespace`: an `import` above it does not expose the nam
 
 The interface and bitcode sections are stored as LZ4 blocks (`djinnc/src/support/text/lz4.djinn`, standard LZ4 block format) when that is smaller, under the kinds 5 and 6, which readers that do not know them ignore. On std this is about 43% smaller for the interface and 51% for the bitcode. The object stays raw, because the linker needs it extracted on disk. Section checksums and the interface hash are the std text hash (`djinnc/src/support/text/text_hash.djinn`, eight independent lanes that LLVM vectorizes; FNV-1a is a serial chain and cannot be), announced by header flag bit 1; libraries without the flag are still read with FNV-1a. Checksums cover the stored bytes, a section that does not decode is reported as corrupted, and the compiler expands the sections in memory when it loads the library, so the interface hash and everything else see the raw bytes. The writer decodes what it compressed and compares it with the original; on a mismatch it warns and stores the section raw. `--no-compress` writes the sections raw. `--inspect-lib` shows the raw size and, on a second line, the stored size.
 
+## Supported platforms
+
+`targets: [windows, linux]` under `compiler:` in `djinn.proj` lists the platforms a project supports (the platform words of
+`[Platform(...)]`: `windows`, `linux`, `macos`, `android`, `ios`, `web`, and the groups `desktop`, `mobile`, `native`; an unknown
+word is an error; no `targets:` means any platform). Building for a platform outside the list is an error, and so is `--run` of it.
+A library stores the list as a bit mask after the link list of its manifest (`--inspect-lib` prints `targets:`). A consumer
+refuses a library that does not support the platform being built for (`library 'x.djlib' supports windows; building for linux`),
+and an application whose `targets` are wider than those of a library it uses (`the project supports windows, linux, but library
+'x.djlib' supports only windows`). Libraries without the list, including older ones, are accepted everywhere.
+
 ## Version policy
 
 A compiler reads libraries written by a compiler of the same major.minor version (offset 28; the patch is ignored) and

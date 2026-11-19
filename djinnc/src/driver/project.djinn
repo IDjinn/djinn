@@ -5,6 +5,7 @@ struct ProjectList {
     const i32 LIBS = 1;
     const i32 SOURCES = 2;
     const i32 IGNORED = 3;
+    const i32 TARGETS = 4;
 }
 
 struct Project {
@@ -236,6 +237,8 @@ i32 main() {
                         kind = ProjectList.LIBS;
                     }
                     open_list = Project.read_items(options, manifest, first + 10, i, kind, directory);
+                } else if (Strings.starts_with(manifest, first, i, "targets:")) {
+                    open_list = Project.read_items(options, manifest, first + 8, i, ProjectList.TARGETS, directory);
                 } else if (Strings.starts_with(manifest, first, i, "entry:")) {
                     options.entry_file = Project.read_value(manifest, first + 6, i);
                 } else if (Strings.starts_with(manifest, first, i, "async-threads:")) {
@@ -313,6 +316,13 @@ i32 main() {
                 }
                 Project.add_item(options, Strings.duplicate(text + item, position - item), list, directory);
                 position = position + 1;
+            } else if (list == ProjectList.TARGETS && c >= 97 && c <= 122) {
+                // platform words may be bare: targets: [windows, linux]
+                i32 word = position - 1;
+                while (position < to && (((i32)text[position] >= 97 && (i32)text[position] <= 122) || ((i32)text[position] >= 48 && (i32)text[position] <= 57))) {
+                    position = position + 1;
+                }
+                Project.add_item(options, Strings.duplicate(text + word, position - word), list, directory);
             }
         }
         return list;
@@ -320,6 +330,16 @@ i32 main() {
 
     static unsafe void add_item(Options* options, ptr<i8> item, i32 list, ptr<i8> directory) {
         if (list == ProjectList.IGNORED) {
+            return;
+        }
+        if (list == ProjectList.TARGETS) {
+            i32 mask = Target.platform_mask(item, strlen(item));
+            if (mask == 0) {
+                logger_error(Log.get(), "djinnc: unknown platform '%s' in targets (windows, linux, macos, android, ios, web, desktop, mobile, native)", item);
+                options.ok = false;
+                return;
+            }
+            options.target_mask = options.target_mask | mask;
             return;
         }
         if (list == ProjectList.LIBS && Strings.same(item, "std")) {
