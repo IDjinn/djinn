@@ -27,7 +27,12 @@ function perfDirectory(root: string): string {
 
 function sourcesFor(target: string): string[] {
   const isDirectory = fs.statSync(target).isDirectory();
-  if (isDirectory && fs.existsSync(path.join(target, "djinn.proj"))) {
+  const manifest = path.join(target, "djinn.proj");
+  if (isDirectory && fs.existsSync(manifest)) {
+    const windowsOnly = ["win32", "vulkan"].filter((lib) => new RegExp(`['"]${lib}['"]`).test(fs.readFileSync(manifest, "utf8")));
+    if (windowsOnly.length > 0) {
+      throw new Error(`"${path.basename(target)}" depends on ${windowsOnly.join(", ")}, which only build on Windows, so it cannot be profiled with perf on Linux/WSL. Pick a project without them.`);
+    }
     // A project: djinnc reads djinn.proj itself (sources, platform files, libraries).
     return [toolchain.toWslPath(target)];
   }
