@@ -64,6 +64,18 @@ python_patch "$out/mathlib.djlib" "$out/stale.djlib" 96 "7a7b"
 if "$compiler" "$sample/app.djinn" --lib "$out/stale.djlib" -o "$out/stale$exe" "${flags[@]}" > "$out/stale.log" 2>&1; then fail "a stale interface hash must be rejected"; fi
 grep -q "is stale" "$out/stale.log" || { cat "$out/stale.log"; fail "a stale library must say so"; }
 
+# compression: interface and bitcode are stored as LZ4 blocks, --no-compress keeps them raw, a damaged one is refused
+"$compiler" --inspect-lib "$out/mathlib.djlib" | grep -q "stored: .* bytes (lz4)" || fail "the interface and bitcode of a library must be stored compressed"
+"$compiler" "$sample/mathlib.djinn" --library --no-compress -o "$out/raw.djlib" "${flags[@]}" > "$out/raw.log" 2>&1 || { cat "$out/raw.log"; fail "library --no-compress must build"; }
+if "$compiler" --inspect-lib "$out/raw.djlib" | grep -q "(lz4)"; then fail "--no-compress must store the sections raw"; fi
+[ "$(stat -c %s "$out/raw.djlib")" -gt "$(stat -c %s "$out/mathlib.djlib")" ] || fail "the compressed library must be smaller than the raw one"
+"$compiler" "$sample/app.djinn" --lib "$out/raw.djlib" -o "$out/raw_app$exe" "${flags[@]}" > "$out/raw_app.log" 2>&1 || { cat "$out/raw_app.log"; fail "an app must build against a raw library"; }
+size=$(stat -c %s "$out/mathlib.djlib")
+cp "$out/mathlib.djlib" "$out/damaged.djlib"
+python_patch "$out/mathlib.djlib" "$out/damaged.djlib" $((size - 3)) "5a5a5a"
+if "$compiler" "$sample/app.djinn" --lib "$out/damaged.djlib" -o "$out/damaged$exe" "${flags[@]}" > "$out/damaged.log" 2>&1; then fail "a damaged compressed section must be rejected"; fi
+grep -q "corrupted" "$out/damaged.log" || { cat "$out/damaged.log"; fail "a damaged compressed section must say corrupted"; }
+
 # --- features across the boundary
 cat > "$out/features_lib.djinn" <<'SOURCE'
 namespace featurelib;

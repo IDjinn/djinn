@@ -41,11 +41,15 @@ compiler:
 A library can be built on another one. A `.djlib` has no dependency list, so the final program lists all of them.
 Import a library after `namespace`: an `import` above it does not expose the names.
 
+## Compression
+
+The interface and bitcode sections are stored as LZ4 blocks (`djinnc/src/support/text/lz4.djinn`, standard LZ4 block format) when that is smaller, under the kinds 5 and 6, which readers that do not know them ignore. On std this is about 43% smaller for the interface and 51% for the bitcode. The object stays raw, because the linker needs it extracted on disk. Section checksums and the interface hash are the std text hash (`djinnc/src/support/text/text_hash.djinn`, eight independent lanes that LLVM vectorizes; FNV-1a is a serial chain and cannot be), announced by header flag bit 1; libraries without the flag are still read with FNV-1a. Checksums cover the stored bytes, a section that does not decode is reported as corrupted, and the compiler expands the sections in memory when it loads the library, so the interface hash and everything else see the raw bytes. The writer decodes what it compressed and compares it with the original; on a mismatch it warns and stores the section raw. `--no-compress` writes the sections raw. `--inspect-lib` shows the raw size and, on a second line, the stored size.
+
 ## Version policy
 
 A compiler reads libraries written by a compiler of the same major.minor version (offset 28; the patch is ignored) and
 rejects others with a message naming the compiler that wrote them: build the library again. The header also stores a hash of
-the interface section (offset 96). A consumer refuses a library whose interface does not match it (`is stale`), and
+the interface section (offset 96, same hash). A consumer refuses a library whose interface does not match it (`is stale`), and
 `--inspect-lib` prints it. A hash of 0 (libraries from before the field) is not checked. The format version (offset 8)
 still guards the layout itself.
 
@@ -56,22 +60,24 @@ still guards the layout itself.
 | 0 | 8 | magic `DJINNLIB` |
 | 8 | 4 | format version (1). Readers must reject a greater value |
 | 12 | 4 | header size (128). Readers skip to this offset |
-| 16 | 4 | flags. bit 0: built with `--std` |
+| 16 | 4 | flags. bit 0: built with `--std`. bit 1: checksums use the text hash (see below); without it they are FNV-1a-64 |
 | 20 | 4 | section count |
 | 24 | 4 | section table offset (128) |
 | 28 | 4 | compiler version, `major<<16 \| minor<<8 \| patch` (256 = 0.1.0), for comparison |
 | 32 | 32 | version label, NUL padded free text (`0.1.0-dev`, `0.2.0-rc.1`, `nightly`...), for display |
 | 64 | 32 | build id, NUL padded free text (commit hash...) |
-| 96 | 8 | interface hash: FNV-1a-64 of the interface section (0 in libraries written before it existed) |
+| 96 | 8 | interface hash: checksum of the interface section (0 in libraries written before it existed) |
 | 104 | 24 | reserved, zero |
 
-Section table: one 32 byte entry per section: `u32 kind, u32 pad, u64 offset, u64 size, u64 FNV-1a-64 checksum`.
+Section table: one 32 byte entry per section: `u32 kind, u32 pad, u64 offset, u64 size, u64 checksum`.
 
 | Kind | Section | Content |
 |---|---|---|
 | 1 | manifest | `u32 len + name`, `u32 len + target triple`, file count, then `u32` link count and that many `u32 len + text` link arguments |
 | 2 | interface | binary token stream, see below |
 | 3 | object | native object file |
+| 5 | interface, compressed | `u32 raw size` + an LZ4 block that decodes to the interface section (written instead of kind 2 when smaller) |
+| 6 | bitcode, compressed | same for the bitcode section (instead of kind 4) |
 | 4 | bitcode | LLVM bitcode of the small, self-contained exported functions (see below), always written in library mode. Readers that do not know the kind ignore it |
 
 The format version stays 1. A library whose interface is the older minified text (no `DJI1` magic) is rejected with a message to build it again; a file with a greater version is rejected as unsupported. The interface is the token stream of the declarations, not text. It starts with the magic `DJI1` and holds, as varints:
@@ -141,4 +147,4 @@ LLVM), a warning is printed and the library is used without inlining. `--inspect
 - Static variable initializers and global constructors across libraries (header globals are declarations only).
 - Reflection method pointers (`funcPtr`) and `[Reflect]` tables of library types when mixed with `--reflect-all`.
 - Cross-target libraries in one file (one interface, several objects per triple). Today each target has its own `.djlib`: while cross-compiling, `<lib-dir>/<triple>/<name>.djlib` is preferred over `<lib-dir>/<name>.djlib`, and a library built for the host is loaded only for its procedural macros (they run in the JIT; nothing of it is linked), which is how `ui_macros` serves a web build. A prebuilt std is `<lib-dir>/<triple>/std.djlib`; without it the std is compiled from source.
-- Compression of the interface and object sections.
+- Compression of the object section (it stays raw: the linker needs it extracted on disk).

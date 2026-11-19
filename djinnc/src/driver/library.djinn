@@ -55,7 +55,12 @@ struct Library {
     const i32 SECTION_INTERFACE = 2;
     const i32 SECTION_OBJECT = 3;
     const i32 SECTION_BITCODE = 4;
+    // the same sections stored as `u32 raw size` + an LZ4 block; readers that do not know the kinds ignore them
+    const i32 SECTION_INTERFACE_LZ4 = 5;
+    const i32 SECTION_BITCODE_LZ4 = 6;
     const i32 FLAG_STD = 1;
+    // section checksums and the interface hash use the vectorizable text hash instead of FNV-1a (older libraries use FNV-1a)
+    const i32 FLAG_TEXT_HASH = 2;
 
     public static bool active() {
         return library_loaded != 0;
@@ -170,6 +175,14 @@ struct Library {
             value = (value << 8) | (u64)(u8)data[offset + i];
         }
         return value;
+    }
+
+    // Checksum of a section of the library whose header is `header`: the text hash when the header says so.
+    static unsafe u64 section_checksum(ptr<i8> header, ptr<i8> data, i32 length) {
+        if ((Library.get_u32(header, 16) & (u32)Library.FLAG_TEXT_HASH) != 0) {
+            return TextHash.of(data, length);
+        }
+        return Library.checksum(data, length);
     }
 
     static unsafe u64 checksum(ptr<i8> data, i32 length) {
@@ -753,15 +766,22 @@ struct Library {
             Library.put_text(manifest, link, strlen(link));
         }
 
-        mut u32 flags = 0;
+        mut u32 flags = (u32)Library.FLAG_TEXT_HASH;
         if (options.use_std) {
-            flags = (u32)Library.FLAG_STD;
+            flags = flags | (u32)Library.FLAG_STD;
         }
         ptr<i8> bitcode = library_pending_bitcode;
         i32 bitcode_length = (i32)library_pending_bitcode_size;
         mut i32 section_count = 3;
         if (bitcode != null) {
             section_count = 4;
+        }
+        // Interface and bitcode are stored compressed when that is smaller; the object stays raw (the linker needs it
+        // extracted on disk), and so does the small manifest.
+        ByteBuffer* iface_stored = Library.compressed(iface.data, iface.length, options.no_compress);
+        mut ByteBuffer* bitcode_stored = ByteBuffer.create();
+        if (bitcode != null) {
+            bitcode_stored = Library.compressed(bitcode, bitcode_length, options.no_compress);
         }
         i32 table_size = Library.HEADER_SIZE + section_count * Library.ENTRY_SIZE;
         ByteBuffer* out = ByteBuffer.create();
@@ -779,7 +799,7 @@ struct Library {
         }
         Library.put_fixed(out, build_id);
         // checksum of the interface section: a consumer checks that the interface it parses is the one the header names
-        Library.put_u64(out, Library.checksum(iface.data, iface.length));
+        Library.put_u64(out, TextHash.of(iface.data, iface.length));
         while (out.length < Library.HEADER_SIZE) {
             out.append_byte(0);
         }
@@ -788,28 +808,35 @@ struct Library {
         for (mut i32 s = 0; s < section_count; s = s + 1) {
             mut ptr<i8> data = manifest.data;
             mut i32 size = manifest.length;
+            mut i32 kind = s + 1;
             if (s == 1) {
-                data = iface.data;
-                size = iface.length;
+                data = iface_stored.data;
+                size = iface_stored.length;
+                if (iface_stored.length != iface.length) {
+                    kind = Library.SECTION_INTERFACE_LZ4;
+                }
             } else if (s == 2) {
                 data = object;
                 size = object_length;
             } else if (s == 3) {
-                data = bitcode;
-                size = bitcode_length;
+                data = bitcode_stored.data;
+                size = bitcode_stored.length;
+                if (bitcode_stored.length != bitcode_length) {
+                    kind = Library.SECTION_BITCODE_LZ4;
+                }
             }
-            Library.put_u32(out, (u32)(s + 1));
+            Library.put_u32(out, (u32)kind);
             Library.put_u32(out, 0);
             Library.put_u64(out, offset);
             Library.put_u64(out, (u64)size);
-            Library.put_u64(out, Library.checksum(data, size));
+            Library.put_u64(out, TextHash.of(data, size));
             offset = offset + (u64)size;
         }
         out.append_slice(manifest.data, manifest.length);
-        out.append_slice(iface.data, iface.length);
+        out.append_slice(iface_stored.data, iface_stored.length);
         out.append_slice(object, object_length);
         if (bitcode != null) {
-            out.append_slice(bitcode, bitcode_length);
+            out.append_slice(bitcode_stored.data, bitcode_stored.length);
         }
         if (Library.same_content(options.output, out.data, out.length)) {
             // nothing changed (interface, object, bitcode and manifest are byte for byte the same): keep the
@@ -818,6 +845,102 @@ struct Library {
             return true;
         }
         return Files.write_bytes(options.output, out.data, out.length);
+    }
+
+    // The bytes to store for a section: the data itself, or `u32 raw size` + an LZ4 block when that is smaller
+    // (the stored length tells which: it differs from the raw length only for a compressed section).
+    static unsafe ByteBuffer* compressed(ptr<i8> data, i32 length, bool disabled) {
+        ByteBuffer* raw = ByteBuffer.create();
+        raw.append_slice(data, length);
+        if (disabled || length < 64) {
+            return raw;
+        }
+        ByteBuffer* packed = ByteBuffer.create();
+        Library.put_u32(packed, (u32)length);
+        Lz4.compress(data, length, packed);
+        if (packed.length >= length) {
+            return raw;
+        }
+        // never store what does not decode back to the same bytes: a compressor bug must not damage a library
+        ptr<i8> again = (ptr<i8>)Memory.zalloc((u64)length + 1);
+        if (!Lz4.decompress(packed.data + 4, packed.length - 4, again, length) || memcmp(again, data, (u64)length) != 0) {
+            logger_warn(Log.get(), "djinnc: compressing a library section failed its round trip check; storing it raw");
+            return raw;
+        }
+        return packed;
+    }
+
+    // Returns the library with every compressed section expanded in place of its stored form, so the rest of the
+    // compiler reads sections the same way whether or not the file was compressed. The stored bytes are checked
+    // against the section checksum first; null (and a message) when one is damaged. A file with nothing compressed
+    // is returned as it is. `length` is updated to the size of the returned image.
+    static unsafe ptr<i8> expand(ptr<i8> data, ptr<i32> length, ptr<i8> path) {
+        i32 count = (i32)Library.get_u32(data, 20);
+        i32 table = (i32)Library.get_u32(data, 24);
+        if (table < Library.HEADER_SIZE || count < 0 || count > 64 || table + count * Library.ENTRY_SIZE > length[0]) {
+            return data;
+        }
+        mut bool any = false;
+        for (mut i32 s = 0; s < count; s = s + 1) {
+            u32 kind = Library.get_u32(data, table + s * Library.ENTRY_SIZE);
+            if (kind == (u32)Library.SECTION_INTERFACE_LZ4 || kind == (u32)Library.SECTION_BITCODE_LZ4) {
+                any = true;
+            }
+        }
+        if (!any) {
+            return data;
+        }
+        i32 head_size = table + count * Library.ENTRY_SIZE;
+        ByteBuffer* entries = ByteBuffer.create();
+        ByteBuffer* body = ByteBuffer.create();
+        for (mut i32 s = 0; s < count; s = s + 1) {
+            i32 entry = table + s * Library.ENTRY_SIZE;
+            u32 kind = Library.get_u32(data, entry);
+            u64 start = Library.get_u64(data, entry + 8);
+            u64 span = Library.get_u64(data, entry + 16);
+            if (start + span > (u64)length[0]) {
+                logger_error(Log.get(), "djinnc: '%s' is corrupted", path);
+                return null;
+            }
+            mut ptr<i8> section = data + (i32)start;
+            mut i32 size = (i32)span;
+            mut u32 plain_kind = kind;
+            if (kind == (u32)Library.SECTION_INTERFACE_LZ4 || kind == (u32)Library.SECTION_BITCODE_LZ4) {
+                if (size < 4 || Library.section_checksum(data, section, size) != Library.get_u64(data, entry + 24)) {
+                    logger_error(Log.get(), "djinnc: '%s' is corrupted", path);
+                    return null;
+                }
+                i32 raw_size = (i32)Library.get_u32(section, 0);
+                if (raw_size <= 0 || raw_size > 1073741824) {
+                    logger_error(Log.get(), "djinnc: '%s' is corrupted", path);
+                    return null;
+                }
+                ptr<i8> raw = (ptr<i8>)Memory.zalloc((u64)raw_size + 1);
+                if (!Lz4.decompress(section + 4, size - 4, raw, raw_size)) {
+                    logger_error(Log.get(), "djinnc: '%s' is corrupted (a compressed section does not decode)", path);
+                    return null;
+                }
+                section = raw;
+                size = raw_size;
+                plain_kind = (u32)Library.SECTION_INTERFACE;
+                if (kind == (u32)Library.SECTION_BITCODE_LZ4) {
+                    plain_kind = (u32)Library.SECTION_BITCODE;
+                }
+            }
+            // an entry of the expanded image: raw size and checksum, offset after the table and the earlier sections
+            Library.put_u32(entries, plain_kind);
+            Library.put_u32(entries, 0);
+            Library.put_u64(entries, (u64)(head_size + body.length));
+            Library.put_u64(entries, (u64)size);
+            Library.put_u64(entries, Library.section_checksum(data, section, size));
+            body.append_slice(section, size);
+        }
+        ByteBuffer* image = ByteBuffer.create();
+        image.append_slice(data, table);
+        image.append_slice(entries.data, entries.length);
+        image.append_slice(body.data, body.length);
+        length[0] = image.length;
+        return image.data;
     }
 
     // True when the file already holds a library with the same header (up to the label) and sections that store
@@ -872,7 +995,7 @@ struct Library {
             }
             offset[0] = (i32)start;
             size[0] = (i32)span;
-            return Library.checksum(data + (i32)start, (i32)span) == Library.get_u64(data, entry + 24);
+            return Library.section_checksum(data, data + (i32)start, (i32)span) == Library.get_u64(data, entry + 24);
         }
         return false;
     }
@@ -1046,7 +1169,7 @@ struct Library {
 
     public static unsafe i32 load(Options* options, ptr<i8> path, PointerList* diagnostics_list) {
         i32 length = 0;
-        ptr<i8> data = Files.read_bytes(path, &length);
+        mut ptr<i8> data = Files.read_bytes(path, &length);
         if (data == null || length < Library.HEADER_SIZE || memcmp(data, "DJINNLIB", 8) != 0) {
             logger_error(Log.get(), "djinnc: '%s' is not a djinn library", path);
             return -1;
@@ -1064,6 +1187,10 @@ struct Library {
                 (i32)(Library.COMPILER_VERSION >> 16), (i32)((Library.COMPILER_VERSION >> 8) & 255), (i32)(Library.COMPILER_VERSION & 255));
             return -1;
         }
+        data = Library.expand(data, &length, path);
+        if (data == null) {
+            return -1;
+        }
         i32 interface_offset = 0;
         i32 interface_size = 0;
         i32 object_offset = 0;
@@ -1079,7 +1206,7 @@ struct Library {
         }
         // the header names the interface it was built with (0 in libraries written before the field existed)
         u64 interface_hash = Library.get_u64(data, Library.INTERFACE_HASH_OFFSET);
-        if (interface_hash != 0 && interface_hash != Library.checksum(data + interface_offset, interface_size)) {
+        if (interface_hash != 0 && interface_hash != Library.section_checksum(data, data + interface_offset, interface_size)) {
             logger_error(Log.get(), "djinnc: '%s' is stale: its interface does not match the one recorded in the header; build the library again", path);
             return -1;
         }
@@ -1189,7 +1316,19 @@ struct Library {
         out.append_byte(10);
     }
 
-    public static unsafe ByteBuffer* describe(ptr<i8> data, i32 length, ptr<i8> path, bool sections_only) {
+    // "stored:" line for a section kept compressed in the file: the bytes it takes there
+    static unsafe void stored_note(ByteBuffer* out, ptr<i8> stored, i32 stored_length, i32 compressed_kind) {
+        i32 count = (i32)Library.get_u32(stored, 20);
+        i32 table = (i32)Library.get_u32(stored, 24);
+        for (mut i32 s = 0; s < count; s = s + 1) {
+            i32 entry = table + s * Library.ENTRY_SIZE;
+            if (entry + Library.ENTRY_SIZE <= stored_length && (i32)Library.get_u32(stored, entry) == compressed_kind) {
+                Library.number_field(out, "            stored: ", (i32)Library.get_u64(stored, entry + 16), " bytes (lz4)");
+            }
+        }
+    }
+
+    public static unsafe ByteBuffer* describe(ptr<i8> data, i32 length, ptr<i8> path, bool sections_only, ptr<i8> stored, i32 stored_length) {
         ByteBuffer* out = ByteBuffer.create();
         u32 version = Library.get_u32(data, 8);
         u32 compiler = Library.get_u32(data, 28);
@@ -1252,14 +1391,16 @@ struct Library {
             }
         }
         out.append("  integrity:  ok\n");
-        Library.number_field(out, "file size:  ", length, " bytes");
+        Library.number_field(out, "file size:  ", stored_length, " bytes");
         Library.number_field(out, "manifest:   ", manifest_size, " bytes");
         Library.number_field(out, "interface:  ", interface_size, " bytes (declaration tokens, no source text)");
+        Library.stored_note(out, stored, stored_length, Library.SECTION_INTERFACE_LZ4);
         Library.number_field(out, "object:     ", object_size, " bytes (compiled code)");
         i32 bitcode_offset = 0;
         i32 bitcode_size = 0;
         if (Library.section(data, length, Library.SECTION_BITCODE, &bitcode_offset, &bitcode_size)) {
             Library.number_field(out, "bitcode:    ", bitcode_size, " bytes (small functions, inlined by consumers)");
+            Library.stored_note(out, stored, stored_length, Library.SECTION_BITCODE_LZ4);
         } else {
             out.append("  bitcode:    none
 ");
@@ -1350,12 +1491,17 @@ struct Library {
 
     public static i32 inspect(ptr<i8> path, ptr<i8> output_path, bool sections_only) {
         i32 length = 0;
-        ptr<i8> data = Files.read_bytes(path, &length);
-        if (data == null || length < Library.HEADER_SIZE || memcmp(data, "DJINNLIB", 8) != 0) {
+        ptr<i8> stored = Files.read_bytes(path, &length);
+        if (stored == null || length < Library.HEADER_SIZE || memcmp(stored, "DJINNLIB", 8) != 0) {
             logger_error(Log.get(), "djinnc: '%s' is not a djinn library", path);
             return 1;
         }
-        ByteBuffer* text = Library.describe(data, length, path, sections_only);
+        i32 stored_length = length;
+        ptr<i8> data = Library.expand(stored, &length, path);
+        if (data == null) {
+            return 1;
+        }
+        ByteBuffer* text = Library.describe(data, length, path, sections_only, stored, stored_length);
         if (output_path != null) {
             if (!Files.write_bytes(output_path, text.data, text.length)) {
                 return 1;

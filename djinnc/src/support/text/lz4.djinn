@@ -1,0 +1,153 @@
+namespace djinnc;
+
+// LZ4 block format (https://github.com/lz4/lz4/blob/dev/doc/lz4_Block_format.md), used to store the interface and
+// bitcode sections of a .djlib. The compressor is a greedy single-probe hash matcher: small and fast, and a 64 KiB
+// window, which is all those sections need. Any LZ4 block decoder reads its output.
+struct Lz4 {
+    const i32 HASH_BITS = 16;
+    const i32 MIN_MATCH = 4;
+    const i32 LAST_LITERALS = 5;
+    const i32 MATCH_FIND_LIMIT = 12;
+    const i32 MAX_OFFSET = 65535;
+
+    static unsafe u32 read32(ptr<i8> data, i32 at) {
+        return (u32)(u8)data[at] | ((u32)(u8)data[at + 1] << 8) | ((u32)(u8)data[at + 2] << 16) | ((u32)(u8)data[at + 3] << 24);
+    }
+
+    static unsafe void put_length(ByteBuffer* out, i32 extra) {
+        mut i32 rest = extra;
+        while (rest >= 255) {
+            out.append_byte(255);
+            rest = rest - 255;
+        }
+        out.append_byte(rest);
+    }
+
+    // Writes one sequence: `literals` bytes from `from`, then a match (offset, length) unless length is 0 (the last one).
+    static unsafe void emit(ByteBuffer* out, ptr<i8> from, i32 literals, i32 offset, i32 match_length) {
+        mut i32 token = 0;
+        if (literals >= 15) {
+            token = 15 << 4;
+        } else {
+            token = literals << 4;
+        }
+        if (match_length > 0) {
+            i32 coded = match_length - Lz4.MIN_MATCH;
+            if (coded >= 15) {
+                token = token | 15;
+            } else {
+                token = token | coded;
+            }
+        }
+        out.append_byte(token);
+        if (literals >= 15) {
+            Lz4.put_length(out, literals - 15);
+        }
+        out.append_slice(from, literals);
+        if (match_length > 0) {
+            out.append_byte(offset & 255);
+            out.append_byte(offset >> 8);
+            i32 coded = match_length - Lz4.MIN_MATCH;
+            if (coded >= 15) {
+                Lz4.put_length(out, coded - 15);
+            }
+        }
+    }
+
+    public static unsafe void compress(ptr<i8> source, i32 length, ByteBuffer* out) {
+        ptr<i32> table = (ptr<i32>)Memory.zalloc((u64)(4 << Lz4.HASH_BITS));
+        mut i32 anchor = 0;
+        mut i32 at = 0;
+        i32 limit = length - Lz4.MATCH_FIND_LIMIT;
+        while (at < limit) {
+            u32 sequence = Lz4.read32(source, at);
+            u32w mixed = (u32w)sequence * 2654435761;
+            i32 slot = (i32)(mixed >> (u32)(32 - Lz4.HASH_BITS));
+            i32 candidate = table[slot] - 1;
+            table[slot] = at + 1;
+            if (candidate < 0 || at - candidate > Lz4.MAX_OFFSET || Lz4.read32(source, candidate) != sequence) {
+                at = at + 1;
+                continue;
+            }
+            i32 longest = length - Lz4.LAST_LITERALS - at;
+            mut i32 matched = Lz4.MIN_MATCH;
+            while (matched < longest && source[candidate + matched] == source[at + matched]) {
+                matched = matched + 1;
+            }
+            Lz4.emit(out, source + anchor, at - anchor, at - candidate, matched);
+            at = at + matched;
+            anchor = at;
+        }
+        Lz4.emit(out, source + anchor, length - anchor, 0, 0);
+    }
+
+    // Decodes a block that must produce exactly `raw_length` bytes into `target`. False on any malformed input.
+    public static unsafe bool decompress(ptr<i8> source, i32 length, ptr<i8> target, i32 raw_length) {
+        mut i32 in_at = 0;
+        mut i32 out_at = 0;
+        while (in_at < length) {
+            i32 token = (i32)(u8)source[in_at];
+            in_at = in_at + 1;
+            mut i32 literals = token >> 4;
+            if (literals == 15) {
+                while (true) {
+                    if (in_at >= length) {
+                        return false;
+                    }
+                    i32 more = (i32)(u8)source[in_at];
+                    in_at = in_at + 1;
+                    literals = literals + more;
+                    if (literals > raw_length) {
+                        return false;
+                    }
+                    if (more != 255) {
+                        break;
+                    }
+                }
+            }
+            if (literals > length - in_at || literals > raw_length - out_at) {
+                return false;
+            }
+            memcpy(target + out_at, source + in_at, (u64)literals);
+            in_at = in_at + literals;
+            out_at = out_at + literals;
+            if (in_at == length) {
+                break;
+            }
+            if (in_at + 2 > length) {
+                return false;
+            }
+            i32 offset = (i32)(u8)source[in_at] | ((i32)(u8)source[in_at + 1] << 8);
+            in_at = in_at + 2;
+            if (offset == 0 || offset > out_at) {
+                return false;
+            }
+            mut i32 matched = token & 15;
+            if (matched == 15) {
+                while (true) {
+                    if (in_at >= length) {
+                        return false;
+                    }
+                    i32 more = (i32)(u8)source[in_at];
+                    in_at = in_at + 1;
+                    matched = matched + more;
+                    if (matched > raw_length) {
+                        return false;
+                    }
+                    if (more != 255) {
+                        break;
+                    }
+                }
+            }
+            matched = matched + Lz4.MIN_MATCH;
+            if (matched > raw_length - out_at) {
+                return false;
+            }
+            for (mut i32 i = 0; i < matched; i = i + 1) {
+                target[out_at + i] = target[out_at - offset + i];
+            }
+            out_at = out_at + matched;
+        }
+        return out_at == raw_length;
+    }
+}
