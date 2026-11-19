@@ -41,6 +41,8 @@ struct DevTools {
     mut f64 sum_present;
     mut f64 worst;
     mut f32* history;
+    mut void* scratch;
+    mut i8* screen;
     mut u32 head;
 
     // the allocator, as it stood when the frame in progress began (mark) and what the frames since the last refresh took
@@ -110,6 +112,10 @@ struct DevTools {
         d.started = DevTools.now();
         d.refreshed = d.started;
         d.last_cpu_wall = d.started;
+        // the buffers every sample and every redraw reuse: the dev tools itself allocates nothing once it runs, so
+        // what the HEAP block counts is the application's
+        d.scratch = __djinn_alloc_zeroed(128);
+        d.screen = (i8*)__djinn_alloc_zeroed((size_long)DevTools.OUT);
         d.history = (f32*)__djinn_alloc_zeroed((size_long)(DevTools.HISTORY * sizeof(f32)));
         d.stage_names = (void**)__djinn_alloc_zeroed((size_long)(DevTools.STAGES * 8));
         d.stage_ms = (f64*)__djinn_alloc_zeroed((size_long)(DevTools.STAGES * 8));
@@ -147,12 +153,11 @@ struct DevTools {
         if (d == (DevTools*)0) {
             return;
         }
-        u64* stats = (u64*)Raw.make(40);
+        u64* stats = (u64*)d.scratch;
         __djinn_alloc_stats(stats);
         d.mark_allocs = stats[0];
         d.mark_frees = stats[1];
         d.mark_bytes = stats[2];
-        __djinn_free((void*)stats);
     }
 
     // One frame that was drawn: the microseconds of its three stages and the size of the scene.
@@ -171,12 +176,11 @@ struct DevTools {
                 d.stage_count = d.stage_count + 1;
             }
         }
-        u64* stats = (u64*)Raw.make(40);
+        u64* stats = (u64*)d.scratch;
         __djinn_alloc_stats(stats);
         u64 allocs = stats[0] - d.mark_allocs;
         u64 frees = stats[1] - d.mark_frees;
         u64 bytes = stats[2] - d.mark_bytes;
-        __djinn_free((void*)stats);
         d.sum_allocs = d.sum_allocs + allocs;
         d.sum_frees = d.sum_frees + frees;
         d.sum_bytes = d.sum_bytes + bytes;
@@ -201,11 +205,10 @@ struct DevTools {
 
     // CPU time of the process (user, kernel) in microseconds: GetProcessTimes counts 100 ns units.
     static unsafe void sample_cpu(DevTools* d, bool first) {
-        void* times = Raw.make(32);
+        void* times = d.scratch;
         GetProcessTimes(GetCurrentProcess(), times, times + 8, times + 16, times + 24);
         f64 kernel = (f64)Raw.get_u64(times, 16) / 10.0;
         f64 user = (f64)Raw.get_u64(times, 24) / 10.0;
-        __djinn_free(times);
         u64 wall = DevTools.now();
         if (!first && wall > d.last_cpu_wall) {
             f64 span = (f64)(wall - d.last_cpu_wall) * (f64)d.cores;
@@ -219,14 +222,13 @@ struct DevTools {
 
     // PROCESS_MEMORY_COUNTERS_EX: PageFaultCount@4, PeakWorkingSetSize@8, WorkingSetSize@16, PrivateUsage@72.
     static unsafe void sample_memory(DevTools* d) {
-        void* counters = Raw.make(80);
+        void* counters = d.scratch;
         Raw.put_u32(counters, 0, 80);
         K32GetProcessMemoryInfo(GetCurrentProcess(), counters, 80);
         d.page_faults = Raw.get_u32(counters, 4);
         d.peak_working_set = Raw.get_u64(counters, 8);
         d.working_set = Raw.get_u64(counters, 16);
         d.private_bytes = Raw.get_u64(counters, 72);
-        __djinn_free(counters);
     }
 
     // Called from the message loop: twice a second it reads the process figures, averages the frames of that span
@@ -271,27 +273,25 @@ struct DevTools {
         d.sum_bytes = 0;
         d.worst_allocs = 0;
         d.worst_bytes = 0;
-        u64* stats = (u64*)Raw.make(40);
+        u64* stats = (u64*)d.scratch;
         __djinn_alloc_stats(stats);
         d.heap_allocs = stats[0];
         d.heap_frees = stats[1];
         d.heap_total = stats[2];
         d.heap_live = stats[3];
         d.heap_peak = stats[4];
-        __djinn_free((void*)stats);
         u64 live_blocks = d.heap_allocs - d.heap_frees;
         d.allocs_per_second = (f64)(d.heap_allocs - d.refresh_allocs) * 1000000.0 / span;
         d.growth_per_second = ((f64)live_blocks - (f64)d.refresh_live_blocks) * 1000000.0 / span;
         d.refresh_allocs = d.heap_allocs;
         d.refresh_live_blocks = live_blocks;
-        u64* parts = (u64*)Raw.make(8 * UiMemory.PARTS);
+        u64* parts = (u64*)d.scratch;
         UiMemory.report(parts);
         d.ui_tree = parts[0];
         d.ui_fonts = parts[1];
         d.ui_styles = parts[2];
         d.ui_nodes = parts[3];
         d.ui_sheets = parts[4];
-        __djinn_free((void*)parts);
         d.frames = 0;
         d.sum_layout = 0.0;
         d.sum_draw = 0.0;
@@ -315,6 +315,8 @@ struct DevTools {
             pos = DevTools.put(out, pos, "?1049l");
             write(1, out, (u64)pos);
         }
+        __djinn_free(d.scratch);
+        __djinn_free((void*)d.screen);
         __djinn_free((void*)d.history);
         __djinn_free((void*)d.stage_names);
         __djinn_free((void*)d.stage_ms);
@@ -437,7 +439,7 @@ struct DevTools {
     }
 
     static unsafe void draw(DevTools* d) {
-        i8* out = (i8*)__djinn_alloc_zeroed((size_long)DevTools.OUT);
+        i8* out = d.screen;
         mut i32 p = 0;
         if (!d.open) {
             d.open = true;
@@ -568,6 +570,5 @@ struct DevTools {
         p = DevTools.csi(out, p);
         p = DevTools.put(out, p, "J");
         write(1, out, (u64)p);
-        __djinn_free((void*)out);
     }
 }
