@@ -6,6 +6,11 @@ import ui;
 
 namespace win32;
 
+extern "C" {
+    // the runtime's allocation counters: blocks allocated, blocks freed, bytes allocated in all, bytes alive, peak bytes alive
+    void __djinn_alloc_stats(u64* out);
+}
+
 // A small dev tools for the native host, drawn as a text UI in the console of the process: frame rate and the time
 // of every stage of a frame (layout and paint, draw, present), the CPU the process uses, its memory, the size of the
 // scene and how long the start-up stages took. It is off by default; WinHost.run turns it on when DJINN_UI_DEVTOOLS
@@ -37,6 +42,31 @@ struct DevTools {
     mut f64 worst;
     mut f32* history;
     mut u32 head;
+
+    // the allocator, as it stood when the frame in progress began (mark) and what the frames since the last refresh took
+    mut u64 mark_allocs;
+    mut u64 mark_frees;
+    mut u64 mark_bytes;
+    mut u64 sum_allocs;
+    mut u64 sum_frees;
+    mut u64 sum_bytes;
+    mut u64 worst_allocs;
+    mut u64 worst_bytes;
+    mut u64 heap_allocs;
+    mut u64 heap_frees;
+    mut u64 heap_total;
+    mut u64 heap_live;
+    mut u64 heap_peak;
+    mut u64 refresh_allocs;
+    mut u64 refresh_live_blocks;
+    // what the screen shows
+    mut f64 per_frame_allocs;
+    mut f64 per_frame_frees;
+    mut f64 per_frame_bytes;
+    mut f64 allocs_per_second;
+    mut f64 growth_per_second;
+    mut u64 shown_worst_allocs;
+    mut u64 shown_worst_bytes;
 
     // what the screen shows, set at each refresh
     mut f64 fps;
@@ -105,6 +135,19 @@ struct DevTools {
         d.stage_count = d.stage_count + 1;
     }
 
+    // Called when a frame starts: remembers the allocator's counters, so that frame() can tell what the frame took.
+    public static unsafe void mark(DevTools* d) {
+        if (d == (DevTools*)0) {
+            return;
+        }
+        u64* stats = (u64*)Raw.make(40);
+        __djinn_alloc_stats(stats);
+        d.mark_allocs = stats[0];
+        d.mark_frees = stats[1];
+        d.mark_bytes = stats[2];
+        __djinn_free((void*)stats);
+    }
+
     // One frame that was drawn: the microseconds of its three stages and the size of the scene.
     public static unsafe void frame(DevTools* d, u64 layout, u64 draw, u64 present, u32 vertices, u32 width, u32 height) {
         if (d == (DevTools*)0) {
@@ -120,6 +163,19 @@ struct DevTools {
             if (d.stage_count < DevTools.STAGES) {
                 d.stage_count = d.stage_count + 1;
             }
+        }
+        u64* stats = (u64*)Raw.make(40);
+        __djinn_alloc_stats(stats);
+        u64 allocs = stats[0] - d.mark_allocs;
+        u64 frees = stats[1] - d.mark_frees;
+        u64 bytes = stats[2] - d.mark_bytes;
+        __djinn_free((void*)stats);
+        d.sum_allocs = d.sum_allocs + allocs;
+        d.sum_frees = d.sum_frees + frees;
+        d.sum_bytes = d.sum_bytes + bytes;
+        if (bytes > d.worst_bytes) {
+            d.worst_bytes = bytes;
+            d.worst_allocs = allocs;
         }
         d.frames = d.frames + 1;
         d.total_frames = d.total_frames + 1;
@@ -191,6 +247,36 @@ struct DevTools {
         d.fps = (f64)d.frames * 1000000.0 / span;
         d.busy = (d.sum_layout + d.sum_draw + d.sum_present) * 1000.0 * 100.0 / span;
         d.shown_worst = d.worst;
+        if (d.frames > 0) {
+            f64 n = (f64)d.frames;
+            d.per_frame_allocs = (f64)d.sum_allocs / n;
+            d.per_frame_frees = (f64)d.sum_frees / n;
+            d.per_frame_bytes = (f64)d.sum_bytes / n;
+        } else {
+            d.per_frame_allocs = 0.0;
+            d.per_frame_frees = 0.0;
+            d.per_frame_bytes = 0.0;
+        }
+        d.shown_worst_allocs = d.worst_allocs;
+        d.shown_worst_bytes = d.worst_bytes;
+        d.sum_allocs = 0;
+        d.sum_frees = 0;
+        d.sum_bytes = 0;
+        d.worst_allocs = 0;
+        d.worst_bytes = 0;
+        u64* stats = (u64*)Raw.make(40);
+        __djinn_alloc_stats(stats);
+        d.heap_allocs = stats[0];
+        d.heap_frees = stats[1];
+        d.heap_total = stats[2];
+        d.heap_live = stats[3];
+        d.heap_peak = stats[4];
+        __djinn_free((void*)stats);
+        u64 live_blocks = d.heap_allocs - d.heap_frees;
+        d.allocs_per_second = (f64)(d.heap_allocs - d.refresh_allocs) * 1000000.0 / span;
+        d.growth_per_second = ((f64)live_blocks - (f64)d.refresh_live_blocks) * 1000000.0 / span;
+        d.refresh_allocs = d.heap_allocs;
+        d.refresh_live_blocks = live_blocks;
         d.frames = 0;
         d.sum_layout = 0.0;
         d.sum_draw = 0.0;
@@ -409,6 +495,33 @@ struct DevTools {
         p = DevTools.bar(out, p, share, 28, false, 35);
         p = p + (i32)snprintf(out + p, (size_long)(DevTools.OUT - p - 8), " %.1f MB   peak %.1f MB   private %.1f MB   %u page faults",
             (f64)d.working_set / megabyte, (f64)d.peak_working_set / megabyte, (f64)d.private_bytes / megabyte, d.page_faults);
+        p = DevTools.eol(out, p);
+
+        // the allocator: what is alive now against the peak, how many blocks, and what a frame costs
+        // what the process holds that the allocator never saw: the GPU driver, the system libraries, the code
+        mut f64 outside = 0.0;
+        if (d.private_bytes > d.heap_live) {
+            outside = (f64)(d.private_bytes - d.heap_live);
+        }
+        mut f64 heap_share = 0.0;
+        if (d.heap_peak > 0) {
+            heap_share = (f64)d.heap_live / (f64)d.heap_peak;
+        }
+        p = DevTools.sgr(out, p, 1);
+        p = DevTools.put(out, p, " HEAP");
+        p = DevTools.sgr(out, p, 0);
+        p = DevTools.put(out, p, "     ");
+        p = DevTools.bar(out, p, heap_share, 28, false, 35);
+        p = p + (i32)snprintf(out + p, (size_long)(DevTools.OUT - p - 8), " %.2f MB   peak %.2f MB   %llu blocks   %.1f MB outside the heap",
+            (f64)d.heap_live / megabyte, (f64)d.heap_peak / megabyte, d.heap_allocs - d.heap_frees, outside / megabyte);
+        p = DevTools.eol(out, p);
+        p = DevTools.put(out, p, "          ");
+        p = p + (i32)snprintf(out + p, (size_long)(DevTools.OUT - p - 8), "%.0f allocs/s   blocks alive %+.0f/s   %llu allocs, %llu frees, %.1f MB in all",
+            d.allocs_per_second, d.growth_per_second, d.heap_allocs, d.heap_frees, (f64)d.heap_total / megabyte);
+        p = DevTools.eol(out, p);
+        p = DevTools.put(out, p, "          ");
+        p = p + (i32)snprintf(out + p, (size_long)(DevTools.OUT - p - 8), "a frame: %.1f allocs %.1f frees %.1f KB   worst %llu allocs %.1f KB",
+            d.per_frame_allocs, d.per_frame_frees, d.per_frame_bytes / 1024.0, d.shown_worst_allocs, (f64)d.shown_worst_bytes / 1024.0);
         p = DevTools.eol(out, p);
         p = DevTools.eol(out, p);
 

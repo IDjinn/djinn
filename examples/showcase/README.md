@@ -19,6 +19,8 @@ builds the same tree natively and on the web.
 
 `DJINN_UI_DEVTOOLS=1 showcase.exe` shows a text UI (std `Spectre`, `libs/win32/src/devtools.djinn`) in the console of the
 native build: frames per second and a sparkline of the last frames, the time of each stage of a frame (layout and paint,
-draw, present) against the 16.7 ms of 60 fps, process CPU (user and kernel), working set, peak and private memory, the size
+draw, present) against the 16.7 ms of 60 fps, process CPU (user and kernel), working set, peak and private memory, the heap
+(`__djinn_alloc_stats` in the runtime: bytes alive and peak, blocks alive and how fast they grow, allocations per second and
+per frame, the worst frame, and how much of the private memory the allocator never saw: GPU driver, system libraries), the size
 of the scene, and how long the start-up stages took (mount, window, GPU, first frame). It redraws twice a second on the
 console's alternate screen and gives the console back when the window closes.
