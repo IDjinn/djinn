@@ -27,6 +27,13 @@ function perfDirectory(root: string): string {
 
 function sourcesFor(target: string): string[] {
   const isDirectory = fs.statSync(target).isDirectory();
+  if (isDirectory && fs.existsSync(path.join(target, "djinn.proj"))) {
+    // A project: djinnc reads djinn.proj itself (sources, platform files, libraries).
+    return [toolchain.toWslPath(target)];
+  }
+  if (isDirectory && !fs.existsSync(path.join(target, "src"))) {
+    throw new Error(`"${target}" is not a Djinn project (no djinn.proj or src folder). Set "target" in launch.json to a project folder, for example "\${workspaceFolder}/examples/ui-bench".`);
+  }
   const source = isDirectory && fs.existsSync(path.join(target, "src")) ? path.join(target, "src") : target;
   const files = isDirectory ? build.sourcesOf(source) : [target];
   return files.map((file) => toolchain.toWslPath(file));
