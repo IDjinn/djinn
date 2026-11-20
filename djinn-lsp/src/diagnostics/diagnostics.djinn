@@ -7,6 +7,19 @@ struct LintItem {
     ptr<i8> message;
     ptr<i8> id;
     i32 severity;
+    // optional quick fix: replace the bytes [fix_from, fix_to) with fix_text (an insertion has from == to)
+    ptr<i8> fix_title;
+    ptr<i8> fix_text;
+    i32 fix_from;
+    i32 fix_to;
+
+    // Offers a quick fix with the finding. A finding without one is only reported.
+    public unsafe void fix(ptr<i8> title, i32 from, i32 to, ptr<i8> text) {
+        this.fix_title = title;
+        this.fix_from = from;
+        this.fix_to = to;
+        this.fix_text = text;
+    }
 }
 
 struct DiagSeverity {
@@ -23,12 +36,12 @@ struct DiagContext {
     Ast* ast;
     PointerList* items;
 
-    public unsafe void report_tokens(i32 first, i32 last, ptr<i8> id, ptr<i8> message, i32 severity) {
+    public unsafe LintItem* report_tokens(i32 first, i32 last, ptr<i8> id, ptr<i8> message, i32 severity) {
         if (first < 0 || last < first || last >= this.unit.token_count) {
-            return;
+            return (LintItem*)0;
         }
         if (!EditorConfig.get().lint_enabled(id)) {
-            return;
+            return (LintItem*)0;
         }
         LintItem* item = (LintItem*)Memory.zalloc(sizeof(LintItem));
         item.token = first;
@@ -37,20 +50,20 @@ struct DiagContext {
         item.id = id;
         item.severity = severity;
         this.items.push((ptr)item);
+        return item;
     }
 
-    // Reports the whole node.
-    public unsafe void report(AstNode* node, ptr<i8> id, ptr<i8> message, i32 severity) {
-        this.report_tokens(node.first, node.last, id, message, severity);
+    // Reports the whole node. Returns the finding (null when the user turned the rule off) to attach a fix to.
+    public unsafe LintItem* report(AstNode* node, ptr<i8> id, ptr<i8> message, i32 severity) {
+        return this.report_tokens(node.first, node.last, id, message, severity);
     }
 
     // Reports the name of a declaration (the whole node when it has none).
-    public unsafe void report_name(AstNode* node, ptr<i8> id, ptr<i8> message, i32 severity) {
+    public unsafe LintItem* report_name(AstNode* node, ptr<i8> id, ptr<i8> message, i32 severity) {
         if (node.name_tok >= 0) {
-            this.report_tokens(node.name_tok, node.name_tok, id, message, severity);
-        } else {
-            this.report(node, id, message, severity);
+            return this.report_tokens(node.name_tok, node.name_tok, id, message, severity);
         }
+        return this.report(node, id, message, severity);
     }
 
     public unsafe void add(LintItem* item) {
