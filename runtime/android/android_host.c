@@ -335,6 +335,110 @@ void djinn_android_insets(int* out)
     (*e)->DeleteLocalRef(e, activity_class);
 }
 
+// ---- clipboard (JNI) ------------------------------------------------------------------------------------------------
+
+static __thread char* djinn_clip = NULL;
+
+static jobject clipboard_manager(JNIEnv* e)
+{
+    jobject activity = djinn_app->activity->clazz;
+    jclass activity_class = (*e)->GetObjectClass(e, activity);
+    jmethodID get_service = (*e)->GetMethodID(e, activity_class, "getSystemService", "(Ljava/lang/String;)Ljava/lang/Object;");
+    jstring name = (*e)->NewStringUTF(e, "clipboard");
+    jobject manager = get_service != NULL ? (*e)->CallObjectMethod(e, activity, get_service, name) : NULL;
+    (*e)->DeleteLocalRef(e, name);
+    (*e)->DeleteLocalRef(e, activity_class);
+    return manager;
+}
+
+// Replaces the clipboard text (UTF-8).
+void djinn_android_clipboard_set(const char* text, int length)
+{
+    JNIEnv* e = jni();
+    if (e == NULL || djinn_app == NULL) return;
+    char* terminated = (char*)malloc((size_t)length + 1);
+    if (terminated == NULL) return;
+    memcpy(terminated, text, (size_t)length);
+    terminated[length] = 0;
+    jobject manager = clipboard_manager(e);
+    if (manager != NULL)
+    {
+        jclass data_class = (*e)->FindClass(e, "android/content/ClipData");
+        jmethodID new_text = (*e)->GetStaticMethodID(e, data_class, "newPlainText",
+            "(Ljava/lang/CharSequence;Ljava/lang/CharSequence;)Landroid/content/ClipData;");
+        jstring label = (*e)->NewStringUTF(e, "djinn");
+        jstring value = (*e)->NewStringUTF(e, terminated);
+        jobject clip = (*e)->CallStaticObjectMethod(e, data_class, new_text, label, value);
+        jclass manager_class = (*e)->GetObjectClass(e, manager);
+        jmethodID set_clip = (*e)->GetMethodID(e, manager_class, "setPrimaryClip", "(Landroid/content/ClipData;)V");
+        if (clip != NULL && set_clip != NULL) (*e)->CallVoidMethod(e, manager, set_clip, clip);
+        (*e)->DeleteLocalRef(e, manager_class);
+        (*e)->DeleteLocalRef(e, clip);
+        (*e)->DeleteLocalRef(e, value);
+        (*e)->DeleteLocalRef(e, label);
+        (*e)->DeleteLocalRef(e, data_class);
+        (*e)->DeleteLocalRef(e, manager);
+    }
+    if ((*e)->ExceptionCheck(e)) (*e)->ExceptionClear(e);
+    free(terminated);
+}
+
+// The clipboard text as UTF-8 (valid until the next call), or NULL when it holds none.
+const char* djinn_android_clipboard_get(int* length)
+{
+    JNIEnv* e = jni();
+    free(djinn_clip);
+    djinn_clip = NULL;
+    if (e == NULL || djinn_app == NULL) return NULL;
+    jobject manager = clipboard_manager(e);
+    if (manager != NULL)
+    {
+        jclass manager_class = (*e)->GetObjectClass(e, manager);
+        jmethodID get_clip = (*e)->GetMethodID(e, manager_class, "getPrimaryClip", "()Landroid/content/ClipData;");
+        jobject clip = get_clip != NULL ? (*e)->CallObjectMethod(e, manager, get_clip) : NULL;
+        if (clip != NULL)
+        {
+            jclass clip_class = (*e)->GetObjectClass(e, clip);
+            jmethodID count = (*e)->GetMethodID(e, clip_class, "getItemCount", "()I");
+            jmethodID item_at = (*e)->GetMethodID(e, clip_class, "getItemAt", "(I)Landroid/content/ClipData$Item;");
+            if (count != NULL && item_at != NULL && (*e)->CallIntMethod(e, clip, count) > 0)
+            {
+                jobject item = (*e)->CallObjectMethod(e, clip, item_at, 0);
+                jclass item_class = (*e)->GetObjectClass(e, item);
+                jmethodID coerce = (*e)->GetMethodID(e, item_class, "coerceToText", "(Landroid/content/Context;)Ljava/lang/CharSequence;");
+                jobject sequence = coerce != NULL ? (*e)->CallObjectMethod(e, item, coerce, djinn_app->activity->clazz) : NULL;
+                if (sequence != NULL)
+                {
+                    jclass object_class = (*e)->FindClass(e, "java/lang/Object");
+                    jmethodID to_string = (*e)->GetMethodID(e, object_class, "toString", "()Ljava/lang/String;");
+                    jstring text = (jstring)(*e)->CallObjectMethod(e, sequence, to_string);
+                    if (text != NULL)
+                    {
+                        const char* chars = (*e)->GetStringUTFChars(e, text, NULL);
+                        if (chars != NULL)
+                        {
+                            djinn_clip = strdup(chars);
+                            (*e)->ReleaseStringUTFChars(e, text, chars);
+                        }
+                        (*e)->DeleteLocalRef(e, text);
+                    }
+                    (*e)->DeleteLocalRef(e, object_class);
+                    (*e)->DeleteLocalRef(e, sequence);
+                }
+                (*e)->DeleteLocalRef(e, item_class);
+                (*e)->DeleteLocalRef(e, item);
+            }
+            (*e)->DeleteLocalRef(e, clip_class);
+            (*e)->DeleteLocalRef(e, clip);
+        }
+        (*e)->DeleteLocalRef(e, manager_class);
+        (*e)->DeleteLocalRef(e, manager);
+    }
+    if ((*e)->ExceptionCheck(e)) (*e)->ExceptionClear(e);
+    if (djinn_clip != NULL) *length = (int)strlen(djinn_clip);
+    return djinn_clip;
+}
+
 // ---- fonts ----------------------------------------------------------------------------------------------------------
 
 typedef struct { stbtt_fontinfo info; unsigned char* data; int loaded; int tried; } djinn_face_t;
