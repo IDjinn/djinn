@@ -115,4 +115,12 @@ export interface LaunchConfig {
   console?: string;
   MIMode?: string;
   profile?: ProfileSettings;
+  /** "android" builds the project for a device and installs it; anything else is the host. */
+  platform?: string;
+  /** Android: the adb serial (or "ask"); defaults to djinn.android.device. */
+  device?: string;
+  /** Android: arm64-v8a or x86_64; defaults to what the device runs. */
+  abi?: string;
+  /** Android: the application id; defaults to the `android:` section of djinn.proj. */
+  package?: string;
 }

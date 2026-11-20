@@ -77,3 +77,36 @@ The snippets "Djinn: Profile CPU", "Profile allocations", "Compare optimization 
 ## Debug builds
 
 Debug builds use `-O0` (`djinn.debug.optimization`) and, when available, a `std.djlib` built with debug info in a `debug/` folder next to the normal one, so locals and struct members are visible and breakpoints work in the standard library too.
+
+## Run and debug on Android
+
+Djinn UI apps (`libs/android`, see `examples/android-hello`) run on Android devices and emulators from the same F5.
+Needs the Android SDK and NDK (Android Studio installs both), a JDK (`keytool`, the APK is signed with a debug key), Git Bash
+on Windows, and a Djinn checkout or a toolchain with the Android tools. **Djinn: Android Doctor** lists what is missing.
+
+- **Djinn: Select Android Device** picks an attached device or starts a virtual device (AVD) and remembers it
+  (`djinn.android.device`). Without a choice the only attached device is used.
+- **Djinn: Run on Android** / launch configuration `Djinn: Run on Android` builds the app for the device's ABI
+  (`build/android/<abi>/`), installs the APK, starts it and streams its log into the *Djinn Android* output.
+  **Djinn: Stop Android App** ends it.
+- **Djinn: Debug on Android** / `Djinn: Debug on Android` builds a debuggable APK with debug info, starts `lldb-server` from the
+  NDK inside the app and attaches the LLDB debugger, so breakpoints are set in `.djinn` files. Needs the **CodeLLDB** extension
+  (`vadimcn.vscode-lldb`).
+- **Djinn: Android Screenshot** saves the device screen to `build/android/screenshots/` and opens it.
+- `djinn-android` tasks (`build`, `run`, `debug`) chain the same steps from `tasks.json`.
+
+The application id, label and minimum API come from an `android:` section of `djinn.proj` (all optional):
+
+```yaml
+android:
+  package: "dev.example.app"
+  label: "My app"
+  min-api: 26
+```
+
+Launch configuration properties: `platform: "android"`, `mode` (`run`, `debug`, `build`), `device` (an adb serial or `"ask"`),
+`abi` (`arm64-v8a` or `x86_64`) and `package`. Settings: `djinn.android.sdk`, `.ndk`, `.device`, `.abi`, `.bash`, `.toolsDir`.
+
+`node scripts/android_smoke.js <app dir> [--build]` exercises the device, install, start, log and screenshot steps against a
+real device or emulator without starting VS Code.
+

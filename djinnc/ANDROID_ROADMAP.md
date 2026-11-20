@@ -24,12 +24,19 @@ the risk is the compiler/runtime, not the UI.
 | 1 | `.so` entry point and software host: `NativeActivity` through `android_native_app_glue` (`runtime/android/android_host.c`), `libs/android` (`AndroidHost.run`, fonts), system fonts through stb_truetype (instead of FreeType), `SoftRaster` blit to `ANativeWindow`, touch as mouse (tap, drag scroll), APK without Gradle (`tools/android_apk.sh`, `tools/android_build.sh`), `examples/android-hello` runs on the emulator | done |
 | 2 | Vulkan: `libs/vulkan` platform files (`platform.windows/android.djinn`: surface, loader), `VK_KHR_android_surface`, surface format chosen from the surface (B8G8R8A8 or R8G8B8A8), `VkApplicationInfo` (the Android loader lists no device without it), surface recreated with the window (home/back), rotation through identity `preTransform` (the compositor rotates). Runs on the emulator (SwiftShader). Left: pre-rotated swapchain, frame-time numbers on a real device | done (emulator) |
 | 3 | Input and environment: touch (tap, drag, fling, long press as `contextmenu`), hardware and soft keyboard keys (US layout) into `Input.press`/`Input.typed`, soft keyboard shown for editable controls, window insets (system bars, cutout, keyboard) through JNI, dark mode, density, `pointer: coarse`. Left: IME composition (text input connection, other layouts), multiline edit (a `libs/ui` feature, not Android specific), multi-touch gestures | done (emulator) |
-| 4 | Product: APK packaging (`aapt2` + `apksigner`, no Gradle), clipboard, `[Platform(android)]` in the kit, headless screenshot tests, emulator in CI | open |
+| 4 | Product: APK packaging (`aapt2` + `apksigner`, no Gradle), clipboard, VS Code run/debug (device picker, build, install, log, lldb-server attach, screenshot, doctor, `djinn-android` tasks; `android:` section in `djinn.proj`). Left: ship `libs/android` and the Android tools in the release packages, `[Platform(android)]` in the kit, headless screenshot tests, emulator in CI | in progress (emulator) |
 | 5 | Advanced: shaping, images/gradients/shadows in the display list, accessibility, iOS reusing the structure | open |
 
 Open decisions: minimum API (26), arm64 first with x86_64 for the emulator, toolchain-only packaging vs. Gradle, stb_truetype (public domain, one header) instead of FreeType for fonts.
 
 ## Run and debug from the VS Code extension
+
+Status: implemented in `tools/vscode-djinn/src/android.ts` (+ `androidsdk.ts`, `scripts/android_smoke.js`). The smoke script (device, ABI,
+build, install, start, log, screenshot, stop) passes on the emulator. The debugger flow was checked with the NDK's `lldb` against
+the emulator: attach through `unix-abstract-connect://<serial>/<socket>`, the app's `.so` is matched through `exec-search-paths`,
+breakpoints on `main.djinn` lines resolve (`hello::Counter.render`, the lambdas) and a breakpoint hit stops the app thread. The
+CodeLLDB attach itself (the `lldb` debug type the extension starts) and the VS Code UI were not exercised. Android debug builds need
+DWARF: djinnc emitted CodeView flags when cross-compiling from Windows, now DWARF for Android targets.
 
 The extension (`tools/vscode-djinn`) already has the `djinn` debug type (build, run, profile, native debugger launch) and tasks.
 Android adds a `platform: "android"` launch configuration so an app is one F5 away:

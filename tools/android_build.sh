@@ -2,20 +2,21 @@
 # Builds a Djinn UI app for Android: the libraries for the target (ui, android), the app as a shared library and, with
 # --apk, a signed APK. The macros library runs on the host (procedural macros run in the JIT), everything else is built
 # for the Android triple.
-# usage: android_build.sh <app dir> --out <dir> [--abi arm64-v8a|x86_64] [--api 26] [--apk] [--package id] [--label name]
+# usage: android_build.sh <app dir> --out <dir> [--abi arm64-v8a|x86_64] [--api 26] [--apk] [--debug] [--package id] [--label name]
 # environment: DJINN_NDK (or ANDROID_NDK_HOME), ANDROID_HOME for the APK, DJINNC (default: djinnc on PATH),
 #   DJINN_HOST_RUNTIME_LIB (the host runtime library, default: the install's lib/), DJINN_ANDROID_RUNTIME_LIB (the target
 #   runtime, default: built here with tools/build_runtime.sh --android).
 set -eu
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
-app="" out="" abi="arm64-v8a" api=26 apk=0 package="dev.djinn.app" label="Djinn app"
+app="" out="" abi="arm64-v8a" api=26 apk=0 debug=0 package="dev.djinn.app" label="Djinn app"
 while [ $# -gt 0 ]; do
     case "$1" in
         --out) out="$2"; shift 2 ;;
         --abi) abi="$2"; shift 2 ;;
         --api) api="$2"; shift 2 ;;
         --apk) apk=1; shift ;;
+        --debug) debug=1; shift ;;
         --package) package="$2"; shift 2 ;;
         --label) label="$2"; shift 2 ;;
         -*) echo "android_build: unknown option $1"; exit 2 ;;
@@ -23,7 +24,7 @@ while [ $# -gt 0 ]; do
     esac
 done
 if [ -z "$app" ] || [ -z "$out" ]; then
-    echo "usage: android_build.sh <app dir> --out <dir> [--abi arm64-v8a|x86_64] [--api 26] [--apk] [--package id] [--label name]"
+    echo "usage: android_build.sh <app dir> --out <dir> [--abi arm64-v8a|x86_64] [--api 26] [--apk] [--debug] [--package id] [--label name]"
     exit 2
 fi
 export DJINN_NDK="${DJINN_NDK:-${ANDROID_NDK_HOME:-}}"
@@ -66,8 +67,10 @@ for lib in ui vulkan spirv android; do
 done
 name="$(basename "$app")"
 so="$out/lib$name.so"
-"$djinnc" "$app" -o "$so" "${flags[@]}" --target "$triple" > "$out/app.log" 2>&1 || { cat "$out/app.log"; exit 1; }
+debug_flags=()
+[ "$debug" = 1 ] && debug_flags=(-g -O0)
+"$djinnc" "$app" -o "$so" "${flags[@]}" --target "$triple" ${debug_flags[@]+"${debug_flags[@]}"} > "$out/app.log" 2>&1 || { cat "$out/app.log"; exit 1; }
 echo "$so"
 if [ "$apk" = 1 ]; then
-    bash "$root/tools/android_apk.sh" --lib "$so" --abi "$abi" --out "$out/$name-$abi.apk" --package "$package" --label "$label" --min-api "$api"
+    bash "$root/tools/android_apk.sh" --lib "$so" --abi "$abi" --out "$out/$name-$abi.apk" --package "$package" --label "$label" --min-api "$api" $([ "$debug" = 1 ] && echo --debuggable)
 fi

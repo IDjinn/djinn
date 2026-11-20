@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import { Android } from "./android";
 import { DebugAdapterFactory, DebugProvider } from "./debug";
 import { InlineDiagnostics } from "./diagnostics";
 import { Profiling } from "./profiling";
@@ -17,6 +18,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const getInfo = (): ReturnType<ServerClient["info"]> => client.info();
   const profiling = new Profiling(getInfo);
   const diagnostics = new InlineDiagnostics();
+  const android = new Android(getInfo);
 
   const showInfo = async (): Promise<void> => {
     const info = await client.info();
@@ -35,7 +37,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     output,
     diagnostics,
     ...profiling.register(),
-    vscode.debug.registerDebugConfigurationProvider("djinn", new DebugProvider(getInfo)),
+    ...android.register(),
+    vscode.debug.registerDebugConfigurationProvider("djinn", new DebugProvider(getInfo, android)),
     vscode.debug.registerDebugAdapterDescriptorFactory("djinn", new DebugAdapterFactory()),
     vscode.tasks.registerTaskProvider("djinn", taskProvider(getInfo)),
     vscode.commands.registerCommand("djinn.install", () => runSetup("install")),

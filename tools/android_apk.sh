@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # Packs a NativeActivity app into a signed APK without Gradle: aapt2 (manifest), zip (the library), zipalign, apksigner.
-# usage: android_apk.sh --lib <libname.so> --abi <arm64-v8a|x86_64> --out <app.apk> [--package <id>] [--label <name>] [--min-api 26]
+# usage: android_apk.sh --lib <libname.so> --abi <arm64-v8a|x86_64> --out <app.apk> [--package <id>] [--label <name>] [--min-api 26] [--debuggable]
 # environment: ANDROID_HOME (the SDK), JAVA_HOME or keytool on PATH (a debug keystore is created once in ~/.android).
 set -eu
 
 package="dev.djinn.app"
 label="Djinn app"
 min_api=26
+debuggable=false
 lib="" abi="" out=""
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -16,6 +17,7 @@ while [ $# -gt 0 ]; do
         --package) package="$2"; shift 2 ;;
         --label) label="$2"; shift 2 ;;
         --min-api) min_api="$2"; shift 2 ;;
+        --debuggable) debuggable=true; shift ;;
         *) echo "android_apk: unknown argument $1"; exit 2 ;;
     esac
 done
@@ -47,7 +49,7 @@ cat > "$work/AndroidManifest.xml" <<MANIFEST
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android" package="$package">
     <uses-sdk android:minSdkVersion="$min_api" android:targetSdkVersion="34"/>
-    <application android:label="$label" android:hasCode="false">
+    <application android:label="$label" android:hasCode="false" android:debuggable="$debuggable">
         <activity android:name="android.app.NativeActivity" android:exported="true"
             android:configChanges="orientation|keyboardHidden|screenSize|screenLayout|density|uiMode|smallestScreenSize"
             android:launchMode="singleTask">
