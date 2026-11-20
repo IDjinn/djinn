@@ -68,3 +68,7 @@ emulator with `examples/android-hello`: 36 characters typed at once arrive in or
 the text at the caret, and the echo equals the field. Not covered: soft keyboard composition (no text input connection yet),
 a signal that rewrites what was typed (the caret is clamped, not remapped), and typing latency on a large page (every key repaints
 the tree until dirty tracking exists, Phase 0b).
+
+## Showcase on Android
+
+`examples/showcase-android` runs the whole showcase (components, virtual list, motion, routing). The theme the APK carries (`tools/android_apk.sh`) sets the window background to the page background, light or dark, and `DjinnActivity` holds the window (and with it the system splash screen) until the app presented its first frame, so no default window background shows in between. The page is clipped to the area inside the system bars (rounded boxes and borders are cut at the clip too), and the bars show the page background. Icons of the kit (select, accordion and collapsible chevrons, the checkbox mark) are drawn with CSS, since the system font has no glyph for them.

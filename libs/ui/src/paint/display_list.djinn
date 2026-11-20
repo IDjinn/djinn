@@ -30,11 +30,13 @@ struct DisplayList {
     mut u32 clip_depth;
     mut f32 shift_x;
     mut f32 shift_y;
+    mut Vertex* spare;
+    mut u32 spare_capacity;
 
     public static unsafe DisplayList create() {
         DisplayList list = { .vertices = (Vertex*)0, .count = 0, .capacity = 0, .clip_left = (f32)-1000000.0, .clip_top = (f32)-1000000.0,
             .clip_right = (f32)1000000.0, .clip_bottom = (f32)1000000.0, .scratch = (f32*)0, .clip_stack = (f32*)0, .clip_depth = 0,
-            .shift_x = (f32)0.0, .shift_y = (f32)0.0 };
+            .shift_x = (f32)0.0, .shift_y = (f32)0.0, .spare = (Vertex*)0, .spare_capacity = 0 };
         list.scratch = (f32*)__djinn_alloc_zeroed((size_long)(4096 * sizeof(f32)));
         list.clip_stack = (f32*)__djinn_alloc_zeroed((size_long)(4 * DisplayList.MAX_CLIPS * sizeof(f32)));
         return list;
@@ -44,6 +46,9 @@ struct DisplayList {
         __djinn_free((void*)this.vertices);
         __djinn_free((void*)this.scratch);
         __djinn_free((void*)this.clip_stack);
+        __djinn_free((void*)this.spare);
+        this.spare = (Vertex*)0;
+        this.spare_capacity = 0;
         this.clip_stack = (f32*)0;
         this.vertices = (Vertex*)0;
         this.scratch = (f32*)0;
@@ -289,6 +294,115 @@ struct DisplayList {
 
     const u32 SEGMENTS = 8;
 
+    // Cuts the triangles drawn since 'first' to the clip rectangle. A quad is cut as it is made; the rounded shapes and
+    // rings are many triangles, and one that crosses the clip would otherwise be drawn whole (over the system bars of
+    // a phone, where the page is moved inside them, or outside a scroll container).
+    unsafe void clip_from(u32 first) {
+        mut bool inside = true;
+        for (mut u32 i = first; i < this.count && inside; i = i + 1) {
+            Vertex* vertex = &this.vertices[i];
+            if (vertex.x < this.clip_left || vertex.x > this.clip_right || vertex.y < this.clip_top || vertex.y > this.clip_bottom) {
+                inside = false;
+            }
+        }
+        if (inside) {
+            return;
+        }
+        u32 total = this.count - first;
+        u32 needed = total + 16;
+        if (this.spare_capacity < needed) {
+            this.spare = (Vertex*)__djinn_realloc((void*)this.spare, (size_long)(needed * sizeof(Vertex)));
+            this.spare_capacity = needed;
+        }
+        Vertex* work = this.spare;
+        Vertex* source = &this.spare[16];
+        memcpy((void*)source, (void*)&this.vertices[first], (size_long)(total * sizeof(Vertex)));
+        this.count = first;
+        for (mut u32 t = 0; t + 2 < total; t = t + 3) {
+            this.clip_triangle(&source[t], work);
+        }
+    }
+
+    unsafe void clip_triangle(Vertex* triangle, Vertex* work) {
+        Vertex* first = work;
+        Vertex* second = &work[8];
+        for (mut u32 k = 0; k < 3; k = k + 1) {
+            DisplayList.copy_vertex(&first[k], &triangle[k]);
+        }
+        mut u32 count = DisplayList.clip_edge(first, 3, second, 0, this.clip_left, true);
+        if (count > 0) {
+            count = DisplayList.clip_edge(second, count, first, 0, this.clip_right, false);
+        }
+        if (count > 0) {
+            count = DisplayList.clip_edge(first, count, second, 1, this.clip_top, true);
+        }
+        if (count > 0) {
+            count = DisplayList.clip_edge(second, count, first, 1, this.clip_bottom, false);
+        }
+        for (mut u32 i = 1; i + 1 < count; i = i + 1) {
+            this.push(first[0].x, first[0].y, first[0].u, first[0].v, first[0].color);
+            this.push(first[i].x, first[i].y, first[i].u, first[i].v, first[i].color);
+            this.push(first[i + 1].x, first[i + 1].y, first[i + 1].u, first[i + 1].v, first[i + 1].color);
+        }
+    }
+
+    static unsafe void copy_vertex(Vertex* to, Vertex* from) {
+        to.x = from.x;
+        to.y = from.y;
+        to.u = from.u;
+        to.v = from.v;
+        to.color = from.color;
+    }
+
+    // How far a vertex is inside the half plane x >= limit, y >= limit (keep_above) or x <= limit, y <= limit.
+    static unsafe f32 inside_by(Vertex* vertex, u32 axis, f32 limit, bool keep_above) {
+        mut f32 value = vertex.x;
+        if (axis == 1) {
+            value = vertex.y;
+        }
+        if (keep_above) {
+            return value - limit;
+        }
+        return limit - value;
+    }
+
+    static unsafe u32 mix_color(u32 a, u32 b, f32 t) {
+        mut u32 mixed = 0;
+        for (mut u32 shift = 0; shift < 32; shift = shift + 8) {
+            f32 from = (f32)((a >> shift) & 255);
+            f32 to = (f32)((b >> shift) & 255);
+            u32 channel = (u32)(from + (to - from) * t + (f32)0.5);
+            mixed = mixed | (channel << shift);
+        }
+        return mixed;
+    }
+
+    // Sutherland-Hodgman against one side of the clip rectangle; returns the vertices written to 'output'.
+    static unsafe u32 clip_edge(Vertex* input, u32 count, Vertex* output, u32 axis, f32 limit, bool keep_above) {
+        mut u32 made = 0;
+        for (mut u32 i = 0; i < count; i = i + 1) {
+            Vertex* p = &input[i];
+            Vertex* q = &input[(i + 1) % count];
+            f32 dp = DisplayList.inside_by(p, axis, limit, keep_above);
+            f32 dq = DisplayList.inside_by(q, axis, limit, keep_above);
+            if (dp >= (f32)0.0) {
+                DisplayList.copy_vertex(&output[made], p);
+                made = made + 1;
+            }
+            if ((dp >= (f32)0.0) != (dq >= (f32)0.0)) {
+                f32 t = dp / (dp - dq);
+                Vertex* cut = &output[made];
+                cut.x = p.x + (q.x - p.x) * t;
+                cut.y = p.y + (q.y - p.y) * t;
+                cut.u = p.u + (q.u - p.u) * t;
+                cut.v = p.v + (q.v - p.v) * t;
+                cut.color = DisplayList.mix_color(p.color, q.color, t);
+                made = made + 1;
+            }
+        }
+        return made;
+    }
+
     // A rounded rectangle with a one pixel soft edge: the inside is opaque, the last half pixel on each side fades out.
     public unsafe void rounded(f32 px, f32 py, f32 width, f32 height, f32 radius, u32 color) {
         if ((color >> 24) == 0 || width <= (f32)0.0 || height <= (f32)0.0) {
@@ -315,6 +429,7 @@ struct DisplayList {
         f32* outer = &this.scratch[points * 2];
         f32 center_x = x + width / (f32)2.0;
         f32 center_y = y + height / (f32)2.0;
+        u32 first = this.count;
         this.reserve(points * 9);
         for (mut u32 i = 0; i < points; i = i + 1) {
             DisplayList.outline_point(x, y, width, height, r, (f32)-0.5, i, &inner[i * 2]);
@@ -332,6 +447,7 @@ struct DisplayList {
             this.push(outer[next * 2], outer[next * 2 + 1], u, u, clear);
             this.push(inner[next * 2], inner[next * 2 + 1], u, u, color);
         }
+        this.clip_from(first);
     }
 
     // A border of 'thickness' px inside a rounded rectangle, soft on both edges.
@@ -365,6 +481,7 @@ struct DisplayList {
         f32* b = &this.scratch[points * 2];       // outer edge, opaque
         f32* c = &this.scratch[points * 4];       // hole edge, opaque
         f32* d = &this.scratch[points * 6];       // hole edge, fading out
+        u32 first = this.count;
         this.reserve(points * 18);
         for (mut u32 i = 0; i < points; i = i + 1) {
             DisplayList.outline_point(x, y, width, height, r, (f32)0.5, i, &a[i * 2]);
@@ -378,6 +495,7 @@ struct DisplayList {
             this.strip(b, color, c, color, i, n, u);
             this.strip(c, color, d, clear, i, n, u);
         }
+        this.clip_from(first);
     }
 
     unsafe void strip(f32* from, u32 from_color, f32* to, u32 to_color, u32 i, u32 n, f32 u) {

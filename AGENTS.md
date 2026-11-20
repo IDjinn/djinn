@@ -123,6 +123,10 @@ loop, `io_socket.c`). A sync function can still `await` (it runs the event loop)
   declarations and modifiers, `features/completion.djinn`, `ext/` embedded languages, `tools/vscode-djinn` grammar). When
   it is affected, update it in the same change and add a case to `djinn-lsp/tests/` (`python tests/<name>_test.py <lsp exe>`).
 - A new language feature or a change to existing behavior must also update the documentation: the `docs` submodule (`docs/content/docs/`) gets the new or changed page in its own commit, and the pull request commits the updated submodule pointer. Do not leave the pointer stale.
+- When a change to the compiler (`djinnc/`) is something the next build, test or example needs (a new feature or fix that
+  `libs/`, `std/`, an example or the language server uses), publish a new release of `djinnc` with a bumped version in the
+  same change, and build with that release. Building new library sources with an older installed `djinnc` fails with
+  confusing errors (stale-toolchain errors such as an unknown struct or a manifest entry it cannot read).
 - The compiler is `djinnc/`, written in Djinn. The C++ compiler (stage0) was removed; it stays available in the
   `stage0-final` tag. Every semantic or codegen error has its own diagnostic code (`DiagnosticErrors`).
 

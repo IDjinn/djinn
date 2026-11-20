@@ -147,6 +147,83 @@ struct MotionTests {
     }
 
     [Test]
+    unsafe void an_alternating_animation_runs_back_on_odd_rounds() {
+        Styles.set_reduced_motion(false);
+        Styles.add("@keyframes kf-slide { from { transform: translateX(0px); } to { transform: translateX(100px); } }");
+        Styles.add(".k3 { animation: kf-slide 1s linear infinite alternate; }");
+        Node box = Page.attach(Node.element("div").attr("class", "k3"));
+        Expect.equal(1000, (i64)Styles.of(box.id).anim_ms);
+        Expect.is_true(Styles.of(box.id).anim_alternate, "alternate is read");
+        Animation.advance(20000);
+        mut Style shown = *Styles.of(box.id);
+        Keyframes.apply(box.id, &shown);
+        Animation.advance(20500);
+        shown = *Styles.of(box.id);
+        Expect.is_true(Keyframes.apply(box.id, &shown));
+        Expect.equal(50, (i64)(shown.translate_x / (f32)Styles.device_scale()), "half way across in the first round");
+        Animation.advance(21250);
+        shown = *Styles.of(box.id);
+        Keyframes.apply(box.id, &shown);
+        Expect.equal(75, (i64)(shown.translate_x / (f32)Styles.device_scale()), "a quarter of the way back in the second round");
+    }
+
+    [Test]
+    unsafe void a_finite_animation_without_forwards_lets_go_at_the_end() {
+        Styles.set_reduced_motion(false);
+        Styles.add("@keyframes kf-grow { from { transform: scale(0.5); } to { transform: scale(1); } }");
+        Styles.add(".k4 { animation: kf-grow 200ms 2; }");
+        Node box = Page.attach(Node.element("div").attr("class", "k4"));
+        Expect.equal(2, (i64)Styles.of(box.id).anim_count);
+        Animation.advance(30000);
+        mut Style shown = *Styles.of(box.id);
+        Expect.is_true(Keyframes.apply(box.id, &shown), "it is running");
+        Animation.advance(30350);
+        shown = *Styles.of(box.id);
+        Expect.is_true(Keyframes.apply(box.id, &shown), "the second round is running");
+        Animation.advance(30450);
+        shown = *Styles.of(box.id);
+        Expect.is_false(Keyframes.apply(box.id, &shown), "after two rounds it is over and the element is as styled");
+    }
+
+    [Test]
+    unsafe void a_new_node_restarts_the_animation_even_when_it_reuses_an_id() {
+        Styles.set_reduced_motion(false);
+        Styles.add("@keyframes kf-again { from { transform: scale(0.5); } to { transform: scale(1); } }");
+        Styles.add(".k6 { animation: kf-again 1s linear 1 forwards; }");
+        Node first = Page.attach(Node.element("div").attr("class", "k6"));
+        Animation.advance(60000);
+        mut Style shown = *Styles.of(first.id);
+        Keyframes.apply(first.id, &shown);
+        Animation.advance(60800);
+        shown = *Styles.of(first.id);
+        Keyframes.apply(first.id, &shown);
+        Expect.equal(90, (i64)(shown.transform_scale * (f32)100.0), "most of the way there");
+        u32 id = first.id;
+        Dom.remove(id);
+        Node second = Page.attach(Node.element("div").attr("class", "k6"));
+        Expect.equal((i64)id, (i64)second.id, "the id was reused");
+        Animation.advance(60900);
+        shown = *Styles.of(second.id);
+        Expect.is_true(Keyframes.apply(second.id, &shown));
+        Expect.equal(50, (i64)(shown.transform_scale * (f32)100.0), "the new node starts from the beginning");
+    }
+
+    [Test]
+    unsafe void reduced_motion_skips_keyframes() {
+        Styles.set_reduced_motion(false);
+        Styles.add("@keyframes kf-blink { from { opacity: 0; } to { opacity: 1; } }");
+        Styles.add(".k5 { animation: kf-blink 300ms infinite; }");
+        Node box = Page.attach(Node.element("div").attr("class", "k5"));
+        Animation.advance(40000);
+        mut Style shown = *Styles.of(box.id);
+        Expect.is_true(Keyframes.apply(box.id, &shown));
+        Styles.set_reduced_motion(true);
+        shown = *Styles.of(box.id);
+        Expect.is_false(Keyframes.apply(box.id, &shown), "the user asked for no motion");
+        Styles.set_reduced_motion(false);
+    }
+
+    [Test]
     unsafe void a_rotated_box_turns_its_pixels() {
         Styles.add(".t6 { position: absolute; left: 0px; top: 15px; width: 40px; height: 10px; background: #ff0000; transform: rotate(90deg); }");
         Node box = Node.element("div").attr("class", "t6");

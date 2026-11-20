@@ -87,6 +87,22 @@ JNIEXPORT void JNICALL Java_dev_djinn_DjinnActivity_nativeKey(JNIEnv* e, jclass 
     inject(0, code, meta);
 }
 
+// The app drew its first frame: the activity keeps the system splash screen (and the window background) until then.
+static volatile int djinn_first_frame = 0;
+
+void djinn_android_ready(void)
+{
+    djinn_first_frame = 1;
+}
+
+// dev.djinn.DjinnActivity.nativeReady
+JNIEXPORT jboolean JNICALL Java_dev_djinn_DjinnActivity_nativeReady(JNIEnv* e, jclass type)
+{
+    (void)e;
+    (void)type;
+    return djinn_first_frame ? JNI_TRUE : JNI_FALSE;
+}
+
 // dev.djinn.DjinnActivity.nativeInsets: the window insets in pixels
 JNIEXPORT void JNICALL Java_dev_djinn_DjinnActivity_nativeInsets(JNIEnv* e, jclass type, jint left, jint top, jint right, jint bottom)
 {

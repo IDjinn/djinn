@@ -49,7 +49,7 @@ cat > "$work/AndroidManifest.xml" <<MANIFEST
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android" package="$package">
     <uses-sdk android:minSdkVersion="$min_api" android:targetSdkVersion="34"/>
-    <application android:label="$label" android:hasCode="true" android:debuggable="$debuggable">
+    <application android:label="$label" android:hasCode="true" android:debuggable="$debuggable" android:theme="@style/DjinnTheme">
         <activity android:name="dev.djinn.DjinnActivity" android:exported="true"
             android:configChanges="orientation|keyboardHidden|screenSize|screenLayout|density|uiMode|smallestScreenSize"
             android:launchMode="singleTask">
@@ -73,9 +73,40 @@ javac --release 11 -classpath "$platform/android.jar" -d "$work/java-classes" "$
 (cd "$work/java-classes" && "$build_tools/d8$bat" --lib "$platform/android.jar" --min-api "$min_api" --output "$work/dex" $(cat "$work/classes.list")) 2>&1 | grep -v "^WARNING" || true
 [ -f "$work/dex/classes.dex" ] || { echo "android_apk: d8 failed"; exit 1; }
 
+# the theme: the window background (and the system splash screen, which takes its color from it) is the page background,
+# light or dark with the system, so nothing of the system's own default shows while the app loads
+mkdir -p "$work/res/values" "$work/res/values-night"
+cat > "$work/res/values/styles.xml" <<STYLES
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="djinn_background">#ffffff</color>
+    <style name="DjinnTheme" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/djinn_background</item>
+        <item name="android:colorBackground">@color/djinn_background</item>
+        <item name="android:statusBarColor">@color/djinn_background</item>
+        <item name="android:navigationBarColor">@color/djinn_background</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowLightNavigationBar">true</item>
+    </style>
+</resources>
+STYLES
+cat > "$work/res/values-night/styles.xml" <<STYLES
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="djinn_background">#0f1115</color>
+    <style name="DjinnTheme" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/djinn_background</item>
+        <item name="android:colorBackground">@color/djinn_background</item>
+        <item name="android:statusBarColor">@color/djinn_background</item>
+        <item name="android:navigationBarColor">@color/djinn_background</item>
+    </style>
+</resources>
+STYLES
+"$build_tools/aapt2$exe" compile --dir "$work/res" -o "$work/resources.zip"
+
 # the manifest and resources go through aapt2; the library is added afterwards (stored, aligned, so it can be mapped)
 "$build_tools/aapt2$exe" link -o "$work/base.apk" -I "$platform/android.jar" --manifest "$work/AndroidManifest.xml" \
-    --min-sdk-version "$min_api" --target-sdk-version 34
+    --min-sdk-version "$min_api" --target-sdk-version 34 "$work/resources.zip"
 # stored (uncompressed), so the system can map the library straight from the APK
 python_tool=""
 for candidate in python3 python py; do
