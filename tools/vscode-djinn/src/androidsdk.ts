@@ -211,7 +211,7 @@ export async function waitForPid(adb: string, serial: string, pkg: string, secon
   return undefined;
 }
 
-export const ACTIVITY = "android.app.NativeActivity";
+export const ACTIVITY = "dev.djinn.DjinnActivity";
 
 /** Installs the APK, replacing an installed copy, and starts the app (waiting for a debugger with `wait`). */
 export async function install(adb: string, serial: string, apk: string, onOutput?: (text: string) => void): Promise<ExecResult> {
