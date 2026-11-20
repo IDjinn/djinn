@@ -554,6 +554,44 @@ const $transition = (show, children) => {
   $effect(() => $present(box, $read(show)));
   return box;
 };
+// A scrolling list of 'count' rows 'item' px tall in a box 'height' px tall that keeps only the rows in view (and a few
+// around them) in the page, each with its own owner: a row keeps its state while it stays and is disposed when it leaves.
+const $virtual = (count, item, height, row) => {
+  const box = $el("div");
+  box.setAttribute("class", "virtual");
+  box.setAttribute("role", "list");
+  box.style.height = height + "px";
+  const space = $el("div");
+  space.setAttribute("class", "virtual-space");
+  space.style.position = "relative";
+  space.style.height = count * item + "px";
+  box.appendChild(space);
+  const rows = new Map();
+  const sync = () => {
+    const top = box.scrollTop;
+    const first = Math.max(0, Math.floor(top / item) - 3);
+    const last = Math.min(count, Math.ceil((top + height) / item) + 3);
+    for (const [index, entry] of rows) {
+      if (index < first || index >= last) { $dispose(entry.root); entry.node.remove(); rows.delete(index); }
+    }
+    $untrack(() => {
+      for (let index = first; index < last; index++) {
+        if (rows.has(index)) continue;
+        const node = $el("div");
+        node.setAttribute("class", "virtual-row");
+        node.setAttribute("role", "listitem");
+        node.style.cssText = "position:absolute;left:0;right:0;top:" + index * item + "px;height:" + item + "px";
+        const root = $root(() => { node.appendChild(row(index)); });
+        space.appendChild(node);
+        rows.set(index, { root, node });
+      }
+    });
+  };
+  box.addEventListener("scroll", sync, { passive: true });
+  $onCleanup(() => { for (const entry of rows.values()) $dispose(entry.root); rows.clear(); });
+  sync();
+  return box;
+};
 const $outlet = (view) => {
   const box = $el("div");
   box.setAttribute("class", "outlet");

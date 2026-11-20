@@ -10,6 +10,14 @@ djinnc examples/showcase -o build/showcase/showcase.exe --lib-dir <libs>        
 djinnc examples/showcase --target web -o build/showcase/showcase --lib-dir <libs>      # build/showcase/showcase.js
 ```
 
+On Android the same pages run from `examples/showcase-android` (its `djinn.proj` lists the shared sources and only `main.djinn` is its own):
+
+```
+bash tools/android_build.sh examples/showcase-android --out build/android --abi x86_64 --apk
+```
+
+The Virtual list page uses `VirtualList` (`virtual.djinn`), native and web: only the rows in view are in the tree; the Motion page shows `@keyframes` (rotate, translate, scale, opacity) and a color transition.
+
 `index.html` loads `showcase.js`; serve the folder with every path answered by `index.html` so the routes work.
 `showcase.exe --html <route>` prints the tree the native build makes, and `DJINN_UI_SHOT=file.ppm` (with
 `DJINN_UI_ROUTE`, `DJINN_UI_H`) renders one frame without a window. `tests/djinnc/showcase.sh` checks that every route

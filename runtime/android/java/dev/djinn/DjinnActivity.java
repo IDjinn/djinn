@@ -8,6 +8,8 @@ import android.content.pm.PackageManager;
 import android.graphics.Insets;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.SystemClock;
+import android.view.ViewTreeObserver;
 import android.text.InputType;
 import android.view.KeyEvent;
 import android.view.View;
@@ -32,6 +34,10 @@ public class DjinnActivity extends NativeActivity {
     static native void nativeKey(int code, int meta);
 
     static native void nativeInsets(int left, int top, int right, int bottom);
+
+    static native boolean nativeReady();
+
+    private static final long SPLASH_LIMIT_MS = 8000;
 
     private InputView input;
 
@@ -63,6 +69,7 @@ public class DjinnActivity extends NativeActivity {
                 decorView.setSystemUiVisibility(decorView.getSystemUiVisibility() | View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR);
             }
         }
+        keepSplashUntilFirstFrame();
         input = new InputView(this);
         addContentView(input, new ViewGroup.LayoutParams(1, 1));
         final View decor = getWindow().getDecorView();
@@ -74,6 +81,26 @@ public class DjinnActivity extends NativeActivity {
             }
         });
         decor.requestApplyInsets();
+    }
+
+    /**
+     * The system shows its splash screen (the app icon on the window background) until the window draws. The app draws its
+     * first frame only after the libraries, the fonts and the first page are ready, so the window is held back until the
+     * native side says that frame was presented; with the window background the theme sets, nothing else shows in between.
+     */
+    private void keepSplashUntilFirstFrame() {
+        final View content = findViewById(android.R.id.content);
+        final long started = SystemClock.uptimeMillis();
+        content.getViewTreeObserver().addOnPreDrawListener(new ViewTreeObserver.OnPreDrawListener() {
+            @Override
+            public boolean onPreDraw() {
+                if (nativeReady() || SystemClock.uptimeMillis() - started > SPLASH_LIMIT_MS) {
+                    content.getViewTreeObserver().removeOnPreDrawListener(this);
+                    return true;
+                }
+                return false;
+            }
+        });
     }
 
     private static void report(WindowInsets insets) {
