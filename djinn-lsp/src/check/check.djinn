@@ -432,6 +432,18 @@ struct Check {
     }
 }
 
+// One thing wrong with a file: where, how bad, which code, a one line title and the whole explanation.
+struct Report {
+    i32 from;
+    i32 to;
+    i32 severity;
+    ptr<i8> code;
+    ptr<i8> source;
+    ptr<i8> message;
+    ptr<i8> full;
+    LintItem* finding;
+}
+
 struct Publisher {
     static unsafe i32 offset_of(Unit* u, i32 line, i32 column) {
         mut i32 index = line - 1;
@@ -595,62 +607,114 @@ struct Publisher {
         return text.cstr();
     }
 
+    static unsafe bool reported_on_line(Unit* u, i32 line) {
+        for (mut i32 i = 0; i < u.diags.length; i = i + 1) {
+            CDiag* diag = (CDiag*)u.diags.get(i);
+            if (diag.line - 1 == line) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static unsafe Report* make_report(Unit* u, i32 from, i32 to, i32 severity, ptr<i8> code, ptr<i8> source, ptr<i8> message, LintItem* finding) {
+        Report* report = (Report*)Memory.zalloc(sizeof(Report));
+        report.from = from;
+        report.to = to;
+        report.severity = severity;
+        report.code = code;
+        report.source = source;
+        report.message = Findings.title(message);
+        report.full = Findings.describe(u, message, finding, from, to, code);
+        report.finding = finding;
+        return report;
+    }
+
+    // What is wrong with the file, as the editor and the command line (src/cli) show it: the compiler's report with
+    // the findings of the rules next to it. `closed` also covers a file that is not open in an editor.
+    public static unsafe PointerList* reports(Unit* u, bool closed) {
+        PointerList* list = PointerList.create();
+        if (!u.analyzed) {
+            return list;
+        }
+        if (u.checked && u.diags != null) {
+            PointerList* findings = Diagnostics.collect(u);
+            for (mut i32 i = 0; i < u.diags.length; i = i + 1) {
+                CDiag* diag = (CDiag*)u.diags.get(i);
+                mut i32 from = Publisher.offset_of(u, diag.line, diag.column);
+                mut i32 to = Publisher.offset_of(u, diag.end_line, diag.end_column);
+                mut i32 start = from;
+                Publisher.narrow(u, diag, &start, &to);
+                from = start;
+                if (diag.code != null && Strings.equals(diag.code, strlen(diag.code), "E6003")) {
+                    Publisher.widen_call(u, &start, &to);
+                    from = start;
+                }
+                if (to <= from) {
+                    to = from + 1;
+                }
+                // a rule that found the same problem knows better how far it reaches (and offers the fix)
+                LintItem* same = Findings.at(u, findings, from, (ptr<i8>)0);
+                if (same != null && same.span_to > same.span_from) {
+                    to = same.span_to;
+                }
+                mut ptr<i8> shown_code = diag.code;
+                if ((shown_code == null || strlen(shown_code) == 0) && same != null) {
+                    shown_code = same.id;
+                }
+                list.push((ptr)Publisher.make_report(u, from, to, diag.severity, shown_code, "djinnc", Publisher.with_hint(u, diag, from), same));
+            }
+            // the compiler stops at a lexical error and never parses the rest: what the rules found on the other
+            // lines is still true
+            for (mut i32 i = 0; i < findings.length; i = i + 1) {
+                LintItem* item = (LintItem*)findings.get(i);
+                if (!Publisher.reported_on_line(u, u.line_of(Findings.start_of(u, item)))) {
+                    list.push((ptr)Publisher.from_finding(u, item));
+                }
+            }
+        } else if (!u.checked && (u.open || closed) && u.ast != null) {
+            PointerList* items = Diagnostics.collect(u);
+            for (mut i32 i = 0; i < items.length; i = i + 1) {
+                list.push((ptr)Publisher.from_finding(u, (LintItem*)items.get(i)));
+            }
+        }
+        return list;
+    }
+
+    static unsafe Report* from_finding(Unit* u, LintItem* item) {
+        mut i32 from = u.tstart[item.token];
+        mut i32 to = u.tend[item.end_token];
+        if (item.span_to > item.span_from) {
+            from = item.span_from;
+            to = item.span_to;
+        }
+        return Publisher.make_report(u, from, to, item.severity, item.id, "djinn-lsp", item.message, item);
+    }
+
     public static unsafe void publish(Unit* u) {
+        PointerList* list = Publisher.reports(u, false);
         ByteBuffer* out = ByteBuffer.create();
         out.append("{\"uri\":");
         out.append_json_string(u.uri);
         out.append(",\"diagnostics\":[");
-        mut i32 count = 0;
-        if (u.analyzed) {
-            if (u.checked && u.diags != null) {
-                for (mut i32 i = 0; i < u.diags.length; i = i + 1) {
-                    CDiag* diag = (CDiag*)u.diags.get(i);
-                    if (count > 0) {
-                        out.append(",");
-                    }
-                    count = count + 1;
-                    out.append("{\"range\":");
-                    mut i32 from = Publisher.offset_of(u, diag.line, diag.column);
-                    mut i32 to = Publisher.offset_of(u, diag.end_line, diag.end_column);
-                    mut i32 start = from;
-                    Publisher.narrow(u, diag, &start, &to);
-                    from = start;
-                    if (diag.code != null && Strings.equals(diag.code, strlen(diag.code), "E6003")) {
-                        Publisher.widen_call(u, &start, &to);
-                        from = start;
-                    }
-                    if (to <= from) {
-                        to = from + 1;
-                    }
-                    Lsp.range(out, u, from, to);
-                    out.append(",\"severity\":");
-                    out.append_int((i64)diag.severity);
-                    out.append(",\"source\":\"djinnc\",\"message\":");
-                    out.append_json_string(Publisher.with_hint(u, diag, from));
-                    out.append("}");
-                }
-            } else if (!u.checked && u.open && u.lint != null) {
-                PointerList* items = Lint.collect(u);
-                for (mut i32 i = 0; i < items.length; i = i + 1) {
-                    LintItem* item = (LintItem*)items.get(i);
-                    if (count > 0) {
-                        out.append(",");
-                    }
-                    count = count + 1;
-                    out.append("{\"range\":");
-                    Lsp.token_range(out, u, item.token, item.token);
-                    out.append(",\"severity\":");
-                    out.append_int((i64)item.severity);
-                    out.append(",\"code\":");
-                    out.append_json_string(item.id);
-                    out.append(",\"source\":\"djinn-lsp\",\"message\":");
-                    out.append_json_string(item.message);
-                    out.append("}");
-                }
+        for (mut i32 i = 0; i < list.length; i = i + 1) {
+            Report* report = (Report*)list.get(i);
+            if (i > 0) {
+                out.append(",");
             }
+            out.append("{\"range\":");
+            Lsp.range(out, u, report.from, report.to);
+            out.append(",\"severity\":");
+            out.append_int((i64)report.severity);
+            Findings.append_code(out, report.code);
+            out.append(",\"source\":");
+            out.append_json_string(report.source);
+            out.append(",\"message\":");
+            out.append_json_string(report.full);
+            out.append("}");
         }
         out.append("]}");
-        u.published = count > 0;
+        u.published = list.length > 0;
         Rpc.notify("textDocument/publishDiagnostics", out);
     }
 }

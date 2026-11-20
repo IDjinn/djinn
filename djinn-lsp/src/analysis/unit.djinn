@@ -1,12 +1,5 @@
 namespace djinnc;
 
-struct LintItem {
-    i32 token;
-    ptr<i8> message;
-    ptr<i8> id;
-    i32 severity;
-}
-
 struct Unit {
     ptr<i8> path;
     ptr<i8> uri;
@@ -35,7 +28,7 @@ struct Unit {
     ptr<i32> tcls;
 
     PointerList* syms;
-    PointerList* lint;
+    Ast* ast;
     ptr<i8> namespace_name;
 
     Arena* diag_arena;
@@ -70,12 +63,11 @@ struct Unit {
         Lexer.run(this);
         this.build_code();
         this.syms = PointerList.create();
-        this.lint = PointerList.create();
         this.namespace_name = null;
         this.tok_sym = (ptr<ptr>)Memory.zalloc((u64)(this.token_count + 1) * 8);
         this.tcls = (ptr<i32>)Memory.zalloc((u64)(this.token_count + 1) * 4);
         Scanner.run(this);
-        this.collect_lint();
+        this.ast = Ast.build(this);
     }
 
     unsafe void compute_lines() {
@@ -142,38 +134,6 @@ struct Unit {
                 }
             }
         }
-    }
-
-    unsafe void collect_lint() {
-        for (mut i32 i = 0; i < this.token_count; i = i + 1) {
-            if (this.tkind[i] == Tk.ERROR) {
-                mut ptr<i8> message = "unterminated string literal";
-                if (this.tend[i] > this.tstart[i] + 1 && this.text[this.tstart[i]] == 47) {
-                    message = "unterminated block comment";
-                }
-                this.add_lint(i, "unterminated-literal", message);
-            }
-        }
-        for (mut i32 c = 0; c < this.code_count; c = c + 1) {
-            bool opener = this.is_punct(c, 40) || this.is_punct(c, 91) || this.is_punct(c, 123);
-            bool closer = this.is_punct(c, 41) || this.is_punct(c, 93) || this.is_punct(c, 125);
-            if ((opener || closer) && this.match[c] < 0) {
-                if (opener) {
-                    this.add_lint(this.code[c], "unclosed-bracket", "unclosed bracket");
-                } else {
-                    this.add_lint(this.code[c], "unmatched-bracket", "unmatched closing bracket");
-                }
-            }
-        }
-    }
-
-    unsafe void add_lint(i32 token, ptr<i8> id, ptr<i8> message) {
-        LintItem* item = (LintItem*)Memory.zalloc(sizeof(LintItem));
-        item.token = token;
-        item.message = message;
-        item.id = id;
-        item.severity = 1;
-        this.lint.push((ptr)item);
     }
 
     public unsafe i32 kind_at(i32 c) {

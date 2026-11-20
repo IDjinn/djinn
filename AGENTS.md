@@ -161,6 +161,12 @@ To add a conformance test, add a `[Test]` method to any struct in `tests/conform
 reflection, no registration. Source is inline (`Verify.source(src).runs(Expected.exit(3))`); error cases use
 `.diagnostics(Expected.error(DiagnosticErrors.X).at(line, col))` and fail on any missing or extra diagnostic.
 
+## Diagnostics for agents
+
+`djinn-lsp diagnostics <file>` lists the problems of a file, one short line each (`#3 13:14 error E1000 ... [fix]`), and
+`djinn-lsp explain <file> <#>` gives the details and the edit for one. Prefer them over reading a large `djinnc --check`
+output: list first, explain only the problem you are about to fix (see `djinn-lsp/README.md`).
+
 ## Compiler architecture
 
 - `djinnc/src/`: `Lexer -> Parser (AST) -> semantic (analyzer, symbols, types, checker, const_eval, range, async) ->

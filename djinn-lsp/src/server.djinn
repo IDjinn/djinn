@@ -300,6 +300,24 @@ struct Server {
         }
     }
 
+    // Sets the workspace up for the command line (src/cli): the folder of the file's project, the compiler, no protocol.
+    public static unsafe void prepare_cli(ptr<i8> file) {
+        cli_mode = true;
+        Words.init();
+        Workspace* ws = Workspace.get();
+        ptr saved = Heap.enter_persistent();
+        ProjectInfo* project = ProjectInfo.find(file);
+        mut ptr<i8> root = Paths.directory(file);
+        if (project != null) {
+            root = project.directory;
+        }
+        ws.roots.push((ptr)Strings.duplicate(root, strlen(root)));
+        Heap.leave(saved);
+        Server.discover();
+        Workspace.index_directory(root, false);
+        EditorConfig.load_directory(root);
+    }
+
     static unsafe void initialized() {
         Server.discover();
         Server.index_workspace();
@@ -506,7 +524,7 @@ struct Server {
             if (context == null || context.get("diagnostics") == null) {
                 Rpc.respond(id, (ByteBuffer*)0);
             } else {
-                Rpc.respond(id, Suggest.actions(unit, context.get("diagnostics")));
+                Rpc.respond(id, CodeActions.collect(unit, context.get("diagnostics")));
             }
         } else if (Strings.same(method, "textDocument/documentHighlight")) {
             Rpc.respond(id, Navigation.highlights(unit, line, character));

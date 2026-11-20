@@ -1,0 +1,37 @@
+namespace djinnc;
+
+// Every diagnostic rule lives in its own file under src/diagnostics/rules and is a struct with
+// `static unsafe void check(DiagContext* context)`.
+//
+// To add a diagnostic:
+//   1. create src/diagnostics/rules/<name>.djinn (copy rules/unclosed_bracket.djinn)
+//   2. add its `check` call to `Diagnostics.run` below
+// Each rule should check `context.expired()` in its loops (the budget is 250 ms for all of them).
+// Nothing else changes: the publisher, the server and the `lint-disable` handling see only the findings.
+struct Diagnostics {
+    static unsafe void run(DiagContext* context) {
+        if (Diagnostics.go(context)) { UnterminatedLiteralRule.check(context); }
+        if (Diagnostics.go(context)) { UnclosedBracketRule.check(context); }
+        if (Diagnostics.go(context)) { UnmatchedBracketRule.check(context); }
+        if (Diagnostics.go(context)) { EmbeddedLanguageRule.check(context); }
+    }
+
+    // The rules share a time budget so that a slow or looping one cannot freeze the server: past the deadline the
+    // remaining rules are skipped, and a rule that polls `context.expired()` stops itself.
+    static unsafe bool go(DiagContext* context) {
+        if (context.expired()) {
+            Rpc.log(2, "djinn-lsp: the diagnostic time budget ran out; the remaining rules were skipped");
+            return false;
+        }
+        return true;
+    }
+
+    // The findings of every rule for the file, as of its current text (the workspace configuration is read now).
+    public static unsafe PointerList* collect(Unit* u) {
+        DiagContext context = { .unit = u, .ast = u.ast, .items = PointerList.create(), .deadline = __djinn_now_us() + 250000 };
+        if (u.ast != null) {
+            Diagnostics.run(&context);
+        }
+        return context.items;
+    }
+}
