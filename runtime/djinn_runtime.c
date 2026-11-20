@@ -66,7 +66,11 @@ void __djinn_alloc_stats(uint64_t* out)
 int64_t __djinn_unix_timestamp_ms(void)
 {
     struct timespec ts;
+#ifdef __ANDROID__
+    clock_gettime(CLOCK_REALTIME, &ts);
+#else
     timespec_get(&ts, TIME_UTC);
+#endif
     return (int64_t)ts.tv_sec * 1000LL + ts.tv_nsec / 1000000LL;
 }
 
@@ -216,7 +220,9 @@ int64_t __djinn_now_us(void)
     return (int64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
 }
 
-#ifdef __linux__
+#ifdef __ANDROID__
+#define program_invocation_name ((char*)getprogname())
+#elif defined(__linux__)
 extern char* program_invocation_name;
 #endif
 

@@ -17,6 +17,7 @@ struct VulkanRenderer {
 
     mut u64 instance;
     mut u64 surface;
+    mut u32 format;
     mut u64 physical;
     mut u64 device;
     mut u64 queue;
@@ -121,32 +122,33 @@ struct VulkanRenderer {
     }
 
     static unsafe bool create_device(VulkanRenderer* self, void* module, void* window) {
-        // the instance, with the surface extensions of Windows
+        // the instance, with the surface extensions of the platform
         void* extensions = VkBuf.make(16);
         VkBuf.ptr_at(extensions, 0, (void*)"VK_KHR_surface");
-        VkBuf.ptr_at(extensions, 8, (void*)"VK_KHR_win32_surface");
+        VkBuf.ptr_at(extensions, 8, (void*)VkPlatform.surface_extension());
+        // the Android loader lists no devices for an instance without application info: ask for Vulkan 1.0 explicitly
+        void* application = VkBuf.make(48);
+        VkBuf.u32_at(application, 44, 4194304);
         void* instance_info = VkBuf.info(64, 1);
+        VkBuf.ptr_at(instance_info, 24, application);
         VkBuf.u32_at(instance_info, 48, 2);
         VkBuf.ptr_at(instance_info, 56, extensions);
         mut bool made = VulkanRenderer.ok(vkCreateInstance(instance_info, (void*)0, &self.instance), "vkCreateInstance");
         __djinn_free(instance_info);
         __djinn_free(extensions);
+        __djinn_free(application);
         if (!made) {
             return false;
         }
-        void* surface_info = VkBuf.info(40, 1000009000);
-        VkBuf.ptr_at(surface_info, 24, module);
-        VkBuf.ptr_at(surface_info, 32, window);
-        made = VulkanRenderer.ok(vkCreateWin32SurfaceKHR(self.instance, surface_info, (void*)0, &self.surface), "vkCreateWin32SurfaceKHR");
-        __djinn_free(surface_info);
+        made = VulkanRenderer.ok(VkPlatform.create_surface(self.instance, module, window, &self.surface), "vkCreateSurfaceKHR");
         if (!made) {
             return false;
         }
         // the first device with a queue family that draws and presents
         mut u32 count = 0;
-        vkEnumeratePhysicalDevices(self.instance, &count, (u64*)0);
+        i32 listed = vkEnumeratePhysicalDevices(self.instance, &count, (u64*)0);
         if (count == 0) {
-            printf("vulkan: no device\n");
+            printf("vulkan: no device (vkEnumeratePhysicalDevices returned %d)\n", listed);
             return false;
         }
         u64* devices = (u64*)__djinn_alloc_zeroed((size_long)(count * 8));
@@ -202,9 +204,45 @@ struct VulkanRenderer {
         return true;
     }
 
+    // The surface format: B8G8R8A8_UNORM when the surface has it (Windows), else R8G8B8A8_UNORM (every Android device),
+    // else the first sRGB-nonlinear one.
+    static unsafe bool choose_format(VulkanRenderer* self) {
+        mut u32 count = 0;
+        vkGetPhysicalDeviceSurfaceFormatsKHR(self.physical, self.surface, &count, (void*)0);
+        if (count == 0) {
+            printf("vulkan: the surface has no formats\n");
+            return false;
+        }
+        if (count > 64) {
+            count = 64;
+        }
+        void* formats = VkBuf.make(count * 8);
+        vkGetPhysicalDeviceSurfaceFormatsKHR(self.physical, self.surface, &count, formats);
+        mut u32 chosen = 0;
+        for (mut u32 i = 0; i < count; i = i + 1) {
+            u32 format = VkBuf.get_u32(formats, i * 8);
+            if (VkBuf.get_u32(formats, i * 8 + 4) != 0) {
+                continue;
+            }
+            if (format == 44) {
+                chosen = 44;
+                break;
+            }
+            if (format == 37 && chosen == 0) {
+                chosen = 37;
+            }
+        }
+        if (chosen == 0) {
+            chosen = VkBuf.get_u32(formats, 0);
+        }
+        __djinn_free(formats);
+        self.format = chosen;
+        return true;
+    }
+
     static unsafe bool create_render_pass(VulkanRenderer* self) {
         void* attachment = VkBuf.make(36);
-        VkBuf.u32_at(attachment, 4, 44);
+        VkBuf.u32_at(attachment, 4, self.format);
         VkBuf.u32_at(attachment, 8, 1);
         VkBuf.u32_at(attachment, 12, 1);
         VkBuf.u32_at(attachment, 16, 0);
@@ -525,7 +563,8 @@ struct VulkanRenderer {
         if (wanted_images > VulkanRenderer.MAX_IMAGES) {
             wanted_images = VulkanRenderer.MAX_IMAGES;
         }
-        u32 transform = VkBuf.get_u32(capabilities, 40);
+        // identity: when the display is rotated the compositor rotates the frame (a pre-rotated swapchain is a later optimization)
+        u32 transform = 1;
         __djinn_free(capabilities);
         if (width == 0 || height == 0) {
             return false;
@@ -533,7 +572,7 @@ struct VulkanRenderer {
         void* info = VkBuf.info(104, 1000001000);
         VkBuf.u64_at(info, 24, self.surface);
         VkBuf.u32_at(info, 32, wanted_images);
-        VkBuf.u32_at(info, 36, 44);
+        VkBuf.u32_at(info, 36, self.format);
         VkBuf.u32_at(info, 40, 0);
         VkBuf.u32_at(info, 44, width);
         VkBuf.u32_at(info, 48, height);
@@ -567,7 +606,7 @@ struct VulkanRenderer {
             void* view_info = VkBuf.info(80, 15);
             VkBuf.u64_at(view_info, 24, self.images[i]);
             VkBuf.u32_at(view_info, 32, 1);
-            VkBuf.u32_at(view_info, 36, 44);
+            VkBuf.u32_at(view_info, 36, self.format);
             VkBuf.u32_at(view_info, 56, 1);
             VkBuf.u32_at(view_info, 64, 1);
             VkBuf.u32_at(view_info, 72, 1);
@@ -615,8 +654,7 @@ struct VulkanRenderer {
 
     // Opens the renderer on a window: null when the machine has no usable Vulkan (the caller keeps the software path).
     public static unsafe VulkanRenderer* create(void* module, void* window, u32 width, u32 height) {
-        if (LoadLibraryExA("vulkan-1.dll", (void*)0, 0) == (void*)0) {
-            printf("vulkan: vulkan-1.dll not found\n");
+        if (!VkPlatform.load()) {
             return (VulkanRenderer*)0;
         }
         VulkanRenderer* self = (VulkanRenderer*)__djinn_alloc_zeroed((size_long)sizeof(VulkanRenderer));
@@ -625,7 +663,7 @@ struct VulkanRenderer {
         self.framebuffers = (u64*)__djinn_alloc_zeroed((size_long)(VulkanRenderer.MAX_IMAGES * 8));
         self.finished = (u64*)__djinn_alloc_zeroed((size_long)(VulkanRenderer.MAX_IMAGES * 8));
         Atlas* atlas = Fonts.atlas();
-        if (VulkanRenderer.create_device(self, module, window) && VulkanRenderer.create_render_pass(self)
+        if (VulkanRenderer.create_device(self, module, window) && VulkanRenderer.choose_format(self) && VulkanRenderer.create_render_pass(self)
             && VulkanRenderer.create_pipeline(self) && VulkanRenderer.create_atlas(self, atlas.width, atlas.height)
             && VulkanRenderer.create_sync(self) && VulkanRenderer.create_swapchain(self, width, height)) {
             return self;

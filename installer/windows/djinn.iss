@@ -5,7 +5,7 @@
 ; Silent install:  djinn-<tag>-windows-x86_64-setup.exe /VERYSILENT /TASKS="extension,autoupdate,addtopath" /COMPONENTS="core,ui,ui\vulkan"
 ;
 ; Optional components are staged in the unpacked release under optional\<component>\ with the same layout as the
-; install (lib\*.djlib, native\...): optional\ui (ui, ui_macros, win32) and optional\vulkan (spirv, vulkan, vulkan-1.lib).
+; install (lib\*.djlib, native\...): optional\ui (ui, ui_macros, win32) and optional\vulkan (spirv, vulkan, vulkan-1.lib) and optional\android (target libraries, build tools).
 ;
 ; Layout (same as installer\install.ps1, which the scheduled task runs to update):
 ;   {app}\versions\<tag>\{bin,lib,runtime,std}   {app}\current (junction)   {app}\bin\djinn-setup.ps1
@@ -54,6 +54,7 @@ Name: "custom"; Description: "Custom installation"; Flags: iscustom
 Name: "core"; Description: "Djinn compiler, standard library and runtime"; Types: full compact custom; Flags: fixed
 Name: "ui"; Description: "UI framework libraries (ui, ui_macros and the Windows host, drawn by a software rasterizer)"; Types: full
 Name: "ui\vulkan"; Description: "Vulkan renderer for the UI (GPU drawing: vulkan and spirv libraries, vulkan-1 import library)"; Types: full
+Name: "android"; Description: "Android target (libraries for arm64-v8a and x86_64, build and APK tools; needs the Android SDK and NDK)"; Types: full
 
 [Tasks]
 Name: "extension"; Description: "Install the Visual Studio Code extension (language server, highlighting, build, debug)"; GroupDescription: "Integration:"; Check: CodeFound
@@ -64,6 +65,7 @@ Name: "addtopath"; Description: "Add Djinn to the PATH"; GroupDescription: "Envi
 Source: "{#Source}\*"; Excludes: "optional\*"; DestDir: "{app}\versions\{#Tag}"; Components: core; Flags: recursesubdirs createallsubdirs ignoreversion
 Source: "{#Source}\optional\ui\*"; DestDir: "{app}\versions\{#Tag}"; Components: ui; Flags: recursesubdirs createallsubdirs ignoreversion skipifsourcedoesntexist
 Source: "{#Source}\optional\vulkan\*"; DestDir: "{app}\versions\{#Tag}"; Components: ui\vulkan; Flags: recursesubdirs createallsubdirs ignoreversion skipifsourcedoesntexist
+Source: "{#Source}\optional\android\*"; DestDir: "{app}\versions\{#Tag}"; Components: android; Flags: recursesubdirs createallsubdirs ignoreversion skipifsourcedoesntexist
 Source: "..\install.ps1"; DestDir: "{app}\bin"; DestName: "djinn-setup.ps1"; Flags: ignoreversion
 Source: "{#Vsix}"; DestDir: "{app}"; DestName: "djinn-lang.vsix"; Flags: ignoreversion
 
@@ -164,6 +166,7 @@ begin
   Text := '';
   if WizardIsComponentSelected('ui') then Text := Text + 'ui' + #13#10;
   if WizardIsComponentSelected('ui\vulkan') then Text := Text + 'vulkan' + #13#10;
+  if WizardIsComponentSelected('android') then Text := Text + 'android' + #13#10;
   SaveStringToFile(ExpandConstant('{app}\.components'), Text, False);
 end;
 

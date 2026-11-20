@@ -2,6 +2,7 @@ import * as fs from "fs";
 import * as path from "path";
 import * as vscode from "vscode";
 import * as build from "./build";
+import { Android } from "./android";
 import { runTask } from "./tasks";
 import * as toolchain from "./toolchain";
 import { LaunchConfig, ServerInfo } from "./types";
@@ -61,13 +62,15 @@ export class DebugAdapterFactory implements vscode.DebugAdapterDescriptorFactory
 }
 
 export class DebugProvider implements vscode.DebugConfigurationProvider {
-  constructor(private readonly getInfo: () => Promise<ServerInfo | undefined>) {}
+  constructor(private readonly getInfo: () => Promise<ServerInfo | undefined>, private readonly android: Android) {}
 
   provideDebugConfigurations(): vscode.DebugConfiguration[] {
     return [
       { type: "djinn", request: "launch", name: "Djinn: Debug project", args: [] },
       { type: "djinn", request: "launch", name: "Djinn: Build project", mode: "build" },
       { type: "djinn", request: "launch", name: "Djinn: Build and run project", mode: "run", args: [] },
+      { type: "djinn", request: "launch", name: "Djinn: Run on Android", platform: "android", mode: "run", target: "${workspaceFolder}" },
+      { type: "djinn", request: "launch", name: "Djinn: Debug on Android", platform: "android", mode: "debug", target: "${workspaceFolder}" },
       { type: "djinn", request: "launch", name: "Djinn: Profile CPU", mode: "profile", target: "${workspaceFolder}", args: [], profile: { kind: "cpu", optimization: "O2" } },
     ];
   }
@@ -84,6 +87,10 @@ export class DebugProvider implements vscode.DebugConfigurationProvider {
     debugConfig: vscode.DebugConfiguration
   ): Promise<undefined> {
     const config = debugConfig as LaunchConfig;
+    if (config.platform === "android") {
+      await this.android.launch(config);
+      return undefined;
+    }
     if (config.mode === "profile") {
       await vscode.commands.executeCommand("djinn.perf.launch", config);
       return undefined;

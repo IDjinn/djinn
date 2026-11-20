@@ -192,6 +192,21 @@ djinn_process_t* __djinn_process_start(const char* command_line, const char* std
         free(process);
         return NULL;
     }
+#ifdef __ANDROID__
+    // posix_spawn file actions need API 28; fork/exec works on every API level.
+    int pipes[6] = {in_pipe[0], in_pipe[1], out_pipe[0], out_pipe[1], err_pipe[0], err_pipe[1]};
+    process->pid = fork();
+    int status = process->pid < 0 ? -1 : 0;
+    if (process->pid == 0)
+    {
+        dup2(in_pipe[0], 0);
+        dup2(out_pipe[1], 1);
+        dup2(err_pipe[1], 2);
+        for (int i = 0; i < 6; i++) close(pipes[i]);
+        execl("/system/bin/sh", "sh", "-c", command_line, (char*)NULL);
+        _exit(127);
+    }
+#else
     posix_spawn_file_actions_t actions;
     posix_spawn_file_actions_init(&actions);
     posix_spawn_file_actions_adddup2(&actions, in_pipe[0], 0);
@@ -202,6 +217,7 @@ djinn_process_t* __djinn_process_start(const char* command_line, const char* std
     char* argv[] = {(char*)"/bin/sh", (char*)"-c", (char*)command_line, NULL};
     int status = posix_spawn(&process->pid, "/bin/sh", &actions, NULL, argv, environ);
     posix_spawn_file_actions_destroy(&actions);
+#endif
     close(in_pipe[0]);
     close(out_pipe[1]);
     close(err_pipe[1]);

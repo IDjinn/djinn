@@ -11,6 +11,7 @@ Options:
   -NoExtension        do not install the VS Code extension (skips the dialog)
   -Ui                 also install the UI framework libraries (ui, ui_macros, win32)
   -Vulkan             also install the Vulkan renderer (vulkan, spirv, vulkan-1.lib); implies -Ui
+  -Android            also install the Android target libraries and build tools (needs the Android SDK and NDK to use)
   -NoAutoUpdate       do not register the scheduled task
   -NoPath             do not change the user PATH
   -Quiet              print errors only; never shows the dialog
@@ -25,6 +26,7 @@ param(
     [switch] $NoExtension,
     [switch] $Ui,
     [switch] $Vulkan,
+    [switch] $Android,
     [switch] $NoAutoUpdate,
     [switch] $NoPath,
     [switch] $Quiet
@@ -77,7 +79,7 @@ function Show-ExtensionDialog([bool] $codeFound) {
     $form.FormBorderStyle = "FixedDialog"
     $form.MaximizeBox = $false
     $form.MinimizeBox = $false
-    $form.ClientSize = New-Object System.Drawing.Size(460, 262)
+    $form.ClientSize = New-Object System.Drawing.Size(460, 292)
 
     $title = New-Object System.Windows.Forms.Label
     $title.Text = "Install Djinn to $Prefix"
@@ -122,22 +124,28 @@ function Show-ExtensionDialog([bool] $codeFound) {
     $form.Controls.Add($vulkanBox)
     $uiBox.Add_CheckedChanged({ $vulkanBox.Enabled = $uiBox.Checked; if (-not $uiBox.Checked) { $vulkanBox.Checked = $false } })
 
+    $androidBox = New-Object System.Windows.Forms.CheckBox
+    $androidBox.Text = "Android target (libraries and build tools; needs the Android SDK and NDK)"
+    $androidBox.AutoSize = $true
+    $androidBox.Location = New-Object System.Drawing.Point(16, 210)
+    $form.Controls.Add($androidBox)
+
     $ok = New-Object System.Windows.Forms.Button
     $ok.Text = "Install"
     $ok.DialogResult = [System.Windows.Forms.DialogResult]::OK
-    $ok.Location = New-Object System.Drawing.Point(284, 222)
+    $ok.Location = New-Object System.Drawing.Point(284, 252)
     $form.Controls.Add($ok)
     $form.AcceptButton = $ok
 
     $cancel = New-Object System.Windows.Forms.Button
     $cancel.Text = "Cancel"
     $cancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
-    $cancel.Location = New-Object System.Drawing.Point(370, 222)
+    $cancel.Location = New-Object System.Drawing.Point(370, 252)
     $form.Controls.Add($cancel)
     $form.CancelButton = $cancel
 
     if ($form.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { return $null }
-    return @{ Extension = $extensionBox.Checked; AutoUpdate = $updateBox.Checked; Path = $pathBox.Checked; Ui = $uiBox.Checked; Vulkan = $vulkanBox.Checked }
+    return @{ Extension = $extensionBox.Checked; AutoUpdate = $updateBox.Checked; Path = $pathBox.Checked; Ui = $uiBox.Checked; Vulkan = $vulkanBox.Checked; Android = $androidBox.Checked }
 }
 
 # Optional components are staged in the release under optional\<name>\ with the layout of the install. The picked
@@ -149,11 +157,12 @@ function Get-SavedComponents {
     return @()
 }
 
-function Install-Components($target, [bool] $ui, [bool] $vulkan) {
+function Install-Components($target, [bool] $ui, [bool] $vulkan, [bool] $android) {
     $staged = Join-Path $target "optional"
     $picked = @()
     if ($ui) { $picked += "ui" }
     if ($ui -and $vulkan) { $picked += "vulkan" }
+    if ($android) { $picked += "android" }
     foreach ($name in $picked) {
         $source = Join-Path $staged $name
         if (Test-Path $source) { Copy-Item (Join-Path $source "*") $target -Recurse -Force }
@@ -210,7 +219,7 @@ function Install-Release {
 
     $saved = Get-SavedComponents
     $choices = @{ Extension = [bool]$Extension; AutoUpdate = -not $NoAutoUpdate; Path = -not $NoPath
-        Ui = ([bool]$Ui -or [bool]$Vulkan -or ($saved -contains "ui")); Vulkan = ([bool]$Vulkan -or ($saved -contains "vulkan")) }
+        Ui = ([bool]$Ui -or [bool]$Vulkan -or ($saved -contains "ui")); Vulkan = ([bool]$Vulkan -or ($saved -contains "vulkan")); Android = ([bool]$Android -or ($saved -contains "android")) }
     if ($Mode -eq "install" -and -not $Extension -and -not $NoExtension) {
         $code = [bool](Get-CodeCli)
         if ($Quiet -or -not [Environment]::UserInteractive) {
@@ -245,7 +254,7 @@ function Install-Release {
         if (Test-Path $target) { Remove-Item $target -Recurse -Force }
         Move-Item (Join-Path $partial $name) $target
         Remove-Item $partial -Recurse -Force
-        Install-Components $target $choices.Ui $choices.Vulkan
+        Install-Components $target $choices.Ui $choices.Vulkan $choices.Android
         Set-CurrentLink $tag
 
         # stable copy of this script for the scheduled task

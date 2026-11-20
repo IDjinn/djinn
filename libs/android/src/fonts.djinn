@@ -1,0 +1,44 @@
+import std::types;
+import std::libc;
+import ui;
+
+namespace android;
+
+// The FontProvider of the Android host: the system fonts (Roboto, Droid Sans Bold) rasterized by stb_truetype in the
+// runtime shim. Advances are fractional, glyphs are antialiased and take a quarter-pixel phase like the other hosts.
+struct AndroidFonts {
+    static unsafe bool rasterize(u32 code, f32 size, u32 weight, u32 phase, GlyphBitmap* out) {
+        mut i32 width = 0;
+        mut i32 height = 0;
+        mut i32 bearing_x = 0;
+        mut i32 bearing_y = 0;
+        mut u8* pixels = (u8*)0;
+        if (djinn_font_rasterize(code, size, weight, phase, &width, &height, &bearing_x, &bearing_y, &pixels) == 0) {
+            return false;
+        }
+        out.width = width;
+        out.height = height;
+        out.bearing_x = bearing_x;
+        out.bearing_y = bearing_y;
+        out.pixels = pixels;
+        return true;
+    }
+
+    static unsafe void metrics(f32 size, u32 weight, f32* ascent, f32* descent) {
+        mut f32 up = (f32)0.0;
+        mut f32 down = (f32)0.0;
+        djinn_font_metrics(size, weight, &up, &down);
+        *ascent = up;
+        *descent = down;
+    }
+
+    public static unsafe void install() {
+        FontProvider provider = {
+            .advance = (u32 code, f32 size, u32 weight) => djinn_font_advance(code, size, weight),
+            .rasterize = (u32 code, f32 size, u32 weight, u32 phase, GlyphBitmap* out) => AndroidFonts.rasterize(code, size, weight, phase, out),
+            .metrics = (f32 size, u32 weight, f32* ascent, f32* descent) => AndroidFonts.metrics(size, weight, ascent, descent)
+        };
+        Fonts.set_provider(provider);
+        Dom.touch();
+    }
+}
