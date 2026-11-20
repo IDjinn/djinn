@@ -1,0 +1,413 @@
+namespace ui;
+
+import testing;
+import std::types;
+
+unsafe static mut i32 nav_builds = 0;
+unsafe static mut i32 nav_finished = 0;
+unsafe static mut i32 nav_hooked = 0;
+
+struct NavPage {
+    signal<bool> open;
+    signal<bool> collapsed;
+    signal<i32> step;
+    signal<bool> can_next;
+
+    public unsafe Node render() {
+        return html!{
+            <main>
+                <Drawer title="Menu" routes="/=Home|/a=About|/b=Béta" open={this.open} collapsed={this.collapsed}>
+                    <Stack titles="/=Home|/a=About">
+                        <Outlet view={(str path) => NavTests.page(path)}/>
+                    </Stack>
+                    <TabBar routes="/=Home|/a=About"/>
+                    <Stepper steps="One|Two|Three" finish="Done" step={this.step} can_next={this.can_next}
+                             on_finish={() => nav_finished = nav_finished + 1}>
+                        <Step index={0} step={this.step}><p id="s0">first</p></Step>
+                        <Step index={1} step={this.step}><p id="s1">second</p></Step>
+                        <Step index={2} step={this.step}><p id="s2">third</p></Step>
+                    </Stepper>
+                </Drawer>
+            </main>
+        };
+    }
+}
+
+struct GroupApp {
+    i32 unused;
+
+    static GroupApp make() {
+        GroupApp value = { .unused = 0 };
+        return value;
+    }
+
+    public unsafe Node render() {
+        return html!{
+            <main><Outlet groups="/a/*|/b/*" view={(str path) => NavTests.page(path)}/></main>
+        };
+    }
+}
+
+struct NavTests {
+    static unsafe Node page(str path) {
+        nav_builds = nav_builds + 1;
+        if (Router.matches("/a", path)) {
+            return Node.element("p").attr("id", "about").add("about");
+        }
+        return Node.element("p").attr("id", "home").add("home");
+    }
+
+    static unsafe NavPage make() {
+        NavPage value = { .open = state(false), .collapsed = state(false), .step = state(0), .can_next = state(true) };
+        return value;
+    }
+
+    // The first element under 'root' whose class list is exactly 'name' and, when not empty, whose attribute has a value.
+    static unsafe u32 by_class(u32 root, str name) {
+        if (Dom.kind(root) == DomKind.ELEMENT && Dom.has_attr(root, "class") && Texts.same(Dom.attr(root, "class"), name)) {
+            return root;
+        }
+        mut u32 child = Dom.first_child(root);
+        while (child != 0) {
+            u32 found = NavTests.by_class(child, name);
+            if (found != 0) {
+                return found;
+            }
+            child = Dom.next_sibling(child);
+        }
+        return 0;
+    }
+
+    // The text of an element whose content is one text slot.
+    static unsafe str words(u32 id) {
+        return Dom.text_of(Dom.first_child(id));
+    }
+
+    // The nearest element above a node (components may put a fragment between).
+    static unsafe u32 holder(u32 id) {
+        mut u32 up = Dom.parent(id);
+        while (up != 0 && Dom.kind(up) != DomKind.ELEMENT) {
+            up = Dom.parent(up);
+        }
+        return up;
+    }
+
+    static unsafe bool attr_is(u32 id, str name, str value) {
+        return Dom.has_attr(id, name) && Texts.same(Dom.attr(id, name), value);
+    }
+
+    static unsafe void reset() {
+        Router.start("/");
+        Prefetch.enable(true);
+        Prefetch.clear();
+        nav_builds = 0;
+        nav_finished = 0;
+    }
+
+    [Test]
+    unsafe void the_stack_shows_back_only_when_there_is_somewhere_to_go() {
+        NavTests.reset();
+        Mounted app = App.mount<NavPage>(NavTests.make());
+        u32 back = NavTests.by_class(app.node.id, "stack-back");
+        u32 title = NavTests.by_class(app.node.id, "stack-title");
+        Expect.is_true(NavTests.attr_is(back, "data-visible", "false"));
+        Expect.is_true(Texts.same(NavTests.words(title), "Home"));
+        Router.navigate("/a");
+        Expect.is_true(NavTests.attr_is(back, "data-visible", "true"));
+        Expect.is_true(Texts.same(NavTests.words(title), "About"));
+        Dom.dispatch(back, "click");
+        Expect.is_true(Texts.same(Router.peek(), "/"));
+        Expect.is_true(NavTests.attr_is(back, "data-visible", "false"));
+        app.unmount();
+        Router.start("/");
+    }
+
+    [Test]
+    unsafe void the_drawer_opens_picks_a_route_and_collapses() {
+        NavTests.reset();
+        NavPage page = NavTests.make();
+        Mounted app = App.mount<NavPage>(page);
+        u32 drawer = NavTests.by_class(app.node.id, "drawer");
+        Expect.is_true(NavTests.attr_is(drawer, "data-state", "closed"));
+        Dom.dispatch(NavTests.by_class(app.node.id, "drawer-toggle"), "click");
+        Expect.is_true(NavTests.attr_is(drawer, "data-state", "open"));
+        u32 item = NavTests.by_class(app.node.id, "drawer-item");
+        Dom.dispatch(Dom.next_sibling(item), "click");
+        Expect.is_true(Texts.same(Router.peek(), "/a"));
+        Expect.is_true(NavTests.attr_is(drawer, "data-state", "closed"), "picking a route closes it");
+        Expect.is_true(NavTests.attr_is(NavTests.by_class(app.node.id, "drawer-mark"), "aria-hidden", "true"));
+        Dom.dispatch(NavTests.by_class(app.node.id, "drawer-collapse"), "click");
+        Expect.is_true(NavTests.attr_is(drawer, "data-collapsed", "true"));
+        app.unmount();
+        Router.start("/");
+    }
+
+    [Test]
+    unsafe void the_drawer_initial_is_a_whole_character() {
+        Expect.is_true(Texts.same(Initial.of("Home"), "H"));
+        Expect.is_true(Texts.same(Initial.of("Éter"), "É"));
+        Expect.equal(0, (i64)Initial.of("").length);
+    }
+
+    [Test]
+    unsafe void the_tab_bar_marks_the_current_route() {
+        NavTests.reset();
+        Mounted app = App.mount<NavPage>(NavTests.make());
+        u32 first = NavTests.by_class(app.node.id, "tabbar-item");
+        u32 second = Dom.next_sibling(first);
+        Expect.is_true(NavTests.attr_is(first, "aria-current", "page"));
+        Expect.is_true(NavTests.attr_is(second, "aria-current", "false"));
+        Dom.dispatch(second, "click");
+        Expect.is_true(NavTests.attr_is(second, "aria-current", "page"));
+        Expect.is_true(NavTests.attr_is(first, "aria-selected", "false"));
+        app.unmount();
+        Router.start("/");
+    }
+
+    [Test]
+    unsafe void the_stepper_advances_only_when_allowed_and_finishes() {
+        NavTests.reset();
+        NavPage page = NavTests.make();
+        Mounted app = App.mount<NavPage>(page);
+        u32 next = NavTests.by_class(app.node.id, "primary stepper-next");
+        u32 back = NavTests.by_class(app.node.id, "stepper-back");
+        Expect.is_true(NavTests.attr_is(back, "aria-disabled", "true"));
+        page.can_next.set(false);
+        Expect.is_true(NavTests.attr_is(next, "aria-disabled", "true"));
+        Dom.dispatch(next, "click");
+        Expect.equal(0, (i64)page.step.get(), "held on the step until it is valid");
+        page.can_next.set(true);
+        Dom.dispatch(next, "click");
+        Expect.equal(1, (i64)page.step.get());
+        Expect.equal(1, (i64)Router.direction());
+        Expect.is_true(NavTests.attr_is(NavTests.holder(Dom.find(app.node.id, "s1")), "data-active", "true"));
+        Expect.is_true(NavTests.attr_is(NavTests.holder(Dom.find(app.node.id, "s0")), "data-active", "false"));
+        Dom.dispatch(back, "click");
+        Expect.equal(0, (i64)page.step.get());
+        Expect.equal(-1, (i64)Router.direction(), "going back slides the other way");
+        Dom.dispatch(next, "click");
+        Dom.dispatch(next, "click");
+        Expect.equal_text("Done", NavTests.words(next).data);
+        Dom.dispatch(next, "click");
+        Expect.equal(1, (i64)nav_finished);
+        Expect.equal(2, (i64)page.step.get(), "the last step stays");
+        app.unmount();
+        Router.start("/");
+    }
+
+    [Test]
+    unsafe void a_prefetched_page_is_built_once_and_shown_at_once() {
+        NavTests.reset();
+        Mounted app = App.mount<NavPage>(NavTests.make());
+        Expect.equal(1, (i64)nav_builds, "the first page");
+        Prefetch.request("/a");
+        Expect.equal(2, (i64)nav_builds, "prerendered");
+        Expect.is_true(Prefetch.has("/a"));
+        Prefetch.request("/a");
+        Expect.equal(2, (i64)nav_builds, "already cached");
+        Router.navigate("/a");
+        Expect.equal(2, (i64)nav_builds, "navigation used the prerendered page");
+        Expect.is_true(Dom.find(app.node.id, "about") != 0);
+        Expect.is_false(Prefetch.has("/a"));
+        Expect.equal(1, (i64)Prefetch.hits());
+        Router.navigate("/");
+        Expect.equal(3, (i64)nav_builds, "a page that was not prefetched is built when asked");
+        app.unmount();
+        Router.start("/");
+    }
+
+    [Test]
+    unsafe void prefetch_can_be_turned_off_and_skipped_per_route() {
+        NavTests.reset();
+        Mounted app = App.mount<NavPage>(NavTests.make());
+        Prefetch.enable(false);
+        Prefetch.request("/a");
+        Expect.is_false(Prefetch.has("/a"));
+        Prefetch.enable(true);
+        Prefetch.skip("/a");
+        Prefetch.request("/a");
+        Expect.is_false(Prefetch.has("/a"), "an opted-out route is never prerendered");
+        Prefetch.request("/");
+        Expect.is_false(Prefetch.has("/"), "the page on screen is not prerendered");
+        app.unmount();
+        Router.start("/");
+    }
+
+    [Test]
+    unsafe void links_prefetch_on_hover_and_focus() {
+        NavTests.reset();
+        Mounted app = App.mount<Pages>(RouterTests.pages());
+        u32 link = Dom.first_child(app.node.id);
+        Expect.is_false(Prefetch.has("/about"));
+        Dom.dispatch(link, "pointerenter");
+        Expect.is_true(Prefetch.has("/about"), "hovering the link prepares its page");
+        Prefetch.clear();
+        Dom.dispatch(link, "focus");
+        Expect.is_true(Prefetch.has("/about"), "so does focusing it");
+        Router.navigate("/about");
+        Expect.is_true(Dom.find(app.node.id, "about") != 0);
+        Expect.equal(1, (i64)Prefetch.hits());
+        app.unmount();
+        Router.start("/");
+    }
+
+    [Test]
+    unsafe void the_hooks_run_before_a_page_is_prepared() {
+        NavTests.reset();
+        nav_hooked = 0;
+        Prefetch.on_request((str path) => nav_hooked = nav_hooked + 1);
+        Mounted app = App.mount<NavPage>(NavTests.make());
+        Prefetch.request("/a");
+        Prefetch.request("/a");
+        Expect.equal(1, (i64)nav_hooked, "once per page, not for a page already cached");
+        app.unmount();
+        Router.start("/");
+    }
+
+    [Test]
+    unsafe void keys_follow_the_platform_and_go_with_their_component() {
+        NavTests.reset();
+        Hotkeys.clear();
+        Styles.set_viewport(500.0, 800.0);
+        NavPage page = NavTests.make();
+        Mounted app = App.mount<NavPage>(page);
+        Router.navigate("/a");
+        Expect.is_true(Input.press(Key.LEFT, Mod.ALT), "Alt+Left goes back");
+        Expect.is_true(Texts.same(Router.peek(), "/"));
+        Expect.is_true(Input.press(Key.RIGHT, Mod.ALT), "Alt+Right goes forward");
+        Expect.is_true(Texts.same(Router.peek(), "/a"));
+        Expect.is_true(Input.press(66, Mod.CTRL), "Ctrl+B toggles the menu");
+        Expect.is_true(page.open.get(), "on a narrow screen it opens");
+        Styles.set_viewport(1200.0, 800.0);
+        Input.press(66, Mod.CTRL);
+        Expect.is_true(page.collapsed.get(), "on a wide one it collapses");
+        Input.press(34, 0);
+        Expect.equal(1, (i64)page.step.get(), "PageDown is the next step");
+        Input.press(33, 0);
+        Expect.equal(0, (i64)page.step.get(), "PageUp the previous one");
+        Input.press(Key.TAB, Mod.CTRL);
+        Expect.is_true(Texts.same(Router.peek(), "/"), "Ctrl+Tab goes to the next tab (it wraps)");
+        app.unmount();
+        Expect.is_false(Input.press(Key.LEFT, Mod.ALT), "the bindings left with the components");
+        Styles.set_viewport(800.0, 600.0);
+        Router.start("/");
+    }
+
+    [Test]
+    unsafe void apple_keyboards_use_command_not_control() {
+        Hotkeys.clear();
+        Hotkeys.use_command(true);
+        mut i32 hits = 0;
+        Hotkeys.on("Mod+B", "", () => nav_hooked = nav_hooked + 1);
+        nav_hooked = 0;
+        Expect.is_true(Input.press(66, Mod.META), "Command+B");
+        Expect.equal(1, (i64)nav_hooked);
+        Expect.is_false(Input.press(66, Mod.CTRL));
+        Hotkeys.clear();
+        Hotkeys.use_command(false);
+        Hotkeys.on("BrowserBack", "", () => nav_hooked = nav_hooked + 10);
+        Hotkeys.on("Mod+[", "", () => nav_hooked = nav_hooked + 100);
+        Expect.is_true(Input.press(166, 0), "the Back key of a remote control");
+        Expect.is_true(Input.press(219, Mod.CTRL), "Mod+[");
+        Expect.equal(111, (i64)nav_hooked);
+        Hotkeys.clear();
+    }
+
+    [Test]
+    unsafe void arrows_walk_a_tab_bar() {
+        NavTests.reset();
+        Mounted app = App.mount<NavPage>(NavTests.make());
+        u32 tabs = NavTests.by_class(app.node.id, "tabbar");
+        Focus.set(NavTests.by_class(app.node.id, "tabbar-item"), true);
+        Input.press(Key.RIGHT, 0);
+        Expect.is_true(Texts.same(Router.peek(), "/a"), "the next tab becomes the page");
+        Input.press(Key.HOME, 0);
+        Expect.is_true(Texts.same(Router.peek(), "/"), "Home goes to the first");
+        Input.press(Key.END, 0);
+        Expect.is_true(Texts.same(Router.peek(), "/a"), "End to the last");
+        Expect.is_true(tabs != 0);
+        Focus.reset();
+        app.unmount();
+        Router.start("/");
+    }
+
+    [Test]
+    unsafe void with_no_pointer_the_arrows_move_focus_between_controls() {
+        Node row = Node.element("div").attr("style", "display: flex");
+        Node a = Node.element("button").attr("style", "width: 100px; height: 40px").add("a");
+        Node b = Node.element("button").attr("style", "width: 100px; height: 40px").add("b");
+        Node c = Node.element("button").attr("style", "width: 100px; height: 40px").add("c");
+        row.child(a).child(b).child(c);
+        Dom.append(Dom.document(), row.id);
+        Layout.compute(row.id, (f32)800.0, (f32)600.0);
+        Focus.set(a.id, true);
+        Expect.is_false(Focus.move_direction(Key.LEFT), "nothing lies to the left of the first");
+        Expect.is_false(Focus.move_direction(Key.DOWN), "or below");
+        Expect.is_true(Focus.move_direction(Key.RIGHT));
+        Expect.equal((i64)b.id, (i64)Focus.current());
+        Expect.is_true(Focus.move_direction(Key.RIGHT));
+        Expect.equal((i64)c.id, (i64)Focus.current());
+        Expect.is_true(Focus.move_direction(Key.LEFT));
+        Expect.equal((i64)b.id, (i64)Focus.current());
+        Styles.set_no_pointer(true);
+        Expect.is_true(Input.press(Key.RIGHT, 0), "with no pointer the arrow key itself moves focus");
+        Expect.equal((i64)c.id, (i64)Focus.current());
+        Styles.set_no_pointer(false);
+        Focus.reset();
+        Dom.remove(row.id);
+    }
+
+    [Test]
+    unsafe void height_orientation_and_pointer_none_media_features() {
+        Styles.add(".nm { color: black; } @media (max-height: 30rem) and (orientation: landscape) { .nm { color: red; } } @media (pointer: none) { .nm { color: lime; } } @media (orientation: portrait) { .nm { width: 3px; } } @media (min-height: 40rem) { .nm { height: 4px; } }");
+        Node node = Node.element("div").attr("class", "nm");
+        Dom.append(Dom.document(), node.id);
+        Styles.set_viewport(900.0, 800.0);
+        Expect.equal_text("#000000", Colors.format(Styles.of(node.id).color).data);
+        Expect.equal(4, (i64)Styles.of(node.id).height.value, "800px is at least 40rem tall");
+        Styles.set_viewport(900.0, 400.0);
+        Expect.equal_text("#ff0000", Colors.format(Styles.of(node.id).color).data);
+        Styles.set_viewport(400.0, 900.0);
+        Expect.equal(3, (i64)Styles.of(node.id).width.value, "taller than wide is portrait");
+        Styles.set_no_pointer(true);
+        Expect.equal_text("#00ff00", Colors.format(Styles.of(node.id).color).data);
+        Styles.set_no_pointer(false);
+        Styles.set_viewport(800.0, 600.0);
+        Dom.remove(node.id);
+    }
+
+    [Test]
+    unsafe void outlet_key_names_the_group_of_a_path() {
+        Expect.is_true(Texts.same(Outlet.key("/a/*|/b/*", "/a/one"), "/a/*"));
+        Expect.is_true(Texts.same(Outlet.key("/a/*|/b/*", "/a"), "/a/*"));
+        Expect.is_true(Texts.same(Outlet.key("/a/*|/b/*", "/b/two"), "/b/*"));
+        Expect.is_true(Texts.same(Outlet.key("/a/*|/b/*", "/c"), "/c"), "outside every group the path is the key");
+    }
+
+    [Test]
+    unsafe void moving_inside_a_group_keeps_the_page() {
+        Router.start("/a/one");
+        Mounted app = App.mount<GroupApp>(GroupApp.make());
+        i32 built = nav_builds;
+        Expect.is_true(built > 0);
+        Router.navigate("/a/two");
+        Expect.equal(built, (i64)nav_builds, "same group: the page is not built again");
+        Router.navigate("/b/one");
+        Expect.is_true(nav_builds > built, "another group: a new page");
+        app.unmount();
+        Router.start("/");
+    }
+
+    [Test]
+    unsafe void corner_shape_and_transform_easing_are_read() {
+        Styles.add(".sq { corner-shape: squircle; transition: transform 300ms ease-out; } .rd { corner-shape: round; transition: transform 300ms; }");
+        Node a = Page.attach(Node.element("div").attr("class", "sq"));
+        Node b = Page.attach(Node.element("div").attr("class", "rd"));
+        Expect.is_true(Styles.of(a.id).corner_squircle, "squircle corners");
+        Expect.is_true(Styles.of(a.id).transform_ease, "ease-out on transform");
+        Expect.is_false(Styles.of(b.id).corner_squircle, "plain corners");
+        Expect.is_false(Styles.of(b.id).transform_ease, "the default is the spring");
+        Dom.remove(a.id);
+        Dom.remove(b.id);
+    }
+}

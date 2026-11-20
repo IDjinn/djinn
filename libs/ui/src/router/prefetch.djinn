@@ -1,0 +1,250 @@
+import std::types;
+import std::libc;
+
+namespace ui;
+
+unsafe static mut ptr prefetch_state = null;
+
+struct PrefetchState {
+    // Prerendered pages, oldest first: the path (copied), the page's root node (detached from the tree) and the
+    // reactive root that owns what its view created.
+    mut i8** paths;
+    mut u32* lengths;
+    mut u32* pages;
+    mut u32* roots;
+    mut u32 count;
+    // Paths (patterns) that must never be prerendered.
+    mut i8** skipped;
+    mut u32* skipped_lengths;
+    mut u32 skipped_count;
+    // Prefetching is on unless this is set (a zeroed state is the default, on).
+    mut bool disabled;
+    // A view is being built for the cache: nested requests (an eager link inside the page) are ignored.
+    mut bool busy;
+    mut bool has_view;
+    mut fn(str) -> Node view;
+    mut i8* groups;
+    mut u32 groups_length;
+    mut bool has_hook;
+    mut fn(str) -> void hook;
+    // Counters, for tests and for tuning.
+    mut u32 requested;
+    mut u32 hits;
+    mut u32 misses;
+}
+
+// Prefetch and prerender of pages. A Link that is hovered, focused or marked eager asks for its page ahead of time:
+// the Outlet's view is run once, off screen, and the finished page waits in a small cache (8 pages, oldest dropped).
+// Navigating to a cached path shows that page at once instead of building it; any other path is built as usual.
+// The view should be free of side effects other than building the page (Prefetch.skip opts a route out), and an
+// app can warm its own data through Prefetch.on_request. Turn it all off with Prefetch.enable(false).
+struct Prefetch {
+    const u32 LIMIT = 8;
+    const u32 SKIP_LIMIT = 16;
+
+    static unsafe PrefetchState* state() {
+        if (prefetch_state == null) {
+            PrefetchState* made = (PrefetchState*)__djinn_alloc_zeroed((size_long)sizeof(PrefetchState));
+            made.paths = (i8**)__djinn_alloc_zeroed((size_long)(Prefetch.LIMIT * 8));
+            made.lengths = (u32*)__djinn_alloc_zeroed((size_long)(Prefetch.LIMIT * 4));
+            made.pages = (u32*)__djinn_alloc_zeroed((size_long)(Prefetch.LIMIT * 4));
+            made.roots = (u32*)__djinn_alloc_zeroed((size_long)(Prefetch.LIMIT * 4));
+            made.skipped = (i8**)__djinn_alloc_zeroed((size_long)(Prefetch.SKIP_LIMIT * 8));
+            made.skipped_lengths = (u32*)__djinn_alloc_zeroed((size_long)(Prefetch.SKIP_LIMIT * 4));
+            prefetch_state = (ptr)made;
+        }
+        return (PrefetchState*)prefetch_state;
+    }
+
+    // Turns prefetching on or off for the whole app (it starts on). Turning it off forgets the cached pages.
+    public static unsafe void enable(bool on) {
+        PrefetchState* s = Prefetch.state();
+        s.disabled = !on;
+        if (!on) {
+            Prefetch.clear();
+        }
+    }
+
+    public static unsafe bool enabled() {
+        return !Prefetch.state().disabled;
+    }
+
+    // Routes (patterns as in Router.matches) that are never prerendered, for pages whose view has side effects.
+    public static unsafe void skip(str pattern) {
+        PrefetchState* s = Prefetch.state();
+        if (s.skipped_count == Prefetch.SKIP_LIMIT) {
+            return;
+        }
+        s.skipped[s.skipped_count] = Router.copy(pattern);
+        s.skipped_lengths[s.skipped_count] = (u32)pattern.length;
+        s.skipped_count = s.skipped_count + 1;
+    }
+
+    // Runs 'hook' with the path whenever a page is about to be prerendered: the place to start loading the data the
+    // page will show. It does not run for a page that is already cached.
+    public static unsafe void on_request(fn(str) -> void hook) {
+        PrefetchState* s = Prefetch.state();
+        s.hook = hook;
+        s.has_hook = true;
+    }
+
+    // The Outlet tells which view builds pages. The outermost Outlet (the first to render) owns prefetching: an Outlet
+    // inside a page it builds is rebuilt for the path when the user arrives. Returns false for the Outlets that are not it.
+    public static unsafe bool register(fn(str) -> Node view, str groups) {
+        PrefetchState* s = Prefetch.state();
+        if (s.has_view) {
+            return false;
+        }
+        s.view = view;
+        s.has_view = true;
+        s.groups = Router.copy(groups);
+        s.groups_length = (u32)groups.length;
+        return true;
+    }
+
+    // The owning Outlet went away: its view can no longer build pages and the cache is stale.
+    public static unsafe void unregister() {
+        Prefetch.clear();
+        PrefetchState* s = Prefetch.state();
+        s.has_view = false;
+        if (s.groups != (i8*)0) {
+            __djinn_free((void*)s.groups);
+            s.groups = (i8*)0;
+        }
+    }
+
+    static unsafe str path_at(PrefetchState* s, u32 index) {
+        str found = { .data = s.paths[index], .length = (size)s.lengths[index] };
+        return found;
+    }
+
+    static unsafe i32 find(PrefetchState* s, str path) {
+        mut u32 i = 0;
+        while (i < s.count) {
+            if (Texts.same(Prefetch.path_at(s, i), path)) {
+                return (i32)i;
+            }
+            i = i + 1;
+        }
+        return -1;
+    }
+
+    public static unsafe bool has(str path) {
+        PrefetchState* s = Prefetch.state();
+        return Prefetch.find(s, path) >= 0;
+    }
+
+    public static unsafe u32 count() {
+        return Prefetch.state().count;
+    }
+
+    static unsafe bool skipped(PrefetchState* s, str path) {
+        mut u32 i = 0;
+        while (i < s.skipped_count) {
+            str pattern = { .data = s.skipped[i], .length = (size)s.skipped_lengths[i] };
+            if (Router.matches(pattern, path)) {
+                return true;
+            }
+            i = i + 1;
+        }
+        return false;
+    }
+
+    static unsafe void drop(PrefetchState* s, u32 index) {
+        Reactive.dispose(s.roots[index]);
+        Dom.remove(s.pages[index]);
+        __djinn_free((void*)s.paths[index]);
+        mut u32 k = index + 1;
+        while (k < s.count) {
+            s.paths[k - 1] = s.paths[k];
+            s.lengths[k - 1] = s.lengths[k];
+            s.pages[k - 1] = s.pages[k];
+            s.roots[k - 1] = s.roots[k];
+            k = k + 1;
+        }
+        s.count = s.count - 1;
+    }
+
+    // Forgets every prerendered page (after the data they show changed).
+    public static unsafe void clear() {
+        PrefetchState* s = Prefetch.state();
+        while (s.count > 0) {
+            Prefetch.drop(s, s.count - 1);
+        }
+    }
+
+    // Asks for 'path' to be prerendered. Does nothing when prefetching is off, no Outlet has rendered yet, the path is
+    // the current page, is already cached, is skipped, or another prerender is running.
+    public static unsafe void request(str path) {
+        PrefetchState* s = Prefetch.state();
+        if (s.disabled || !s.has_view || s.busy || path.length == 0) {
+            return;
+        }
+        if (Texts.same(Router.peek(), path) || Prefetch.find(s, path) >= 0 || Prefetch.skipped(s, path)) {
+            return;
+        }
+        str groups = { .data = s.groups, .length = (size)s.groups_length };
+        if (Texts.same(Outlet.key(groups, path), Outlet.key(groups, Router.peek()))) {
+            // the same page stays on screen for this path: nothing to prepare
+            return;
+        }
+        s.requested = s.requested + 1;
+        if (s.has_hook) {
+            s.hook(path);
+        }
+        if (s.count == Prefetch.LIMIT) {
+            Prefetch.drop(s, 0);
+        }
+        s.busy = true;
+        u32 root = Reactive.create_root(0);
+        Scope saved = Reactive.enter(root);
+        Node inner = s.view(path);
+        Node page = Node.element("div").attr("class", "route").child(inner);
+        Reactive.leave(saved);
+        s.busy = false;
+        u32 at = s.count;
+        s.paths[at] = Router.copy(path);
+        s.lengths[at] = (u32)path.length;
+        s.pages[at] = page.id;
+        s.roots[at] = root;
+        s.count = at + 1;
+    }
+
+    // The prerendered page for 'path' (0 when there is none), leaving the cache; 'root' receives the reactive root
+    // that owns it, which the caller disposes when the page goes away.
+    public static unsafe u32 take(str path, u32* root) {
+        PrefetchState* s = Prefetch.state();
+        i32 at = Prefetch.find(s, path);
+        if (at < 0) {
+            s.misses = s.misses + 1;
+            return 0;
+        }
+        u32 index = (u32)at;
+        u32 page = s.pages[index];
+        *root = s.roots[index];
+        __djinn_free((void*)s.paths[index]);
+        mut u32 k = index + 1;
+        while (k < s.count) {
+            s.paths[k - 1] = s.paths[k];
+            s.lengths[k - 1] = s.lengths[k];
+            s.pages[k - 1] = s.pages[k];
+            s.roots[k - 1] = s.roots[k];
+            k = k + 1;
+        }
+        s.count = s.count - 1;
+        s.hits = s.hits + 1;
+        return page;
+    }
+
+    public static unsafe u32 hits() {
+        return Prefetch.state().hits;
+    }
+
+    public static unsafe u32 misses() {
+        return Prefetch.state().misses;
+    }
+
+    public static unsafe u32 requested() {
+        return Prefetch.state().requested;
+    }
+}

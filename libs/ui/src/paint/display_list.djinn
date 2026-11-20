@@ -4,6 +4,8 @@ import std::math;
 
 namespace ui;
 
+unsafe static mut bool display_squircle = false;
+
 // One corner of a triangle: position in px, the atlas coordinate (0..1) it samples and its color (straight alpha,
 // R in the lowest byte, which is what the GPU reads as R8G8B8A8). The final pixel is 'color * atlas(u, v)', so a
 // plain shape samples the solid block of the atlas and a glyph its coverage.
@@ -261,11 +263,41 @@ struct DisplayList {
 
     // One point of a rounded rectangle outline moved 'grow' px outward, walking clockwise from the top-left corner;
     // 'index' counts 0 .. 4 * (SEGMENTS + 1) - 1. Writes x and y into out[0], out[1].
+    // Corners drawn from here on are squircles (continuous corners, as Apple draws them) instead of circular arcs.
+    public static unsafe void squircle(bool on) {
+        display_squircle = on;
+    }
+
+    // The value of a point on a superellipse of exponent 5 (the curve Apple's continuous corners follow closely): the
+    // cosine or sine of the angle, pushed out so the corner is fuller than a circle and joins the straight edge gently.
+    static f32 fuller(f32 v) {
+        mut f32 magnitude = v;
+        if (magnitude < (f32)0.0) {
+            magnitude = (f32)0.0 - magnitude;
+        }
+        f32 shaped = (f32)Math.pow((f64)magnitude, 0.4);
+        if (v < (f32)0.0) {
+            return (f32)0.0 - shaped;
+        }
+        return shaped;
+    }
+
     static unsafe void outline_point(f32 x, f32 y, f32 width, f32 height, f32 radius, f32 grow, u32 index, f32* out) {
         u32 per_corner = DisplayList.SEGMENTS + 1;
         u32 corner = index / per_corner;
         u32 step = index % per_corner;
-        mut f32 r = radius + grow;
+        mut f32 base = radius;
+        if (display_squircle) {
+            // a continuous corner spans a little more of each edge than a circular one of the same radius
+            f32 reach = base * (f32)1.25;
+            f32 half = Px.min(width, height) / (f32)2.0;
+            if (reach > half) {
+                base = half;
+            } else {
+                base = reach;
+            }
+        }
+        mut f32 r = base + grow;
         if (r < (f32)0.0) {
             r = (f32)0.0;
         }
@@ -288,8 +320,14 @@ struct DisplayList {
             start = (f32)1.57079633;
         }
         f32 angle = start + (f32)1.57079633 * (f32)step / (f32)DisplayList.SEGMENTS;
-        out[0] = cx + r * Math.cos(angle);
-        out[1] = cy + r * Math.sin(angle);
+        mut f32 across = Math.cos(angle);
+        mut f32 down = Math.sin(angle);
+        if (display_squircle) {
+            across = DisplayList.fuller(across);
+            down = DisplayList.fuller(down);
+        }
+        out[0] = cx + r * across;
+        out[1] = cy + r * down;
     }
 
     const u32 SEGMENTS = 8;
