@@ -451,6 +451,51 @@ In the Windows host the extra mouse buttons go back / forward through the router
 `Timers.every(ms, handler)` / `Timers.every_mounted` run a handler on the host clock (a handler that sets a signal drives
 looping transitions; see the Motion page of `examples/ui-native`). Not yet: rubber-band overscroll, an inline `style` attribute.
 
+## Navigation
+
+One set of components for every target (`libs/ui/src/kit/navigation.djinn`, shared with the web build): they look and move the same
+natively and on the web, and only their arrangement follows the screen. Routes are written as in `Navigator`: `"/=Home|/settings=Settings"`.
+
+- `Stack { titles }`: a header with a Back button (visible only when there is a page to go back to) and the title of the route, over its
+  content (put an `Outlet` inside). Pages slide in from the side the navigation went.
+- `Drawer { title, routes, open, collapsed }`: a menu of routes. From 56.25rem wide it is a column that collapses to a rail of initials
+  (`collapsed`); below that it hides behind a menu button and slides over the content with a scrim (`open`).
+- `TabBar { routes }`: the tabs of an app, one per route: along the bottom edge below 43.75rem (the bottom navigator), along the top above.
+- `Stepper { steps, finish, step, can_next, on_finish }` with `Step { index, step }` inside: a wizard. `can_next` holds the user on a
+  step until it is valid; steps slide in from the side the wizard moved.
+
+Keys follow the platform (`navigation_keys.djinn`, `Hotkeys`, `Device.apple()`): Alt+Left / Alt+Right go back and forward (Command+[ and
+Command+] on macOS and iOS), the Back and Forward keys of a remote control work everywhere, Ctrl+B / Command+B toggles the menu, Left / Right /
+Home / End walk the tabs and Up / Down / Home / End the menu entries, PageDown / PageUp move the wizard (ignored while typing). Ctrl+Tab cycles
+the tabs where the platform lets the page have it (browsers keep it). Tab and Shift+Tab walk the controls. With **no pointer** (`pointer: none`,
+`Styles.set_no_pointer(true)`; a TV or a kiosk) the arrow keys move focus to the nearest control in that direction (`Focus.move_direction`).
+Bindings belong to the component that made them and go away with it.
+
+**Prefetch.** A `Link` that is hovered or focused (`prefetch="eager"`: as soon as it is shown, `prefetch="off"`: never) asks for its page: the
+outermost `Outlet`'s view builds it off screen and the finished page waits in a cache of 8 pages, shown at once when the user arrives
+(`Prefetch.request`, `has`, `clear`). `Prefetch.enable(false)` turns it all off, `Prefetch.skip("/pattern")` opts a route out, and
+`Prefetch.on_request(fn)` lets an app warm its data. The view must be free of side effects other than building the page; an `Outlet` inside a
+prefetched page is rebuilt for its path on arrival.
+
+**Responsive theme.** Breakpoints are in `rem`, so they follow the user's font size and the OS text scale. Media features: `min/max-width`,
+`min/max-height`, `orientation`, `hover`, `pointer: coarse | fine | none`, `prefers-*`, `forced-colors`. Profiles: the default (phone and desktop),
+larger targets from 120rem, and `pointer: none` (a TV: larger text, spacing and targets, a safe margin, a stronger focus ring).
+`data-form="tv|phone|panel"` on the root forces a profile when the size alone says the wrong thing (a small IoT panel, a TV that reports a desktop
+size). Hairlines (1-2 px borders, outlines) stay absolute on purpose.
+
+**Only what changes moves.** `<Outlet groups="/navigation/*|/routing/*">`: routes of one group share a page, so moving inside a group
+(a tab, a menu entry) keeps the page, its state and its animation, and only the inner `Outlet` changes. Without `groups` every path is its own page.
+
+**Motion and shape.** Durations are calm: 320 ms to appear, 220 ms to leave, 440 ms for a page (`--ui-motion`, `--ui-spring`, `--ui-slide`).
+`transform` moves with a spring unless a transition names an easing (`transition: transform var(--ui-slide) ease-out`, as the drawer does, so
+it never overshoots). `corner-shape: squircle` draws continuous, Apple-style corners (the theme sets it through `--ui-corner`; pills and circles
+stay round, and `corner-shape: round` opts an element out), the same natively and in Chrome.
+
+### Known gap: state shared between components
+There is no context, provider or store yet. A `signal<T>` is a global handle, so state is shared by passing the signal to the components that
+need it (or keeping it in a static, as `Router` does), but there is no scope for a subtree (`provide` / `inject`), no store with selectors or
+derived state, and no persistence. Navigation does not depend on it. This is planned (see the task list); it should be designed before apps grow.
+
 ## Hotkeys
 
 `Hotkeys.on("Mod+Shift+P", scope, handler)` binds a shortcut and returns its id (0 when the combo is not valid or is

@@ -1,0 +1,121 @@
+import std::types;
+
+namespace ui;
+
+// The keyboard side of the navigation components. The keys follow the platform the app runs on: the main modifier is
+// Command on macOS and iOS and Control elsewhere, history uses Alt+Left / Alt+Right (Command+[ and Command+] on Apple
+// systems, as Safari and Finder do), and the Back and Forward keys of a remote control or a mouse work everywhere.
+// Bindings belong to the component that asked for them and go away with it. Tab and Shift+Tab walk the controls in
+// reading order (Focus.move), the arrows walk a menu or a tab bar, and with no pointer the arrows move between any
+// controls (Focus.move_direction), so a remote control reaches everything.
+//
+//   Back / Forward        Alt+Left, Alt+Right (Command+[, Command+]), BrowserBack, BrowserForward
+//   Menu (Drawer)         Mod+B opens or closes it (collapses it on a wide screen); Escape closes it
+//   Tabs (TabBar)         Left / Right, Home / End on a tab; Ctrl+Tab and Ctrl+Shift+Tab where the platform lets the
+//                         page have them (browsers keep those for their own tabs)
+//   Menu entries          Up / Down, Home / End
+//   Wizard (Stepper)      PageDown next (or finish), PageUp back; ignored while typing in a field
+struct NavKeys {
+    public static unsafe void bind(str combo, fn() -> void handler) {
+        u32 id = Hotkeys.on(combo, "", handler);
+        if (id != 0) {
+            Reactive.on_cleanup(() => Hotkeys.off(id));
+        }
+    }
+
+    static unsafe void go_back() {
+        if (Router.can_go_back()) {
+            Router.back();
+        }
+    }
+
+    static unsafe void go_forward() {
+        if (Router.can_go_forward()) {
+            Router.forward();
+        }
+    }
+
+    // Back and forward through the history, with the keys of the platform.
+    public static unsafe void history() {
+        Hotkeys.use_command(Device.apple());
+        if (Device.apple()) {
+            NavKeys.bind("Mod+[", () => NavKeys.go_back());
+            NavKeys.bind("Mod+]", () => NavKeys.go_forward());
+        } else {
+            NavKeys.bind("Alt+Left", () => NavKeys.go_back());
+            NavKeys.bind("Alt+Right", () => NavKeys.go_forward());
+        }
+        NavKeys.bind("BrowserBack", () => NavKeys.go_back());
+        NavKeys.bind("BrowserForward", () => NavKeys.go_forward());
+    }
+
+    static unsafe void toggle_menu(signal<bool> open, signal<bool> collapsed) {
+        if (Device.wide()) {
+            collapsed.set(!collapsed.get());
+        } else {
+            open.set(!open.get());
+        }
+    }
+
+    public static unsafe void menu(signal<bool> open, signal<bool> collapsed) {
+        Hotkeys.use_command(Device.apple());
+        NavKeys.bind("Mod+B", () => NavKeys.toggle_menu(open, collapsed));
+    }
+
+    // The index of the route that fits the current path (0 when none does).
+    public static unsafe i32 current(str routes) {
+        str path = Router.peek();
+        mut u32 i = 0;
+        u32 total = Choices.count(routes);
+        while (i < total) {
+            if (Router.matches(Navigator.target(routes, (i32)i), path)) {
+                return (i32)i;
+            }
+            i = i + 1;
+        }
+        return 0;
+    }
+
+    // Goes to the route 'delta' places from the current one, wrapping around.
+    public static unsafe void cycle(str routes, i32 delta) {
+        i32 total = (i32)Choices.count(routes);
+        if (total == 0) {
+            return;
+        }
+        i32 next = (NavKeys.current(routes) + delta + total) % total;
+        Router.navigate(Navigator.target(routes, next));
+    }
+
+    public static unsafe void tabs(str routes) {
+        NavKeys.bind("Ctrl+Tab", () => NavKeys.cycle(routes, 1));
+        NavKeys.bind("Ctrl+Shift+Tab", () => NavKeys.cycle(routes, -1));
+    }
+
+    // The arrows on a focused entry of a tab bar (horizontal) or a menu (vertical): the neighbour takes focus and, as
+    // tabs are meant to, becomes the current page; Home and End go to the first and last.
+    public static unsafe void arrows(str routes, bool horizontal) {
+        i32 key = Input.key();
+        mut i32 before = Key.UP;
+        mut i32 after = Key.DOWN;
+        if (horizontal) {
+            before = Key.LEFT;
+            after = Key.RIGHT;
+        }
+        i32 total = (i32)Choices.count(routes);
+        if (key == before) {
+            Device.step_focus(true);
+            NavKeys.cycle(routes, -1);
+            Input.prevent();
+        } else if (key == after) {
+            Device.step_focus(false);
+            NavKeys.cycle(routes, 1);
+            Input.prevent();
+        } else if (key == Key.HOME) {
+            Router.navigate(Navigator.target(routes, 0));
+            Input.prevent();
+        } else if (key == Key.END && total > 0) {
+            Router.navigate(Navigator.target(routes, total - 1));
+            Input.prevent();
+        }
+    }
+}

@@ -47,11 +47,17 @@ struct Router {
         return router_direction;
     }
 
+    // Tells which way the next thing slides in (1 forward, -1 back), for a wizard or anything else that moves like a
+    // navigation does.
+    public static unsafe void set_direction(i32 direction) {
+        router_direction = direction;
+    }
+
     static unsafe void changed(RouterState* s) {
         s.version.set(s.version.peek() + 1);
     }
 
-    static unsafe i8* copy(str path) {
+    public static unsafe i8* copy(str path) {
         i8* made = (i8*)__djinn_alloc_zeroed((size_long)(path.length + 1));
         if (path.length > 0) {
             memcpy((void*)made, (void*)path.data, (size_long)path.length);
@@ -271,8 +277,31 @@ struct Router {
 
 // Shows the view for the current path, rebuilt after every navigation; each new page fades in. 'view' maps a path to
 // the page (usually a chain of Router.matches).
+struct OutletCell {
+    mut u32 root;
+    mut i8* key;
+    mut u32 key_length;
+}
+
 struct Outlet {
     fn(str) -> Node view;
+    // Routes that share one page, written "/settings/*|/users/*": while the path moves inside a group the page stays,
+    // and only what is inside it (usually an Outlet of its own) changes. Without groups every path is its own page.
+    str groups;
+
+    // What decides whether the page changes: the pattern of the group the path belongs to, or the path itself.
+    public static unsafe str key(str groups, str path) {
+        u32 total = Choices.count(groups);
+        mut u32 i = 0;
+        while (i < total) {
+            str pattern = Choices.nth(groups, (i32)i);
+            if (pattern.length > 0 && Router.matches(pattern, path)) {
+                return pattern;
+            }
+            i = i + 1;
+        }
+        return path;
+    }
 
     // A page that is being replaced stays for a moment, lifted out of the flow, and fades out under the new one.
     static unsafe void retire(u32 page) {
@@ -281,25 +310,53 @@ struct Outlet {
         }
         Dom.set_attr(page, "data-leaving", "true", 4);
         Animation.fade_out(page, Animation.EXIT);
-        Timers.after(Animation.EXIT + 120, () => Dom.remove(page));
+        Timers.after(Animation.EXIT + 160, () => Dom.remove(page));
     }
 
     public unsafe Node render() {
         Node box = Node.element("div").attr("class", "outlet");
         u32 region = Dom.fragment();
         Dom.append(box.id, region);
+        // The reactive root that owns the page on screen; replaced (and disposed) with the page.
+        OutletCell* live = (OutletCell*)__djinn_alloc_zeroed((size_long)sizeof(OutletCell));
+        if (Prefetch.register(this.view, this.groups)) {
+            Reactive.on_cleanup(() => Prefetch.unregister());
+        }
         effect(() => {
+            str path = Router.path();
+            str key = Outlet.key(this.groups, path);
+            if (live.key != (i8*)0) {
+                str kept = { .data = live.key, .length = (size)live.key_length };
+                if (Texts.same(kept, key)) {
+                    return;
+                }
+                __djinn_free((void*)live.key);
+            }
+            live.key = Router.copy(key);
+            live.key_length = (u32)key.length;
             mut u32 old = Dom.first_child(region);
             while (old != 0) {
                 u32 next = Dom.next_sibling(old);
                 Outlet.retire(old);
                 old = next;
             }
-            str path = Router.path();
-            Node inner = this.view(path);
-            Node page = Node.element("div").attr("class", "route").child(inner);
-            Animation.enter(page.id, Animation.ENTER + 80, (f32)(28 * Router.direction()));
-            Dom.append(region, page.id);
+            if (live.root != 0) {
+                Reactive.dispose(live.root);
+                live.root = 0;
+            }
+            mut u32 root = 0;
+            mut u32 page = Prefetch.take(path, &root);
+            if (page == 0) {
+                root = Reactive.create_root(0);
+                Scope saved = Reactive.enter(root);
+                Node inner = this.view(path);
+                Node built = Node.element("div").attr("class", "route").child(inner);
+                Reactive.leave(saved);
+                page = built.id;
+            }
+            live.root = root;
+            Animation.enter(page, Animation.PAGE, (f32)(28 * Router.direction()));
+            Dom.append(region, page);
         });
         return box;
     }

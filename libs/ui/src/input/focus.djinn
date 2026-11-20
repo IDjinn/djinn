@@ -202,6 +202,66 @@ struct Focus {
         return Focus.set(target, true);
     }
 
+    // An arrow key moves focus to the nearest tabbable element in that direction (a remote control or a gamepad has no
+    // pointer): candidates must lie ahead, and distance across the direction counts double so that the element in the
+    // same row or column wins over a closer diagonal one. Returns false when nothing lies that way.
+    public static unsafe bool move_direction(i32 key) {
+        DomTree* t = Dom.tree();
+        u32* order = (u32*)__djinn_alloc_zeroed((size_long)((t.count + 1) * 4));
+        mut u32 count = 0;
+        Focus.collect(Dom.document(), order, &count);
+        u32 now = Focus.current();
+        if (count == 0) {
+            __djinn_free((void*)order);
+            return false;
+        }
+        if (now == 0) {
+            u32 first = order[0];
+            __djinn_free((void*)order);
+            return Focus.set(first, true);
+        }
+        Rect from = Layout.rect(now);
+        f32 fx = from.x + from.width / (f32)2.0;
+        f32 fy = from.y + from.height / (f32)2.0;
+        mut u32 best = 0;
+        mut f32 best_score = (f32)1000000000.0;
+        for (mut u32 i = 0; i < count; i = i + 1) {
+            u32 candidate = order[i];
+            if (candidate == now) {
+                continue;
+            }
+            Rect to = Layout.rect(candidate);
+            f32 dx = to.x + to.width / (f32)2.0 - fx;
+            f32 dy = to.y + to.height / (f32)2.0 - fy;
+            mut f32 along = dx;
+            mut f32 across = dy;
+            if (key == Key.LEFT) {
+                along = (f32)0.0 - dx;
+            } else if (key == Key.UP) {
+                along = (f32)0.0 - dy;
+                across = dx;
+            } else if (key == Key.DOWN) {
+                along = dy;
+                across = dx;
+            }
+            if (across < (f32)0.0) {
+                across = (f32)0.0 - across;
+            }
+            if (along > (f32)0.5) {
+                f32 score = along + across * (f32)2.0;
+                if (score < best_score) {
+                    best_score = score;
+                    best = candidate;
+                }
+            }
+        }
+        __djinn_free((void*)order);
+        if (best == 0) {
+            return false;
+        }
+        return Focus.set(best, true);
+    }
+
     // Forgets the focus without events: for a host tearing the tree down, and for tests.
     public static unsafe void reset() {
         focused_node = 0;

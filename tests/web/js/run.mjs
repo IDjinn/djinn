@@ -42,7 +42,7 @@ export function load(path, startPath = "/", page = null, extra = {}) {
 }
 
 // Lets the program's timers run (a page that leaves is removed after its fade, as natively).
-export function settle(milliseconds = 300) {
+export function settle(milliseconds = 600) {
     return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 

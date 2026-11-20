@@ -1,0 +1,258 @@
+import std::types;
+
+namespace ui;
+
+// Navigation: stack, drawer, tabs and wizard. They are written once and look the same on every target; only the layout
+// follows the screen (the theme switches between phone, desktop and TV arrangements with media queries). The routes
+// are written as in Navigator: "/=Home|/settings=Settings".
+
+// A stack of screens: a header with a Back button (shown when there is a page to go back to) and the title of the
+// current route, over the content. Put an Outlet inside; each page slides in from the side the navigation went.
+// 'titles' is written "/=Home|/user/:id=Profile".
+struct Stack {
+    str titles;
+    Node children;
+
+    public static unsafe str title(str titles) {
+        str path = Router.path();
+        mut u32 i = 0;
+        u32 total = Choices.count(titles);
+        while (i < total) {
+            str route = Choices.nth(titles, (i32)i);
+            if (Router.matches(Choices.side(route, true), path)) {
+                return Choices.side(route, false);
+            }
+            i = i + 1;
+        }
+        return "";
+    }
+
+    // "true" when there is somewhere to go back to; reading it follows the navigation.
+    public static unsafe str can_back() {
+        Router.path();
+        return Kit.flag(Router.can_go_back());
+    }
+
+    public static unsafe str hidden() {
+        Router.path();
+        return Kit.flag(!Router.can_go_back());
+    }
+
+    public static unsafe void back() {
+        if (Router.can_go_back()) {
+            Router.back();
+        }
+    }
+
+    public unsafe Node render() {
+        NavKeys.history();
+        return html!{
+            <section class="stack-screen">
+                <header class="stack-header">
+                    <button class="stack-back" aria-label="Back" data-visible={Stack.can_back()}
+                            aria-hidden={Stack.hidden()} on_click={() => Stack.back()}>
+                        <span class="stack-back-mark" aria-hidden="true"></span>
+                    </button>
+                    <h1 class="stack-title">{Stack.title(this.titles)}</h1>
+                </header>
+                {this.children}
+            </section>
+        };
+    }
+}
+
+// A menu of routes beside the content. On a wide screen it is a column that the user can collapse to a rail of
+// initials; on a narrow one it is hidden behind a menu button and slides over the content with a scrim. 'open' is the
+// narrow state, 'collapsed' the wide one; both belong to the caller.
+struct Drawer {
+    str title;
+    str routes;
+    signal<bool> open;
+    signal<bool> collapsed;
+    Node children;
+
+    public static unsafe str state(bool open) {
+        if (open) {
+            return "open";
+        }
+        return "closed";
+    }
+
+    static unsafe void pick(signal<bool> open, str target) {
+        Router.navigate(target);
+        open.set(false);
+    }
+
+    static unsafe void on_key(signal<bool> open) {
+        if (open.get() && Input.key() == Key.ESCAPE) {
+            open.set(false);
+        }
+    }
+
+    public unsafe Node render() {
+        NavKeys.menu(this.open, this.collapsed);
+        return html!{
+            <div class="drawer-layout" on_keydown={() => Drawer.on_key(this.open)}>
+                <div class="drawer-scrim" data-open={Kit.flag(this.open.get())} on_click={() => this.open.set(false)}></div>
+                <nav class="drawer" role="navigation" aria-label={this.title} data-state={Drawer.state(this.open.get())}
+                     data-collapsed={Kit.flag(this.collapsed.get())} on_keydown={() => NavKeys.arrows(this.routes, false)}>
+                    <div class="drawer-head">
+                        <strong class="drawer-title">{this.title}</strong>
+                        <button class="drawer-collapse" aria-label="Collapse the menu" aria-expanded={Kit.flag(!this.collapsed.get())}
+                                on_click={() => this.collapsed.set(!this.collapsed.get())}>
+                            <span class="drawer-collapse-mark" aria-hidden="true"></span>
+                        </button>
+                    </div>
+                    {for (i32 i in 0..(i32)Choices.count(this.routes)) {
+                        <a class="drawer-item" href={Navigator.target(this.routes, i)}
+                           aria-current={Navigator.current(this.routes, i)}
+                           on_click={() => Drawer.pick(this.open, Navigator.target(this.routes, i))}>
+                            <span class="drawer-mark" aria-hidden="true">{Initial.of(Navigator.label(this.routes, i))}</span>
+                            <span class="drawer-label">{Navigator.label(this.routes, i)}</span>
+                        </a>
+                    }}
+                </nav>
+                <div class="drawer-content">
+                    <button class="drawer-toggle" aria-label="Open the menu" aria-expanded={Kit.flag(this.open.get())}
+                            on_click={() => this.open.set(!this.open.get())}>
+                        <span class="drawer-toggle-mark" aria-hidden="true"></span>
+                    </button>
+                    {this.children}
+                </div>
+            </div>
+        };
+    }
+}
+
+// The tabs of an app, one per route: along the bottom edge of a phone, along the top of a wide screen.
+struct TabBar {
+    str routes;
+
+    public static unsafe str selected(str routes, i32 index) {
+        return Kit.flag(Texts.same(Navigator.current(routes, index), "page"));
+    }
+
+    public unsafe Node render() {
+        NavKeys.tabs(this.routes);
+        return html!{
+            <div class="tabbar-wrap">
+                <nav class="tabbar" role="tablist" on_keydown={() => NavKeys.arrows(this.routes, true)}>
+                    {for (i32 i in 0..(i32)Choices.count(this.routes)) {
+                        <a class="tabbar-item" role="tab" href={Navigator.target(this.routes, i)}
+                           aria-current={Navigator.current(this.routes, i)}
+                           aria-selected={TabBar.selected(this.routes, i)}
+                           on_click={() => Router.navigate(Navigator.target(this.routes, i))}>
+                            <span class="tabbar-mark" aria-hidden="true">{Initial.of(Navigator.label(this.routes, i))}</span>
+                            <span class="tabbar-label">{Navigator.label(this.routes, i)}</span>
+                        </a>
+                    }}
+                </nav>
+                <div class="tabbar-space" aria-hidden="true"></div>
+            </div>
+        };
+    }
+}
+
+// A wizard: a list of steps ("Account|Address|Payment") with the current one marked, Back and Next buttons and the
+// content of the step that is shown (Step components inside, one per index). 'can_next' lets the app hold the user
+// on a step until it is valid; the last step's button reads 'finish' and runs 'on_finish'.
+struct Stepper {
+    str steps;
+    str finish;
+    signal<i32> step;
+    signal<bool> can_next;
+    fn() -> void on_finish;
+    Node children;
+
+    public static unsafe str state(i32 index, i32 current) {
+        if (index < current) {
+            return "done";
+        }
+        if (index == current) {
+            return "current";
+        }
+        return "todo";
+    }
+
+    public static unsafe void back(signal<i32> step) {
+        if (step.get() > 0) {
+            Router.set_direction(-1);
+            step.set(step.get() - 1);
+        }
+    }
+
+    // Next step, or the end of the wizard on the last one; nothing while the step is not valid.
+    public unsafe void advance(i32 total) {
+        if (!this.can_next.get()) {
+            return;
+        }
+        if (this.step.get() + 1 < total) {
+            Router.set_direction(1);
+            this.step.set(this.step.get() + 1);
+        } else {
+            this.on_finish();
+        }
+    }
+
+    // Jumping straight back to a step that was already reached.
+    public static unsafe void jump(signal<i32> step, i32 index) {
+        if (index < step.get()) {
+            Router.set_direction(-1);
+            step.set(index);
+        }
+    }
+
+    public static unsafe str forward_label(str steps, str finish, i32 current) {
+        if (current + 1 >= (i32)Choices.count(steps)) {
+            return finish;
+        }
+        return "Next";
+    }
+
+    public static unsafe str progress(i32 current, i32 total) {
+        return $"{current + 1} / {total}";
+    }
+
+    public unsafe Node render() {
+        i32 total = (i32)Choices.count(this.steps);
+        NavKeys.bind("PageDown", () => this.advance(total));
+        NavKeys.bind("PageUp", () => Stepper.back(this.step));
+        return html!{
+            <section class="stepper">
+                <ol class="stepper-list" aria-label="Progress">
+                    {for (i32 i in 0..total) {
+                        <li class="stepper-item" data-state={Stepper.state(i, this.step.get())}
+                            aria-current={Kit.current(i == this.step.get())}>
+                            <button class="stepper-dot" aria-label={Choices.nth(this.steps, i)}
+                                    on_click={() => Stepper.jump(this.step, i)}>{i + 1}</button>
+                            <span class="stepper-label">{Choices.nth(this.steps, i)}</span>
+                        </li>
+                    }}
+                </ol>
+                <p class="stepper-count" aria-live="polite">{Stepper.progress(this.step.get(), total)}</p>
+                <div class="stepper-body">{this.children}</div>
+                <div class="stepper-actions">
+                    <button class="stepper-back" aria-disabled={Kit.flag(this.step.get() == 0)}
+                            on_click={() => Stepper.back(this.step)}>Back</button>
+                    <button class="primary stepper-next" aria-disabled={Kit.flag(!this.can_next.get())}
+                            on_click={() => this.advance(total)}>{Stepper.forward_label(this.steps, this.finish, this.step.get())}</button>
+                </div>
+            </section>
+        };
+    }
+}
+
+// The content of one step of a Stepper; it slides in from the side the wizard moved.
+struct Step {
+    i32 index;
+    signal<i32> step;
+    Node children;
+
+    public unsafe Node render() {
+        return html!{
+            <div class="step" role="group" data-slide="true" data-active={Kit.flag(this.step.get() == this.index)}>
+                {this.children}
+            </div>
+        };
+    }
+}

@@ -40,7 +40,7 @@ cp libs/vulkan/native/vulkan-1.* "$libs/"
 "$compiler" examples/showcase --target web -o "$out/showcase" "${flags[@]}" > "$out/web.log" 2>&1 \
     || { cat "$out/web.log"; fail "the web showcase must build"; }
 
-for route in / /components /data /motion /routing /routing/settings /routing/users/42; do
+for route in / /components /data /motion /routing /routing/settings /routing/users/42 /navigation /navigation/inbox; do
     MSYS_NO_PATHCONV=1 "$out/showcase.exe" --html "$route" | tr -d '\r' > "$out/native.html" || fail "the native showcase must render $route"
     MSYS_NO_PATHCONV=1 node tests/web/js/showcase.mjs build/unit/showcase/showcase.js "$route" > "$out/web.html" || fail "the web showcase must render $route"
     grep -q "<main" "$out/native.html" || fail "the native showcase rendered nothing at $route"

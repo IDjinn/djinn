@@ -500,14 +500,26 @@ const $theme = {
 // string and the fragment are ignored.
 const $path = $signal(location.pathname);
 let $direction = 1;
-addEventListener("popstate", () => { $direction = -1; $set($path, location.pathname); });
+// The position in the history (kept in history.state) tells which way a popstate went and whether there is a page to go back to.
+let $index = (history.state && history.state.i) || 0, $max = $index;
+addEventListener("popstate", (event) => {
+  const at = (event.state && event.state.i) || 0;
+  $direction = at < $index ? -1 : 1;
+  $index = at; $max = Math.max($max, at);
+  $set($path, location.pathname);
+});
 const $navigate = (path, replace) => {
   if ($event && $event.type === "click") $event.preventDefault();
   if (path === $path.value) return;
-  if (replace) history.replaceState(null, "", path); else history.pushState(null, "", path);
+  if (replace) history.replaceState({ i: $index }, "", path); else { $index++; $max = $index; history.pushState({ i: $index }, "", path); }
   $direction = 1;
   $set($path, path);
 };
+// The program reaches these through functions: it cannot read a let of the runtime.
+const $canBack = () => $index > 0;
+const $canForward = () => $index < $max;
+const $getDirection = () => $direction;
+const $setDirection = (direction) => { $direction = direction; };
 const $segments = (text) => text.replace(/[?#].*$/, "").split("/").filter((part) => part.length > 0);
 const $matches = (pattern, path) => {
   const want = $segments(pattern), have = $segments(path);
@@ -532,6 +544,8 @@ const $side = (route, before) => {
 // Motion, as the native animation system does it: data-open presents or dismisses (fade, then data-gone="true"
 // which the theme hides), a tab panel that becomes active fades in, a new page fades and slides in.
 const $reduced = () => typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
+// Timing, as the native Animation: things appear a little slower than they leave.
+const $ENTER = 320, $EXIT = 220, $PAGE = 440;
 const $fade = (node, from, to, duration, slide, done) => {
   if (!node.animate || $reduced()) { if (done) done(); return; }
   const frames = slide ? [{ opacity: from, transform: `translateX(${slide}px)` }, { opacity: to, transform: "none" }] : [{ opacity: from }, { opacity: to }];
@@ -540,12 +554,12 @@ const $fade = (node, from, to, duration, slide, done) => {
 };
 const $present = (node, on) => {
   if (!node.hasAttribute("data-gone")) { node.setAttribute("data-gone", on ? "false" : "true"); return; }
-  if (on) { node.setAttribute("data-gone", "false"); $fade(node, 0, 1, 200); }
-  else $fade(node, 1, 0, 140, 0, () => node.setAttribute("data-gone", "true"));
+  if (on) { node.setAttribute("data-gone", "false"); $fade(node, 0, 1, $ENTER); }
+  else $fade(node, 1, 0, $EXIT, 0, () => node.setAttribute("data-gone", "true"));
 };
 const $attributeMoved = (node, name, value, existed) => {
   if (name === "data-open") $present(node, value === "true");
-  else if (existed && name === "data-active" && value === "true") $fade(node, 0, 1, 200);
+  else if (existed && name === "data-active" && value === "true") $fade(node, 0, 1, $ENTER, node.hasAttribute("data-slide") ? 24 * $direction : 0);
 };
 const $transition = (show, children) => {
   const box = $el("div");
@@ -592,27 +606,60 @@ const $virtual = (count, item, height, row) => {
   sync();
   return box;
 };
-const $outlet = (view) => {
+// Prefetch and prerender: the pages asked for ahead of time wait here (8 at most, the oldest dropped) until the Outlet
+// shows them. The view should be free of side effects other than building the page.
+const $pf = { off: false, view: null, groups: "", cache: new Map(), skip: [], hook: null, busy: false };
+const $prefetchClear = () => { for (const entry of $pf.cache.values()) $dispose(entry.root); $pf.cache.clear(); };
+const $prefetchEnable = (on) => { $pf.off = !on; if (!on) $prefetchClear(); };
+const $prefetch = (path) => {
+  if ($pf.off || !$pf.view || $pf.busy || !path || path === $path.value || $pf.cache.has(path) || $pf.skip.some((pattern) => $matches(pattern, path))) return;
+  if ($groupKey($pf.groups, path) === $groupKey($pf.groups, $path.value)) return;
+  if ($pf.hook) $pf.hook(path);
+  if ($pf.cache.size >= 8) {
+    const [oldest, entry] = $pf.cache.entries().next().value;
+    $dispose(entry.root);
+    $pf.cache.delete(oldest);
+  }
+  $pf.busy = true;
+  const page = $el("div");
+  page.setAttribute("class", "route");
+  try { const root = $root(() => { page.appendChild($pf.view(path)); }); $pf.cache.set(path, { page, root }); }
+  finally { $pf.busy = false; }
+};
+const $groupKey = (groups, path) => groups.split("|").find((pattern) => pattern.length > 0 && $matches(pattern, path)) ?? path;
+const $outlet = (view, groups) => {
   const box = $el("div");
   box.setAttribute("class", "outlet");
   const region = $region();
   box.appendChild(region.fragment);
+  if (!$pf.view) { $pf.view = view; $pf.groups = groups || ""; $onCleanup(() => { $prefetchClear(); $pf.view = null; }); }
+  let live = null, kept = null;
   $effect(() => {
+    // Moving inside a group of routes keeps the page; what is inside it (an Outlet of its own) changes.
+    const path = $read($path);
+    const key = $groupKey(groups || "", path);
+    if (key === kept) return;
+    kept = key;
+    if (live) { $dispose(live); live = null; }
     for (const old of region.nodes) {
       if (old.nodeType !== 1 || old.hasAttribute("data-leaving")) continue;
       old.setAttribute("data-leaving", "true");
-      $fade(old, 1, 0, 140, 0, () => old.setAttribute("data-gone", "true"));
-      setTimeout(() => old.remove(), 260);
+      $fade(old, 1, 0, $EXIT, 0, () => old.setAttribute("data-gone", "true"));
+      setTimeout(() => old.remove(), $EXIT + 160);
     }
-    const path = $read($path);
     $untrack(() => {
       const adopting = $adopt !== null;
-      const page = $el("div");
-      page.setAttribute("class", "route");
-      page.appendChild(view(path));
+      const hit = adopting ? undefined : $pf.cache.get(path);
+      if (hit) $pf.cache.delete(path);
+      const page = hit ? hit.page : $el("div");
+      if (hit) live = hit.root;
+      else {
+        page.setAttribute("class", "route");
+        page.appendChild(view(path));
+      }
       region.end.parentNode.insertBefore(page, region.end);
       region.nodes = region.nodes.filter((node) => node.parentNode).concat([page]);
-      if (!adopting) $fade(page, 0, 1, 280, 28 * $direction);
+      if (!adopting) $fade(page, 0, 1, $PAGE, 28 * $direction);
     });
   });
   return box;
@@ -623,6 +670,71 @@ const $key = { code: 0, shift: false, ctrl: false, alt: false, event: null, prev
 addEventListener("keydown", (event) => {
   $key.code = event.keyCode; $key.shift = event.shiftKey; $key.ctrl = event.ctrlKey; $key.alt = event.altKey; $key.event = event;
 }, true);
+// Hotkeys: one step combos ("Mod+B", "Alt+Left", "PageDown"); Mod is Command on Apple systems and Control elsewhere. A
+// shortcut without Ctrl, Alt or Meta is ignored while a field has focus, so typing never triggers it.
+const $apple = typeof navigator !== "undefined" && /Mac|iPhone|iPad|iPod/.test(navigator.platform || navigator.userAgent || "");
+const $media = (query) => typeof matchMedia === "function" && matchMedia(query).matches;
+const $hk = { mac: $apple, list: [], next: 1 };
+const $names = { enter: 13, return: 13, escape: 27, esc: 27, space: 32, tab: 9, backspace: 8, delete: 46, del: 46, home: 36, end: 35,
+  left: 37, up: 38, right: 39, down: 40, pageup: 33, pagedown: 34, browserback: 166, browserforward: 167 };
+const $keyCode = (name) => {
+  const lower = name.toLowerCase();
+  if ($names[lower]) return $names[lower];
+  if (lower.length === 1) {
+    if (lower >= "a" && lower <= "z") return lower.toUpperCase().charCodeAt(0);
+    if (lower >= "0" && lower <= "9") return lower.charCodeAt(0);
+    return { ",": 188, ".": 190, "/": 191, "-": 189, "=": 187, "[": 219, "]": 221 }[lower] || 0;
+  }
+  const f = /^f([1-9]|1[0-2])$/.exec(lower);
+  return f ? 111 + Number(f[1]) : 0;
+};
+const $hotkeyOn = (combo, scope, handler) => {
+  const parts = combo.trim().split("+");
+  const key = $keyCode(parts.pop());
+  let mods = 0;
+  for (const word of parts) {
+    const w = word.toLowerCase();
+    mods |= w === "shift" ? 1 : w === "ctrl" || w === "control" ? 2 : w === "alt" || w === "option" ? 4
+      : w === "meta" || w === "cmd" || w === "command" || w === "super" ? 8 : w === "mod" ? ($hk.mac ? 8 : 2) : 0;
+  }
+  if (!key || $hk.list.some((h) => h.key === key && h.mods === mods)) return 0;
+  const id = $hk.next++;
+  $hk.list.push({ id, key, mods, handler });
+  return id;
+};
+const $hotkeyOff = (id) => { $hk.list = $hk.list.filter((h) => h.id !== id); };
+const $typing = (target) => !!target && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName));
+addEventListener("keydown", (event) => {
+  if ((event.keyCode >= 16 && event.keyCode <= 18) || event.keyCode === 91 || event.keyCode === 92) return;
+  const mods = (event.shiftKey ? 1 : 0) | (event.ctrlKey ? 2 : 0) | (event.altKey ? 4 : 0) | (event.metaKey ? 8 : 0);
+  if ($typing(event.target) && !(mods & 14)) return;
+  const hit = $hk.list.find((h) => h.key === event.keyCode && h.mods === mods);
+  if (hit) { event.preventDefault(); hit.handler(); }
+});
+// Focus: Tab order, and with no pointer (a TV) the arrows move to the nearest control in that direction.
+const $focusable = () => [...document.querySelectorAll('a[href], button:not([disabled]), input:not([type="hidden"]), select, textarea, [tabindex]:not([tabindex="-1"])')]
+  .filter((el) => el.offsetParent !== null || el === document.activeElement);
+const $focusStep = (backward) => {
+  const items = $focusable();
+  if (items.length === 0) return;
+  const at = items.indexOf(document.activeElement);
+  items[(at + (backward ? -1 : 1) + items.length) % items.length].focus();
+};
+addEventListener("keydown", (event) => {
+  if (event.keyCode < 37 || event.keyCode > 40 || event.defaultPrevented || $typing(event.target) || !$media("(pointer: none)")) return;
+  const items = $focusable(), from = document.activeElement;
+  if (!from || from === document.body) { if (items[0]) { items[0].focus(); event.preventDefault(); } return; }
+  const a = from.getBoundingClientRect(), ax = a.left + a.width / 2, ay = a.top + a.height / 2;
+  let best = null, bestScore = Infinity;
+  for (const el of items) {
+    if (el === from) continue;
+    const r = el.getBoundingClientRect(), dx = r.left + r.width / 2 - ax, dy = r.top + r.height / 2 - ay;
+    const along = event.keyCode === 37 ? -dx : event.keyCode === 39 ? dx : event.keyCode === 38 ? -dy : dy;
+    const across = Math.abs(event.keyCode === 37 || event.keyCode === 39 ? dy : dx);
+    if (along > 0.5 && along + 2 * across < bestScore) { best = el; bestScore = along + 2 * across; }
+  }
+  if (best) { best.focus(); event.preventDefault(); }
+});
 const $onDocument = (type, handler) => {
   const listener = () => handler();
   document.addEventListener(type, listener);
