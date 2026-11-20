@@ -91,6 +91,40 @@ struct Findings {
         return out.cstr();
     }
 
+    // The lines [first, last] of the file, each after a line break (clamped to the file; a line is cut at 160 characters).
+    static unsafe void context(ByteBuffer* out, Unit* u, i32 first, i32 last) {
+        mut i32 from = first;
+        if (from < 0) {
+            from = 0;
+        }
+        mut bool started = false;
+        for (mut i32 l = from; l <= last && l < u.line_count; l = l + 1) {
+            i32 start = u.line_starts[l];
+            mut i32 end = u.line_starts[l + 1] - 1;
+            if (end > u.length) {
+                end = u.length;
+            }
+            if (end > start && u.text[end - 1] == 13) {
+                end = end - 1;
+            }
+            mut bool blank = true;
+            for (mut i32 k = start; k < end; k = k + 1) {
+                if (u.text[k] != 32 && u.text[k] != 9) {
+                    blank = false;
+                }
+            }
+            if (blank && !started) {
+                continue;
+            }
+            started = true;
+            if (end - start > 160) {
+                end = start + 160;
+            }
+            out.append("\n");
+            out.append_slice(u.text + start, end - start);
+        }
+    }
+
     // `,"code":"X","codeDescription":{...}`: the editor shows the code as a link to the page that explains it.
     public static unsafe void append_code(ByteBuffer* out, ptr<i8> code) {
         if (code == null || strlen(code) == 0) {
@@ -139,6 +173,7 @@ struct Findings {
             line_end = line_end - 1;
         }
         if (from >= line_start && from <= line_end) {
+            Findings.context(out, u, line - 3, line - 1);
             out.append("\n");
             out.append_slice(u.text + line_start, line_end - line_start);
             out.append("\n");
@@ -155,6 +190,7 @@ struct Findings {
             for (mut i32 i = 1; i < span; i = i + 1) {
                 out.append_char((char)(126));
             }
+            Findings.context(out, u, line + 1, line + 1);
             if (item != null && item.note_text != null) {
                 out.append("\nnote: ");
                 out.append(item.note_text);
@@ -164,7 +200,9 @@ struct Findings {
                 out.append(item.help_text);
             }
             if (item != null && item.fix_title != null && item.fix_from >= line_start && item.fix_to <= line_end && item.fix_from <= item.fix_to) {
-                out.append("\n\n");
+                out.append("\n");
+                Findings.context(out, u, line - 1, line - 1);
+                out.append("\n");
                 out.append_slice(u.text + line_start, item.fix_from - line_start);
                 out.append(item.fix_text);
                 out.append_slice(u.text + item.fix_to, line_end - item.fix_to);
@@ -196,6 +234,7 @@ struct Findings {
                         out.append("`");
                     }
                 }
+                Findings.context(out, u, line + 1, line + 1);
             }
         }
         if (code != null && strlen(code) > 0) {
