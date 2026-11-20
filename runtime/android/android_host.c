@@ -12,6 +12,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <pthread.h>
+#include <unistd.h>
 
 #define STB_TRUETYPE_IMPLEMENTATION
 #define STBTT_STATIC
@@ -19,18 +21,51 @@
 
 extern int main(int argc, char** argv);
 
-static struct android_app* djinn_app = NULL;
-static int djinn_window_ready = 0;
-static int djinn_dirty = 0;
+// per app thread: the activity can be recreated while the previous app thread is still winding down
+static __thread struct android_app* djinn_app = NULL;
+static __thread int djinn_window_ready = 0;
+static __thread int djinn_dirty = 0;
 
 #define TOUCH_CAPACITY 64
 typedef struct { float x, y; int action; } djinn_touch_t;
-static djinn_touch_t djinn_touches[TOUCH_CAPACITY];
-static int djinn_touch_head = 0, djinn_touch_tail = 0;
+static __thread djinn_touch_t djinn_touches[TOUCH_CAPACITY];
+static __thread int djinn_touch_head = 0, djinn_touch_tail = 0;
 
 void djinn_android_log(const char* text)
 {
     __android_log_write(ANDROID_LOG_INFO, "djinn", text);
+}
+
+// printf and stderr go nowhere on Android: a thread reads them from a pipe and writes each line to logcat (tag "djinn").
+static void* pump_stdio(void* arg)
+{
+    int fd = (int)(intptr_t)arg;
+    char line[1024];
+    size_t used = 0;
+    char byte;
+    while (read(fd, &byte, 1) > 0)
+    {
+        if (byte == '\n' || used == sizeof line - 1)
+        {
+            line[used] = 0;
+            if (used > 0) __android_log_write(ANDROID_LOG_INFO, "djinn", line);
+            used = 0;
+        }
+        else line[used++] = byte;
+    }
+    return NULL;
+}
+
+static void redirect_stdio(void)
+{
+    int fds[2];
+    if (pipe(fds) != 0) return;
+    setvbuf(stdout, NULL, _IOLBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
+    dup2(fds[1], 1);
+    dup2(fds[1], 2);
+    pthread_t thread;
+    if (pthread_create(&thread, NULL, pump_stdio, (void*)(intptr_t)fds[0]) == 0) pthread_detach(thread);
 }
 
 static void on_command(struct android_app* app, int32_t command)
@@ -73,6 +108,7 @@ static int32_t on_input(struct android_app* app, AInputEvent* event)
 void android_main(struct android_app* app)
 {
     djinn_app = app;
+    redirect_stdio();
     app->onAppCmd = on_command;
     app->onInputEvent = on_input;
     djinn_android_log("android_main: starting the Djinn program");
@@ -155,7 +191,7 @@ int djinn_android_next_touch(float* x, float* y, int* action)
 
 typedef struct { stbtt_fontinfo info; unsigned char* data; int loaded; int tried; } djinn_face_t;
 static djinn_face_t djinn_faces[2];
-static unsigned char* djinn_glyph = NULL;
+static __thread unsigned char* djinn_glyph = NULL;
 
 static djinn_face_t* face_for(unsigned weight)
 {

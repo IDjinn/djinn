@@ -37,9 +37,31 @@ struct Linker {
         return Process.run(command.cstr());
     }
 
+    // The argument without its platform prefix, or null when it is for other platforms ('windows:-lvulkan-1').
+    public static unsafe ptr<i8> for_this_platform(ptr<i8> declared) {
+        mut i32 colon = 0;
+        while (declared[colon] != 0 && declared[colon] != 58 && declared[colon] != 45 && declared[colon] != 47 && declared[colon] != 92) {
+            colon = colon + 1;
+        }
+        if (colon > 0 && declared[colon] == 58 && Target.platform_mask(declared, colon) != 0) {
+            if ((Target.platform_mask(declared, colon) & Target.platform_bit()) == 0) {
+                return null;
+            }
+            return declared + (colon + 1);
+        }
+        return declared;
+    }
+
     // One linker argument from a manifest or from -l / -L: with lld on Windows, -lfoo is foo.lib, -Ldir is /libpath:dir
     // and -Wl,flag (a flag for the linker behind the clang driver) is the flag itself.
-    public static unsafe void append_link_arg(Options* options, ByteBuffer* link_args, ptr<i8> value) {
+    //
+    // An argument can start with the platforms it is for, as in 'windows:-lvulkan-1' or 'android:-lvulkan': it is passed
+    // only when building for one of them (the words of [Platform(...)] and the groups desktop, mobile, native).
+    public static unsafe void append_link_arg(Options* options, ByteBuffer* link_args, ptr<i8> declared) {
+        ptr<i8> value = Linker.for_this_platform(declared);
+        if (value == null) {
+            return;
+        }
         i32 value_length = strlen(value);
         link_args.append(" \"");
         if (options.use_lld && Strings.starts_with(value, 0, value_length, "-Wl,")) {

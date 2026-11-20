@@ -1,12 +1,14 @@
 import std::types;
 import std::libc;
 import ui;
+import vulkan;
 
 namespace android;
 
 // The Android host: runs one app inside the NativeActivity the runtime shim set up. The frame is the same display list
-// every host draws; this first host rasterizes it on the CPU (SoftRaster) and posts it to the window. A touch is a
-// mouse: down, up and, when both land on the same element, a click; a drag scrolls.
+// every host draws; it goes to the GPU through Vulkan (the same renderer as Windows) and, when the device has no
+// usable Vulkan or DJINN_UI_CPU is set in the app's environment, is rasterized on the CPU (SoftRaster) and posted to
+// the window. A touch is a mouse: down, up and, when both land on the same element, a click; a drag scrolls.
 struct AndroidHost {
     static unsafe void announce(u32 id, str event) {
         if (id != 0) {
@@ -32,6 +34,9 @@ struct AndroidHost {
         mut bool dragged = false;
         mut bool running = true;
         mut i32 frames = 0;
+        mut VulkanRenderer* gpu = (VulkanRenderer*)0;
+        mut void* gpu_window = (void*)0;
+        bool force_cpu = getenv("DJINN_UI_CPU") != (i8*)0;
         while (running) {
             // wait for events only when there is nothing to draw
             mut i32 wait = -1;
@@ -100,24 +105,53 @@ struct AndroidHost {
             if (Animation.advance((u32)(__djinn_now_us() / 1000))) {
                 dirty = true;
             }
-            if ((u32)width != canvas.width || (u32)height != canvas.height) {
+            // a new window (first start, or the activity came back) needs a new surface and swapchain
+            void* window = djinn_android_window();
+            if (window != gpu_window) {
+                if (gpu != (VulkanRenderer*)0) {
+                    VulkanRenderer.release(gpu);
+                    gpu = (VulkanRenderer*)0;
+                }
+                gpu_window = window;
+                if (!force_cpu) {
+                    gpu = VulkanRenderer.create((void*)0, window, (u32)width, (u32)height);
+                    if (gpu == (VulkanRenderer*)0) {
+                        djinn_android_log("android: Vulkan is not available, drawing with the software rasterizer");
+                    } else {
+                        djinn_android_log("android: drawing with Vulkan");
+                    }
+                }
+                dirty = true;
+            }
+            if (gpu == (VulkanRenderer*)0 && ((u32)width != canvas.width || (u32)height != canvas.height)) {
                 canvas.release();
                 canvas = Canvas.create((u32)width, (u32)height);
                 dirty = true;
             }
             if (dirty || Dom.stamp() + Animation.version() + Scroll.version() != stamp || Dom.epoch() != epoch) {
                 Painter.frame(&list, (f32)width, (f32)height);
-                canvas.clear(0xFFFFFFFF);
-                SoftRaster.draw(&canvas, &list);
-                djinn_android_present((u32*)canvas.pixels, width, height);
+                if (gpu != (VulkanRenderer*)0) {
+                    // a size change makes the first attempt rebuild the swapchain: draw again at once
+                    dirty = !VulkanRenderer.draw(gpu, &list, (u32)width, (u32)height);
+                    if (dirty) {
+                        dirty = !VulkanRenderer.draw(gpu, &list, (u32)width, (u32)height);
+                    }
+                } else {
+                    canvas.clear(0xFFFFFFFF);
+                    SoftRaster.draw(&canvas, &list);
+                    djinn_android_present((u32*)canvas.pixels, width, height);
+                    dirty = false;
+                }
                 stamp = Dom.stamp() + Animation.version() + Scroll.version();
                 epoch = Dom.epoch();
-                dirty = false;
                 frames = frames + 1;
                 if (frames == 1) {
                     djinn_android_log("android: first frame presented");
                 }
             }
+        }
+        if (gpu != (VulkanRenderer*)0) {
+            VulkanRenderer.release(gpu);
         }
         list.release();
         canvas.release();

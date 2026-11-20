@@ -56,8 +56,12 @@ fi
 
 cd "$root"
 flags=(--lib-dir "$libs" --std-dir "$root/std" --runtime-dir "$root/runtime" --runtime-lib "$host_runtime")
-"$djinnc" libs/ui_macros -o "$libs/ui_macros.djlib" "${flags[@]}" > "$out/ui_macros.log" 2>&1 || { cat "$out/ui_macros.log"; exit 1; }
-for lib in ui android; do
+for lib in ui_macros spirv; do
+    "$djinnc" "libs/$lib" -o "$libs/$lib.djlib" "${flags[@]}" > "$out/host-$lib.log" 2>&1 || { cat "$out/host-$lib.log"; exit 1; }
+done
+# spirv is built for the target after vulkan: while vulkan expands spirv!, the host build of it must be the one found
+rm -f "$libs/$triple/spirv.djlib"
+for lib in ui vulkan spirv android; do
     "$djinnc" "libs/$lib" -o "$libs/$triple/$lib.djlib" "${flags[@]}" --target "$triple" > "$out/$lib.log" 2>&1 || { cat "$out/$lib.log"; exit 1; }
 done
 name="$(basename "$app")"
