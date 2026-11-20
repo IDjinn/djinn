@@ -102,6 +102,11 @@ if [ -n "$adb_tool" ] && "$adb_tool" get-state > /dev/null 2>&1; then
     [ "$shown" = 1 ] || { "$adb_tool" logcat -d | tail -30; fail "the app did not present a frame"; }
     "$adb_tool" shell input tap 216 504
     sleep 1
+    # touch drag with a fling, then typing into the focused field (coordinates of the 1080x2400 emulator)
+    "$adb_tool" shell input swipe 540 1800 540 700 150
+    sleep 1
+    "$adb_tool" shell input text "Hello42"
+    sleep 1
     [ -n "$("$adb_tool" shell pidof dev.djinn.hello | tr -d '\r')" ] || fail "the app died after a tap"
     "$adb_tool" uninstall dev.djinn.hello > /dev/null
     echo "ok android app ran on device"

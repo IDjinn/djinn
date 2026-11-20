@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <jni.h>
 #include <pthread.h>
 #include <unistd.h>
 
@@ -30,6 +31,11 @@ static __thread int djinn_dirty = 0;
 typedef struct { float x, y; int action; } djinn_touch_t;
 static __thread djinn_touch_t djinn_touches[TOUCH_CAPACITY];
 static __thread int djinn_touch_head = 0, djinn_touch_tail = 0;
+
+#define KEY_CAPACITY 64
+typedef struct { int code; int meta; int action; } djinn_key_t;
+static __thread djinn_key_t djinn_keys[KEY_CAPACITY];
+static __thread int djinn_key_head = 0, djinn_key_tail = 0;
 
 void djinn_android_log(const char* text)
 {
@@ -94,6 +100,19 @@ static void on_command(struct android_app* app, int32_t command)
 static int32_t on_input(struct android_app* app, AInputEvent* event)
 {
     (void)app;
+    if (AInputEvent_getType(event) == AINPUT_EVENT_TYPE_KEY)
+    {
+        int code = AKeyEvent_getKeyCode(event);
+        // Back and the volume keys stay with the system
+        if (code == AKEYCODE_BACK || code == AKEYCODE_VOLUME_UP || code == AKEYCODE_VOLUME_DOWN || code == AKEYCODE_POWER) return 0;
+        int next_key = (djinn_key_head + 1) % KEY_CAPACITY;
+        if (next_key == djinn_key_tail) return 1;
+        djinn_keys[djinn_key_head].code = code;
+        djinn_keys[djinn_key_head].meta = AKeyEvent_getMetaState(event);
+        djinn_keys[djinn_key_head].action = AKeyEvent_getAction(event);
+        djinn_key_head = next_key;
+        return 1;
+    }
     if (AInputEvent_getType(event) != AINPUT_EVENT_TYPE_MOTION) return 0;
     int next = (djinn_touch_head + 1) % TOUCH_CAPACITY;
     if (next == djinn_touch_tail) return 1;
@@ -185,6 +204,135 @@ int djinn_android_next_touch(float* x, float* y, int* action)
     *action = djinn_touches[djinn_touch_tail].action;
     djinn_touch_tail = (djinn_touch_tail + 1) % TOUCH_CAPACITY;
     return 1;
+}
+
+// The next key event: action 0 down, 1 up; 'unicode' is the printable character it types (0 for none), US layout.
+// The soft keyboard's own composition (other layouts, emoji, suggestions) needs a text input connection: a later step.
+int djinn_android_next_key(int* code, int* meta, int* action, int* unicode)
+{
+    if (djinn_key_tail == djinn_key_head) return 0;
+    djinn_key_t key = djinn_keys[djinn_key_tail];
+    djinn_key_tail = (djinn_key_tail + 1) % KEY_CAPACITY;
+    *code = key.code;
+    *meta = key.meta;
+    *action = key.action;
+    int shift = (key.meta & AMETA_SHIFT_ON) != 0;
+    int c = 0;
+    if (key.code >= AKEYCODE_A && key.code <= AKEYCODE_Z) c = (shift ? 'A' : 'a') + (key.code - AKEYCODE_A);
+    else if (key.code >= AKEYCODE_0 && key.code <= AKEYCODE_9)
+    {
+        static const char shifted[] = ")!@#$%^&*(";
+        c = shift ? shifted[key.code - AKEYCODE_0] : '0' + (key.code - AKEYCODE_0);
+    }
+    else switch (key.code)
+    {
+    case AKEYCODE_SPACE: c = ' '; break;
+    case AKEYCODE_COMMA: c = shift ? '<' : ','; break;
+    case AKEYCODE_PERIOD: c = shift ? '>' : '.'; break;
+    case AKEYCODE_MINUS: c = shift ? '_' : '-'; break;
+    case AKEYCODE_EQUALS: c = shift ? '+' : '='; break;
+    case AKEYCODE_LEFT_BRACKET: c = shift ? '{' : '['; break;
+    case AKEYCODE_RIGHT_BRACKET: c = shift ? '}' : ']'; break;
+    case AKEYCODE_BACKSLASH: c = shift ? '|' : '\\'; break;
+    case AKEYCODE_SEMICOLON: c = shift ? ':' : ';'; break;
+    case AKEYCODE_APOSTROPHE: c = shift ? '"' : '\''; break;
+    case AKEYCODE_SLASH: c = shift ? '?' : '/'; break;
+    case AKEYCODE_AT: c = '@'; break;
+    case AKEYCODE_PLUS: c = '+'; break;
+    case AKEYCODE_STAR: c = '*'; break;
+    case AKEYCODE_POUND: c = '#'; break;
+    case AKEYCODE_GRAVE: c = shift ? '~' : '`'; break;
+    default: break;
+    }
+    *unicode = c;
+    return 1;
+}
+
+// Shows or hides the soft keyboard.
+void djinn_android_keyboard(int show)
+{
+    if (djinn_app == NULL) return;
+    if (show) ANativeActivity_showSoftInput(djinn_app->activity, ANATIVEACTIVITY_SHOW_SOFT_INPUT_IMPLICIT);
+    else ANativeActivity_hideSoftInput(djinn_app->activity, 0);
+}
+
+// ---- insets (JNI) ---------------------------------------------------------------------------------------------------
+
+static __thread JNIEnv* djinn_env = NULL;
+
+static JNIEnv* jni(void)
+{
+    if (djinn_env == NULL)
+    {
+        JavaVM* vm = djinn_app->activity->vm;
+        if ((*vm)->AttachCurrentThread(vm, &djinn_env, NULL) != JNI_OK) djinn_env = NULL;
+    }
+    return djinn_env;
+}
+
+// Window insets in pixels, as left, top, right, bottom: the system bars and the display cutout, with the soft keyboard
+// added to the bottom while it is shown. All zero before API 30 (the window is then laid out inside the bars already).
+void djinn_android_insets(int* out)
+{
+    out[0] = out[1] = out[2] = out[3] = 0;
+    JNIEnv* e = jni();
+    if (e == NULL || djinn_app == NULL) return;
+    jobject activity = djinn_app->activity->clazz;
+    jclass activity_class = (*e)->GetObjectClass(e, activity);
+    jmethodID get_window = (*e)->GetMethodID(e, activity_class, "getWindow", "()Landroid/view/Window;");
+    jobject window = get_window != NULL ? (*e)->CallObjectMethod(e, activity, get_window) : NULL;
+    jobject decor = NULL;
+    if (window != NULL)
+    {
+        jclass window_class = (*e)->GetObjectClass(e, window);
+        jmethodID get_decor = (*e)->GetMethodID(e, window_class, "getDecorView", "()Landroid/view/View;");
+        if (get_decor != NULL) decor = (*e)->CallObjectMethod(e, window, get_decor);
+        (*e)->DeleteLocalRef(e, window_class);
+    }
+    jobject insets = NULL;
+    jclass view_class = NULL;
+    if (decor != NULL)
+    {
+        view_class = (*e)->GetObjectClass(e, decor);
+        jmethodID get_root = (*e)->GetMethodID(e, view_class, "getRootWindowInsets", "()Landroid/view/WindowInsets;");
+        if (get_root != NULL) insets = (*e)->CallObjectMethod(e, decor, get_root);
+    }
+    if (insets != NULL)
+    {
+        jclass insets_class = (*e)->GetObjectClass(e, insets);
+        jmethodID get_insets = (*e)->GetMethodID(e, insets_class, "getInsets", "(I)Landroid/graphics/Insets;");
+        if (get_insets != NULL)
+        {
+            // Type.systemBars() | Type.displayCutout() = 7 | 128, then Type.ime() = 8
+            jobject bars = (*e)->CallObjectMethod(e, insets, get_insets, 135);
+            jobject ime = (*e)->CallObjectMethod(e, insets, get_insets, 8);
+            if (bars != NULL)
+            {
+                jclass c = (*e)->GetObjectClass(e, bars);
+                out[0] = (*e)->GetIntField(e, bars, (*e)->GetFieldID(e, c, "left", "I"));
+                out[1] = (*e)->GetIntField(e, bars, (*e)->GetFieldID(e, c, "top", "I"));
+                out[2] = (*e)->GetIntField(e, bars, (*e)->GetFieldID(e, c, "right", "I"));
+                out[3] = (*e)->GetIntField(e, bars, (*e)->GetFieldID(e, c, "bottom", "I"));
+                (*e)->DeleteLocalRef(e, c);
+                (*e)->DeleteLocalRef(e, bars);
+            }
+            if (ime != NULL)
+            {
+                jclass c = (*e)->GetObjectClass(e, ime);
+                int keyboard = (*e)->GetIntField(e, ime, (*e)->GetFieldID(e, c, "bottom", "I"));
+                if (keyboard > out[3]) out[3] = keyboard;
+                (*e)->DeleteLocalRef(e, c);
+                (*e)->DeleteLocalRef(e, ime);
+            }
+        }
+        (*e)->DeleteLocalRef(e, insets_class);
+        (*e)->DeleteLocalRef(e, insets);
+    }
+    if ((*e)->ExceptionCheck(e)) (*e)->ExceptionClear(e);
+    if (view_class != NULL) (*e)->DeleteLocalRef(e, view_class);
+    if (decor != NULL) (*e)->DeleteLocalRef(e, decor);
+    if (window != NULL) (*e)->DeleteLocalRef(e, window);
+    (*e)->DeleteLocalRef(e, activity_class);
 }
 
 // ---- fonts ----------------------------------------------------------------------------------------------------------

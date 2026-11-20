@@ -8,12 +8,43 @@ namespace android;
 // The Android host: runs one app inside the NativeActivity the runtime shim set up. The frame is the same display list
 // every host draws; it goes to the GPU through Vulkan (the same renderer as Windows) and, when the device has no
 // usable Vulkan or DJINN_UI_CPU is set in the app's environment, is rasterized on the CPU (SoftRaster) and posted to
-// the window. A touch is a mouse: down, up and, when both land on the same element, a click; a drag scrolls.
+// the window.
+//
+// Touch is a mouse: down, up and, when both land on the same element, a click. A drag scrolls and lifting the finger
+// while it moves flings; holding still for half a second is a long press (a 'contextmenu' event, no click). A tap on an
+// editable control shows the soft keyboard, whose keys reach the control as key presses and typed characters. The page is
+// laid out inside the system bars, the display cutout and the soft keyboard (the window insets).
 struct AndroidHost {
+    const i64 LONG_PRESS_MS = 500;
+    const f32 DRAG_SLOP = 12.0;
+
     static unsafe void announce(u32 id, str event) {
         if (id != 0) {
             Dom.dispatch(id, event);
         }
+    }
+
+    // The Windows virtual-key code of an Android key code, the codes the UI's key handling is written against.
+    static i32 virtual_key(i32 code) {
+        if (code >= 29 && code <= 54) {
+            return 65 + (code - 29);
+        }
+        if (code >= 7 && code <= 16) {
+            return 48 + (code - 7);
+        }
+        if (code == 67) { return 8; }
+        if (code == 66) { return 13; }
+        if (code == 112) { return 46; }
+        if (code == 61) { return 9; }
+        if (code == 111) { return 27; }
+        if (code == 62) { return 32; }
+        if (code == 21) { return 37; }
+        if (code == 19) { return 38; }
+        if (code == 22) { return 39; }
+        if (code == 20) { return 40; }
+        if (code == 122) { return 36; }
+        if (code == 123) { return 35; }
+        return 0;
     }
 
     // Runs the app until the activity is destroyed. Returns the exit code.
@@ -31,17 +62,29 @@ struct AndroidHost {
         mut u32 pressed = 0;
         mut f32 last_y = (f32)0.0;
         mut f32 start_y = (f32)0.0;
+        mut i64 last_ms = 0;
+        mut i64 press_ms = 0;
+        mut f32 velocity = (f32)0.0;
         mut bool dragged = false;
+        mut bool long_pressed = false;
+        mut bool keyboard = false;
         mut bool running = true;
         mut i32 frames = 0;
         mut VulkanRenderer* gpu = (VulkanRenderer*)0;
         mut void* gpu_window = (void*)0;
         bool force_cpu = getenv("DJINN_UI_CPU") != (i8*)0;
+        i32* insets = (i32*)__djinn_alloc_zeroed((size_long)16);
+        mut i32 inset_left = 0;
+        mut i32 inset_top = 0;
+        mut i32 inset_right = 0;
+        mut i32 inset_bottom = 0;
         while (running) {
-            // wait for events only when there is nothing to draw
+            // wait for events only when nothing is pending: a pressed finger and a shown keyboard need a regular look
             mut i32 wait = -1;
             if (dirty) {
                 wait = 0;
+            } else if (pressed != 0 || keyboard) {
+                wait = 50;
             }
             i32 state = djinn_android_pump(wait);
             if (state < 0) {
@@ -51,41 +94,112 @@ struct AndroidHost {
             if (djinn_android_take_dirty() != 0) {
                 dirty = true;
             }
+            i64 now_ms = __djinn_now_us() / 1000;
+            // the insets change with the keyboard, the bars and rotation
+            if (dirty || keyboard) {
+                djinn_android_insets(insets);
+                if (insets[0] != inset_left || insets[1] != inset_top || insets[2] != inset_right || insets[3] != inset_bottom) {
+                    inset_left = insets[0];
+                    inset_top = insets[1];
+                    inset_right = insets[2];
+                    inset_bottom = insets[3];
+                    dirty = true;
+                }
+            }
             mut f32 touch_x = (f32)0.0;
             mut f32 touch_y = (f32)0.0;
             mut i32 action = 0;
             while (djinn_android_next_touch(&touch_x, &touch_y, &action) != 0) {
                 dirty = true;
+                // the page starts below the insets
+                f32 x = touch_x - (f32)inset_left;
+                f32 y = touch_y - (f32)inset_top;
                 if (action == 0) {
-                    pressed = Hit.at(touch_x, touch_y);
+                    pressed = Hit.at(x, y);
                     last_y = touch_y;
                     start_y = touch_y;
+                    last_ms = now_ms;
+                    press_ms = now_ms;
+                    velocity = (f32)0.0;
                     dragged = false;
+                    long_pressed = false;
                     u32 control = Focus.owner(pressed);
                     if (control != 0) {
                         Focus.set(control, false);
+                        if (Input.editable(control)) {
+                            Edit.click(control, x, false);
+                            if (!keyboard) {
+                                djinn_android_keyboard(1);
+                                keyboard = true;
+                            }
+                        } else if (keyboard) {
+                            djinn_android_keyboard(0);
+                            keyboard = false;
+                        }
                     } else {
                         Focus.clear();
+                        if (keyboard) {
+                            djinn_android_keyboard(0);
+                            keyboard = false;
+                        }
                     }
                     Pointer.press(pressed);
                     AndroidHost.announce(pressed, "mousedown");
                 } else if (action == 2) {
                     f32 moved = touch_y - start_y;
-                    if (moved > (f32)12.0 || moved < (f32)-12.0) {
+                    if (moved > AndroidHost.DRAG_SLOP || moved < (f32)0.0 - AndroidHost.DRAG_SLOP) {
                         dragged = true;
                     }
                     if (dragged) {
-                        Scroll.wheel(touch_x, touch_y, last_y - touch_y);
+                        Scroll.wheel(x, y, last_y - touch_y);
+                        i64 elapsed = now_ms - last_ms;
+                        if (elapsed > 0) {
+                            // a smoothed finger speed in px per ms, positive when the content moves down the page
+                            velocity = velocity * (f32)0.6 + ((last_y - touch_y) / (f32)elapsed) * (f32)0.4;
+                        }
                     }
                     last_y = touch_y;
+                    last_ms = now_ms;
                 } else if (action == 1 || action == 3) {
-                    u32 target = Hit.at(touch_x, touch_y);
+                    u32 target = Hit.at(x, y);
                     Pointer.release();
                     AndroidHost.announce(target, "mouseup");
-                    if (action == 1 && !dragged && target != 0 && target == pressed) {
+                    if (action == 1 && !dragged && !long_pressed && target != 0 && target == pressed) {
                         AndroidHost.announce(target, "click");
                     }
+                    // lifting a moving finger keeps the content going: about a third of a second of the finger's speed
+                    if (action == 1 && dragged && now_ms - last_ms < 80 && (velocity > (f32)0.3 || velocity < (f32)-0.3)) {
+                        Scroll.wheel(x, y, velocity * (f32)350.0);
+                    }
                     pressed = 0;
+                }
+            }
+            // a finger held still is a long press
+            if (pressed != 0 && !dragged && !long_pressed && now_ms - press_ms >= AndroidHost.LONG_PRESS_MS) {
+                long_pressed = true;
+                AndroidHost.announce(pressed, "contextmenu");
+                dirty = true;
+            }
+            // the soft keyboard and attached keyboards
+            mut i32 key_code = 0;
+            mut i32 key_meta = 0;
+            mut i32 key_action = 0;
+            mut i32 key_char = 0;
+            while (djinn_android_next_key(&key_code, &key_meta, &key_action, &key_char) != 0) {
+                if (key_action != 0) {
+                    continue;
+                }
+                dirty = true;
+                mut u32 mods = 0;
+                if ((key_meta & 1) != 0) {
+                    mods = mods | Mod.SHIFT;
+                }
+                i32 virtual_key = AndroidHost.virtual_key(key_code);
+                if (virtual_key != 0) {
+                    Input.press(virtual_key, mods);
+                }
+                if (key_char != 0) {
+                    Input.typed((u32)key_char);
                 }
             }
             if (state == 0) {
@@ -102,7 +216,7 @@ struct AndroidHost {
                 dirty = true;
             }
             Styles.set_prefers_dark(djinn_android_night() != 0);
-            if (Animation.advance((u32)(__djinn_now_us() / 1000))) {
+            if (Animation.advance((u32)now_ms)) {
                 dirty = true;
             }
             // a new window (first start, or the activity came back) needs a new surface and swapchain
@@ -129,7 +243,16 @@ struct AndroidHost {
                 dirty = true;
             }
             if (dirty || Dom.stamp() + Animation.version() + Scroll.version() != stamp || Dom.epoch() != epoch) {
-                Painter.frame(&list, (f32)width, (f32)height);
+                f32 page_width = (f32)(width - inset_left - inset_right);
+                f32 page_height = (f32)(height - inset_top - inset_bottom);
+                Painter.frame(&list, page_width, page_height);
+                if (inset_left != 0 || inset_top != 0) {
+                    for (mut u32 i = 0; i < list.count; i = i + 1) {
+                        Vertex* vertex = &list.vertices[i];
+                        vertex.x = vertex.x + (f32)inset_left;
+                        vertex.y = vertex.y + (f32)inset_top;
+                    }
+                }
                 if (gpu != (VulkanRenderer*)0) {
                     // a size change makes the first attempt rebuild the swapchain: draw again at once
                     dirty = !VulkanRenderer.draw(gpu, &list, (u32)width, (u32)height);
@@ -153,6 +276,7 @@ struct AndroidHost {
         if (gpu != (VulkanRenderer*)0) {
             VulkanRenderer.release(gpu);
         }
+        __djinn_free((void*)insets);
         list.release();
         canvas.release();
         mounted.unmount();
