@@ -93,7 +93,7 @@ if [ -n "$adb_tool" ] && "$adb_tool" get-state > /dev/null 2>&1; then
     export MSYS_NO_PATHCONV=1
     "$adb_tool" logcat -c
     "$adb_tool" install -r "$apk_file" > /dev/null || fail "install"
-    "$adb_tool" shell am start -n dev.djinn.hello/android.app.NativeActivity > /dev/null
+    "$adb_tool" shell am start -n dev.djinn.hello/dev.djinn.DjinnActivity > /dev/null
     shown=0
     for _ in $(seq 1 20); do
         if "$adb_tool" logcat -d -s djinn:I | grep -q "first frame presented"; then shown=1; break; fi
