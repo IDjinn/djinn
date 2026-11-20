@@ -595,6 +595,33 @@ struct Publisher {
         return text.cstr();
     }
 
+    static unsafe bool reported_on_line(Unit* u, i32 line) {
+        for (mut i32 i = 0; i < u.diags.length; i = i + 1) {
+            CDiag* diag = (CDiag*)u.diags.get(i);
+            if (diag.line - 1 == line) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static unsafe void append_finding(ByteBuffer* out, Unit* u, LintItem* item) {
+        out.append("{\"range\":");
+        mut i32 item_from = u.tstart[item.token];
+        mut i32 item_to = u.tend[item.end_token];
+        if (item.span_to > item.span_from) {
+            item_from = item.span_from;
+            item_to = item.span_to;
+        }
+        Lsp.range(out, u, item_from, item_to);
+        out.append(",\"severity\":");
+        out.append_int((i64)item.severity);
+        Findings.append_code(out, item.id);
+        out.append(",\"source\":\"djinn-lsp\",\"message\":");
+        out.append_json_string(Findings.describe(u, item.message, item, item_from, item_to, item.id));
+        out.append("}");
+    }
+
     public static unsafe void publish(Unit* u) {
         ByteBuffer* out = ByteBuffer.create();
         out.append("{\"uri\":");
@@ -629,35 +656,38 @@ struct Publisher {
                         to = same.span_to;
                     }
                     Lsp.range(out, u, from, to);
+                    mut ptr<i8> shown_code = diag.code;
+                    if ((shown_code == null || strlen(shown_code) == 0) && same != null) {
+                        shown_code = same.id;
+                    }
                     out.append(",\"severity\":");
                     out.append_int((i64)diag.severity);
+                    Findings.append_code(out, shown_code);
                     out.append(",\"source\":\"djinnc\",\"message\":");
-                    out.append_json_string(Findings.describe(u, Publisher.with_hint(u, diag, from), same, from, to));
+                    out.append_json_string(Findings.describe(u, Publisher.with_hint(u, diag, from), same, from, to, shown_code));
                     out.append("}");
                 }
-            } else if (!u.checked && u.open && u.ast != null) {
-                PointerList* items = Diagnostics.collect(u);
-                for (mut i32 i = 0; i < items.length; i = i + 1) {
-                    LintItem* item = (LintItem*)items.get(i);
+                // the compiler stops at a lexical error and never parses the rest: what the rules found on the other
+                // lines is still true
+                for (mut i32 i = 0; i < findings.length; i = i + 1) {
+                    LintItem* item = (LintItem*)findings.get(i);
+                    if (Publisher.reported_on_line(u, u.line_of(Findings.start_of(u, item)))) {
+                        continue;
+                    }
                     if (count > 0) {
                         out.append(",");
                     }
                     count = count + 1;
-                    out.append("{\"range\":");
-                    mut i32 item_from = u.tstart[item.token];
-                    mut i32 item_to = u.tend[item.end_token];
-                    if (item.span_to > item.span_from) {
-                        item_from = item.span_from;
-                        item_to = item.span_to;
+                    Publisher.append_finding(out, u, item);
+                }
+            } else if (!u.checked && u.open && u.ast != null) {
+                PointerList* items = Diagnostics.collect(u);
+                for (mut i32 i = 0; i < items.length; i = i + 1) {
+                    if (count > 0) {
+                        out.append(",");
                     }
-                    Lsp.range(out, u, item_from, item_to);
-                    out.append(",\"severity\":");
-                    out.append_int((i64)item.severity);
-                    out.append(",\"code\":");
-                    out.append_json_string(item.id);
-                    out.append(",\"source\":\"djinn-lsp\",\"message\":");
-                    out.append_json_string(Findings.describe(u, item.message, item, item_from, item_to));
-                    out.append("}");
+                    count = count + 1;
+                    Publisher.append_finding(out, u, (LintItem*)items.get(i));
                 }
             }
         }

@@ -77,40 +77,35 @@ struct Findings {
         }
     }
 
-    static unsafe void gutter(ByteBuffer* out, i32 width, i32 number) {
-        mut i32 digits = 0;
-        mut i32 rest = number;
-        while (rest > 0) {
-            digits = digits + 1;
-            rest = rest / 10;
+    // `,"code":"X","codeDescription":{...}`: the editor shows the code as a link to the page that explains it.
+    public static unsafe void append_code(ByteBuffer* out, ptr<i8> code) {
+        if (code == null || strlen(code) == 0) {
+            return;
         }
-        for (mut i32 i = digits; i < width; i = i + 1) {
-            out.append_char((char)(32));
-        }
-        if (number > 0) {
-            out.append_int((i64)number);
-        }
-    }
-
-    static unsafe void blank_gutter(ByteBuffer* out, i32 width) {
-        for (mut i32 i = 0; i < width; i = i + 1) {
-            out.append_char((char)(32));
-        }
+        out.append(",\"code\":");
+        out.append_json_string(code);
+        ByteBuffer* link = ByteBuffer.create();
+        link.append("https://docs.link/errors/");
+        link.append(code);
+        out.append(",\"codeDescription\":{\"href\":");
+        out.append_json_string(link.cstr());
+        out.append("}");
     }
 
     // The diagnostic the way rustc prints it: the message, the line with `^~~~` under the problem, the note and the
-    // help, then the line as it would be after the quick fix with a `^` under what was added.
+    // help, then the line as it would be after the quick fix with a `^` under what was added. There is no gutter and
+    // no line number, so the carets stay under the source whatever the font.
     //
     //   Unterminated string literal
-    //      |
-    //   13 |     auto s = "open;
-    //      |              ^~~~~~
-    //      = note: a string that is not closed keeps reading to the end of the file
-    //      = help: add a closing '"' where the string ends
-    //      |
-    //   13 |     auto s = "open";
-    //      |                   ^ suggestion: close the string
-    public static unsafe ptr<i8> describe(Unit* u, ptr<i8> message, LintItem* item, i32 from, i32 to) {
+    //       auto s = "open;
+    //                ^~~~~~
+    //   note: a string that is not closed keeps reading to the end of the file
+    //   help: add a closing '"' where the string ends
+    //
+    //       auto s = "open";
+    //                     ^ suggestion: add the quote after `open`
+    //   docs: docs.link/errors/E1002
+    public static unsafe ptr<i8> describe(Unit* u, ptr<i8> message, LintItem* item, i32 from, i32 to, ptr<i8> code) {
         ByteBuffer* out = ByteBuffer.create();
         if (message != null && strlen(message) > 0) {
             mut i32 first = (i32)(u8)message[0];
@@ -129,77 +124,69 @@ struct Findings {
         if (line_end > line_start && u.text[line_end - 1] == 13) {
             line_end = line_end - 1;
         }
-        if (from < line_start || from > line_end) {
-            return out.cstr();
-        }
-        i32 number = line + 1;
-        mut i32 width = 1;
-        mut i32 rest = number;
-        while (rest >= 10) {
-            width = width + 1;
-            rest = rest / 10;
-        }
-        out.append("\n");
-        Findings.blank_gutter(out, width);
-        out.append(" |\n");
-        Findings.gutter(out, width, number);
-        out.append(" | ");
-        out.append_slice(u.text + line_start, line_end - line_start);
-        out.append("\n");
-        Findings.blank_gutter(out, width);
-        out.append(" | ");
-        Findings.indent(out, u, line_start, from);
-        mut i32 stop = to;
-        if (stop > line_end) {
-            stop = line_end;
-        }
-        mut i32 span = Findings.columns(u, from, stop);
-        if (span < 1) {
-            span = 1;
-        }
-        out.append_char((char)(94));
-        for (mut i32 i = 1; i < span; i = i + 1) {
-            out.append_char((char)(126));
-        }
-        if (item != null && item.note_text != null) {
+        if (from >= line_start && from <= line_end) {
             out.append("\n");
-            Findings.blank_gutter(out, width);
-            out.append(" = note: ");
-            out.append(item.note_text);
-        }
-        if (item != null && item.help_text != null) {
+            out.append_slice(u.text + line_start, line_end - line_start);
             out.append("\n");
-            Findings.blank_gutter(out, width);
-            out.append(" = help: ");
-            out.append(item.help_text);
-        }
-        if (item != null && item.fix_title != null && item.fix_from >= line_start && item.fix_to <= line_end && item.fix_from <= item.fix_to) {
-            out.append("\n");
-            Findings.blank_gutter(out, width);
-            out.append(" |\n");
-            Findings.gutter(out, width, number);
-            out.append(" | ");
-            out.append_slice(u.text + line_start, item.fix_from - line_start);
-            out.append(item.fix_text);
-            out.append_slice(u.text + item.fix_to, line_end - item.fix_to);
-            out.append("\n");
-            Findings.blank_gutter(out, width);
-            out.append(" | ");
-            Findings.indent(out, u, line_start, item.fix_from);
-            mut i32 added = (i32)strlen(item.fix_text);
-            if (added < 1) {
-                added = 1;
+            Findings.indent(out, u, line_start, from);
+            mut i32 stop = to;
+            if (stop > line_end) {
+                stop = line_end;
             }
-            for (mut i32 i = 0; i < added; i = i + 1) {
-                out.append_char((char)(94));
+            mut i32 span = Findings.columns(u, from, stop);
+            if (span < 1) {
+                span = 1;
             }
-            out.append(" suggestion: ");
-            mut i32 letter = (i32)(u8)item.fix_title[0];
-            if (letter >= 65 && letter <= 90) {
-                letter = letter + 32;
+            out.append_char((char)(94));
+            for (mut i32 i = 1; i < span; i = i + 1) {
+                out.append_char((char)(126));
             }
-            out.append_char((char)(letter));
-            out.append(item.fix_title + 1);
+            if (item != null && item.note_text != null) {
+                out.append("\nnote: ");
+                out.append(item.note_text);
+            }
+            if (item != null && item.help_text != null) {
+                out.append("\nhelp: ");
+                out.append(item.help_text);
+            }
+            if (item != null && item.fix_title != null && item.fix_from >= line_start && item.fix_to <= line_end && item.fix_from <= item.fix_to) {
+                out.append("\n\n");
+                out.append_slice(u.text + line_start, item.fix_from - line_start);
+                out.append(item.fix_text);
+                out.append_slice(u.text + item.fix_to, line_end - item.fix_to);
+                out.append("\n");
+                Findings.indent(out, u, line_start, item.fix_from);
+                mut i32 added = (i32)strlen(item.fix_text);
+                if (added < 1) {
+                    added = 1;
+                }
+                for (mut i32 i = 0; i < added; i = i + 1) {
+                    out.append_char((char)(94));
+                }
+                out.append(" suggestion: ");
+                mut i32 letter = (i32)(u8)item.fix_title[0];
+                if (letter >= 65 && letter <= 90) {
+                    letter = letter + 32;
+                }
+                out.append_char((char)(letter));
+                out.append(item.fix_title + 1);
+                // where it goes: after the word before the insertion
+                if (item.fix_from == item.fix_to) {
+                    mut i32 word = item.fix_from;
+                    while (word > line_start && u.text[word - 1] != 32 && u.text[word - 1] != 9 && item.fix_from - word < 16) {
+                        word = word - 1;
+                    }
+                    if (word < item.fix_from) {
+                        out.append(" after `");
+                        out.append_slice(u.text + word, item.fix_from - word);
+                        out.append("`");
+                    }
+                }
+            }
+        }
+        if (code != null && strlen(code) > 0) {
+            out.append("\ndocs: docs.link/errors/");
+            out.append(code);
         }
         return out.cstr();
     }
