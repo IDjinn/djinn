@@ -23,3 +23,14 @@ Full documentation: `docs/content/docs/advanced/language-server.mdx`. The VS Cod
 To add a diagnostic: create `src/diagnostics/rules/<name>.djinn` (copy `unclosed_bracket.djinn`: a struct with `static unsafe void check(DiagContext* context)`) and add its call to `Diagnostics.run` in `src/diagnostics/registry.djinn`.
 
 A rule can offer a quick fix with its finding: `report` returns the finding, and `item.fix(title, from, to, text)` replaces the bytes `[from, to)` with `text` (an insertion has `from == to`). The editor shows it as a quickfix; see `unmatched_bracket.djinn` and `unterminated_literal.djinn`.
+
+## For agents
+
+The same diagnostics from the command line, with the least text (`DJINNC` or `djinn.compilerPath` finds the compiler; the project is found from the file):
+
+```bash
+djinn-lsp diagnostics src/big.djinn [--limit N]   # one line per problem, with a [fix] marker when there is a quick fix
+djinn-lsp explain src/big.djinn 3                 # the line with carets, note, help, the suggestion and the edit to apply
+```
+
+`diagnostics` prints `#3 13:14 error E1000 Unterminated string literal [fix]`; `explain` is only paid for the problem about to be fixed. The numbers follow the file order and are stable while the file does not change. Exit code: 0 clean, 1 problems, 2 bad arguments or an unreadable file.

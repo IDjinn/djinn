@@ -1,0 +1,189 @@
+namespace djinnc;
+
+extern "C" {
+    ptr<i8> getcwd(ptr<i8> buffer, i32 size);
+}
+
+// The language server for a coding agent: the same diagnostics as the editor, with the least text.
+//
+//   djinn-lsp diagnostics <file> [--limit N]   one line per problem: `#3 13:14 error E1000 Unterminated string literal [fix]`
+//   djinn-lsp explain <file> <#>               everything about one problem: the code, the note, the help, the fix
+//
+// An agent reads the short list of a large file, then asks for the details of the one it is about to fix, so the
+// explanations of the others are never paid for. The numbers are stable while the file does not change.
+struct Agent {
+    static unsafe i32 number(ptr<i8> text) {
+        i32 length = strlen(text);
+        if (length == 0) {
+            return 0 - 1;
+        }
+        mut i32 value = 0;
+        for (mut i32 i = 0; i < length; i = i + 1) {
+            if (text[i] < 48 || text[i] > 57) {
+                return 0 - 1;
+            }
+            value = value * 10 + (i32)(text[i] - 48);
+        }
+        return value;
+    }
+
+    static unsafe ptr<i8> absolute(ptr<i8> file) {
+        ptr<i8> path = Paths.normalize(file);
+        bool rooted = path[0] == 47 || (strlen(path) > 1 && path[1] == 58);
+        if (rooted) {
+            return path;
+        }
+        ptr<i8> buffer = (ptr<i8>)Memory.zalloc(4096);
+        if (getcwd(buffer, 4096) == null) {
+            return path;
+        }
+        return Paths.normalize(Paths.join(buffer, path));
+    }
+
+    // The reports of one file, in the order of the file, after the compiler has looked at the whole project.
+    static unsafe PointerList* analyse(ptr<i8> file) {
+        ptr<i8> path = Agent.absolute(file);
+        Server.prepare_cli(path);
+        Unit* unit = Workspace.ensure_unit(path, null);
+        if (!Workspace.load_from_disk(unit)) {
+            return (PointerList*)0;
+        }
+        unit.open = true;
+        Check.run(unit);
+        PointerList* list = Publisher.reports(unit, true);
+        for (mut i32 i = 1; i < list.length; i = i + 1) {
+            mut i32 at = i;
+            while (at > 0 && ((Report*)list.get(at)).from < ((Report*)list.get(at - 1)).from) {
+                ptr<ptr> data = list.data;
+                ptr held = data[at];
+                data[at] = data[at - 1];
+                data[at - 1] = held;
+                at = at - 1;
+            }
+        }
+        return list;
+    }
+
+    static unsafe ptr<i8> severity_name(i32 severity) {
+        if (severity == 1) {
+            return "error";
+        }
+        if (severity == 2) {
+            return "warning";
+        }
+        return "info";
+    }
+
+    static unsafe i32 column(Unit* u, i32 offset) {
+        i32 line_start = u.line_starts[u.line_of(offset)];
+        return Findings.columns(u, line_start, offset) + 1;
+    }
+
+    static unsafe void header(Unit* u, Report* report, i32 number) {
+        mut ptr<i8> code = report.code;
+        if (code == null || strlen(code) == 0) {
+            code = "-";
+        }
+        printf("#%d %d:%d %s %s", number, u.line_of(report.from) + 1, Agent.column(u, report.from), Agent.severity_name(report.severity), code);
+    }
+
+    // Other files of the project the compiler complained about: a count each, no text.
+    static unsafe void others(Unit* current) {
+        Workspace* ws = Workspace.get();
+        for (mut i32 i = 0; i < ws.units.length; i = i + 1) {
+            Unit* unit = (Unit*)ws.units.get(i);
+            if (unit != current && !unit.library && unit.diags != null && unit.diags.length > 0) {
+                printf("also %d in %s\n", unit.diags.length, unit.path);
+            }
+        }
+    }
+
+    public static unsafe i32 diagnostics(ptr<i8> file, i32 limit) {
+        PointerList* list = Agent.analyse(file);
+        if (list == null) {
+            printf("cannot read %s\n", file);
+            return 2;
+        }
+        Unit* unit = Workspace.find_path(Agent.absolute(file));
+        if (list.length == 0) {
+            printf("%s: no problems\n", file);
+            Agent.others(unit);
+            return 0;
+        }
+        mut i32 errors = 0;
+        for (mut i32 i = 0; i < list.length; i = i + 1) {
+            if (((Report*)list.get(i)).severity == 1) {
+                errors = errors + 1;
+            }
+        }
+        printf("%s: %d problems (%d errors)\n", file, list.length, errors);
+        for (mut i32 i = 0; i < list.length && i < limit; i = i + 1) {
+            Report* report = (Report*)list.get(i);
+            Agent.header(unit, report, i + 1);
+            printf(" %s", report.message);
+            if (report.finding != null && report.finding.fix_title != null) {
+                printf(" [fix]");
+            }
+            printf("\n");
+        }
+        if (list.length > limit) {
+            printf("... %d more (--limit %d)\n", list.length - limit, list.length);
+        }
+        Agent.others(unit);
+        printf("details: djinn-lsp explain %s <#>\n", file);
+        return 1;
+    }
+
+    static unsafe void describe_fix(Unit* u, LintItem* item) {
+        i32 from_line = u.line_of(item.fix_from) + 1;
+        i32 from_column = Agent.column(u, item.fix_from);
+        if (item.fix_from == item.fix_to) {
+            printf("fix: insert `%s` at %d:%d (%s)\n", item.fix_text, from_line, from_column, item.fix_title);
+        } else if (strlen(item.fix_text) == 0) {
+            printf("fix: delete %d:%d to %d:%d (%s)\n", from_line, from_column, u.line_of(item.fix_to) + 1, Agent.column(u, item.fix_to), item.fix_title);
+        } else {
+            printf("fix: replace %d:%d to %d:%d with `%s` (%s)\n", from_line, from_column, u.line_of(item.fix_to) + 1, Agent.column(u, item.fix_to), item.fix_text, item.fix_title);
+        }
+    }
+
+    public static unsafe i32 explain(ptr<i8> file, i32 number) {
+        PointerList* list = Agent.analyse(file);
+        if (list == null) {
+            printf("cannot read %s\n", file);
+            return 2;
+        }
+        if (number < 1 || number > list.length) {
+            printf("%s has %d problems; there is no #%d\n", file, list.length, number);
+            return 2;
+        }
+        Unit* unit = Workspace.find_path(Agent.absolute(file));
+        Report* report = (Report*)list.get(number - 1);
+        Agent.header(unit, report, number);
+        printf("\n%s\n", report.full);
+        if (report.finding != null && report.finding.fix_title != null) {
+            Agent.describe_fix(unit, report.finding);
+        }
+        return 0;
+    }
+
+    // `djinn-lsp diagnostics|explain ...`; returns -1 when the arguments are not a command line mode.
+    public static unsafe i32 dispatch() {
+        ptr<i8> command = Process.argv_or(1, "");
+        if (Strings.same(command, "diagnostics") && Process.argc() >= 3) {
+            mut i32 limit = 30;
+            for (mut i32 i = 3; i + 1 < Process.argc(); i = i + 1) {
+                if (Strings.same(Process.argv_or(i, ""), "--limit")) {
+                    i32 value = Agent.number(Process.argv_or(i + 1, ""));
+                    if (value > 0) {
+                        limit = value;
+                    }
+                }
+            }
+            return Agent.diagnostics(Process.argv_or(2, ""), limit);
+        }
+        if (Strings.same(command, "explain") && Process.argc() >= 4) {
+            return Agent.explain(Process.argv_or(2, ""), Agent.number(Process.argv_or(3, "")));
+        }
+        return 0 - 1;
+    }
+}
