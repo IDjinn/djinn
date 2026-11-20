@@ -42,3 +42,24 @@ for abi in arm64-v8a x86_64; do
         echo "ok android $abi (built, no device)"
     fi
 done
+
+# setup errors: without an NDK the link must fail with a message that says what to set
+if env -u DJINN_NDK -u ANDROID_NDK_HOME -u DJINN_ANDROID_CLANG "$compiler" "$out/hello.djinn" --target aarch64-linux-android26 \
+    --runtime-dir "$runtime" --runtime-lib "$out/rt-arm64-v8a/libdjinn_runtime.a" -o "$out/no-ndk" > "$out/no-ndk.log" 2>&1; then
+    fail "linking without the NDK succeeded"
+fi
+grep -q "needs the NDK" "$out/no-ndk.log" || fail "missing NDK message"
+echo "ok android missing NDK is reported"
+
+# an output ending in .so is a shared library for the target (what NativeActivity loads)
+"$compiler" "$out/hello.djinn" --target aarch64-linux-android26 --runtime-dir "$runtime" \
+    --runtime-lib "$out/rt-arm64-v8a/libdjinn_runtime.a" -o "$out/libhello.so" > /dev/null 2>&1 || fail "build libhello.so"
+readelf="$(ls "$DJINN_NDK"/toolchains/llvm/prebuilt/*/bin/llvm-readelf* | head -1)"
+"$readelf" -h "$out/libhello.so" | grep -q "Type:.*DYN" || fail "libhello.so is not a shared object"
+"$readelf" -h "$out/libhello.so" | grep -q "Machine:.*AArch64" || fail "libhello.so is not AArch64"
+echo "ok android .so output"
+
+# the environment check reports what is missing
+bash tools/android_doctor.sh > "$out/doctor.log" 2>&1 || true
+grep -q "ndk" "$out/doctor.log" || fail "doctor prints nothing about the NDK"
+echo "ok android doctor"
