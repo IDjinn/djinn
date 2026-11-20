@@ -64,10 +64,17 @@ done
 "$clang" "${flags[@]}" "$root/runtime/tier.c" -o "$out/tier.o"
 "$clang" "${flags[@]}" "$root/runtime/third_party/yyjson/yyjson.c" -o "$out/yyjson.o"
 "$clang" "${flags[@]}" "$root/runtime/json/djinn_json.c" -o "$out/djinn_json.o"
+android_objects=()
+if [ -n "$android" ]; then
+    # the UI host shim (looper, window, touch, fonts) and the NDK's native_app_glue, which defines ANativeActivity_onCreate
+    "$clang" "${flags[@]}" -w "$root/runtime/android/android_host.c" -I "$ndk/sources/android/native_app_glue" -o "$out/android_host.o"
+    "$clang" "${flags[@]}" -w "$ndk/sources/android/native_app_glue/android_native_app_glue.c" -o "$out/android_glue.o"
+    android_objects=("$out/android_host.o" "$out/android_glue.o")
+fi
 
 if [ "$windows" = 1 ]; then
     "$archiver" "-out:$archive" "$out/runtime_all.o" "$out/logger.o" "$out/yyjson.o" "$out/djinn_json.o" "$out/tier.o"
 else
-    "$archiver" rcs "$archive" "$out/runtime_all.o" "$out/logger.o" "$out/yyjson.o" "$out/djinn_json.o" "$out/tier.o"
+    "$archiver" rcs "$archive" "$out/runtime_all.o" "$out/logger.o" "$out/yyjson.o" "$out/djinn_json.o" "$out/tier.o" ${android_objects[@]+"${android_objects[@]}"}
 fi
 echo "$archive"

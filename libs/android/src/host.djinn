@@ -1,0 +1,127 @@
+import std::types;
+import std::libc;
+import ui;
+
+namespace android;
+
+// The Android host: runs one app inside the NativeActivity the runtime shim set up. The frame is the same display list
+// every host draws; this first host rasterizes it on the CPU (SoftRaster) and posts it to the window. A touch is a
+// mouse: down, up and, when both land on the same element, a click; a drag scrolls.
+struct AndroidHost {
+    static unsafe void announce(u32 id, str event) {
+        if (id != 0) {
+            Dom.dispatch(id, event);
+        }
+    }
+
+    // Runs the app until the activity is destroyed. Returns the exit code.
+    public static unsafe i32 run<T>(T app) {
+        djinn_android_log("android: host starting");
+        AndroidFonts.install();
+        Scroll.set_smooth(true);
+        Styles.set_coarse_pointer(true);
+        Mounted mounted = App.mount<T>(app);
+        mut DisplayList list = DisplayList.create();
+        mut Canvas canvas = Canvas.create(1, 1);
+        mut u32 stamp = 0;
+        mut u32 epoch = 0;
+        mut bool dirty = true;
+        mut u32 pressed = 0;
+        mut f32 last_y = (f32)0.0;
+        mut f32 start_y = (f32)0.0;
+        mut bool dragged = false;
+        mut bool running = true;
+        mut i32 frames = 0;
+        while (running) {
+            // wait for events only when there is nothing to draw
+            mut i32 wait = -1;
+            if (dirty) {
+                wait = 0;
+            }
+            i32 state = djinn_android_pump(wait);
+            if (state < 0) {
+                running = false;
+                continue;
+            }
+            if (djinn_android_take_dirty() != 0) {
+                dirty = true;
+            }
+            mut f32 touch_x = (f32)0.0;
+            mut f32 touch_y = (f32)0.0;
+            mut i32 action = 0;
+            while (djinn_android_next_touch(&touch_x, &touch_y, &action) != 0) {
+                dirty = true;
+                if (action == 0) {
+                    pressed = Hit.at(touch_x, touch_y);
+                    last_y = touch_y;
+                    start_y = touch_y;
+                    dragged = false;
+                    u32 control = Focus.owner(pressed);
+                    if (control != 0) {
+                        Focus.set(control, false);
+                    } else {
+                        Focus.clear();
+                    }
+                    Pointer.press(pressed);
+                    AndroidHost.announce(pressed, "mousedown");
+                } else if (action == 2) {
+                    f32 moved = touch_y - start_y;
+                    if (moved > (f32)12.0 || moved < (f32)-12.0) {
+                        dragged = true;
+                    }
+                    if (dragged) {
+                        Scroll.wheel(touch_x, touch_y, last_y - touch_y);
+                    }
+                    last_y = touch_y;
+                } else if (action == 1 || action == 3) {
+                    u32 target = Hit.at(touch_x, touch_y);
+                    Pointer.release();
+                    AndroidHost.announce(target, "mouseup");
+                    if (action == 1 && !dragged && target != 0 && target == pressed) {
+                        AndroidHost.announce(target, "click");
+                    }
+                    pressed = 0;
+                }
+            }
+            if (state == 0) {
+                continue;
+            }
+            i32 width = djinn_android_width();
+            i32 height = djinn_android_height();
+            if (width <= 0 || height <= 0) {
+                continue;
+            }
+            f64 density = (f64)djinn_android_density() / 160.0;
+            if (density != Styles.device_scale()) {
+                Styles.set_device_scale(density);
+                dirty = true;
+            }
+            Styles.set_prefers_dark(djinn_android_night() != 0);
+            if (Animation.advance((u32)(__djinn_now_us() / 1000))) {
+                dirty = true;
+            }
+            if ((u32)width != canvas.width || (u32)height != canvas.height) {
+                canvas.release();
+                canvas = Canvas.create((u32)width, (u32)height);
+                dirty = true;
+            }
+            if (dirty || Dom.stamp() + Animation.version() + Scroll.version() != stamp || Dom.epoch() != epoch) {
+                Painter.frame(&list, (f32)width, (f32)height);
+                canvas.clear(0xFFFFFFFF);
+                SoftRaster.draw(&canvas, &list);
+                djinn_android_present((u32*)canvas.pixels, width, height);
+                stamp = Dom.stamp() + Animation.version() + Scroll.version();
+                epoch = Dom.epoch();
+                dirty = false;
+                frames = frames + 1;
+                if (frames == 1) {
+                    djinn_android_log("android: first frame presented");
+                }
+            }
+        }
+        list.release();
+        canvas.release();
+        mounted.unmount();
+        return 0;
+    }
+}

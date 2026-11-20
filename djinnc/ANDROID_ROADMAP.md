@@ -21,14 +21,13 @@ the risk is the compiler/runtime, not the UI.
 | 0 | Compile proof: AArch64 backend, data layout, NDK link, Bionic runtime, hello runs on the emulator (x86_64 and arm64) | done |
 | 0a | Release: Android runtime for both ABIs in the Linux and Windows packages | done |
 | 0b | Performance prerequisites: bucket style rules by rightmost key, find the ~11 KB/node retention, dirty tracking / retained display lists | open |
-| 1 | `.so` entry point: `NativeActivity` glue (`android_main`, looper, `ANativeWindow`), `libs/android` NDK bindings, FreeType `FontProvider`, `SoftRaster` blit as bring-up | open |
+| 1 | `.so` entry point and software host: `NativeActivity` through `android_native_app_glue` (`runtime/android/android_host.c`), `libs/android` (`AndroidHost.run`, fonts), system fonts through stb_truetype (instead of FreeType), `SoftRaster` blit to `ANativeWindow`, touch as mouse (tap, drag scroll), APK without Gradle (`tools/android_apk.sh`, `tools/android_build.sh`), `examples/android-hello` runs on the emulator | done |
 | 2 | Vulkan: `VK_KHR_android_surface`, swapchain, `preTransform`/rotation, surface recreation, frame-time comparison with Windows | open |
 | 3 | Input and environment: touch, tap/long-press, fling scroll, IME and multiline edit, insets, dark mode, density, `pointer: coarse` | open |
 | 4 | Product: APK packaging (`aapt2` + `apksigner`, no Gradle), clipboard, `[Platform(android)]` in the kit, headless screenshot tests, emulator in CI | open |
 | 5 | Advanced: shaping, images/gradients/shadows in the display list, accessibility, iOS reusing the structure | open |
 
-Open decisions: minimum API (26), arm64 first with x86_64 for the emulator, toolchain-only packaging vs. Gradle, FreeType as a
-dependency.
+Open decisions: minimum API (26), arm64 first with x86_64 for the emulator, toolchain-only packaging vs. Gradle, stb_truetype (public domain, one header) instead of FreeType for fonts.
 
 ## Run and debug from the VS Code extension
 
