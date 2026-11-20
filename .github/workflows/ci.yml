@@ -100,15 +100,26 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
 
+      # The djinnc built by the first job links LLVM dynamically: the shared library has to be on this runner too.
+      - name: Install the LLVM runtime library
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends wget gnupg ca-certificates libxml2 zlib1g libzstd1 libffi8
+          wget -qO- --timeout=30 --tries=3 https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc >/dev/null
+          echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-21 main" | sudo tee /etc/apt/sources.list.d/llvm.list
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libllvm21 llvm-21
+          ls /usr/lib/llvm-21/lib | grep -i "libLLVM" | head -3
+
       - name: Run the Android test on an x86_64 emulator
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 34
           arch: x86_64
+          # each line of the script runs in its own shell: the variables go on the command that needs them
           script: |
             chmod +x build/bootstrap/stage2/djinnc
-            export DJINN_NDK="$ANDROID_NDK_HOME"
-            bash tests/djinnc/android.sh build/bootstrap/stage2/djinnc runtime
+            env DJINN_NDK="$ANDROID_NDK_HOME" DJINN_HOST_RUNTIME_LIB="$PWD/build/runtime/libdjinn_runtime.a" LD_LIBRARY_PATH=/usr/lib/llvm-21/lib bash tests/djinnc/android.sh build/bootstrap/stage2/djinnc runtime
 
   djinnc-windows:
     name: djinnc bootstrap and conformance (Windows)
