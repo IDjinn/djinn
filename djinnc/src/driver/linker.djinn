@@ -220,7 +220,114 @@ struct Linker {
         return 0;
     }
 
+    // The Android ABI directory name of the target (arm64-v8a, x86_64), and the NDK clang wrapper prefix.
+    static unsafe ptr<i8> android_abi() {
+        if (Target.triple_mentions("aarch64") || Target.triple_mentions("arm64")) {
+            return "arm64-v8a";
+        }
+        return "x86_64";
+    }
+
+    // The API level written after 'android' in the triple (aarch64-linux-android26); 26 when there is none.
+    static unsafe i32 android_api() {
+        ptr<i8> triple = Target.triple();
+        i32 length = strlen(triple);
+        for (mut i32 i = 0; i + 7 <= length; i = i + 1) {
+            if (Strings.equals(triple + i, 7, "android")) {
+                mut i32 api = 0;
+                mut i32 at = i + 7;
+                while (at < length && triple[at] >= 48 && triple[at] <= 57) {
+                    api = api * 10 + (triple[at] - 48);
+                    at = at + 1;
+                }
+                if (api > 0) {
+                    return api;
+                }
+                return 26;
+            }
+        }
+        return 26;
+    }
+
+    // An Android program or library through the NDK clang wrapper (DJINN_NDK or ANDROID_NDK_HOME; DJINN_ANDROID_CLANG
+    // names the wrapper directly). An output ending in '.so' is a shared library (the NativeActivity entry point).
+    // The runtime comes from lib/android/<abi>/ of the install, else --runtime-lib (built with build_runtime.sh --android).
+    static unsafe i32 link_android(Options* options, ptr<i8> object_path) {
+        mut ptr<i8> clang = getenv("DJINN_ANDROID_CLANG");
+        ByteBuffer* wrapper = ByteBuffer.create();
+        if (clang == null) {
+            mut ptr<i8> ndk = getenv("DJINN_NDK");
+            if (ndk == null) {
+                ndk = getenv("ANDROID_NDK_HOME");
+            }
+            if (ndk == null) {
+                logger_error(Log.get(), "djinnc: an Android target needs the NDK: set DJINN_NDK (or ANDROID_NDK_HOME), or DJINN_ANDROID_CLANG");
+                return 1;
+            }
+            wrapper.append(ndk);
+            if (Linker.is_windows()) {
+                wrapper.append("/toolchains/llvm/prebuilt/windows-x86_64/bin/");
+            } else {
+                wrapper.append("/toolchains/llvm/prebuilt/linux-x86_64/bin/");
+            }
+            if (Target.triple_mentions("aarch64") || Target.triple_mentions("arm64")) {
+                wrapper.append("aarch64");
+            } else {
+                wrapper.append("x86_64");
+            }
+            wrapper.append("-linux-android");
+            wrapper.append_int((i64)Linker.android_api());
+            wrapper.append("-clang");
+            clang = wrapper.cstr();
+        }
+
+        mut ptr<i8> runtime = options.runtime_lib;
+        ptr<i8> executable_dir = __djinn_executable_dir();
+        if (executable_dir != null) {
+            ByteBuffer* installed = ByteBuffer.create();
+            installed.append(executable_dir);
+            installed.append("/../lib/android/");
+            installed.append(Linker.android_abi());
+            installed.append("/libdjinn_runtime.a");
+            if (__djinn_path_exists(installed.cstr()) != 0) {
+                runtime = installed.cstr();
+            }
+        }
+        if (runtime == null) {
+            logger_error(Log.get(), "djinnc: no Android runtime library (lib/android/%s/libdjinn_runtime.a, or --runtime-lib from tools/build_runtime.sh --android)", Linker.android_abi());
+            return 1;
+        }
+
+        ByteBuffer* command = ByteBuffer.create();
+        if (Linker.is_windows()) {
+            command.append("\"");
+        }
+        command.append("\"");
+        command.append(clang);
+        command.append("\" \"");
+        command.append(object_path);
+        command.append("\" \"");
+        command.append(runtime);
+        command.append("\" -lm -llog -landroid");
+        i32 output_length = strlen(options.output);
+        if (output_length > 3 && Strings.equals(options.output + (output_length - 3), 3, ".so")) {
+            command.append(" -shared");
+        }
+        ByteBuffer* link_args = options.link_args;
+        command.append(link_args.cstr());
+        command.append(" -o \"");
+        command.append(options.output);
+        command.append("\"");
+        if (Linker.is_windows()) {
+            command.append("\"");
+        }
+        return Process.run(command.cstr());
+    }
+
     public static i32 link(Options* options, ptr<i8> object_path) {
+        if (Target.is_android()) {
+            return Linker.link_android(options, object_path);
+        }
         if (Target.is_wasm()) {
             return Linker.link_wasm(options, object_path);
         }
