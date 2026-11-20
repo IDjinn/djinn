@@ -1,0 +1,59 @@
+namespace djinnc;
+
+// A finding of a rule, in tokens (raw indices, `first` and `last` included).
+struct LintItem {
+    i32 token;
+    i32 end_token;
+    ptr<i8> message;
+    ptr<i8> id;
+    i32 severity;
+}
+
+struct DiagSeverity {
+    const i32 ERROR = 1;
+    const i32 WARNING = 2;
+    const i32 INFORMATION = 3;
+    const i32 HINT = 4;
+}
+
+// What a rule receives: the file, its syntax tree, and the way to report. A rule never talks to the protocol and
+// never checks `djinn.editor` (`lint-disable: <id>`) itself: `report` drops what the user turned off.
+struct DiagContext {
+    Unit* unit;
+    Ast* ast;
+    PointerList* items;
+
+    public unsafe void report_tokens(i32 first, i32 last, ptr<i8> id, ptr<i8> message, i32 severity) {
+        if (first < 0 || last < first || last >= this.unit.token_count) {
+            return;
+        }
+        if (!EditorConfig.get().lint_enabled(id)) {
+            return;
+        }
+        LintItem* item = (LintItem*)Memory.zalloc(sizeof(LintItem));
+        item.token = first;
+        item.end_token = last;
+        item.message = message;
+        item.id = id;
+        item.severity = severity;
+        this.items.push((ptr)item);
+    }
+
+    // Reports the whole node.
+    public unsafe void report(AstNode* node, ptr<i8> id, ptr<i8> message, i32 severity) {
+        this.report_tokens(node.first, node.last, id, message, severity);
+    }
+
+    // Reports the name of a declaration (the whole node when it has none).
+    public unsafe void report_name(AstNode* node, ptr<i8> id, ptr<i8> message, i32 severity) {
+        if (node.name_tok >= 0) {
+            this.report_tokens(node.name_tok, node.name_tok, id, message, severity);
+        } else {
+            this.report(node, id, message, severity);
+        }
+    }
+
+    public unsafe void add(LintItem* item) {
+        this.items.push((ptr)item);
+    }
+}

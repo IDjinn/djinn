@@ -1,0 +1,228 @@
+namespace djinnc;
+
+// The syntax tree of a file. It is built once per analysis, on top of the tokens, the bracket matching and the
+// declarations found by the Scanner, and it is what the diagnostic rules (src/diagnostics) walk.
+//
+//   ROOT
+//    +- NAMESPACE / IMPORT / TYPE / IMPL / FUNCTION ...      (one node per declaration, nested like the source)
+//    |    +- PARAM, BLOCK                                    (a body is a tree of BLOCKs holding the LOCALs)
+//    +- lexical problems (UNTERMINATED, UNCLOSED_BRACKET, UNMATCHED_BRACKET) hang from the node they appear in
+//
+// Tokens are always raw token indices (Unit.tstart / tend / tkind), `first` and `last` included.
+struct AstKind {
+    const i32 ROOT = 0;
+    const i32 NAMESPACE = 1;
+    const i32 IMPORT = 2;
+    const i32 TYPE = 3;
+    const i32 IMPL = 4;
+    const i32 FUNCTION = 5;
+    const i32 FIELD = 6;
+    const i32 PARAM = 7;
+    const i32 LOCAL = 8;
+    const i32 ENUM_MEMBER = 9;
+    const i32 BLOCK = 10;
+    const i32 UNTERMINATED = 11;
+    const i32 UNCLOSED_BRACKET = 12;
+    const i32 UNMATCHED_BRACKET = 13;
+}
+
+struct AstNode {
+    i32 kind;
+    i32 first;
+    i32 last;
+    i32 name_tok;
+    Sym* sym;
+    AstNode* parent;
+    PointerList* children;
+
+    public unsafe bool contains_token(i32 raw) {
+        return raw >= this.first && raw <= this.last;
+    }
+
+    public unsafe i32 child_count() {
+        return this.children.length;
+    }
+
+    public unsafe AstNode* child(i32 index) {
+        return (AstNode*)this.children.get(index);
+    }
+}
+
+struct Ast {
+    AstNode* root;
+    // every node, in the order they were created (parents before their children, error nodes last)
+    PointerList* nodes;
+
+    public static unsafe Ast* build(Unit* u) {
+        Ast* ast = (Ast*)Memory.zalloc(sizeof(Ast));
+        ast.nodes = PointerList.create();
+        ast.root = ast.make(AstKind.ROOT, 0, u.token_count - 1, 0 - 1, (Sym*)0, (AstNode*)0);
+        for (mut i32 i = 0; i < u.syms.length; i = i + 1) {
+            ast.add_symbol(u, (Sym*)u.syms.get(i));
+        }
+        ast.add_lexical_errors(u);
+        return ast;
+    }
+
+    unsafe AstNode* make(i32 kind, i32 first, i32 last, i32 name_tok, Sym* sym, AstNode* parent) {
+        AstNode* node = (AstNode*)Memory.zalloc(sizeof(AstNode));
+        node.kind = kind;
+        node.first = first;
+        node.last = last;
+        node.name_tok = name_tok;
+        node.sym = sym;
+        node.parent = parent;
+        node.children = PointerList.create();
+        if (parent != null) {
+            parent.children.push((ptr)node);
+        }
+        this.nodes.push((ptr)node);
+        return node;
+    }
+
+    static unsafe i32 kind_of(Sym* sym) {
+        i32 kind = sym.kind;
+        if (kind == SK.NAMESPACE) {
+            return AstKind.NAMESPACE;
+        }
+        if (kind == SK.IMPORT) {
+            return AstKind.IMPORT;
+        }
+        if (kind == SK.IMPL) {
+            return AstKind.IMPL;
+        }
+        if (sym.is_type()) {
+            return AstKind.TYPE;
+        }
+        if (sym.is_callable()) {
+            return AstKind.FUNCTION;
+        }
+        if (kind == SK.ENUM_MEMBER) {
+            return AstKind.ENUM_MEMBER;
+        }
+        if ((sym.flags & SF.PARAM) != 0) {
+            return AstKind.PARAM;
+        }
+        if ((sym.flags & SF.LOCAL) != 0) {
+            return AstKind.LOCAL;
+        }
+        return AstKind.FIELD;
+    }
+
+    // The innermost BLOCK of `node` that contains the token, or `node` itself.
+    static unsafe AstNode* innermost_block(AstNode* node, i32 raw) {
+        mut AstNode* current = node;
+        mut bool descended = true;
+        while (descended) {
+            descended = false;
+            for (mut i32 i = 0; i < current.children.length; i = i + 1) {
+                AstNode* child = current.child(i);
+                if (child.kind == AstKind.BLOCK && child.contains_token(raw)) {
+                    current = child;
+                    descended = true;
+                    break;
+                }
+            }
+        }
+        return current;
+    }
+
+    unsafe void add_symbol(Unit* u, Sym* sym) {
+        mut AstNode* parent = this.root;
+        if (sym.parent != null && sym.parent.node != null) {
+            parent = sym.parent.node;
+        }
+        i32 kind = Ast.kind_of(sym);
+        if (kind == AstKind.LOCAL) {
+            parent = Ast.innermost_block(parent, sym.first_tok);
+        }
+        mut i32 last = sym.last_tok;
+        if (last < sym.first_tok) {
+            last = sym.first_tok;
+        }
+        AstNode* node = this.make(kind, sym.first_tok, last, sym.name_tok, sym, parent);
+        sym.node = node;
+        if (kind == AstKind.FUNCTION && sym.body_open >= 0 && sym.body_close >= sym.body_open) {
+            this.add_blocks(u, node, sym.body_open, sym.body_close);
+        }
+    }
+
+    // One BLOCK per `{ ... }` of a body, nested like the braces.
+    unsafe void add_blocks(Unit* u, AstNode* function, i32 body_open, i32 body_close) {
+        ptr<ptr> stack = (ptr<ptr>)Memory.zalloc(65 * 8);
+        mut i32 depth = 0;
+        for (mut i32 raw = body_open; raw <= body_close && raw < u.token_count; raw = raw + 1) {
+            if (u.tkind[raw] != Tk.PUNCT || u.tend[raw] - u.tstart[raw] != 1) {
+                continue;
+            }
+            i32 ch = (i32)u.text[u.tstart[raw]];
+            if (ch == 123) {
+                if (depth < 64) {
+                    mut AstNode* parent = function;
+                    if (depth > 0) {
+                        parent = (AstNode*)stack[depth - 1];
+                    }
+                    mut i32 last = body_close;
+                    i32 code = u.code_of[raw];
+                    if (code >= 0 && u.match[code] >= 0) {
+                        last = u.code[u.match[code]];
+                    }
+                    stack[depth] = (ptr)this.make(AstKind.BLOCK, raw, last, 0 - 1, (Sym*)0, parent);
+                    depth = depth + 1;
+                }
+            } else if (ch == 125 && depth > 0) {
+                depth = depth - 1;
+            }
+        }
+    }
+
+    // Deepest node, not an error node, whose tokens cover `raw`.
+    unsafe AstNode* enclosing(i32 raw) {
+        mut AstNode* current = this.root;
+        mut bool descended = true;
+        while (descended) {
+            descended = false;
+            for (mut i32 i = 0; i < current.children.length; i = i + 1) {
+                AstNode* child = current.child(i);
+                if (child.kind < AstKind.UNTERMINATED && child.contains_token(raw)) {
+                    current = child;
+                    descended = true;
+                    break;
+                }
+            }
+        }
+        return current;
+    }
+
+    unsafe void add_lexical_errors(Unit* u) {
+        for (mut i32 raw = 0; raw < u.token_count; raw = raw + 1) {
+            if (u.tkind[raw] == Tk.ERROR) {
+                this.make(AstKind.UNTERMINATED, raw, raw, 0 - 1, (Sym*)0, this.enclosing(raw));
+            }
+        }
+        for (mut i32 c = 0; c < u.code_count; c = c + 1) {
+            bool opener = u.is_punct(c, 40) || u.is_punct(c, 91) || u.is_punct(c, 123);
+            bool closer = u.is_punct(c, 41) || u.is_punct(c, 93) || u.is_punct(c, 125);
+            if ((opener || closer) && u.match[c] < 0) {
+                i32 raw = u.code[c];
+                mut i32 kind = AstKind.UNMATCHED_BRACKET;
+                if (opener) {
+                    kind = AstKind.UNCLOSED_BRACKET;
+                }
+                this.make(kind, raw, raw, 0 - 1, (Sym*)0, this.enclosing(raw));
+            }
+        }
+    }
+
+    // Every node of a kind, for the rules that look at one construct only.
+    public unsafe PointerList* of_kind(i32 kind) {
+        PointerList* found = PointerList.create();
+        for (mut i32 i = 0; i < this.nodes.length; i = i + 1) {
+            AstNode* node = (AstNode*)this.nodes.get(i);
+            if (node.kind == kind) {
+                found.push((ptr)node);
+            }
+        }
+        return found;
+    }
+}
