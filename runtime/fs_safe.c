@@ -1121,7 +1121,7 @@ int64_t __djinn_fs_rename(int64_t from_dir, const char* from, int64_t from_lengt
         }
         else
         {
-#if defined(__linux__) && defined(RENAME_NOREPLACE)
+#if defined(__linux__) && !defined(__ANDROID__) && defined(RENAME_NOREPLACE)
             status = renameat2(source.parent, source.leaf, target.parent, target.leaf, RENAME_NOREPLACE);
 #else
             status = linkat(source.parent, source.leaf, target.parent, target.leaf, 0);

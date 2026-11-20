@@ -554,7 +554,11 @@ static void log_internal(Logger* logger, LogLevel level, const char* fmt, va_lis
     int millis = 0;
     if (logger->needs_time)
     {
+#ifdef __ANDROID__
+        clock_gettime(CLOCK_REALTIME, &ts);
+#else
         timespec_get(&ts, TIME_UTC);
+#endif
         load_time(&ts, &time_parts);
         millis = (int)(ts.tv_nsec / 1000000);
     }

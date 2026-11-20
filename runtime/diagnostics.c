@@ -673,7 +673,9 @@ __attribute__((constructor)) static void djinn_install_crash_trace(void)
     djinn_previous_filter = SetUnhandledExceptionFilter(djinn_crash_filter);
 }
 #else
+#ifndef __ANDROID__
 #include <execinfo.h>
+#endif
 #include <signal.h>
 #include <dlfcn.h>
 #include <elf.h>
@@ -683,6 +685,10 @@ extern const Elf64_Ehdr __ehdr_start __attribute__((weak));
 
 __attribute__((noinline)) static void djinn_native_stack(const int skip)
 {
+#ifdef __ANDROID__
+    (void)skip;
+    fputs("native stack trace: unavailable on Android (see logcat tombstones)\n", stderr);
+#else
     void* addresses[64];
     const int count = backtrace(addresses, 64);
     fputs("native stack trace:\n", stderr);
@@ -715,6 +721,7 @@ __attribute__((noinline)) static void djinn_native_stack(const int skip)
     }
     if (!printed) backtrace_symbols_fd(addresses + skip, count - skip, 2);
     fflush(stderr);
+#endif
 }
 
 static void djinn_crash_signal(const int signal_number)
