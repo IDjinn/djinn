@@ -5,7 +5,7 @@ struct UnterminatedLiteralRule {
     static unsafe void check(DiagContext* context) {
         Unit* u = context.unit;
         PointerList* nodes = context.ast.of_kind(AstKind.UNTERMINATED);
-        for (mut i32 i = 0; i < nodes.length; i = i + 1) {
+        for (mut i32 i = 0; i < nodes.length && !context.expired(); i = i + 1) {
             AstNode* node = (AstNode*)nodes.get(i);
             i32 from = u.tstart[node.first];
             i32 to = u.tend[node.first];
@@ -19,13 +19,31 @@ struct UnterminatedLiteralRule {
                 continue;
             }
             if (comment) {
+                item.note("a block comment runs until its closing '*/'");
+                item.help("close it with '*/'");
                 item.fix("Close the comment", to, to, "*/");
             } else {
-                // a string ends at its line: close it before the line break
+                // the lexer keeps reading to the end of the file; the problem is the line it starts on, so the finding
+                // covers that line and the fix closes the string before the line break
                 mut i32 at = from;
                 while (at < to && u.text[at] != 10 && u.text[at] != 13) {
                     at = at + 1;
                 }
+                // a trailing ';' or ',' belongs after the quote
+                mut i32 end = at;
+                while (end > from && (u.text[end - 1] == 32 || u.text[end - 1] == 9)) {
+                    end = end - 1;
+                }
+                if (end > from + 1 && (u.text[end - 1] == 59 || u.text[end - 1] == 44)) {
+                    end = end - 1;
+                    while (end > from && (u.text[end - 1] == 32 || u.text[end - 1] == 9)) {
+                        end = end - 1;
+                    }
+                }
+                item.span(from, at);
+                item.note("a string that is not closed keeps reading to the end of the file");
+                item.help("add a closing '\"' where the string ends");
+                at = end;
                 item.fix("Close the string", at, at, "\"");
             }
         }

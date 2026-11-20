@@ -2,6 +2,7 @@ import * as vscode from "vscode";
 import { Android } from "./android";
 import { DebugAdapterFactory, DebugProvider } from "./debug";
 import { InlineDiagnostics } from "./diagnostics";
+import { InlineFixes } from "./inlinefix";
 import { Profiling } from "./profiling";
 import { ServerClient } from "./server";
 import { runSetup } from "./setup";
@@ -51,6 +52,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand("djinn.build", () => runTask("build", getInfo)),
     vscode.commands.registerCommand("djinn.run", () => runTask("run", getInfo)),
     vscode.commands.registerCommand("djinn.showServerInfo", showInfo),
+    vscode.languages.registerInlineCompletionItemProvider({ language: "djinn" }, new InlineFixes()),
     vscode.languages.onDidChangeDiagnostics(diagnostics.renderAll),
     vscode.window.onDidChangeVisibleTextEditors(diagnostics.renderAll),
     vscode.workspace.onDidChangeConfiguration((event) => {

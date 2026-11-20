@@ -603,6 +603,7 @@ struct Publisher {
         mut i32 count = 0;
         if (u.analyzed) {
             if (u.checked && u.diags != null) {
+                PointerList* findings = Diagnostics.collect(u);
                 for (mut i32 i = 0; i < u.diags.length; i = i + 1) {
                     CDiag* diag = (CDiag*)u.diags.get(i);
                     if (count > 0) {
@@ -622,11 +623,16 @@ struct Publisher {
                     if (to <= from) {
                         to = from + 1;
                     }
+                    // a rule that found the same problem knows better how far it reaches (and offers the fix)
+                    LintItem* same = Findings.at(u, findings, from, (ptr<i8>)0);
+                    if (same != null && same.span_to > same.span_from) {
+                        to = same.span_to;
+                    }
                     Lsp.range(out, u, from, to);
                     out.append(",\"severity\":");
                     out.append_int((i64)diag.severity);
                     out.append(",\"source\":\"djinnc\",\"message\":");
-                    out.append_json_string(Publisher.with_hint(u, diag, from));
+                    out.append_json_string(Findings.describe(Publisher.with_hint(u, diag, from), same));
                     out.append("}");
                 }
             } else if (!u.checked && u.open && u.ast != null) {
@@ -638,13 +644,17 @@ struct Publisher {
                     }
                     count = count + 1;
                     out.append("{\"range\":");
-                    Lsp.token_range(out, u, item.token, item.end_token);
+                    if (item.span_to > item.span_from) {
+                        Lsp.range(out, u, item.span_from, item.span_to);
+                    } else {
+                        Lsp.token_range(out, u, item.token, item.end_token);
+                    }
                     out.append(",\"severity\":");
                     out.append_int((i64)item.severity);
                     out.append(",\"code\":");
                     out.append_json_string(item.id);
                     out.append(",\"source\":\"djinn-lsp\",\"message\":");
-                    out.append_json_string(item.message);
+                    out.append_json_string(Findings.describe(item.message, item));
                     out.append("}");
                 }
             }

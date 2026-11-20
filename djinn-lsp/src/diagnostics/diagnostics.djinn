@@ -13,6 +13,27 @@ struct LintItem {
     i32 fix_from;
     i32 fix_to;
 
+    // Rust-style details: what the problem is (note) and how to solve it (help), shown under the message
+    ptr<i8> note_text;
+    ptr<i8> help_text;
+
+    public unsafe void note(ptr<i8> text) {
+        this.note_text = text;
+    }
+
+    public unsafe void help(ptr<i8> text) {
+        this.help_text = text;
+    }
+
+    // optional range in bytes, when the finding should cover more than its tokens (span_to > span_from)
+    i32 span_from;
+    i32 span_to;
+
+    public unsafe void span(i32 from, i32 to) {
+        this.span_from = from;
+        this.span_to = to;
+    }
+
     // Offers a quick fix with the finding. A finding without one is only reported.
     public unsafe void fix(ptr<i8> title, i32 from, i32 to, ptr<i8> text) {
         this.fix_title = title;
@@ -29,12 +50,71 @@ struct DiagSeverity {
     const i32 HINT = 4;
 }
 
+struct Findings {
+    // The message with a capital first letter, followed by the note and the help of the finding when there is one.
+    public static unsafe ptr<i8> describe(ptr<i8> message, LintItem* item) {
+        ByteBuffer* out = ByteBuffer.create();
+        if (message != null && strlen(message) > 0) {
+            mut i32 first = (i32)(u8)message[0];
+            if (first >= 97 && first <= 122) {
+                first = first - 32;
+            }
+            out.append_char((char)(first));
+            out.append(message + 1);
+        }
+        if (item != null && item.note_text != null) {
+            out.append("\n\nnote: ");
+            out.append(item.note_text);
+        }
+        if (item != null && item.help_text != null) {
+            if (item.note_text == null) {
+                out.append("\n");
+            }
+            out.append("\nhelp: ");
+            out.append(item.help_text);
+        }
+        return out.cstr();
+    }
+
+    public static unsafe i32 start_of(Unit* u, LintItem* item) {
+        if (item.span_to > item.span_from) {
+            return item.span_from;
+        }
+        return u.tstart[item.token];
+    }
+
+    // The finding of a rule that starts at `offset`, preferring the one with this id (the editor sends back the
+    // diagnostic it got, which may be the compiler's own report of the same problem).
+    public static unsafe LintItem* at(Unit* u, PointerList* items, i32 offset, ptr<i8> code) {
+        mut LintItem* any = (LintItem*)0;
+        for (mut i32 i = 0; i < items.length; i = i + 1) {
+            LintItem* item = (LintItem*)items.get(i);
+            if (Findings.start_of(u, item) != offset) {
+                continue;
+            }
+            if (code != null && Strings.same(item.id, code)) {
+                return item;
+            }
+            if (any == null) {
+                any = item;
+            }
+        }
+        return any;
+    }
+}
+
 // What a rule receives: the file, its syntax tree, and the way to report. A rule never talks to the protocol and
 // never checks `djinn.editor` (`lint-disable: <id>`) itself: `report` drops what the user turned off.
 struct DiagContext {
     Unit* unit;
     Ast* ast;
     PointerList* items;
+    // when the rules must stop (microseconds); a rule with a loop over the file should poll `expired()`
+    i64 deadline;
+
+    public unsafe bool expired() {
+        return __djinn_now_us() > this.deadline;
+    }
 
     public unsafe LintItem* report_tokens(i32 first, i32 last, ptr<i8> id, ptr<i8> message, i32 severity) {
         if (first < 0 || last < first || last >= this.unit.token_count) {

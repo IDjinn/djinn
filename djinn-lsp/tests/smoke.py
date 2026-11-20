@@ -89,7 +89,7 @@ check("rename edits every use of a local", len(edits) == 2, edits)
 
 diagnostics = client.wait_for("textDocument/publishDiagnostics", lambda p: p["uri"].lower() == main_uri.lower() and any(d.get("source") == "djinnc" for d in p["diagnostics"]))
 messages = [d["message"] for d in diagnostics["diagnostics"]]
-check("compiler diagnostics report the undefined variable", any("undefined variable" in m for m in messages), messages)
+check("compiler diagnostics report the undefined variable", any("undefined variable" in m.lower() for m in messages), messages)
 check("diagnostic points at line 6", any(d["range"]["start"]["line"] == 5 for d in diagnostics["diagnostics"]), diagnostics)
 
 fixed = main_text.replace("missing", "total")
