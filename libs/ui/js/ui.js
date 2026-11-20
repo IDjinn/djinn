@@ -634,6 +634,7 @@ const $outlet = (view, groups) => {
   box.appendChild(region.fragment);
   if (!$pf.view) { $pf.view = view; $pf.groups = groups || ""; $onCleanup(() => { $prefetchClear(); $pf.view = null; }); }
   let live = null, kept = null;
+  $onCleanup(() => { if (live) { $dispose(live); live = null; } });
   $effect(() => {
     // Moving inside a group of routes keeps the page; what is inside it (an Outlet of its own) changes.
     const path = $read($path);
@@ -655,7 +656,10 @@ const $outlet = (view, groups) => {
       if (hit) live = hit.root;
       else {
         page.setAttribute("class", "route");
-        page.appendChild(view(path));
+        // The page lives in a root of its own: the effect reruns when the path moves inside a group and must not take
+        // the page's effects with it.
+        const savedOwner = $owner; $owner = null;
+        try { live = $root(() => { page.appendChild(view(path)); }); } finally { $owner = savedOwner; }
       }
       region.end.parentNode.insertBefore(page, region.end);
       region.nodes = region.nodes.filter((node) => node.parentNode).concat([page]);
