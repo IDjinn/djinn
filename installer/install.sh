@@ -12,6 +12,7 @@
 #   --no-extension        do not install the VS Code extension
 #   --ui                  also install the UI framework libraries (ui, ui_macros and the platform host)
 #   --vulkan              also install the Vulkan renderer (vulkan, spirv); implies --ui
+#   --android             also install the Android target libraries and build tools (needs the Android SDK and NDK to use)
 #   --no-auto-update      do not register the cron job
 #   --no-path             do not touch shell profiles
 #   --quiet               print errors only
@@ -28,6 +29,7 @@ TAG=""
 EXTENSION="ask"
 UI=ask
 VULKAN=ask
+ANDROID=ask
 CRON=1
 PATH_SETUP=1
 QUIET=0
@@ -44,6 +46,7 @@ while [ $# -gt 0 ]; do
         --no-extension) EXTENSION=no; shift ;;
         --ui) UI=yes; shift ;;
         --vulkan) UI=yes; VULKAN=yes; shift ;;
+        --android) ANDROID=yes; shift ;;
         --no-auto-update) CRON=0; shift ;;
         --no-path) PATH_SETUP=0; shift ;;
         --quiet) QUIET=1; shift ;;
@@ -129,15 +132,21 @@ choose_components() {
         elif [ "$MODE" = install ] && ask_yes "Install the Vulkan renderer for the UI (GPU drawing)?"; then VULKAN=yes
         else VULKAN=no; fi
     fi
+    if [ "$ANDROID" = ask ]; then
+        if [ -f "$saved" ] && grep -qx android "$saved"; then ANDROID=yes
+        elif [ "$MODE" = install ] && ask_yes "Install the Android target (libraries and build tools; needs the Android SDK and NDK)?"; then ANDROID=yes
+        else ANDROID=no; fi
+    fi
 }
 
 install_components() { # <version dir>
     staged="$1/optional"
     : > "$HOME_DIR/.components"
-    for part in ui vulkan; do
+    for part in ui vulkan android; do
         want=no
         [ "$part" = ui ] && want="$UI"
         [ "$part" = vulkan ] && want="$VULKAN"
+        [ "$part" = android ] && want="$ANDROID"
         [ "$want" = yes ] || continue
         if [ -d "$staged/$part" ]; then
             cp -R "$staged/$part/." "$1/"

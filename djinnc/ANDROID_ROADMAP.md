@@ -24,7 +24,7 @@ the risk is the compiler/runtime, not the UI.
 | 1 | `.so` entry point and software host: `NativeActivity` through `android_native_app_glue` (`runtime/android/android_host.c`), `libs/android` (`AndroidHost.run`, fonts), system fonts through stb_truetype (instead of FreeType), `SoftRaster` blit to `ANativeWindow`, touch as mouse (tap, drag scroll), APK without Gradle (`tools/android_apk.sh`, `tools/android_build.sh`), `examples/android-hello` runs on the emulator | done |
 | 2 | Vulkan: `libs/vulkan` platform files (`platform.windows/android.djinn`: surface, loader), `VK_KHR_android_surface`, surface format chosen from the surface (B8G8R8A8 or R8G8B8A8), `VkApplicationInfo` (the Android loader lists no device without it), surface recreated with the window (home/back), rotation through identity `preTransform` (the compositor rotates). Runs on the emulator (SwiftShader). Left: pre-rotated swapchain, frame-time numbers on a real device | done (emulator) |
 | 3 | Input and environment: touch (tap, drag, fling, long press as `contextmenu`), hardware and soft keyboard keys (US layout) into `Input.press`/`Input.typed`, soft keyboard shown for editable controls, window insets (system bars, cutout, keyboard) through JNI, dark mode, density, `pointer: coarse`. Left: IME composition (text input connection, other layouts), multiline edit (a `libs/ui` feature, not Android specific), multi-touch gestures | done (emulator) |
-| 4 | Product: APK packaging (`aapt2` + `apksigner`, no Gradle), clipboard, VS Code run/debug (device picker, build, install, log, lldb-server attach, screenshot, doctor, `djinn-android` tasks; `android:` section in `djinn.proj`). Left: ship `libs/android` and the Android tools in the release packages, `[Platform(android)]` in the kit, headless screenshot tests, emulator in CI | in progress (emulator) |
+| 4 | Product: APK packaging (`aapt2` + `apksigner`, no Gradle), clipboard, VS Code run/debug (device picker, build, install, log, lldb-server attach, screenshot, doctor, `djinn-android` tasks; `android:` section in `djinn.proj`). Release: an `android` installer component (per-triple libraries, host macro libraries, build/APK scripts; `android_build.sh` uses the prebuilt libraries of an install). Left: run that packaging in CI (written, not run), `[Platform(android)]` in the kit, headless screenshot tests, emulator in CI | in progress (emulator) |
 | 5 | Advanced: shaping, images/gradients/shadows in the display list, accessibility, iOS reusing the structure | open |
 
 Open decisions: minimum API (26), arm64 first with x86_64 for the emulator, toolchain-only packaging vs. Gradle, stb_truetype (public domain, one header) instead of FreeType for fonts.
@@ -58,3 +58,13 @@ Android adds a `platform: "android"` launch configuration so an app is one F5 aw
 
 Prerequisite in the compiler: debug info (`-g`) for Android targets keeps DWARF in the `.so` (phase 1), and the app package name
 and activity come from `djinn.proj` (`android:` section: package, label, min API, permissions).
+
+## Text input: controlled fields
+
+A field bound to a signal (`Field value={signal}` echoed elsewhere) does not show the controlled-input problems of bridged
+frameworks: `Edit` keeps the caret outside the value, the echo of the signal into the field (`Dom.set_attr` with identical text)
+is a no-op, and `render()` runs once (signals update the nodes), so a key press never recreates the field. Checked on the
+emulator with `examples/android-hello`: 36 characters typed at once arrive in order, ten left-arrow presses and an insertion put
+the text at the caret, and the echo equals the field. Not covered: soft keyboard composition (no text input connection yet),
+a signal that rewrites what was typed (the caret is clamped, not remapped), and typing latency on a large page (every key repaints
+the tree until dirty tracking exists, Phase 0b).
