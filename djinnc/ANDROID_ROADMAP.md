@@ -1,0 +1,54 @@
+# Android roadmap
+
+Native Android for Djinn and the `libs/ui` framework: the same `html!`/`css!` source and kit as web and Windows, drawn by the
+framework's own renderer (Vulkan), with the NDK only where the platform is irreplaceable (lifecycle, touch, IME, clipboard,
+insets, fonts, accessibility). Feasibility study: the display list, layout, style and reactive core are about 85% reusable;
+the risk is the compiler/runtime, not the UI.
+
+## Environment
+
+- Android SDK (`platform-tools`, `emulator`, a system image) and the NDK r27+ (`DJINN_NDK` or `ANDROID_NDK_HOME`).
+- Targets: `aarch64-linux-android<api>` (devices) and `x86_64-linux-android<api>` (emulator), default API 26.
+- `bash tools/build_runtime.sh --android <arm64-v8a|x86_64> --out <dir>` builds the runtime with the NDK.
+- `djinnc app --target aarch64-linux-android26 --runtime-lib <lib> -o app` links with the NDK clang; an output ending in
+  `.so` is a shared library. Releases carry `lib/android/<abi>/libdjinn_runtime.a` (found automatically).
+- `tests/djinnc/android.sh <djinnc>` builds for both ABIs and runs on a connected device or emulator (skips without the NDK).
+
+## Phases
+
+| # | Phase | State |
+|---|---|---|
+| 0 | Compile proof: AArch64 backend, data layout, NDK link, Bionic runtime, hello runs on the emulator (x86_64 and arm64) | done |
+| 0a | Release: Android runtime for both ABIs in the Linux and Windows packages | done |
+| 0b | Performance prerequisites: bucket style rules by rightmost key, find the ~11 KB/node retention, dirty tracking / retained display lists | open |
+| 1 | `.so` entry point: `NativeActivity` glue (`android_main`, looper, `ANativeWindow`), `libs/android` NDK bindings, FreeType `FontProvider`, `SoftRaster` blit as bring-up | open |
+| 2 | Vulkan: `VK_KHR_android_surface`, swapchain, `preTransform`/rotation, surface recreation, frame-time comparison with Windows | open |
+| 3 | Input and environment: touch, tap/long-press, fling scroll, IME and multiline edit, insets, dark mode, density, `pointer: coarse` | open |
+| 4 | Product: APK packaging (`aapt2` + `apksigner`, no Gradle), clipboard, `[Platform(android)]` in the kit, headless screenshot tests, emulator in CI | open |
+| 5 | Advanced: shaping, images/gradients/shadows in the display list, accessibility, iOS reusing the structure | open |
+
+Open decisions: minimum API (26), arm64 first with x86_64 for the emulator, toolchain-only packaging vs. Gradle, FreeType as a
+dependency.
+
+## Run and debug from the VS Code extension
+
+The extension (`tools/vscode-djinn`) already has the `djinn` debug type (build, run, profile, native debugger launch) and tasks.
+Android adds a `platform: "android"` launch configuration so an app is one F5 away:
+
+1. **Devices**: a `Djinn: Select Android Device` command lists `adb devices` and AVDs (`emulator -list-avds`), can start an AVD,
+   and stores the choice (`djinn.android.device`). Settings: `djinn.android.sdk`, `djinn.android.ndk`, `djinn.android.abi`
+   (default: the device's first ABI).
+2. **Build**: the launch config builds with `--target <abi triple>` (`-g` for debug) and the Android runtime; the output is the
+   `.so` (and, from phase 4, the APK) in `build/android/<abi>/`.
+3. **Run** (`mode: run`): install (`adb install -r`), start (`am start -n <package>/android.app.NativeActivity`), and stream
+   `adb logcat --pid` into an output channel; stop kills the app (`am force-stop`).
+4. **Debug** (`mode: debug`): push `lldb-server` from the NDK, start it on the device (`adb forward`), start the app waiting
+   for the debugger (`am start -D`), and attach with the native debugger (`type: lldb` or `cppdbg` with `miDebuggerServerAddress`)
+   using the unstripped `.so` and the source map, so Djinn lines and breakpoints work.
+5. **Tasks**: `djinn-android` task type (build, install, run, logcat) so the steps can be chained in `tasks.json`.
+6. **Hot path to feedback**: a `Djinn: Android Screenshot` command (`adb exec-out screencap`) next to the preview, and the
+   existing profiling flow reused with Perfetto/`simpleperf` instead of `perf`.
+7. **Checks**: a `Djinn: Doctor` entry for Android that reports missing SDK/NDK/adb/device and the exact install steps.
+
+Prerequisite in the compiler: debug info (`-g`) for Android targets keeps DWARF in the `.so` (phase 1), and the app package name
+and activity come from `djinn.proj` (`android:` section: package, label, min API, permissions).
