@@ -49,8 +49,8 @@ cat > "$work/AndroidManifest.xml" <<MANIFEST
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android" package="$package">
     <uses-sdk android:minSdkVersion="$min_api" android:targetSdkVersion="34"/>
-    <application android:label="$label" android:hasCode="false" android:debuggable="$debuggable">
-        <activity android:name="android.app.NativeActivity" android:exported="true"
+    <application android:label="$label" android:hasCode="true" android:debuggable="$debuggable">
+        <activity android:name="dev.djinn.DjinnActivity" android:exported="true"
             android:configChanges="orientation|keyboardHidden|screenSize|screenLayout|density|uiMode|smallestScreenSize"
             android:launchMode="singleTask">
             <meta-data android:name="android.app.lib_name" android:value="$name"/>
@@ -63,6 +63,16 @@ cat > "$work/AndroidManifest.xml" <<MANIFEST
 </manifest>
 MANIFEST
 
+# DjinnActivity (runtime/android/java): a NativeActivity with the text-editor view the soft keyboard needs and the window insets.
+# Compiled here with the JDK's javac and the SDK's d8, so an app never needs Gradle.
+java_src="$(cd "$(dirname "$0")/.." && pwd)/runtime/android/java"
+mkdir -p "$work/java-classes" "$work/dex"
+javac --release 11 -classpath "$platform/android.jar" -d "$work/java-classes" "$java_src/dev/djinn/DjinnActivity.java" 2>&1 | grep -v "^warning\|^Note" || true
+(cd "$work/java-classes" && find . -name '*.class' | sed 's#^\./##') > "$work/classes.list"
+[ -s "$work/classes.list" ] || { echo "android_apk: javac failed (needs a JDK)"; exit 1; }
+(cd "$work/java-classes" && "$build_tools/d8$bat" --lib "$platform/android.jar" --min-api "$min_api" --output "$work/dex" $(cat "$work/classes.list")) 2>&1 | grep -v "^WARNING" || true
+[ -f "$work/dex/classes.dex" ] || { echo "android_apk: d8 failed"; exit 1; }
+
 # the manifest and resources go through aapt2; the library is added afterwards (stored, aligned, so it can be mapped)
 "$build_tools/aapt2$exe" link -o "$work/base.apk" -I "$platform/android.jar" --manifest "$work/AndroidManifest.xml" \
     --min-sdk-version "$min_api" --target-sdk-version 34
@@ -72,13 +82,14 @@ for candidate in python3 python py; do
     if command -v "$candidate" > /dev/null 2>&1 && "$candidate" -c "import zipfile" > /dev/null 2>&1; then python_tool="$candidate"; break; fi
 done
 [ -n "$python_tool" ] || { echo "android_apk: needs python to add the library to the APK"; exit 1; }
-"$python_tool" - "$work/base.apk" "$work/unaligned.apk" "$work/lib/$abi/lib$name.so" "lib/$abi/lib$name.so" <<'PY'
+"$python_tool" - "$work/base.apk" "$work/unaligned.apk" "$work/lib/$abi/lib$name.so" "lib/$abi/lib$name.so" "$work/dex/classes.dex" <<'PY'
 import sys, zipfile
-base, out, path, entry = sys.argv[1:5]
+base, out, path, entry, dex = sys.argv[1:6]
 with zipfile.ZipFile(base) as source, zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as target:
     for item in source.infolist():
         target.writestr(item, source.read(item.filename))
     target.write(path, entry, compress_type=zipfile.ZIP_STORED)
+    target.write(dex, "classes.dex", compress_type=zipfile.ZIP_DEFLATED)
 PY
 "$build_tools/zipalign$exe" -f -p 4 "$work/unaligned.apk" "$work/aligned.apk"
 

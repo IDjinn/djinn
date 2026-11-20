@@ -61,6 +61,8 @@ struct AndroidHost {
         mut u32 stamp = 0;
         mut u32 epoch = 0;
         mut bool dirty = true;
+        // a glide or an animation still runs: frames keep coming without waiting for an event
+        mut bool animating = false;
         mut u32 pressed = 0;
         mut f32 last_y = (f32)0.0;
         mut f32 start_y = (f32)0.0;
@@ -85,6 +87,8 @@ struct AndroidHost {
             mut i32 wait = -1;
             if (dirty) {
                 wait = 0;
+            } else if (animating) {
+                wait = 4;
             } else if (pressed != 0 || keyboard) {
                 wait = 50;
             }
@@ -98,15 +102,13 @@ struct AndroidHost {
             }
             i64 now_ms = __djinn_now_us() / 1000;
             // the insets change with the keyboard, the bars and rotation
-            if (dirty || keyboard) {
-                djinn_android_insets(insets);
-                if (insets[0] != inset_left || insets[1] != inset_top || insets[2] != inset_right || insets[3] != inset_bottom) {
-                    inset_left = insets[0];
-                    inset_top = insets[1];
-                    inset_right = insets[2];
-                    inset_bottom = insets[3];
-                    dirty = true;
-                }
+            djinn_android_insets(insets);
+            if (insets[0] != inset_left || insets[1] != inset_top || insets[2] != inset_right || insets[3] != inset_bottom) {
+                inset_left = insets[0];
+                inset_top = insets[1];
+                inset_right = insets[2];
+                inset_bottom = insets[3];
+                dirty = true;
             }
             mut f32 touch_x = (f32)0.0;
             mut f32 touch_y = (f32)0.0;
@@ -224,7 +226,9 @@ struct AndroidHost {
                 dirty = true;
             }
             Styles.set_prefers_dark(djinn_android_night() != 0);
-            if (Animation.advance((u32)now_ms)) {
+            // 'dirty' is cleared once a frame is drawn: the running animation has its own flag, or a fling stops when the finger lifts
+            animating = Animation.advance((u32)now_ms);
+            if (animating) {
                 dirty = true;
             }
             // a new window (first start, or the activity came back) needs a new surface and swapchain

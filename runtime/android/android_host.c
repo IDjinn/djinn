@@ -32,6 +32,77 @@ typedef struct { float x, y; int action; } djinn_touch_t;
 static __thread djinn_touch_t djinn_touches[TOUCH_CAPACITY];
 static __thread int djinn_touch_head = 0, djinn_touch_tail = 0;
 
+// Text and keys that come from the Java side (the soft keyboard's InputConnection, on the UI thread) and the window insets
+// the Java side reports. Shared between threads, so guarded; the app thread's looper is woken when something arrives.
+#define INJECT_CAPACITY 256
+typedef struct { int text; int value; int meta; } djinn_injected_t;
+static djinn_injected_t djinn_injected[INJECT_CAPACITY];
+static int djinn_inject_head = 0, djinn_inject_tail = 0;
+static pthread_mutex_t djinn_inject_lock = PTHREAD_MUTEX_INITIALIZER;
+static ALooper* djinn_looper = NULL;
+static int djinn_java_insets[4] = {0, 0, 0, 0};
+static int djinn_java_insets_set = 0;
+
+static void inject(int text, int value, int meta)
+{
+    pthread_mutex_lock(&djinn_inject_lock);
+    int next = (djinn_inject_head + 1) % INJECT_CAPACITY;
+    if (next != djinn_inject_tail)
+    {
+        djinn_injected[djinn_inject_head].text = text;
+        djinn_injected[djinn_inject_head].value = value;
+        djinn_injected[djinn_inject_head].meta = meta;
+        djinn_inject_head = next;
+    }
+    pthread_mutex_unlock(&djinn_inject_lock);
+    if (djinn_looper != NULL) ALooper_wake(djinn_looper);
+}
+
+// dev.djinn.DjinnActivity.nativeText: text the keyboard committed (UTF-16), as code points
+JNIEXPORT void JNICALL Java_dev_djinn_DjinnActivity_nativeText(JNIEnv* e, jclass type, jstring text)
+{
+    (void)type;
+    if (text == NULL) return;
+    jsize length = (*e)->GetStringLength(e, text);
+    const jchar* units = (*e)->GetStringChars(e, text, NULL);
+    if (units == NULL) return;
+    for (jsize i = 0; i < length; i++)
+    {
+        int c = units[i];
+        if (c >= 0xD800 && c < 0xDC00 && i + 1 < length && units[i + 1] >= 0xDC00 && units[i + 1] < 0xE000)
+        {
+            c = 0x10000 + ((c - 0xD800) << 10) + (units[i + 1] - 0xDC00);
+            i++;
+        }
+        inject(1, c, 0);
+    }
+    (*e)->ReleaseStringChars(e, text, units);
+}
+
+// dev.djinn.DjinnActivity.nativeKey: a key press from the keyboard (backspace, enter, arrows)
+JNIEXPORT void JNICALL Java_dev_djinn_DjinnActivity_nativeKey(JNIEnv* e, jclass type, jint code, jint meta)
+{
+    (void)e;
+    (void)type;
+    inject(0, code, meta);
+}
+
+// dev.djinn.DjinnActivity.nativeInsets: the window insets in pixels
+JNIEXPORT void JNICALL Java_dev_djinn_DjinnActivity_nativeInsets(JNIEnv* e, jclass type, jint left, jint top, jint right, jint bottom)
+{
+    (void)e;
+    (void)type;
+    pthread_mutex_lock(&djinn_inject_lock);
+    djinn_java_insets[0] = left;
+    djinn_java_insets[1] = top;
+    djinn_java_insets[2] = right;
+    djinn_java_insets[3] = bottom;
+    djinn_java_insets_set = 1;
+    pthread_mutex_unlock(&djinn_inject_lock);
+    __android_log_print(ANDROID_LOG_INFO, "djinn", "window insets: left %d top %d right %d bottom %d", (int)left, (int)top, (int)right, (int)bottom);
+    if (djinn_looper != NULL) ALooper_wake(djinn_looper);
+}
+
 #define KEY_CAPACITY 64
 typedef struct { int code; int meta; int action; } djinn_key_t;
 static __thread djinn_key_t djinn_keys[KEY_CAPACITY];
@@ -127,6 +198,7 @@ static int32_t on_input(struct android_app* app, AInputEvent* event)
 void android_main(struct android_app* app)
 {
     djinn_app = app;
+    djinn_looper = ALooper_forThread();
     redirect_stdio();
     app->onAppCmd = on_command;
     app->onInputEvent = on_input;
@@ -208,14 +280,51 @@ int djinn_android_next_touch(float* x, float* y, int* action)
 
 // The next key event: action 0 down, 1 up; 'unicode' is the printable character it types (0 for none), US layout.
 // The soft keyboard's own composition (other layouts, emoji, suggestions) needs a text input connection: a later step.
+static int printable(djinn_key_t key);
+
 int djinn_android_next_key(int* code, int* meta, int* action, int* unicode)
 {
+    // from the soft keyboard: committed text arrives as characters, other keys as key presses
+    djinn_injected_t injected;
+    int have = 0;
+    pthread_mutex_lock(&djinn_inject_lock);
+    if (djinn_inject_tail != djinn_inject_head)
+    {
+        injected = djinn_injected[djinn_inject_tail];
+        djinn_inject_tail = (djinn_inject_tail + 1) % INJECT_CAPACITY;
+        have = 1;
+    }
+    pthread_mutex_unlock(&djinn_inject_lock);
+    if (have)
+    {
+        *action = 0;
+        if (injected.text)
+        {
+            *code = 0;
+            *meta = 0;
+            *unicode = injected.value;
+        }
+        else
+        {
+            djinn_key_t key = { injected.value, injected.meta, 0 };
+            *code = key.code;
+            *meta = key.meta;
+            *unicode = 0;
+        }
+        return 1;
+    }
     if (djinn_key_tail == djinn_key_head) return 0;
     djinn_key_t key = djinn_keys[djinn_key_tail];
     djinn_key_tail = (djinn_key_tail + 1) % KEY_CAPACITY;
     *code = key.code;
     *meta = key.meta;
     *action = key.action;
+    *unicode = printable(key);
+    return 1;
+}
+
+static int printable(djinn_key_t key)
+{
     int shift = (key.meta & AMETA_SHIFT_ON) != 0;
     int c = 0;
     if (key.code >= AKEYCODE_A && key.code <= AKEYCODE_Z) c = (shift ? 'A' : 'a') + (key.code - AKEYCODE_A);
@@ -244,14 +353,32 @@ int djinn_android_next_key(int* code, int* meta, int* action, int* unicode)
     case AKEYCODE_GRAVE: c = shift ? '~' : '`'; break;
     default: break;
     }
-    *unicode = c;
-    return 1;
+    return c;
 }
 
 // Shows or hides the soft keyboard.
+static JNIEnv* jni(void);
+
 void djinn_android_keyboard(int show)
 {
     if (djinn_app == NULL) return;
+    // DjinnActivity has the text-editor view that makes the keyboard open; a plain NativeActivity only has the system call
+    JNIEnv* e = jni();
+    if (e != NULL)
+    {
+        jobject activity = djinn_app->activity->clazz;
+        jclass activity_class = (*e)->GetObjectClass(e, activity);
+        jmethodID method = (*e)->GetMethodID(e, activity_class, show ? "showKeyboard" : "hideKeyboard", "()V");
+        if (method != NULL)
+        {
+            (*e)->CallVoidMethod(e, activity, method);
+            (*e)->DeleteLocalRef(e, activity_class);
+            if ((*e)->ExceptionCheck(e)) (*e)->ExceptionClear(e);
+            return;
+        }
+        if ((*e)->ExceptionCheck(e)) (*e)->ExceptionClear(e);
+        (*e)->DeleteLocalRef(e, activity_class);
+    }
     if (show) ANativeActivity_showSoftInput(djinn_app->activity, ANATIVEACTIVITY_SHOW_SOFT_INPUT_IMPLICIT);
     else ANativeActivity_hideSoftInput(djinn_app->activity, 0);
 }
@@ -275,6 +402,11 @@ static JNIEnv* jni(void)
 void djinn_android_insets(int* out)
 {
     out[0] = out[1] = out[2] = out[3] = 0;
+    pthread_mutex_lock(&djinn_inject_lock);
+    int from_java = djinn_java_insets_set;
+    if (from_java) memcpy(out, djinn_java_insets, sizeof djinn_java_insets);
+    pthread_mutex_unlock(&djinn_inject_lock);
+    if (from_java) return;
     JNIEnv* e = jni();
     if (e == NULL || djinn_app == NULL) return;
     jobject activity = djinn_app->activity->clazz;
@@ -301,7 +433,19 @@ void djinn_android_insets(int* out)
     {
         jclass insets_class = (*e)->GetObjectClass(e, insets);
         jmethodID get_insets = (*e)->GetMethodID(e, insets_class, "getInsets", "(I)Landroid/graphics/Insets;");
-        if (get_insets != NULL)
+        if (get_insets == NULL)
+        {
+            // before API 30: the deprecated system window insets (the keyboard is part of the bottom one)
+            if ((*e)->ExceptionCheck(e)) (*e)->ExceptionClear(e);
+            const char* names[4] = {"getSystemWindowInsetLeft", "getSystemWindowInsetTop", "getSystemWindowInsetRight", "getSystemWindowInsetBottom"};
+            for (int i = 0; i < 4; i++)
+            {
+                jmethodID getter = (*e)->GetMethodID(e, insets_class, names[i], "()I");
+                if (getter != NULL) out[i] = (*e)->CallIntMethod(e, insets, getter);
+                else if ((*e)->ExceptionCheck(e)) (*e)->ExceptionClear(e);
+            }
+        }
+        else
         {
             // Type.systemBars() | Type.displayCutout() = 7 | 128, then Type.ime() = 8
             jobject bars = (*e)->CallObjectMethod(e, insets, get_insets, 135);
