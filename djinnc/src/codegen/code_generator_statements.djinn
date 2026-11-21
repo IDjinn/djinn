@@ -340,6 +340,30 @@ impl CodeGenerator {
         function_context.leave_loop();
     }
 
+    Value* gen_conditional(Node* node) {
+        u32 result_type = node.value_type();
+        ptr result_slot = this.create_slot(result_type, "cond.result");
+        ptr then_block = this.new_block("cond.then");
+        ptr else_block = this.new_block("cond.else");
+        ptr end_block = this.new_block("cond.end");
+
+        ptr condition = this.to_condition(this.gen_expression(node.first()));
+        LLVMBuildCondBr(this.builder, condition, then_block, else_block);
+
+        LLVMPositionBuilderAtEnd(this.builder, then_block);
+        Value* then_value = this.gen_expression(node.second());
+        LLVMBuildStore(this.builder, this.coerce(then_value, result_type), result_slot);
+        this.branch_if_open(end_block);
+
+        LLVMPositionBuilderAtEnd(this.builder, else_block);
+        Value* else_value = this.gen_expression(node.third());
+        LLVMBuildStore(this.builder, this.coerce(else_value, result_type), result_slot);
+        this.branch_if_open(end_block);
+
+        LLVMPositionBuilderAtEnd(this.builder, end_block);
+        return Value.create(LLVMBuildLoad2(this.builder, this.llvm_type(result_type), result_slot, "cond.value"), result_type);
+    }
+
     unsafe Value* gen_switch_expression(Node* node) {
         if (node.symbol_kind() == SymbolKind.ERROR_SWITCH) {
             return this.generate_error_switch(node);

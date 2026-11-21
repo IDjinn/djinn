@@ -264,6 +264,97 @@ impl Parser {
         return node;
     }
 
+    bool at_word(ptr<i8> word) {
+        i32 token = this.current();
+        return this.kind_of(token) == TokenKind::IDENTIFIER && Strings.equals(this.text_of(token), this.length_of(token), word);
+    }
+
+    Node* subject_reference(ptr<i8> name, i32 at) {
+        Node* reference = Node.create(NodeKind::IDENTIFIER, at);
+        reference.set_text(name);
+        return reference;
+    }
+
+    unsafe Node* parse_switch_test(ptr<i8> subject, i32 at) {
+        TokenKind relation = this.kind_of(this.current());
+        mut Node* test = (Node*)0;
+        if (relation == TokenKind::LESS || relation == TokenKind::LESS_EQUAL || relation == TokenKind::GREATER || relation == TokenKind::GREATER_EQUAL) {
+            this.advance();
+            test = this.make_binary(relation, this.subject_reference(subject, at), this.parse_binary(9), at);
+        } else {
+            test = this.make_binary(TokenKind::EQUAL_EQUAL, this.subject_reference(subject, at), this.parse_binary(5), at);
+        }
+        while (this.at_word("or")) {
+            i32 joint = this.advance();
+            test = this.make_binary(TokenKind::OR_OR, test, this.parse_switch_test(subject, at), joint);
+        }
+        return test;
+    }
+
+    // 'value switch { pattern => result, _ => other }': the subject is evaluated once into a temporary, each arm is a
+    // test of it (== a value, a relation such as '< 5', 'or' alternatives, an optional 'when' guard) and the arms
+    // become a chain of conditional expressions ending in the '_' arm.
+    unsafe Node* parse_value_switch(Node* subject) {
+        i32 start = this.advance();
+        this.expect(TokenKind::LBRACE, "expected '{' to open switch expression");
+        AtomTable* atoms = Atoms.get();
+        ptr<i8> name = atoms.text(Macros.unique_atom("switch"));
+        Node* scope = Node.create_list(NodeKind::LET_EXPR, start);
+        Node* temporary = Node.create(NodeKind::FIELD_DECL, start);
+        temporary.set_text(name);
+        temporary.set_first(subject);
+        scope.add(temporary);
+
+        PointerList* tests = PointerList.create();
+        PointerList* results = PointerList.create();
+        mut Node* fallback = (Node*)0;
+        while (!this.check(TokenKind::RBRACE) && !this.at_end() && !this.failed) {
+            i32 label = this.current();
+            mut Node* test = (Node*)0;
+            if (this.at_word("_")) {
+                this.advance();
+            } else {
+                test = this.parse_switch_test(name, start);
+            }
+            if (this.at_word("when")) {
+                this.advance();
+                Node* guard = this.parse_expression();
+                if (test == null) {
+                    test = guard;
+                } else {
+                    test = this.make_binary(TokenKind::AND_AND, test, guard, label);
+                }
+            }
+            this.expect(TokenKind::ARROW, "expected '=>' after the pattern");
+            Node* result = this.parse_expression();
+            if (test == null) {
+                fallback = result;
+            } else {
+                tests.push((ptr)test);
+                results.push((ptr)result);
+            }
+            if (!this.check(TokenKind::RBRACE)) {
+                this.expect(TokenKind::COMMA, "expected ',' between switch arms");
+            }
+        }
+        this.expect(TokenKind::RBRACE, "expected '}' to close switch expression");
+        if (fallback == null) {
+            this.fail("a switch expression needs a '_' arm");
+            return scope;
+        }
+        mut Node* chain = fallback;
+        for (mut i32 i = tests.length - 1; i >= 0; i = i - 1) {
+            Node* test = (Node*)tests.get(i);
+            Node* branch = Node.create(NodeKind::COND_EXPR, start);
+            branch.set_first(test);
+            branch.set_second((Node*)results.get(i));
+            branch.set_third(chain);
+            chain = branch;
+        }
+        scope.set_first(chain);
+        return scope;
+    }
+
     Node* parse_statement_or_empty() {
         i32 token = this.current();
         Node* statement = this.parse_statement();

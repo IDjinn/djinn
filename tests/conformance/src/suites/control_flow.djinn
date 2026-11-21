@@ -788,6 +788,105 @@ i32 main() {
 """;
         Verify.source(source).with_std().runs(Expected.exit(10));
     }
+
+    [Test]
+    void ConditionalExpressionPicksBranch() {
+        str source = """
+i32 pick(bool flag) {
+    return flag ? 4 : 9;
+}
+
+i32 main() {
+    i64 wide = pick(true) > 3 ? 1 : 5000000000;
+    auto nested = pick(false) > 5 ? (pick(true) > 5 ? 100 : 20) : 3;
+    mut i32 evaluated = 0;
+    i32 once = pick(true) == 4 ? 1 : (evaluated = 50);
+    return pick(true) + pick(false) + (i32)wide + nested + evaluated + once;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(35));
+    }
+
+    [Test]
+    void ConditionalExpressionOverText() {
+        str source = """
+str label(i32 n) {
+    return n > 1 ? "many" : "one";
+}
+
+i32 main() {
+    string owned = label(3) == "many" ? "x" : "y";
+    return owned == "x" ? 7 : 1;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(7));
+    }
+
+    [Test]
+    void ConditionalBranchesMustAgree() {
+        str source = """
+i32 main() {
+    auto value = true ? 1 : "a";
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.VALUE_TYPE_MISMATCH).at(2, 23));
+    }
+
+    [Test]
+    void ValueSwitchOverIntegers() {
+        str source = """
+str name(i32 n) {
+    return n switch {
+        1 => "one",
+        2 or 3 => "few",
+        > 100 => "many",
+        _ when n < 0 => "negative",
+        _ => "other"
+    };
+}
+
+i32 main() {
+    if (name(1) != "one" || name(3) != "few") { return 1; }
+    if (name(500) != "many" || name(-4) != "negative" || name(50) != "other") { return 2; }
+    return 0;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(0));
+    }
+
+    [Test]
+    void ValueSwitchOverTextAndEnums() {
+        str source = """
+enum Color { Red, Green, Blue }
+
+i32 code(str text) {
+    return text switch { "a" => 1, "b" => 2, _ => 0 };
+}
+
+i32 shade(Color color) {
+    return color switch { Color::Red => 10, Color::Green => 20, _ => 30 };
+}
+
+i32 main() {
+    string owned = "b";
+    return code("b") + shade(Color::Green) + (owned switch { "b" => 5, _ => 0 }) + code("z");
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(27));
+    }
+
+    [Test]
+    void ValueSwitchEvaluatesSubjectOnce() {
+        str source = """
+i32 main() {
+    mut i32 calls = 0;
+    i32 picked = (calls = calls + 1) switch { 1 => 10, 2 => 20, _ => 30 };
+    return picked + calls;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(11));
+    }
 }
 
 struct ErrorHandlingTests {

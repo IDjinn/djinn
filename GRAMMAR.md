@@ -345,7 +345,8 @@ Lowest to highest precedence:
 
 ```ebnf
 expression           = assignment ;
-assignment           = coalesce [ assign_op assignment ] ;
+assignment           = conditional [ assign_op assignment ] ;
+conditional          = coalesce [ "?" assignment ":" assignment ] ;
 assign_op            = "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=" | "??=" ;
 coalesce             = or_expr [ "??" coalesce ] ;
 or_expr              = and_expr { "||" and_expr } ;
@@ -364,7 +365,7 @@ cast                 = "(" type ")" unary ;
 await_expr           = "await" unary ;
 blocking_wait        = postfix "." "sync" ;   (* not followed by "(" or "<"; same node as await_expr, blocking *)
 postfix              = primary { "." IDENTIFIER [ generic_args ] | "?." IDENTIFIER | "!." IDENTIFIER | "[" expression "]"
-                     | "(" [ arg_list ] ")" | "++" | "--" } ;
+                     | "(" [ arg_list ] ")" | "++" | "--" | value_switch } ;
 
 primary              = INTEGER_LITERAL | FLOAT_LITERAL | STRING_LITERAL | INTERP_STRING | CHAR_LITERAL | "true" | "false" | "null"
                      | IDENTIFIER | "this" | "(" expression ")" | array_literal | brace_initializer | new_expression
@@ -409,3 +410,18 @@ arm_body             = expression | block ;
 or `_` present; all arms yield the same type) and the outcome of throwing calls (`Result v` / `_ v` for success, `Error e`
 or an error type name for failures, tried in source order, otherwise the error propagates). An arm block produces its value
 with `yield expr;`; `return` is not allowed in an arm block. *)
+
+#### Value switch (C# style) and conditional expression
+
+```ebnf
+value_switch         = "switch" "{" { value_arm [ "," ] } "}" ;
+value_arm            = ( pattern | "_" ) [ "when" expression ] "=>" expression ;
+pattern              = pattern_test { "or" pattern_test } ;
+pattern_test         = [ "<" | "<=" | ">" | ">=" ] shift ;
+```
+
+(* `subject switch { 1 => a, 2 or 3 => b, > 100 => c, _ when cond => d, _ => e }` compares the subject (evaluated once)
+with each pattern in source order (`==` unless a relation is written; integers, enums, `str`, `string` through `operator ==`)
+and yields the first matching arm. A `_` arm without `when` is required. The arms are an ordinary chain of conditional
+expressions: they yield the same type. `condition ? a : b` evaluates one branch; the branches have the same type (numbers
+widen, a nullable pointer accepts a safe pointer, `null` and number literals take the other branch's type). *)
