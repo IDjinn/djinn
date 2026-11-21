@@ -99,7 +99,7 @@ struct ValueReader {
 
     public unsafe bool is_delim(str text) {
         CssToken token = this.peek();
-        return token.kind == CssKind.DELIM && Texts.same(token.text, text);
+        return token.kind == CssKind.DELIM && token.text == text;
     }
 
     // The index just after the ')' that closes a function or parenthesis opened before 'pos'.
@@ -123,7 +123,8 @@ struct ValueReader {
 }
 
 struct CssNames {
-    public static unsafe bool equal(str text, str wanted) {
+    // Compares ignoring ASCII case: "PX" equals "px". 'wanted' must already be lower case.
+    public static unsafe bool equal_ignore_case(str text, str wanted) {
         if (text.length != wanted.length) {
             return false;
         }
@@ -152,37 +153,37 @@ struct CssNumbers {
     public static unsafe Numeric dimension(CssToken token, ValueContext* context) {
         f64 value = token.number;
         str unit = token.text;
-        if (CssNames.equal(unit, "px")) {
+        if (CssNames.equal_ignore_case(unit, "px")) {
             return Numeric.of(Unit.PX, value * CssNumbers.scale(context));
         }
-        if (CssNames.equal(unit, "rem")) {
+        if (CssNames.equal_ignore_case(unit, "rem")) {
             return Numeric.of(Unit.PX, value * context.root_font_size);
         }
-        if (CssNames.equal(unit, "em")) {
+        if (CssNames.equal_ignore_case(unit, "em")) {
             return Numeric.of(Unit.PX, value * context.font_size);
         }
         // The dynamic, small and large viewport units are the same here: a native window has no browser bars that
         // come and go. The inline axis is the horizontal one (horizontal writing modes only, for now).
-        if (CssNames.equal(unit, "vw") || CssNames.equal(unit, "vi") || CssNames.equal(unit, "dvw") || CssNames.equal(unit, "svw")
-            || CssNames.equal(unit, "lvw") || CssNames.equal(unit, "dvi") || CssNames.equal(unit, "svi") || CssNames.equal(unit, "lvi")) {
+        if (CssNames.equal_ignore_case(unit, "vw") || CssNames.equal_ignore_case(unit, "vi") || CssNames.equal_ignore_case(unit, "dvw") || CssNames.equal_ignore_case(unit, "svw")
+            || CssNames.equal_ignore_case(unit, "lvw") || CssNames.equal_ignore_case(unit, "dvi") || CssNames.equal_ignore_case(unit, "svi") || CssNames.equal_ignore_case(unit, "lvi")) {
             return Numeric.of(Unit.PX, value * context.viewport_width / 100.0);
         }
-        if (CssNames.equal(unit, "vh") || CssNames.equal(unit, "vb") || CssNames.equal(unit, "dvh") || CssNames.equal(unit, "svh")
-            || CssNames.equal(unit, "lvh") || CssNames.equal(unit, "dvb") || CssNames.equal(unit, "svb") || CssNames.equal(unit, "lvb")) {
+        if (CssNames.equal_ignore_case(unit, "vh") || CssNames.equal_ignore_case(unit, "vb") || CssNames.equal_ignore_case(unit, "dvh") || CssNames.equal_ignore_case(unit, "svh")
+            || CssNames.equal_ignore_case(unit, "lvh") || CssNames.equal_ignore_case(unit, "dvb") || CssNames.equal_ignore_case(unit, "svb") || CssNames.equal_ignore_case(unit, "lvb")) {
             return Numeric.of(Unit.PX, value * context.viewport_height / 100.0);
         }
-        if (CssNames.equal(unit, "vmin") || CssNames.equal(unit, "vmax")) {
+        if (CssNames.equal_ignore_case(unit, "vmin") || CssNames.equal_ignore_case(unit, "vmax")) {
             mut f64 side = context.viewport_width;
             bool smaller = context.viewport_height < context.viewport_width;
-            if (smaller == CssNames.equal(unit, "vmin")) {
+            if (smaller == CssNames.equal_ignore_case(unit, "vmin")) {
                 side = context.viewport_height;
             }
             return Numeric.of(Unit.PX, value * side / 100.0);
         }
-        if (CssNames.equal(unit, "pt")) {
+        if (CssNames.equal_ignore_case(unit, "pt")) {
             return Numeric.of(Unit.PX, value * 4.0 / 3.0 * CssNumbers.scale(context));
         }
-        if (CssNames.equal(unit, "ch")) {
+        if (CssNames.equal_ignore_case(unit, "ch")) {
             // the advance of "0" in the font; half the font size until a font is installed
             mut f64 zero = context.font_size * 0.5;
             if (Fonts.active()) {
@@ -190,19 +191,19 @@ struct CssNumbers {
             }
             return Numeric.of(Unit.PX, value * zero);
         }
-        if (CssNames.equal(unit, "deg")) {
+        if (CssNames.equal_ignore_case(unit, "deg")) {
             return Numeric.of(Unit.DEGREES, value);
         }
-        if (CssNames.equal(unit, "turn")) {
+        if (CssNames.equal_ignore_case(unit, "turn")) {
             return Numeric.of(Unit.DEGREES, value * 360.0);
         }
-        if (CssNames.equal(unit, "rad")) {
+        if (CssNames.equal_ignore_case(unit, "rad")) {
             return Numeric.of(Unit.DEGREES, value * 57.29577951308232);
         }
-        if (CssNames.equal(unit, "ms")) {
+        if (CssNames.equal_ignore_case(unit, "ms")) {
             return Numeric.of(Unit.NUMBER, value);
         }
-        if (CssNames.equal(unit, "s")) {
+        if (CssNames.equal_ignore_case(unit, "s")) {
             return Numeric.of(Unit.NUMBER, value * 1000.0);
         }
         return Numeric.invalid();
@@ -220,14 +221,14 @@ struct CssNumbers {
         if (token.kind == CssKind.DIMENSION) {
             return CssNumbers.dimension(token, context);
         }
-        if (token.kind == CssKind.OPEN_PAREN || (token.kind == CssKind.FUNCTION && CssNames.equal(token.text, "calc"))) {
+        if (token.kind == CssKind.OPEN_PAREN || (token.kind == CssKind.FUNCTION && CssNames.equal_ignore_case(token.text, "calc"))) {
             u32 close = reader.closing();
             mut ValueReader inner = ValueReader.over(reader.tokens, reader.pos, close);
             Numeric value = CssNumbers.sum(&inner, context);
             reader.pos = close + 1;
             return value;
         }
-        if (token.kind == CssKind.FUNCTION && (CssNames.equal(token.text, "min") || CssNames.equal(token.text, "max") || CssNames.equal(token.text, "clamp"))) {
+        if (token.kind == CssKind.FUNCTION && (CssNames.equal_ignore_case(token.text, "min") || CssNames.equal_ignore_case(token.text, "max") || CssNames.equal_ignore_case(token.text, "clamp"))) {
             u32 close = reader.closing();
             mut ValueReader inner = ValueReader.over(reader.tokens, reader.pos, close);
             Numeric* items = (Numeric*)__djinn_alloc_zeroed((size_long)(8 * sizeof(Numeric)));
@@ -241,7 +242,7 @@ struct CssNumbers {
             }
             reader.pos = close + 1;
             mut Numeric result = Numeric.invalid();
-            if (CssNames.equal(token.text, "clamp")) {
+            if (CssNames.equal_ignore_case(token.text, "clamp")) {
                 if (count == 3 && items[0].unit == items[1].unit && items[1].unit == items[2].unit) {
                     mut f64 value = items[1].value;
                     if (value < items[0].value) {
@@ -259,7 +260,7 @@ struct CssNumbers {
                         result = Numeric.invalid();
                         break;
                     }
-                    if ((CssNames.equal(token.text, "min") && items[i].value < result.value) || (CssNames.equal(token.text, "max") && items[i].value > result.value)) {
+                    if ((CssNames.equal_ignore_case(token.text, "min") && items[i].value < result.value) || (CssNames.equal_ignore_case(token.text, "max") && items[i].value > result.value)) {
                         result = items[i];
                     }
                 }
@@ -317,10 +318,10 @@ struct CssNumbers {
         CssToken token = reader.peek();
         if (token.kind == CssKind.IDENT) {
             reader.next();
-            if (CssNames.equal(token.text, "auto")) {
+            if (CssNames.equal_ignore_case(token.text, "auto")) {
                 return Numeric.of(Unit.AUTO, 0.0);
             }
-            if (CssNames.equal(token.text, "none")) {
+            if (CssNames.equal_ignore_case(token.text, "none")) {
                 return Numeric.of(Unit.NONE, 0.0);
             }
             return Numeric.invalid();
@@ -537,20 +538,20 @@ struct Colors {
     public static unsafe bool system(str name, bool dark, u32* out) {
         mut u32 light = 0;
         mut u32 night = 0;
-        if (CssNames.equal(name, "canvas") || CssNames.equal(name, "field")) { light = 0xffffffff; night = 0x121212ff; }
-        else if (CssNames.equal(name, "canvastext") || CssNames.equal(name, "fieldtext") || CssNames.equal(name, "buttontext")) { light = 0x000000ff; night = 0xffffffff; }
-        else if (CssNames.equal(name, "linktext")) { light = 0x0000eeff; night = 0x9e9effff; }
-        else if (CssNames.equal(name, "visitedtext")) { light = 0x551a8bff; night = 0xd0adf0ff; }
-        else if (CssNames.equal(name, "activetext")) { light = 0xff0000ff; night = 0xff9e9eff; }
-        else if (CssNames.equal(name, "buttonface")) { light = 0xefefefff; night = 0x6b6b6bff; }
-        else if (CssNames.equal(name, "buttonborder")) { light = 0x767676ff; night = 0x858585ff; }
-        else if (CssNames.equal(name, "highlight") || CssNames.equal(name, "selecteditem")) { light = 0x0078d7ff; night = 0x0078d7ff; }
-        else if (CssNames.equal(name, "highlighttext") || CssNames.equal(name, "selecteditemtext")) { light = 0xffffffff; night = 0xffffffff; }
-        else if (CssNames.equal(name, "graytext")) { light = 0x6d6d6dff; night = 0x808080ff; }
-        else if (CssNames.equal(name, "mark")) { light = 0xffff00ff; night = 0xffff00ff; }
-        else if (CssNames.equal(name, "marktext")) { light = 0x000000ff; night = 0x000000ff; }
-        else if (CssNames.equal(name, "accentcolor")) { light = 0x0075ffff; night = 0x99c8ffff; }
-        else if (CssNames.equal(name, "accentcolortext")) { light = 0xffffffff; night = 0x000000ff; }
+        if (CssNames.equal_ignore_case(name, "canvas") || CssNames.equal_ignore_case(name, "field")) { light = 0xffffffff; night = 0x121212ff; }
+        else if (CssNames.equal_ignore_case(name, "canvastext") || CssNames.equal_ignore_case(name, "fieldtext") || CssNames.equal_ignore_case(name, "buttontext")) { light = 0x000000ff; night = 0xffffffff; }
+        else if (CssNames.equal_ignore_case(name, "linktext")) { light = 0x0000eeff; night = 0x9e9effff; }
+        else if (CssNames.equal_ignore_case(name, "visitedtext")) { light = 0x551a8bff; night = 0xd0adf0ff; }
+        else if (CssNames.equal_ignore_case(name, "activetext")) { light = 0xff0000ff; night = 0xff9e9eff; }
+        else if (CssNames.equal_ignore_case(name, "buttonface")) { light = 0xefefefff; night = 0x6b6b6bff; }
+        else if (CssNames.equal_ignore_case(name, "buttonborder")) { light = 0x767676ff; night = 0x858585ff; }
+        else if (CssNames.equal_ignore_case(name, "highlight") || CssNames.equal_ignore_case(name, "selecteditem")) { light = 0x0078d7ff; night = 0x0078d7ff; }
+        else if (CssNames.equal_ignore_case(name, "highlighttext") || CssNames.equal_ignore_case(name, "selecteditemtext")) { light = 0xffffffff; night = 0xffffffff; }
+        else if (CssNames.equal_ignore_case(name, "graytext")) { light = 0x6d6d6dff; night = 0x808080ff; }
+        else if (CssNames.equal_ignore_case(name, "mark")) { light = 0xffff00ff; night = 0xffff00ff; }
+        else if (CssNames.equal_ignore_case(name, "marktext")) { light = 0x000000ff; night = 0x000000ff; }
+        else if (CssNames.equal_ignore_case(name, "accentcolor")) { light = 0x0075ffff; night = 0x99c8ffff; }
+        else if (CssNames.equal_ignore_case(name, "accentcolortext")) { light = 0xffffffff; night = 0x000000ff; }
         else { return false; }
         out[0] = light;
         if (dark) {
@@ -560,24 +561,24 @@ struct Colors {
     }
 
     public static unsafe bool named(str name, u32* out) {
-        if (CssNames.equal(name, "transparent")) { out[0] = 0; return true; }
-        if (CssNames.equal(name, "black")) { out[0] = 255; return true; }
-        if (CssNames.equal(name, "white")) { out[0] = 4294967295; return true; }
-        if (CssNames.equal(name, "red")) { out[0] = 4278190335; return true; }
-        if (CssNames.equal(name, "green")) { out[0] = 8388863; return true; }
-        if (CssNames.equal(name, "lime")) { out[0] = 16711935; return true; }
-        if (CssNames.equal(name, "blue")) { out[0] = 65535; return true; }
-        if (CssNames.equal(name, "yellow")) { out[0] = 4294902015; return true; }
-        if (CssNames.equal(name, "orange")) { out[0] = 4289003775; return true; }
-        if (CssNames.equal(name, "purple")) { out[0] = 2147516671; return true; }
-        if (CssNames.equal(name, "gray") || CssNames.equal(name, "grey")) { out[0] = 2155905279; return true; }
-        if (CssNames.equal(name, "silver")) { out[0] = 3233857791; return true; }
-        if (CssNames.equal(name, "navy")) { out[0] = 33023; return true; }
-        if (CssNames.equal(name, "teal")) { out[0] = 8421631; return true; }
-        if (CssNames.equal(name, "maroon")) { out[0] = 2147483903; return true; }
-        if (CssNames.equal(name, "olive")) { out[0] = 2155872511; return true; }
-        if (CssNames.equal(name, "aqua") || CssNames.equal(name, "cyan")) { out[0] = 16777215; return true; }
-        if (CssNames.equal(name, "fuchsia") || CssNames.equal(name, "magenta")) { out[0] = 4278255615; return true; }
+        if (CssNames.equal_ignore_case(name, "transparent")) { out[0] = 0; return true; }
+        if (CssNames.equal_ignore_case(name, "black")) { out[0] = 255; return true; }
+        if (CssNames.equal_ignore_case(name, "white")) { out[0] = 4294967295; return true; }
+        if (CssNames.equal_ignore_case(name, "red")) { out[0] = 4278190335; return true; }
+        if (CssNames.equal_ignore_case(name, "green")) { out[0] = 8388863; return true; }
+        if (CssNames.equal_ignore_case(name, "lime")) { out[0] = 16711935; return true; }
+        if (CssNames.equal_ignore_case(name, "blue")) { out[0] = 65535; return true; }
+        if (CssNames.equal_ignore_case(name, "yellow")) { out[0] = 4294902015; return true; }
+        if (CssNames.equal_ignore_case(name, "orange")) { out[0] = 4289003775; return true; }
+        if (CssNames.equal_ignore_case(name, "purple")) { out[0] = 2147516671; return true; }
+        if (CssNames.equal_ignore_case(name, "gray") || CssNames.equal_ignore_case(name, "grey")) { out[0] = 2155905279; return true; }
+        if (CssNames.equal_ignore_case(name, "silver")) { out[0] = 3233857791; return true; }
+        if (CssNames.equal_ignore_case(name, "navy")) { out[0] = 33023; return true; }
+        if (CssNames.equal_ignore_case(name, "teal")) { out[0] = 8421631; return true; }
+        if (CssNames.equal_ignore_case(name, "maroon")) { out[0] = 2147483903; return true; }
+        if (CssNames.equal_ignore_case(name, "olive")) { out[0] = 2155872511; return true; }
+        if (CssNames.equal_ignore_case(name, "aqua") || CssNames.equal_ignore_case(name, "cyan")) { out[0] = 16777215; return true; }
+        if (CssNames.equal_ignore_case(name, "fuchsia") || CssNames.equal_ignore_case(name, "magenta")) { out[0] = 4278255615; return true; }
         return false;
     }
 
@@ -586,7 +587,7 @@ struct Colors {
         mut u32 count = 0;
         while (!reader.done() && count < 4) {
             CssToken token = reader.peek();
-            if (token.kind == CssKind.COMMA || (token.kind == CssKind.DELIM && Texts.same(token.text, "/"))) {
+            if (token.kind == CssKind.COMMA || (token.kind == CssKind.DELIM && token.text == "/")) {
                 reader.next();
                 if (token.kind == CssKind.DELIM) {
                     while (count < 3) {
@@ -596,7 +597,7 @@ struct Colors {
                 }
                 continue;
             }
-            if (token.kind == CssKind.IDENT && CssNames.equal(token.text, "none")) {
+            if (token.kind == CssKind.IDENT && CssNames.equal_ignore_case(token.text, "none")) {
                 reader.next();
                 out[count] = Numeric.of(Unit.NUMBER, 0.0);
             } else {
@@ -628,7 +629,7 @@ struct Colors {
             return Colors.hex(token.text, out);
         }
         if (token.kind == CssKind.IDENT) {
-            if (CssNames.equal(token.text, "currentcolor")) {
+            if (CssNames.equal_ignore_case(token.text, "currentcolor")) {
                 out[0] = current;
                 return true;
             }
@@ -644,7 +645,7 @@ struct Colors {
         mut ValueReader inner = ValueReader.over(reader.tokens, reader.pos, close);
         reader.pos = close + 1;
         str name = token.text;
-        if (CssNames.equal(name, "light-dark")) {
+        if (CssNames.equal_ignore_case(name, "light-dark")) {
             // The first color when the element's color scheme is light, the second when it is dark.
             mut u32 comma = close;
             mut i32 depth = 0;
@@ -675,7 +676,7 @@ struct Colors {
             }
             return true;
         }
-        if (CssNames.equal(name, "color-mix")) {
+        if (CssNames.equal_ignore_case(name, "color-mix")) {
             return Colors.read_mix(&inner, context, current, out);
         }
         Numeric* parts = (Numeric*)__djinn_alloc_zeroed((size_long)(4 * sizeof(Numeric)));
@@ -683,13 +684,13 @@ struct Colors {
         mut bool ok = count >= 3;
         if (ok) {
             f64 alpha = Colors.alpha_of(parts, count);
-            if (CssNames.equal(name, "rgb") || CssNames.equal(name, "rgba")) {
+            if (CssNames.equal_ignore_case(name, "rgb") || CssNames.equal_ignore_case(name, "rgba")) {
                 out[0] = Colors.pack(Colors.fraction(parts[0], 255.0) / 255.0, Colors.fraction(parts[1], 255.0) / 255.0, Colors.fraction(parts[2], 255.0) / 255.0, alpha);
-            } else if (CssNames.equal(name, "hsl") || CssNames.equal(name, "hsla")) {
+            } else if (CssNames.equal_ignore_case(name, "hsl") || CssNames.equal_ignore_case(name, "hsla")) {
                 out[0] = Colors.hsl(parts[0].value, Colors.fraction(parts[1], 1.0), Colors.fraction(parts[2], 1.0), alpha);
-            } else if (CssNames.equal(name, "oklch")) {
+            } else if (CssNames.equal_ignore_case(name, "oklch")) {
                 out[0] = Colors.oklch(Colors.fraction(parts[0], 1.0), Colors.fraction(parts[1], 0.4), parts[2].value, alpha);
-            } else if (CssNames.equal(name, "oklab")) {
+            } else if (CssNames.equal_ignore_case(name, "oklab")) {
                 out[0] = Colors.oklab(Colors.fraction(parts[0], 1.0), Colors.fraction(parts[1], 0.4), Colors.fraction(parts[2], 0.4), alpha);
             } else {
                 ok = false;
@@ -702,11 +703,11 @@ struct Colors {
     // color-mix(in oklab | srgb, <color> [p%], <color> [q%]); a missing percentage is 100% minus the other.
     static unsafe bool read_mix(ValueReader* reader, ValueContext* context, u32 current, u32* out) {
         CssToken first = reader.next();
-        if (!(first.kind == CssKind.IDENT && CssNames.equal(first.text, "in"))) {
+        if (!(first.kind == CssKind.IDENT && CssNames.equal_ignore_case(first.text, "in"))) {
             return false;
         }
         CssToken space = reader.next();
-        bool oklab = !(CssNames.equal(space.text, "srgb") || CssNames.equal(space.text, "srgb-linear"));
+        bool oklab = !(CssNames.equal_ignore_case(space.text, "srgb") || CssNames.equal_ignore_case(space.text, "srgb-linear"));
         while (!reader.done() && reader.peek().kind != CssKind.COMMA) {
             reader.next();
         }
