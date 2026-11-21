@@ -402,9 +402,9 @@ select / menu, tooltip, tables, and two-way binding of a field's value to a sign
 
 ## More kit components
 
-`Select` (`label`, `options="One|Two|Three"`, `index` signal), `Menu` (`label`, `items="Open|Save"`, `on_pick(i32)`, `keep_label` to keep the label instead of showing the last pick),
+`Select` (`label`, `options=["One", "Two", "Three"]`, `index` signal), `Menu` (`label`, `items=["Open", "Save"]`, `on_pick(i32)`, `keep_label` to keep the label instead of showing the last pick),
 `Tooltip` (`text`, children; shows on hover or focus), `List` / `Item`, `Table` / `Row` (`header`; cells share the
-width) and `Navigator` (`routes="/=Home|/settings=Settings"`, marks the current page with `aria-current`). The popups
+width) and `Navigator` (`routes=["/=Home", "/settings=Settings"]`, marks the current page with `aria-current`). The popups
 close when you choose and on Escape; `List` and `Table` scroll past 16rem (the `.scroll` class). `Pointer`
 (`libs/ui/src/input/hit.djinn`) keeps `:hover` and `:active` on the tree: the host calls `Pointer.move(id)`,
 `press(id)` and `release()` as the mouse does, which is also what the tooltip and the hover colors use.
@@ -414,7 +414,7 @@ close when you choose and on Escape; `List` and `Table` scroll past 16rem (the `
 `libs/ui/src/kit/shadcn.djinn` ports the rest of the shadcn/ui set to the Djinn theme (same source on every native host and on the web target): `Card` with `CardHeader`, `CardTitle`, `CardDescription`,
 `CardContent`, `CardFooter`; `Badge` (`variant` "", "secondary", "destructive", "outline"); `Alert` (`title`, `description`, `variant` "" / "destructive"); `Separator`
 (`vertical`); `Skeleton` (`wide`, `pulse` for the looping fade, which keeps the window redrawing); `Progress` (`value` 0-100, drawn in steps of 5); `Avatar` (`initials`); `Label`; `Kbd`; `Toggle` (`pressed` signal, `variant` "outline");
-`RadioGroup` (`options="S|M|L"`, `index` signal); `AccordionItem` (`title`, `open`) and `Breadcrumb` (`items="Home|Docs|Page"`). Also `Collapsible`, `Popover` (button + floating panel), `AlertDialog` (`confirm`, `on_confirm`), `Sheet` (`side` "right" / "left" / "top" / "bottom"), `Pagination` (`pages`, `page` signal), `Slider` (0-100 in steps of 5: click the track, or Left / Right / Home / End) and `Textarea` (binds a `signal<str>` like `Field`; natively it edits as one line for now). They are styled by the tokens (`--ui-*`), so an app restyles them like the rest.
+`RadioGroup` (`options=["S", "M", "L"]`, `index` signal); `AccordionItem` (`title`, `open`) and `Breadcrumb` (`items=["Home", "Docs", "Page"]`). Also `Collapsible`, `Popover` (button + floating panel), `AlertDialog` (`confirm`, `on_confirm`), `Sheet` (`side` "right" / "left" / "top" / "bottom"), `Pagination` (`pages`, `page` signal), `Slider` (0-100 in steps of 5: click the track, or Left / Right / Home / End) and `Textarea` (binds a `signal<str>` like `Field`; natively it edits as one line for now). They are styled by the tokens (`--ui-*`), so an app restyles them like the rest.
 
 ## Router and animation
 
@@ -483,7 +483,7 @@ larger targets from 120rem, and `pointer: none` (a TV: larger text, spacing and 
 `data-form="tv|phone|panel"` on the root forces a profile when the size alone says the wrong thing (a small IoT panel, a TV that reports a desktop
 size). Hairlines (1-2 px borders, outlines) stay absolute on purpose.
 
-**Only what changes moves.** `<Outlet groups="/navigation/*|/routing/*">`: routes of one group share a page, so moving inside a group
+**Only what changes moves.** `<Outlet groups=["/navigation/*", "/routing/*"]>`: routes of one group share a page, so moving inside a group
 (a tab, a menu entry) keeps the page, its state and its animation, and only the inner `Outlet` changes. Without `groups` every path is its own page.
 
 **Motion and shape.** Durations are calm: 320 ms to appear, 220 ms to leave, 440 ms for a page (`--ui-motion`, `--ui-spring`, `--ui-slide`).

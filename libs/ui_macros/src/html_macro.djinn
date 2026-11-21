@@ -7,6 +7,7 @@ namespace ui::markup;
 // html!{ ... }: JSX-like markup lowered to the ui builder calls at compile time.
 //   <div class="a" on_click={handler}>text {expr}</div>   lowercase tag: a native element
 //   <Button label="x" on_click={...}/>                     Capitalized tag: a component, View.mount<Button>({ ... })
+//   <Select options=["Small", "Medium"]/>                  [..] is an array literal, built once when the component is mounted
 //   {if (cond) { ... } else if (other) { ... } else { ... }} View.show
 //   {for (Item item in items) key(item.id) { ... }}        View.each (keyed), without key(...) View.each_value
 //   {for (i32 i in 0..count) { ... }}                      View.range
@@ -288,8 +289,16 @@ struct HtmlMacro {
             m.pos = m.pos + 1;
             return attr;
         }
+        if (HtmlMacro.at(m, end, "[")) {
+            u32 bracket = m.input.matching(m.pos);
+            attr.kind = AttrKind.ARRAY;
+            attr.start = m.pos;
+            attr.end = bracket + 1;
+            m.pos = bracket + 1;
+            return attr;
+        }
         if (!HtmlMacro.at(m, end, "{")) {
-            HtmlMacro.fail(m, out, "html!: an attribute value is \"text\" or {expression}");
+            HtmlMacro.fail(m, out, "html!: an attribute value is \"text\", {expression} or [array]");
             return attr;
         }
         u32 close = m.input.matching(m.pos);
@@ -327,6 +336,10 @@ struct HtmlMacro {
 
     static unsafe void emit_attr(Markup* m, TokenStream* out, MarkupAttr attr) {
         i32 span = attr.span;
+        if (attr.kind == AttrKind.ARRAY) {
+            HtmlMacro.fail(m, out, "html!: an array value is for a component's property; a native element's attribute is \"text\" or {expression}");
+            return;
+        }
         Tokens.punct(out, ".", span);
         if (attr.kind == AttrKind.EXPRESSION && HtmlMacro.is_event(attr.name)) {
             Tokens.ident(out, "on", span);
