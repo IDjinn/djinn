@@ -145,8 +145,10 @@ property name means `this.name`. `operator` members are static.
 ### Function
 
 ```ebnf
-function             = [ attributes ] [ "unsafe" ] [ "async" | "sync" ] [ "constexpr" | "consteval" ] type IDENTIFIER [ generic_params ]
-                       "(" [ param_list ] ")" [ where_clause ] [ throws_clause ] { contract_clause } ( block | "=>" expression ";" ) ;
+function             = [ attributes ] [ "abstract" ] [ "unsafe" ] [ "async" | "sync" ] [ "constexpr" | "consteval" ] type IDENTIFIER [ generic_params ]
+                       "(" [ param_list ] ")" [ where_clause ] [ throws_clause ] { contract_clause } ( block | "=>" expression ";" | ";" ) ;
+
+A function with `;` instead of a body must be `abstract` (or a method of an `abstract` / `extern` struct): the platform provides it, through `[Js("template")]` on the web or `[Symbol("name")]` natively (`E3070` without either, `E3069` for a call on a target that has no provider).
 param_list           = parameter { "," parameter } ;
 parameter            = [ attributes ] type [ "..." ] IDENTIFIER [ "=" expression ] | "..." IDENTIFIER | "..." ;
 ```
