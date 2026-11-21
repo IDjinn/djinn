@@ -48,21 +48,21 @@ struct Length {
 }
 
 // What relative units resolve against.
-struct ValueContext {
-    mut f64 font_size;
-    mut f64 root_font_size;
-    mut f64 viewport_width;
-    mut f64 viewport_height;
-    mut bool dark;
-    mut f64 device_scale;
+struct mut ValueContext {
+    f64 font_size;
+    f64 root_font_size;
+    f64 viewport_width;
+    f64 viewport_height;
+    bool dark;
+    f64 device_scale;
 }
 
 // A cursor over the tokens of one value, skipping whitespace.
-struct ValueReader {
-    mut CssTokens* tokens;
-    mut u32 pos;
-    mut u32 end;
-    mut i8* text;
+struct mut ValueReader {
+    CssTokens* tokens;
+    u32 pos;
+    u32 end;
+    i8* text;
 
     public static unsafe ValueReader over(CssTokens* tokens, u32 start, u32 end) {
         ValueReader reader = { .tokens = tokens, .pos = start, .end = end, .text = (i8*)0 };
@@ -122,19 +122,50 @@ struct ValueReader {
     }
 }
 
-struct CssNames {
-    // Compares ignoring ASCII case: "PX" equals "px". 'wanted' must already be lower case.
-    public static unsafe bool equal_ignore_case(str text, str wanted) {
+constexpr struct CssNames {
+    public static constexpr bool is_lower(str text) {
+        unsafe {
+            for (mut size i = 0u; i < text.length; i = i + 1u) {
+                u8 c = (u8)text.data[i];
+                if (c >= 65 && c <= 90) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    // Compares ignoring ASCII case: "PX" equals "px". When 'wanted' is already lower case (every literal in this file),
+    // only 'text' is folded; otherwise both sides are. Folded to a literal when both arguments are constant.
+    [Inline] public static constexpr bool equal_ignore_case(str text, str wanted) {
         if (text.length != wanted.length) {
             return false;
         }
-        for (mut u32 i = 0; i < (u32)text.length; i = i + 1) {
-            mut i8 c = text.data[i];
-            if (c >= 65 && c <= 90) {
-                c = c + 32;
+        unsafe {
+            if (CssNames.is_lower(wanted)) {
+                for (mut size i = 0u; i < text.length; i = i + 1u) {
+                    mut u8 c = (u8)text.data[i];
+                    if (c >= 65 && c <= 90) {
+                        c = c | 32;
+                    }
+                    if (c != (u8)wanted.data[i]) {
+                        return false;
+                    }
+                }
+                return true;
             }
-            if (c != wanted.data[i]) {
-                return false;
+            for (mut size i = 0u; i < text.length; i = i + 1u) {
+                mut u8 a = (u8)text.data[i];
+                if (a >= 65 && a <= 90) {
+                    a = a | 32;
+                }
+                mut u8 b = (u8)wanted.data[i];
+                if (b >= 65 && b <= 90) {
+                    b = b | 32;
+                }
+                if (a != b) {
+                    return false;
+                }
             }
         }
         return true;
