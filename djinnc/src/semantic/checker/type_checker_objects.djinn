@@ -21,6 +21,40 @@ impl TypeChecker {
         return result;
     }
 
+    bool needs_type_hint(Node* node) {
+        return this.is_untyped_literal(node) || node.kind() == NodeKind::NULL_LITERAL;
+    }
+
+    u32 check_conditional(Node* node, u32 expected) {
+        this.check_condition(node.first());
+        Node* then_branch = node.second();
+        Node* else_branch = node.third();
+        mut u32 then_type = 0;
+        mut u32 else_type = 0;
+        if (this.needs_type_hint(then_branch) && !this.needs_type_hint(else_branch)) {
+            else_type = this.check_expression(else_branch, expected);
+            then_type = this.check_expression(then_branch, else_type);
+        } else {
+            then_type = this.check_expression(then_branch, expected);
+            else_type = this.check_expression(else_branch, then_type);
+        }
+        if (then_type == else_type) {
+            return then_type;
+        }
+        bool numbers = (Types.is_integer(then_type) || Types.is_float(then_type)) && (Types.is_integer(else_type) || Types.is_float(else_type));
+        if (numbers && (Types.widens(then_type, else_type) || Types.widens(else_type, then_type))) {
+            return Types.common(then_type, else_type);
+        }
+        if (Types.is_nullable_pointer(then_type) && Types.is_safe_pointer(else_type)) {
+            return then_type;
+        }
+        if (Types.is_nullable_pointer(else_type) && Types.is_safe_pointer(then_type)) {
+            return else_type;
+        }
+        this.error_code(node, DiagnosticErrors.VALUE_TYPE_MISMATCH, "the branches of a conditional expression must have the same type");
+        return then_type;
+    }
+
     u32 task_result(u32 type) {
         SymbolTable* symbols = this.symbols;
         if (type == 0 || !Types.is_struct(type) || symbols.enum_of_type(type) != null) {
