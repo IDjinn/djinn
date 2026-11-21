@@ -232,8 +232,16 @@ impl Parser {
     Node* parse_struct() {
         i32 start = this.advance();
         Node* node = Node.create_list(NodeKind::STRUCT_DECL, start);
+        bool declares_all_fields_mutable = this.match(TokenKind::MUT);
         i32 name = this.expect(TokenKind::IDENTIFIER, "expected struct name");
         node.set_text(this.copy_of(name));
+
+        bool enclosing_fields_default_mutable = this.struct_fields_default_mutable;
+        i32 enclosing_declared_field_count = this.declared_field_count;
+        i32 enclosing_declared_mutable_field_count = this.declared_mutable_field_count;
+        this.struct_fields_default_mutable = declares_all_fields_mutable;
+        this.declared_field_count = 0;
+        this.declared_mutable_field_count = 0;
 
         mut bool generic_struct = false;
         if (this.check(TokenKind::LESS)) {
@@ -243,6 +251,9 @@ impl Parser {
         this.parse_bases_and_constraints(node);
 
         if (this.match(TokenKind::SEMICOLON)) {
+            this.struct_fields_default_mutable = enclosing_fields_default_mutable;
+            this.declared_field_count = enclosing_declared_field_count;
+            this.declared_mutable_field_count = enclosing_declared_mutable_field_count;
             return node;
         }
 
@@ -257,6 +268,13 @@ impl Parser {
             this.generic_depth = this.generic_depth - 1;
         }
         this.expect(TokenKind::RBRACE, "expected '}' to close struct body");
+        if (!declares_all_fields_mutable && this.declared_field_count > 1 && this.declared_field_count == this.declared_mutable_field_count) {
+            Diagnostics* warnings = this.diagnostics;
+            warnings.warning(DiagnosticWarnings.STRUCT_ALL_MUTABLE, this.line_of(name), this.column_of(name), "every field of this struct is 'mut': declare it as 'struct mut' instead");
+        }
+        this.struct_fields_default_mutable = enclosing_fields_default_mutable;
+        this.declared_field_count = enclosing_declared_field_count;
+        this.declared_mutable_field_count = enclosing_declared_mutable_field_count;
         return node;
     }
 
@@ -386,7 +404,12 @@ impl Parser {
             this.advance();
         }
         Node* field = Node.create(NodeKind::FIELD_DECL, start);
-        if (mutable_field || this.match(TokenKind::MUT)) {
+        bool field_declared_mutable = mutable_field || this.match(TokenKind::MUT);
+        this.declared_field_count = this.declared_field_count + 1;
+        if (field_declared_mutable) {
+            this.declared_mutable_field_count = this.declared_mutable_field_count + 1;
+        }
+        if (field_declared_mutable || this.struct_fields_default_mutable) {
             field.set_flag(true);
         }
         field.set_type(this.parse_type());

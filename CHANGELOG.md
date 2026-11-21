@@ -2,7 +2,13 @@
 
 ## [Unreleased]
 
+## [0.7.0-preview.2] - 2026-11-21
+
 ### Added
+- Enum variants without a payload are written without parentheses: `enum FileKind { RegularFile, Directory }`, `return FileKind::Directory;`.
+- `Enum::parseValue(i64)` returns the variant that has that value, or `Unknown` (the enum must declare it, `E3034`); also on `--target web`. `std::filesystem::FsError` carries its codes and `fs_error_from_code` is `FsError::parseValue(code)`.
+- `struct mut Name { ... }` makes every field mutable. A struct whose fields are all declared `mut` reports warning `E6007` and suggests `struct mut`. `djinn-lsp` reads `struct mut Name` (`struct_mut_test.py`).
+- A `constexpr` struct or array with `str`/`string` literals, nested arrays and structs is emitted as constant static data in the binary. A text field that is not a literal is an error.
 - `==` and `!=` compare `str` on the web target too (`runtime/js/std` declares the operator, compiled to `===`).
 - Arrays in `html!` (`libs/ui_macros`): a component property can be written as an array literal, `<Select options=["Small", "Medium"] index={size}/>` (or `options={sizes}` with `str[] sizes = [...]`). The array is built once when the component is mounted, so a list of choices is no longer one `"A|B|C"` text split on every read. `Select`, `Menu`, `Navigator`, `Drawer`, `TabBar`, `Stack`, `Stepper`, `RadioGroup`, `Breadcrumb` and `Outlet` (`groups`) take `str[]`; `Choices.count` and `Choices.nth` have `str[]` overloads (the `str` forms stay for `"A|B"` helpers). A native element's attribute cannot be an array. `djinn-lsp` highlights the array as Djinn code (`embedded_test.py`).
 - LLVM memory attributes for allocation functions, bound by attributes instead of names: `[AllocFn("family")]`, `[ReallocFn("family")]`, `[FreeFn("family")]` and `[AllocZeroed]` on a function, `[AllocSize]`, `[AllocPtr]` and `[AllocAlign]` on its parameters. They emit `allockind`, `allocsize`, `allocptr`, `allocalign`, `memory(...)`, `noalias`, `nounwind` and `alloc-family`, so LLVM can pair allocations with frees. `std/sys/libc.djinn` and `runtime/core/libc.djinn` carry them; the attributes also apply to a redeclaration of a function declared earlier. IR tests in `AllocatorIrTests`.

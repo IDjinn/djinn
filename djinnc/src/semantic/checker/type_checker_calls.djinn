@@ -537,6 +537,41 @@ impl TypeChecker {
         return Types.pointer_to(type);
     }
 
+    unsafe StructInfo* enum_named_by_parse_value_call(Node* callee) {
+        if (callee.type() != null || callee.flag()) {
+            return (StructInfo*)0;
+        }
+        ptr<i8> text = callee.text();
+        i32 length = (i32)strlen(text);
+        if (length < 13 || !Strings.same(text + length - 12, "::parseValue")) {
+            return (StructInfo*)0;
+        }
+        i32 split = length - 12;
+        AtomTable* atoms = Ast.atoms();
+        u32 full = atoms.intern_copy(text, (u32)split);
+        u32 base = Ast.intern_base_name(text, split);
+        SymbolTable* symbols = this.symbols;
+        StructInfo* owner = symbols.find_struct(full, base, this.scope);
+        if (owner == null || !owner.is_enum || owner.has_payload || owner.is_template) {
+            return (StructInfo*)0;
+        }
+        return owner;
+    }
+
+    unsafe u32 check_enum_variant_from_value_call(Node* node, Node* callee, StructInfo* owner) {
+        SymbolTable* symbols = this.symbols;
+        if (node.count() != 1) {
+            this.error_code(node, DiagnosticErrors.WRONG_ARGUMENT_COUNT, "parseValue takes the value of the variant to look up");
+            return owner.type_id;
+        }
+        this.check_expression(node.child(0), Types.i64_type());
+        if (symbols.find_constant(owner, Ast.intern_base_name("Unknown", 7)) == null) {
+            this.error_code(node, DiagnosticErrors.UNKNOWN_VARIANT, "parseValue returns the 'Unknown' variant for a value that matches no variant: declare one");
+        }
+        callee.set_symbol(SymbolKind.ENUM_PARSE_VALUE, (ptr)owner);
+        return owner.type_id;
+    }
+
     unsafe u32 check_call(Node* node, u32 expected) {
         Node* callee = node.first();
         SymbolTable* symbols = this.symbols;
@@ -550,6 +585,10 @@ impl TypeChecker {
             }
         }
         if (callee.kind() == NodeKind::IDENTIFIER) {
+            StructInfo* enum_named_by_call = this.enum_named_by_parse_value_call(callee);
+            if (enum_named_by_call != null) {
+                return this.check_enum_variant_from_value_call(node, callee, enum_named_by_call);
+            }
             Node* variant = this.find_enum_variant(callee, node, expected);
             if (variant != null) {
                 if (node.count() != variant.payload_count()) {
@@ -600,6 +639,10 @@ impl TypeChecker {
                 }
                 base.set_symbol(SymbolKind.STRUCT_NAME, (ptr)owner);
                 info = symbols.find_method(owner, callee.name());
+                if (info == null && owner.is_enum && !owner.has_payload && !owner.is_template
+                    && callee.name() == Ast.intern_base_name("parseValue", 10)) {
+                    return this.check_enum_variant_from_value_call(node, callee, owner);
+                }
                 info = this.apply_named_arguments(node, info);
                 if (info != null && info.is_template) {
                     info = this.instantiate_call(node, callee, info);

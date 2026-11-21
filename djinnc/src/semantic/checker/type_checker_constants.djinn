@@ -78,8 +78,8 @@ impl TypeChecker {
             variable.const_state = 3;
             return;
         }
-        if (this.array_element(variable.type) != 0) {
-            this.evaluate_array_variable(variable, initial);
+        if (this.array_element(variable.type) != 0 || initial.kind() == NodeKind::STRUCT_INIT) {
+            this.evaluate_static_data_variable(variable, initial);
             return;
         }
         ConstEval* evaluator = this.const_eval;
@@ -98,30 +98,67 @@ impl TypeChecker {
         this.error_reason(at, "not a compile-time constant: ", evaluator.failure);
     }
 
-    // A constexpr arr<number> global becomes read-only static data (const_state 4): no allocation per use.
-    void evaluate_array_variable(LocalVariable* variable, Node* initial) {
-        u32 element = this.array_element(variable.type);
-        bool numeric = Types.is_integer(element) || Types.is_float(element) || Types.is_char(element);
-        if (initial.kind() != NodeKind::ARRAY_LITERAL || !numeric) {
+    // A constexpr array or struct global becomes read-only static data (const_state 4 for an array, 5 for a struct): no
+    // allocation per use. Its leaves are numbers, booleans, chars and text literals (str, string), nested in array
+    // literals and struct initializers.
+    void evaluate_static_data_variable(LocalVariable* variable, Node* initial) {
+        if (!this.is_static_data(initial, variable.type)) {
             variable.const_state = 3;
-            this.error_code(initial, DiagnosticErrors.INVALID_CONSTANT_EXPRESSION, "a constexpr array must be an array literal of numbers, booleans or chars");
             return;
         }
-        ConstEval* evaluator = this.const_eval;
-        for (mut i32 i = 0; i < initial.count(); i = i + 1) {
-            Node* item = initial.child(i);
-            if (!evaluator.evaluate(item, item.value_type(), element)) {
-                variable.const_state = 3;
-                mut Node* at = evaluator.failure_node;
-                if (at == null) {
-                    at = item;
-                }
-                this.error_reason(at, "not a compile-time constant: ", evaluator.failure);
-                return;
-            }
-            evaluator.fold(item, element);
+        if (this.array_element(variable.type) != 0) {
+            variable.const_state = 4;
+        } else {
+            variable.const_state = 5;
         }
-        variable.const_state = 4;
+    }
+
+    unsafe bool is_static_data(Node* node, u32 type) {
+        u32 element = this.array_element(type);
+        if (element != 0) {
+            if (node.kind() != NodeKind::ARRAY_LITERAL) {
+                this.error_code(node, DiagnosticErrors.INVALID_CONSTANT_EXPRESSION, "a constexpr array must be an array literal of numbers, booleans, chars, text or structs");
+                return false;
+            }
+            for (mut i32 i = 0; i < node.count(); i = i + 1) {
+                if (!this.is_static_data(node.child(i), element)) {
+                    return false;
+                }
+            }
+            return true;
+        }
+        if (type == this.core_type("str") || type == this.core_type("string")) {
+            if (node.kind() != NodeKind::STRING_LITERAL) {
+                this.error_code(node, DiagnosticErrors.INVALID_CONSTANT_EXPRESSION, "a constexpr text field must be a string literal");
+                return false;
+            }
+            return true;
+        }
+        if (Types.is_struct(type)) {
+            if (node.kind() != NodeKind::STRUCT_INIT) {
+                this.error_code(node, DiagnosticErrors.INVALID_CONSTANT_EXPRESSION, "a constexpr struct is built with a brace initializer: { .field = value }");
+                return false;
+            }
+            for (mut i32 i = 0; i < node.count(); i = i + 1) {
+                Node* field_initializer = node.child(i);
+                FieldInfo* field = (FieldInfo*)field_initializer.symbol();
+                if (field == null || !this.is_static_data(field_initializer.first(), field.type)) {
+                    return false;
+                }
+            }
+            return true;
+        }
+        ConstEval* evaluator = this.const_eval;
+        if (!evaluator.evaluate(node, node.value_type(), type)) {
+            mut Node* at = evaluator.failure_node;
+            if (at == null) {
+                at = node;
+            }
+            this.error_reason(at, "not a compile-time constant: ", evaluator.failure);
+            return false;
+        }
+        evaluator.fold(node, type);
+        return true;
     }
 
     void check_compile_time_if(Node* node) {
