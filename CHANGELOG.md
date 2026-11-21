@@ -5,6 +5,9 @@
 ### Added
 - `switch` accepts a `str` or `string` value: `switch (name) { case "red": ... default: ... }`. Labels have the value's type and are compared in order with `operator ==`; a `constexpr` switch on text compares the contents. Other value types still report `E3046`.
 
+### Fixed
+- `async void main` that suspends (an `await` on a real task such as `Task.delay`) failed to link with `undefined symbol: __djinn_coro_destroy`: the entry point declared the function before the coroutine wrappers were defined, so LLVM renamed the definition. The wrappers now reuse the existing declaration (`AsyncVoidMainWithSuspension`).
+
 ## [0.7.0-preview.2] - 2026-11-21
 
 ### Added
