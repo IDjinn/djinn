@@ -1,0 +1,190 @@
+namespace djinnc;
+
+// Hint W6008: `return x == A || x == B || ...` (or `return f_ignore_case(x, "a") || ...`) over constants is a switch.
+impl TypeChecker {
+    // prefix + name + suffix, for messages that name the offending identifier.
+    static unsafe ptr<i8> named_message(ptr<i8> prefix, ptr<i8> name, ptr<i8> suffix) {
+        ByteBuffer* message = ByteBuffer.create();
+        message.append(prefix);
+        if (name != null) {
+            message.append(name);
+        }
+        message.append(suffix);
+        return message.cstr();
+    }
+
+    unsafe ptr<i8> argument_count_message(FunctionInfo* info, i32 given, i32 normal, i32 fixed) {
+        ByteBuffer* message = ByteBuffer.create();
+        message.append("'");
+        message.append(info.name);
+        message.append("' takes ");
+        if (info.is_variadic || info.packs_variadic) {
+            message.append("at least ");
+            message.append_int((i64)normal);
+        } else {
+            message.append_int((i64)fixed);
+        }
+        message.append(" argument(s) but ");
+        message.append_int((i64)given);
+        message.append(" were given");
+        return message.cstr();
+    }
+
+    static unsafe void collect_alternatives(Node* node, PointerList* terms) {
+        if (node.kind() == NodeKind::BINARY && node.op_kind() == TokenKind::OR_OR) {
+            TypeChecker.collect_alternatives(node.first(), terms);
+            TypeChecker.collect_alternatives(node.second(), terms);
+            return;
+        }
+        terms.push((ptr)node);
+    }
+
+    static unsafe bool plain_subject(Node* node) {
+        if (node.kind() == NodeKind::IDENTIFIER) {
+            return true;
+        }
+        return node.kind() == NodeKind::FIELD_ACCESS && node.first() != null && TypeChecker.plain_subject(node.first());
+    }
+
+    static unsafe bool same_operand(Node* left, Node* right) {
+        if (left.kind() != right.kind() || !Strings.same(left.text(), right.text())) {
+            return false;
+        }
+        if (left.kind() == NodeKind::FIELD_ACCESS) {
+            return TypeChecker.same_operand(left.first(), right.first());
+        }
+        return true;
+    }
+
+    static unsafe bool names_ignore_case(Node* callee) {
+        if (callee.kind() != NodeKind::IDENTIFIER && callee.kind() != NodeKind::FIELD_ACCESS) {
+            return false;
+        }
+        ptr<i8> name = callee.text();
+        if (name == null) {
+            return false;
+        }
+        ptr<i8> wanted = "ignore_case";
+        i32 length = strlen(name);
+        for (mut i32 i = 0; i + 11 <= length; i = i + 1) {
+            if (Strings.starts_with(name, i, length, wanted)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // parts: subject, label, callee (null for `==`)
+    static unsafe bool split_term(Node* term, ptr<ptr> parts) {
+        parts[2] = (ptr)0;
+        if (term.kind() == NodeKind::BINARY && term.op_kind() == TokenKind::EQUAL_EQUAL) {
+            parts[0] = (ptr)term.first();
+            parts[1] = (ptr)term.second();
+            return true;
+        }
+        if (term.kind() == NodeKind::CALL && term.count() == 2 && term.first() != null && TypeChecker.names_ignore_case(term.first())) {
+            parts[0] = (ptr)term.child(0);
+            parts[1] = (ptr)term.child(1);
+            parts[2] = (ptr)term.first();
+            return true;
+        }
+        return false;
+    }
+
+    static unsafe Node* variant_name(Node* label) {
+        if (label.kind() == NodeKind::CALL && label.count() == 0 && label.first() != null) {
+            return label.first();
+        }
+        return label;
+    }
+
+    static unsafe bool has_upper_case(Node* label) {
+        ptr<i8> text = label.text();
+        for (mut i32 i = 0; text != null && text[i] != 0; i = i + 1) {
+            if (text[i] >= 65 && text[i] <= 90) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static unsafe bool names_variant(Node* label) {
+        Node* name = TypeChecker.variant_name(label);
+        if (name.kind() != NodeKind::IDENTIFIER || name.text() == null) {
+            return false;
+        }
+        ptr<i8> text = name.text();
+        i32 length = strlen(text);
+        for (mut i32 i = 0; i + 1 < length; i = i + 1) {
+            if (text[i] == 58 && text[i + 1] == 58) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    unsafe bool fits_switch_subject(Node* subject, Node* label, bool ignore_case) {
+        SymbolTable* symbols = this.symbols;
+        u32 type = subject.value_type();
+        if (type == 0) {
+            return false;
+        }
+        bool text = type == this.core_type("str") || type == this.core_type("string");
+        if (text) {
+            return label.kind() == NodeKind::STRING_LITERAL && (!ignore_case || !TypeChecker.has_upper_case(label));
+        }
+        if (ignore_case) {
+            return false;
+        }
+        StructInfo* enumeration = symbols.enum_of_type(type);
+        if (enumeration != null) {
+            return !enumeration.has_payload && TypeChecker.names_variant(label);
+        }
+        return Types.is_integer(type) && label.kind() == NodeKind::INT_LITERAL;
+    }
+
+    unsafe void check_comparison_chain(Node* node) {
+        Node* value = node.first();
+        Diagnostics* diagnostics = this.diagnostics;
+        if (value == null || value.kind() != NodeKind::BINARY || value.op_kind() != TokenKind::OR_OR || diagnostics.failed() || node.is_library_interface()) {
+            return;
+        }
+        PointerList* terms = PointerList.create();
+        TypeChecker.collect_alternatives(value, terms);
+        if (terms.length < 5) {
+            return;
+        }
+        ptr<ptr> parts = (ptr<ptr>)Memory.zalloc(24);
+        mut Node* subject = (Node*)0;
+        mut Node* callee = (Node*)0;
+        for (mut i32 i = 0; i < terms.length; i = i + 1) {
+            if (!TypeChecker.split_term((Node*)terms.get(i), parts)) {
+                return;
+            }
+            Node* term_subject = (Node*)parts[0];
+            Node* label = (Node*)parts[1];
+            Node* term_callee = (Node*)parts[2];
+            if (i == 0) {
+                subject = term_subject;
+                callee = term_callee;
+                if (!TypeChecker.plain_subject(subject)) {
+                    return;
+                }
+            } else if (!TypeChecker.same_operand(subject, term_subject) || (callee == null) != (term_callee == null)
+                || (callee != null && !TypeChecker.same_operand(callee, term_callee))) {
+                return;
+            }
+            if (!this.fits_switch_subject(term_subject, label, callee != null)) {
+                return;
+            }
+        }
+        ByteBuffer* message = ByteBuffer.create();
+        message.append("this chain of ");
+        message.append_int((i64)terms.length);
+        message.append(" comparisons against constants can be a 'switch'");
+        if (callee != null) {
+            message.append(" on the lower-cased value");
+        }
+        this.warning_code(node, DiagnosticWarnings.COMPARISON_CHAIN_TO_SWITCH, message.cstr());
+    }
+}

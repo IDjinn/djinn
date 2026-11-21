@@ -1,0 +1,259 @@
+namespace djinnc;
+
+// One alternative of the chain, in code token indices (`end` is exclusive).
+struct ChainTerm {
+    i32 subject_start;
+    i32 subject_end;
+    i32 label;
+    i32 label_kind;
+    i32 callee_start;
+    i32 callee_end;
+}
+
+// `comparison-chain`: `return x == A || x == B || ...` (or `f_ignore_case(x, "a") || ...`) over constants is a switch.
+// Same shape as the compiler's warning E6008, which anchors on the `return`; this rule adds the fix.
+struct ComparisonChainRule {
+    const i32 LABEL_TEXT = 1;
+    const i32 LABEL_NUMBER = 2;
+    const i32 LABEL_VARIANT = 3;
+
+    // `name` or `this`, then `.name` any number of times; the index after the chain, or -1.
+    static unsafe i32 chain_end(Unit* u, i32 c) {
+        if (!u.is_name(c) && !u.is_word(c, "this")) {
+            return 0 - 1;
+        }
+        mut i32 at = c + 1;
+        while (u.is_punct(at, 46) && u.is_name(at + 1)) {
+            at = at + 2;
+        }
+        return at;
+    }
+
+    static unsafe bool same_tokens(Unit* u, i32 a, i32 b, i32 length) {
+        for (mut i32 i = 0; i < length; i = i + 1) {
+            i32 left = u.code[a + i];
+            i32 right = u.code[b + i];
+            i32 width = u.tend[left] - u.tstart[left];
+            if (width != u.tend[right] - u.tstart[right] || !Strings.equals(u.text + u.tstart[left], width, u.token_text(right))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    static unsafe bool names_ignore_case(Unit* u, i32 last_name) {
+        i32 raw = u.code[last_name];
+        i32 length = u.tend[raw] - u.tstart[raw];
+        for (mut i32 i = 0; i + 11 <= length; i = i + 1) {
+            if (Strings.starts_with(u.text + u.tstart[raw], i, length, "ignore_case")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static unsafe bool has_upper(Unit* u, i32 c) {
+        i32 raw = u.code[c];
+        for (mut i32 i = u.tstart[raw]; i < u.tend[raw]; i = i + 1) {
+            if (u.text[i] >= 65 && u.text[i] <= 90) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static unsafe i32 label_kind(Unit* u, i32 from, i32 to) {
+        if (to == from + 1) {
+            i32 kind = u.kind_at(from);
+            if (kind == Tk.STRING && u.first_char(from) == 34) {
+                return ComparisonChainRule.LABEL_TEXT;
+            }
+            if (kind == Tk.NUMBER || (kind == Tk.STRING && u.first_char(from) == 39)) {
+                return ComparisonChainRule.LABEL_NUMBER;
+            }
+            return 0;
+        }
+        mut i32 at = from;
+        mut i32 parts = 0;
+        while (u.is_name(at) && at < to) {
+            parts = parts + 1;
+            at = at + 1;
+            if (at < to && u.is_scope(at)) {
+                at = at + 1;
+            } else {
+                break;
+            }
+        }
+        if (at == to && parts >= 2) {
+            return ComparisonChainRule.LABEL_VARIANT;
+        }
+        return 0;
+    }
+
+    // Reads the alternative in the code tokens [from, to); false when it is neither shape.
+    static unsafe bool parse_term(Unit* u, i32 from, i32 to, ChainTerm* term) {
+        term.callee_start = 0 - 1;
+        i32 first_end = ComparisonChainRule.chain_end(u, from);
+        if (first_end < 0 || first_end >= to) {
+            return false;
+        }
+        if (u.is_punct2(first_end, 61, 61)) {
+            term.subject_start = from;
+            term.subject_end = first_end;
+            term.label = first_end + 1;
+            term.label_kind = ComparisonChainRule.label_kind(u, first_end + 1, to);
+            return term.label_kind != 0;
+        }
+        if (!u.is_punct(first_end, 40) || !ComparisonChainRule.names_ignore_case(u, first_end - 1) || u.match[first_end] != to - 1) {
+            return false;
+        }
+        i32 subject_end = ComparisonChainRule.chain_end(u, first_end + 1);
+        if (subject_end < 0 || !u.is_punct(subject_end, 44) || subject_end + 3 != to) {
+            return false;
+        }
+        if (ComparisonChainRule.label_kind(u, subject_end + 1, subject_end + 2) != ComparisonChainRule.LABEL_TEXT || ComparisonChainRule.has_upper(u, subject_end + 1)) {
+            return false;
+        }
+        term.callee_start = from;
+        term.callee_end = first_end;
+        term.subject_start = first_end + 1;
+        term.subject_end = subject_end;
+        term.label = subject_end + 1;
+        term.label_kind = ComparisonChainRule.LABEL_TEXT;
+        return true;
+    }
+
+    static unsafe void append_code_text(ByteBuffer* out, Unit* u, i32 from, i32 to) {
+        for (mut i32 i = from; i < to; i = i + 1) {
+            i32 raw = u.code[i];
+            out.append_slice(u.text + u.tstart[raw], u.tend[raw] - u.tstart[raw]);
+        }
+    }
+
+    static unsafe void append_indent(ByteBuffer* out, Unit* u, i32 offset) {
+        i32 line_start = u.line_starts[u.line_of(offset)];
+        for (mut i32 i = line_start; i < offset && (u.text[i] == 32 || u.text[i] == 9); i = i + 1) {
+            out.append_char((char)(u.text[i]));
+        }
+    }
+
+    static unsafe ptr<i8> replacement(Unit* u, ChainTerm* terms, i32 count, i32 return_offset) {
+        ByteBuffer* indent = ByteBuffer.create();
+        ComparisonChainRule.append_indent(indent, u, return_offset);
+        mut ptr<i8> step = "    ";
+        if (indent.length > 0 && indent.cstr()[0] == 9) {
+            step = "\t";
+        }
+        ChainTerm* first = &terms[0];
+        ByteBuffer* out = ByteBuffer.create();
+        ByteBuffer* subject = ByteBuffer.create();
+        if (first.callee_start >= 0) {
+            ComparisonChainRule.append_code_text(subject, u, first.subject_start, first.subject_end);
+            mut i32 last = first.subject_end - 1;
+            ByteBuffer* name = ByteBuffer.create();
+            name.append_slice(u.text + u.tstart[u.code[last]], u.tend[u.code[last]] - u.tstart[u.code[last]]);
+            name.append("_lower");
+            out.append("string ");
+            out.append(name.cstr());
+            out.append(" = ");
+            out.append(subject.cstr());
+            out.append(".toLower();\n");
+            out.append(indent.cstr());
+            out.append("switch (");
+            out.append(name.cstr());
+            out.append(") {\n");
+        } else {
+            out.append("switch (");
+            ComparisonChainRule.append_code_text(out, u, first.subject_start, first.subject_end);
+            out.append(") {\n");
+        }
+        for (mut i32 i = 0; i < count; i = i + 1) {
+            out.append(indent.cstr());
+            out.append(step);
+            out.append("case ");
+            ChainTerm* term = &terms[i];
+            mut i32 label_end = term.label + 1;
+            if (term.label_kind == ComparisonChainRule.LABEL_VARIANT) {
+                label_end = term.label;
+                while (u.is_name(label_end) || u.is_scope(label_end)) {
+                    label_end = label_end + 1;
+                }
+            }
+            ComparisonChainRule.append_code_text(out, u, term.label, label_end);
+            out.append(": return true;\n");
+        }
+        out.append(indent.cstr());
+        out.append(step);
+        out.append("default: return false;\n");
+        out.append(indent.cstr());
+        out.append("}");
+        return out.cstr();
+    }
+
+    static unsafe void check_return(DiagContext* context, i32 c) {
+        Unit* u = context.unit;
+        ChainTerm* terms = (ChainTerm*)Memory.zalloc(sizeof(ChainTerm) * 64);
+        mut i32 count = 0;
+        mut i32 start = c + 1;
+        mut i32 at = c + 1;
+        mut i32 semicolon = 0 - 1;
+        while (at < u.code_count && semicolon < 0) {
+            if (u.is_punct(at, 40) || u.is_punct(at, 91) || u.is_punct(at, 123)) {
+                if (u.match[at] < 0) {
+                    return;
+                }
+                at = u.match[at] + 1;
+                continue;
+            }
+            bool split = u.is_punct2(at, 124, 124);
+            if (split || u.is_punct(at, 59)) {
+                if (count >= 64 || at <= start || !ComparisonChainRule.parse_term(u, start, at, &terms[count])) {
+                    return;
+                }
+                count = count + 1;
+                start = at + 1;
+                if (!split) {
+                    semicolon = at;
+                }
+            } else if (u.is_punct(at, 125) || u.is_punct(at, 41)) {
+                return;
+            }
+            at = at + 1;
+        }
+        if (semicolon < 0 || count < 5) {
+            return;
+        }
+        ChainTerm* first = &terms[0];
+        for (mut i32 i = 1; i < count; i = i + 1) {
+            ChainTerm* term = &terms[i];
+            i32 subject_length = first.subject_end - first.subject_start;
+            bool same_form = (term.callee_start < 0) == (first.callee_start < 0) && term.label_kind == first.label_kind;
+            if (!same_form || term.subject_end - term.subject_start != subject_length || !ComparisonChainRule.same_tokens(u, first.subject_start, term.subject_start, subject_length)) {
+                return;
+            }
+            if (first.callee_start >= 0 && (term.callee_end - term.callee_start != first.callee_end - first.callee_start
+                || !ComparisonChainRule.same_tokens(u, first.callee_start, term.callee_start, first.callee_end - first.callee_start))) {
+                return;
+            }
+        }
+        i32 from_raw = u.code[c];
+        i32 to_raw = u.code[semicolon];
+        LintItem* item = context.report_tokens(from_raw, from_raw, "comparison-chain", "this chain of comparisons against constants can be a switch", DiagSeverity.HINT);
+        if (item == null) {
+            return;
+        }
+        item.span(u.tstart[from_raw], u.tend[to_raw]);
+        item.note("the alternatives compare the same value with constants");
+        item.help("use a switch with one case per constant");
+        item.fix("Convert to switch", u.tstart[from_raw], u.tend[to_raw], ComparisonChainRule.replacement(u, terms, count, u.tstart[from_raw]));
+    }
+
+    static unsafe void check(DiagContext* context) {
+        Unit* u = context.unit;
+        for (mut i32 c = 0; c < u.code_count && !context.expired(); c = c + 1) {
+            if (u.is_word(c, "return")) {
+                ComparisonChainRule.check_return(context, c);
+            }
+        }
+    }
+}

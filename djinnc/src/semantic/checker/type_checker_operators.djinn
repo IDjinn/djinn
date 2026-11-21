@@ -184,6 +184,60 @@ impl TypeChecker {
         this.error_code(node, DiagnosticErrors.OPERATOR_NOT_DEFINED, message.cstr());
     }
 
+    // "'Point' does not define operator '+'", then what to declare and where.
+    void error_missing_operator(Node* node, TokenKind op, u32 owner_type, i32 arity, u32 other) {
+        SymbolTable* symbols = this.symbols;
+        ByteBuffer* message = ByteBuffer.create();
+        message.append("'");
+        symbols.describe_type(owner_type, message);
+        message.append("' does not define operator '");
+        message.append(op.text);
+        message.append("'; declare it in the struct or an impl, for example: operator ");
+        message.append(op.text);
+        message.append("(");
+        symbols.describe_type(owner_type, message);
+        message.append(" left");
+        if (arity == 2) {
+            message.append(", ");
+            symbols.describe_type(other, message);
+            message.append(" right");
+        }
+        message.append(") -> ...");
+        this.error_code(node, DiagnosticErrors.OPERATOR_NOT_DEFINED, message.cstr());
+    }
+
+    // The operator exists but not for these operand types: list what was written and what is declared.
+    unsafe void error_operand_mismatch(Node* node, TokenKind op, FunctionInfo* method, u32 left, u32 right, i32 arity) {
+        SymbolTable* symbols = this.symbols;
+        ByteBuffer* message = ByteBuffer.create();
+        message.append("operator '");
+        message.append(op.text);
+        message.append("' cannot be applied to '");
+        symbols.describe_type(left, message);
+        if (arity == 2) {
+            message.append("' and '");
+            symbols.describe_type(right, message);
+        }
+        message.append("'; declared overloads: ");
+        mut FunctionInfo* walk = method;
+        while (walk != null) {
+            IdList* candidate_params = walk.param_types;
+            message.append("(");
+            for (mut i32 i = 0; i < candidate_params.length; i = i + 1) {
+                if (i > 0) {
+                    message.append(", ");
+                }
+                symbols.describe_type(candidate_params.get(i), message);
+            }
+            message.append(")");
+            if (walk.overload != null) {
+                message.append(" ");
+            }
+            walk = walk.overload;
+        }
+        this.error_code(node, DiagnosticErrors.OPERATOR_NOT_DEFINED, message.cstr());
+    }
+
     // A primitive without an operator declaration keeps the built-in behavior; a bodiless declaration in its impl disables it.
     unsafe bool primitive_operator_disabled(u32 type, TokenKind op, i32 arity, u32 other) {
         SymbolTable* symbols = this.symbols;
@@ -212,9 +266,10 @@ impl TypeChecker {
         StructInfo* owner = symbols.struct_at(Types.struct_index(operand));
         mut FunctionInfo* walk = this.find_operator(owner, op);
         if (walk == null) {
-            this.error_code(node, DiagnosticErrors.OPERATOR_NOT_DEFINED, "struct does not define this operator");
+            this.error_missing_operator(node, op, operand, 1, 0);
             return Types.i32_type();
         }
+        mut FunctionInfo* declared = walk;
         while (walk != null) {
             IdList* candidate_params = walk.param_types;
             if (candidate_params.length == 1 && candidate_params.get(0) == operand) {
@@ -223,7 +278,7 @@ impl TypeChecker {
             }
             walk = walk.overload;
         }
-        this.error_code(node, DiagnosticErrors.OPERATOR_NOT_DEFINED, "operator operand does not match its parameter");
+        this.error_operand_mismatch(node, op, declared, operand, 0, 1);
         return Types.i32_type();
     }
 
@@ -266,7 +321,11 @@ impl TypeChecker {
         mut FunctionInfo* method = this.find_operator_named(owner, "operatorget[]");
         if (method == null) {
             this.check_expression(node.second(), Types.i64_type());
-            this.error_code(node, DiagnosticErrors.OPERATOR_NOT_DEFINED, "struct does not define operator get[]");
+            ByteBuffer* missing = ByteBuffer.create();
+            missing.append("'");
+            symbols.describe_type(base, missing);
+            missing.append("' cannot be indexed with '[]': it does not define operator get[]; declare it in the struct or an impl");
+            this.error_code(node, DiagnosticErrors.OPERATOR_NOT_DEFINED, missing.cstr());
             return Types.i32_type();
         }
         u32 index = this.check_expression(node.second(), 0);
@@ -282,7 +341,11 @@ impl TypeChecker {
             walk = walk.overload;
         }
         if (exact == null) {
-            this.error_code(node, DiagnosticErrors.OPERATOR_NOT_DEFINED, "operator get[] does not accept this collection");
+            ByteBuffer* rejected = ByteBuffer.create();
+            rejected.append("operator get[] of '");
+            symbols.describe_type(base, rejected);
+            rejected.append("' does not take the collection as its first parameter");
+            this.error_code(node, DiagnosticErrors.OPERATOR_NOT_DEFINED, rejected.cstr());
             return Types.i32_type();
         }
         IdList* chosen_params = exact.param_types;
@@ -308,7 +371,11 @@ impl TypeChecker {
             }
             walk = walk.overload;
         }
-        this.error_code(target, DiagnosticErrors.OPERATOR_NOT_DEFINED, "struct does not define a matching operator set[]");
+        ByteBuffer* missing = ByteBuffer.create();
+        missing.append("cannot assign through '[]': '");
+        symbols.describe_type(base, missing);
+        missing.append("' needs an operator set[] taking the same collection and index types as its operator get[]");
+        this.error_code(target, DiagnosticErrors.OPERATOR_NOT_DEFINED, missing.cstr());
     }
 
     unsafe FunctionInfo* exact_overload(FunctionInfo* first, u32 left, u32 right) {
@@ -337,12 +404,16 @@ impl TypeChecker {
             kind = SymbolKind.NEGATED_OPERATOR;
         }
         if (method == null) {
-            this.error_code(node, DiagnosticErrors.OPERATOR_NOT_DEFINED, "struct does not define this operator");
+            mut u32 other = right;
+            if (owner_type == right) {
+                other = left;
+            }
+            this.error_missing_operator(node, op, owner_type, 2, other);
             return Types.i32_type();
         }
         FunctionInfo* exact = this.exact_overload(method, left, right);
         if (exact == null) {
-            this.error_code(node, DiagnosticErrors.OPERATOR_NOT_DEFINED, "operator operands do not match its parameters");
+            this.error_operand_mismatch(node, op, method, left, right, 2);
             return method.return_type;
         }
         if (exact.is_disabled) {
