@@ -18,6 +18,31 @@ impl CodeGenerator {
         return Value.create(result, info.return_type);
     }
 
+    unsafe Value* generate_enum_variant_from_value(Node* node, Node* callee) {
+        StructInfo* enum_info = (StructInfo*)callee.symbol();
+        Node* enum_declaration = enum_info.node;
+        u32 enum_type = enum_info.type_id;
+        ptr enum_llvm_type = this.llvm_type(enum_type);
+        ptr wide_integer_llvm_type = LLVMIntTypeInContext(this.context, 64);
+        ptr searched_value = this.coerce(this.gen_expression(node.child(0)), Types.i64_type());
+        mut ptr selected_variant_value = LLVMConstNull(enum_llvm_type);
+        for (mut i32 i = 0; i < enum_declaration.count(); i = i + 1) {
+            Node* variant_declaration = enum_declaration.child(i);
+            if (variant_declaration.kind() == NodeKind::FIELD_DECL && Strings.same(variant_declaration.text(), "Unknown")) {
+                selected_variant_value = LLVMConstInt(enum_llvm_type, (u64)variant_declaration.first().int_value(), 1);
+            }
+        }
+        for (mut i32 i = 0; i < enum_declaration.count(); i = i + 1) {
+            Node* variant_declaration = enum_declaration.child(i);
+            if (variant_declaration.kind() == NodeKind::FIELD_DECL) {
+                i64 variant_value = variant_declaration.first().int_value();
+                ptr value_matches_variant = LLVMBuildICmp(this.builder, LlvmConst.INT_EQ, searched_value, LLVMConstInt(wide_integer_llvm_type, (u64)variant_value, 1), "parse.match");
+                selected_variant_value = LLVMBuildSelect(this.builder, value_matches_variant, LLVMConstInt(enum_llvm_type, (u64)variant_value, 1), selected_variant_value, "parse.pick");
+            }
+        }
+        return Value.create(selected_variant_value, enum_type);
+    }
+
     Value* gen_enum_construct(Node* node, Node* variant, u32 enum_type) {
         ptr llvm = this.llvm_type(enum_type);
         ptr slot = this.create_slot(enum_type, "enum.value");
@@ -104,6 +129,9 @@ impl CodeGenerator {
         }
         if (callee.symbol_kind() == SymbolKind.FLOAT_BUILTIN) {
             return this.gen_float_builtin(node, callee);
+        }
+        if (callee.symbol_kind() == SymbolKind.ENUM_PARSE_VALUE) {
+            return this.generate_enum_variant_from_value(node, callee);
         }
         if (callee.symbol_kind() == SymbolKind.ENUM_VALUE) {
             Value* enum_value = this.gen_expression(callee.first());
