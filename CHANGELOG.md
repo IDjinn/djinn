@@ -10,6 +10,7 @@
 ### Added
 - Enum variants without a payload are written without parentheses: `enum FileKind { RegularFile, Directory }`, `return FileKind::Directory;`.
 - `Enum::parseValue(i64)` returns the variant that has that value, or `Unknown` (the enum must declare it, `E3034`); also on `--target web`. `std::filesystem::FsError` carries its codes and `fs_error_from_code` is `FsError::parseValue(code)`.
+- Warning `E6008`: `return x == A || x == B || ...` (5+ alternatives over the same `str`/`string`/integer/enum value and constants, or `f_ignore_case(x, "a") || ...`) can be a `switch`. `djinn-lsp` reports it as the `comparison-chain` hint with a "Convert to switch" fix (the ignore-case form switches on `x.toLower()`; `comparison_chain_test.py`).
 - `struct mut Name { ... }` makes every field mutable. A struct whose fields are all declared `mut` reports warning `E6007` and suggests `struct mut`. `djinn-lsp` reads `struct mut Name` (`struct_mut_test.py`).
 - A `constexpr` struct or array with `str`/`string` literals, nested arrays and structs is emitted as constant static data in the binary. A text field that is not a literal is an error.
 - `==` and `!=` compare `str` on the web target too (`runtime/js/std` declares the operator, compiled to `===`).
