@@ -15,7 +15,7 @@ void page(str title) {
     auto view = html! {
         <div class="card" data-id="a">
             <h1>{title}</h1>
-            <Button label="x" on_click={go}/>
+            <Button label="x" items=["Open", title] on_click={go}/>
             <br>
             {if (ready) { <b>yes</b> }}
         </div>
@@ -90,6 +90,7 @@ check("attribute value is a string", at(4, '"card"') == "string", found)
 check("tag bracket is an operator", at(4, "<") == "operator", found)
 check("closing tag name is a tag", at(9, "div") == "tag", found)
 check("component tag is a class", at(6, "Button") == "class", found)
+check("array attribute values are Djinn", at(6, "title") == "parameter" and at(6, "items") == "property", found)
 check("{title} stays Djinn", at(5, "title") == "parameter", found)
 check("tag inside a code group is markup", at(8, "b") == "tag", found)
 check("rule language keyword", at(11, "select") == "keyword" and at(11, "from") == "keyword" and at(11, "where") == "keyword", found)

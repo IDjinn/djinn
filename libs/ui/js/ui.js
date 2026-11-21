@@ -608,7 +608,7 @@ const $virtual = (count, item, height, row) => {
 };
 // Prefetch and prerender: the pages asked for ahead of time wait here (8 at most, the oldest dropped) until the Outlet
 // shows them. The view should be free of side effects other than building the page.
-const $pf = { off: false, view: null, groups: "", cache: new Map(), skip: [], hook: null, busy: false };
+const $pf = { off: false, view: null, groups: [], cache: new Map(), skip: [], hook: null, busy: false };
 const $prefetchClear = () => { for (const entry of $pf.cache.values()) $dispose(entry.root); $pf.cache.clear(); };
 const $prefetchEnable = (on) => { $pf.off = !on; if (!on) $prefetchClear(); };
 const $prefetch = (path) => {
@@ -626,19 +626,19 @@ const $prefetch = (path) => {
   try { const root = $root(() => { page.appendChild($pf.view(path)); }); $pf.cache.set(path, { page, root }); }
   finally { $pf.busy = false; }
 };
-const $groupKey = (groups, path) => groups.split("|").find((pattern) => pattern.length > 0 && $matches(pattern, path)) ?? path;
+const $groupKey = (groups, path) => groups.find((pattern) => pattern.length > 0 && $matches(pattern, path)) ?? path;
 const $outlet = (view, groups) => {
   const box = $el("div");
   box.setAttribute("class", "outlet");
   const region = $region();
   box.appendChild(region.fragment);
-  if (!$pf.view) { $pf.view = view; $pf.groups = groups || ""; $onCleanup(() => { $prefetchClear(); $pf.view = null; }); }
+  if (!$pf.view) { $pf.view = view; $pf.groups = groups || []; $onCleanup(() => { $prefetchClear(); $pf.view = null; }); }
   let live = null, kept = null;
   $onCleanup(() => { if (live) { $dispose(live); live = null; } });
   $effect(() => {
     // Moving inside a group of routes keeps the page; what is inside it (an Outlet of its own) changes.
     const path = $read($path);
-    const key = $groupKey(groups || "", path);
+    const key = $groupKey(groups || [], path);
     if (key === kept) return;
     kept = key;
     if (live) { $dispose(live); live = null; }
