@@ -182,13 +182,32 @@ impl TypeChecker {
         label.set_value_type(enumeration.type_id);
     }
 
+    unsafe void resolve_text_switch_operator(Node* node, u32 value_type) {
+        SymbolTable* symbols = this.symbols;
+        StructInfo* owner = symbols.struct_at(Types.struct_index(value_type));
+        FunctionInfo* method = this.find_operator(owner, TokenKind::EQUAL_EQUAL);
+        mut FunctionInfo* exact = (FunctionInfo*)0;
+        if (method != null) {
+            exact = this.exact_overload(method, value_type, value_type);
+        }
+        if (exact == null || exact.is_disabled) {
+            this.error_code(node.first(), DiagnosticErrors.OPERATOR_NOT_DEFINED, "switch on text needs an 'operator ==' for the switched type");
+            return;
+        }
+        node.set_symbol(SymbolKind.OPERATOR, (ptr)exact);
+    }
+
     void check_switch(Node* node) {
         u32 value_type = this.check_expression(node.first(), 0);
         SymbolTable* symbols = this.symbols;
         StructInfo* enumeration = symbols.enum_of_type(value_type);
         bool over_enum = enumeration != null && !enumeration.has_payload;
-        if (!over_enum && !Types.is_integer(value_type)) {
-            this.error_code(node.first(), DiagnosticErrors.INVALID_CASE, "switch value must be an integer or an enum");
+        bool over_text = value_type != 0 && (value_type == this.core_type("str") || value_type == this.core_type("string"));
+        if (!over_enum && !over_text && !Types.is_integer(value_type)) {
+            this.error_code(node.first(), DiagnosticErrors.INVALID_CASE, "switch value must be an integer, an enum, a str or a string");
+        }
+        if (over_text) {
+            this.resolve_text_switch_operator(node, value_type);
         }
         mut bool has_default = false;
         this.switch_depth = this.switch_depth + 1;
@@ -201,6 +220,11 @@ impl TypeChecker {
                 has_default = true;
             } else if (over_enum) {
                 this.check_enum_label(arm, enumeration);
+            } else if (over_text) {
+                u32 label_type = this.check_expression(arm.first(), value_type);
+                if (label_type != value_type) {
+                    this.error_code(arm.first(), DiagnosticErrors.INVALID_CASE, "case label must have the same text type as the switched value");
+                }
             } else {
                 u32 label_type = this.check_expression(arm.first(), value_type);
                 if (!Types.is_integer(label_type)) {

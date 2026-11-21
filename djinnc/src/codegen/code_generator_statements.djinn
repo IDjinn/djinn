@@ -139,6 +139,26 @@ impl CodeGenerator {
         LLVMPositionBuilderAtEnd(this.builder, end_block);
     }
 
+    // Text switch: test each label in order with the resolved operator ==.
+    unsafe void gen_text_dispatch(Node* node, Value* subject, PointerList* blocks, ptr default_block) {
+        FunctionInfo* info = (FunctionInfo*)node.symbol();
+        IdList* param_types = info.param_types;
+        for (mut i32 i = 0; i < node.count(); i = i + 1) {
+            Node* arm = node.child(i);
+            if (arm.first() == null) {
+                continue;
+            }
+            ptr<ptr> args = CodeGenerator.array_of(2);
+            args[0] = this.coerce(subject, param_types.get(0));
+            args[1] = this.coerce(this.gen_expression(arm.first()), param_types.get(1));
+            ptr equal = LLVMBuildCall2(this.builder, info.function_type, info.function, args, 2, "switch.eq");
+            ptr next_test = this.new_block("switch.test");
+            LLVMBuildCondBr(this.builder, equal, blocks.get(i), next_test);
+            LLVMPositionBuilderAtEnd(this.builder, next_test);
+        }
+        LLVMBuildBr(this.builder, default_block);
+    }
+
     unsafe void gen_switch(Node* node) {
         Value* subject = this.gen_expression(node.first());
         u32 subject_type = subject.type;
@@ -147,12 +167,16 @@ impl CodeGenerator {
         PointerList* blocks = PointerList.create();
         PointerList* labels = PointerList.create();
         mut u32 case_count = 0;
+        bool over_text = node.symbol_kind() == SymbolKind.OPERATOR;
 
         for (mut i32 i = 0; i < node.count(); i = i + 1) {
             Node* arm = node.child(i);
             if (arm.first() == null) {
                 default_block = this.new_block("switch.default");
                 blocks.push(default_block);
+                labels.push(null);
+            } else if (over_text) {
+                blocks.push(this.new_block("switch.case"));
                 labels.push(null);
             } else {
                 blocks.push(this.new_block("switch.case"));
@@ -168,10 +192,14 @@ impl CodeGenerator {
             }
         }
 
-        ptr dispatch = LLVMBuildSwitch(this.builder, subject.ref, default_block, case_count);
-        for (mut i32 i = 0; i < node.count(); i = i + 1) {
-            if (labels.get(i) != null) {
-                LLVMAddCase(dispatch, labels.get(i), blocks.get(i));
+        if (over_text) {
+            this.gen_text_dispatch(node, subject, blocks, default_block);
+        } else {
+            ptr dispatch = LLVMBuildSwitch(this.builder, subject.ref, default_block, case_count);
+            for (mut i32 i = 0; i < node.count(); i = i + 1) {
+                if (labels.get(i) != null) {
+                    LLVMAddCase(dispatch, labels.get(i), blocks.get(i));
+                }
             }
         }
 

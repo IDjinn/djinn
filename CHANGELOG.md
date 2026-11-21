@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+- `switch` accepts a `str` or `string` value: `switch (name) { case "red": ... default: ... }`. Labels have the value's type and are compared in order with `operator ==`; a `constexpr` switch on text compares the contents. Other value types still report `E3046`.
+
 ## [0.7.0-preview.2] - 2026-11-21
 
 ### Added
