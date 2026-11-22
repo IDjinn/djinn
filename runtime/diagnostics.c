@@ -1,5 +1,8 @@
 #include "runtime_internal.h"
 
+#include <signal.h>
+#include <stdlib.h>
+
 #ifdef _WIN32
 #include <windows.h>
 #endif
@@ -401,6 +404,8 @@ void __djinn_runtime_error(const djinn_error_info_t* info)
         info = &fallback;
     }
 
+    __djinn_hook_fire(DJINN_HOOK_RUNTIME_ERROR, info->message, info->file, info->line);
+
     // The innermost frame should point at the failing operation, not at the
     // function definition line.
     __djinn_frame_set_line(info->line);
@@ -512,11 +517,69 @@ const char* __djinn_error_stack_text(void)
 static void* djinn_hook_handlers[DJINN_HOOK_COUNT];
 static int djinn_panic_hook_running = 0;
 
+static void djinn_hook_exit(void)
+{
+    const djinn_exit_hook_function hook = (djinn_exit_hook_function)djinn_hook_handlers[DJINN_HOOK_EXIT];
+    if (hook != NULL) hook();
+}
+
+static void djinn_hook_signal(const int signal_number)
+{
+    signal(signal_number, djinn_hook_signal);
+    const int32_t kind = signal_number == SIGABRT ? DJINN_HOOK_ABORT : DJINN_HOOK_INTERRUPT;
+    const djinn_signal_hook_function hook = (djinn_signal_hook_function)djinn_hook_handlers[kind];
+    if (hook != NULL) hook(signal_number);
+}
+
+static void djinn_hook_install(const int32_t kind, const int enabled)
+{
+    static int exit_registered = 0;
+    void (*handler)(int) = enabled ? djinn_hook_signal : SIG_DFL;
+    if (kind == DJINN_HOOK_EXIT && enabled && !exit_registered)
+    {
+        exit_registered = 1;
+        atexit(djinn_hook_exit);
+    }
+    else if (kind == DJINN_HOOK_ABORT)
+    {
+        signal(SIGABRT, handler);
+    }
+    else if (kind == DJINN_HOOK_INTERRUPT)
+    {
+        signal(SIGINT, handler);
+        signal(SIGTERM, handler);
+    }
+}
+
+static void djinn_hook_crash(const int32_t code)
+{
+    const djinn_signal_hook_function hook = (djinn_signal_hook_function)djinn_hook_handlers[DJINN_HOOK_CRASH];
+    if (hook == NULL) return;
+    djinn_hook_handlers[DJINN_HOOK_CRASH] = NULL;
+    hook(code);
+    fflush(stdout);
+    fflush(stderr);
+}
+
+_Thread_local int __djinn_task_depth = 0;
+static _Thread_local int djinn_event_hook_running = 0;
+
+void __djinn_hook_fire(const int32_t kind, const char* message, const char* file, const uint32_t line)
+{
+    if (kind < 0 || kind >= DJINN_HOOK_COUNT || djinn_event_hook_running) return;
+    const djinn_panic_hook_function hook = (djinn_panic_hook_function)djinn_hook_handlers[kind];
+    if (hook == NULL) return;
+    djinn_event_hook_running = 1;
+    hook(message, file, line);
+    djinn_event_hook_running = 0;
+}
+
 void* __djinn_hook_set(const int32_t kind, void* handler)
 {
     if (kind < 0 || kind >= DJINN_HOOK_COUNT) return NULL;
     void* previous = djinn_hook_handlers[kind];
     djinn_hook_handlers[kind] = handler;
+    djinn_hook_install(kind, handler != NULL);
     return previous;
 }
 
@@ -540,6 +603,7 @@ void __djinn_panic_default_report(const char* message, const char* file, const u
 
 void __djinn_panic(const char* message, const char* file, const uint32_t line)
 {
+    if (__djinn_task_depth > 0) __djinn_hook_fire(DJINN_HOOK_TASK_PANIC, message, file, line);
     const djinn_panic_hook_function hook = (djinn_panic_hook_function)djinn_hook_handlers[DJINN_HOOK_PANIC];
     if (hook != NULL && !djinn_panic_hook_running)
     {
@@ -652,6 +716,7 @@ static void djinn_write_crash_dump(EXCEPTION_POINTERS* info)
 static LONG WINAPI djinn_crash_filter(EXCEPTION_POINTERS* info)
 {
     EXCEPTION_RECORD* record = info->ExceptionRecord;
+    djinn_hook_crash((int32_t)record->ExceptionCode);
     fprintf(stderr, "djinn crash: exception 0x%08lx at %p\n", (unsigned long)record->ExceptionCode, record->ExceptionAddress);
     HMODULE module = NULL;
     char module_name[260] = "";
@@ -726,6 +791,7 @@ __attribute__((noinline)) static void djinn_native_stack(const int skip)
 
 static void djinn_crash_signal(const int signal_number)
 {
+    djinn_hook_crash(signal_number);
     fprintf(stderr, "djinn crash: signal %d\n", signal_number);
     djinn_native_stack(1);
     signal(signal_number, SIG_DFL);

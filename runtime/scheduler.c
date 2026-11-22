@@ -390,7 +390,9 @@ DWORD WINAPI djinn_worker_thread(LPVOID arg)
 
         if (!__djinn_coro_done(handle))
         {
+            __djinn_task_depth++;
             __djinn_coro_resume(handle);
+            __djinn_task_depth--;
             if (!__djinn_coro_done(handle))
             {
                 djinn_enqueue_task(&pool->queue, handle);
@@ -789,7 +791,9 @@ static void drain_ready_queue(void* main_handle)
     {
         if (!__djinn_coro_done(remaining))
         {
+            __djinn_task_depth++;
             __djinn_coro_resume(remaining);
+            __djinn_task_depth--;
             if (!__djinn_coro_done(remaining))
             {
                 if (!djinn_is_waiting(remaining))
@@ -819,7 +823,9 @@ static void run_event_loop_core(void* main_handle)
         {
             if (!__djinn_coro_done(handle))
             {
+                __djinn_task_depth++;
                 __djinn_coro_resume(handle);
+                __djinn_task_depth--;
                 if (!__djinn_coro_done(handle))
                 {
                     if (djinn_is_waiting(handle))
