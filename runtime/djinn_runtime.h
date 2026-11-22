@@ -218,6 +218,9 @@ int64_t __djinn_now_us(void);
 // Recursively lists files under `directory` whose name ends with `extension`.
 // Returns a malloc'd, path-sorted, newline-separated list (NULL when the directory cannot be read).
 char* __djinn_list_files(const char* directory, const char* extension);
+// Reads (write == 0: buffers[i] gets a malloc'd NUL-terminated copy, lengths[i] its size) or writes (write != 0: from
+// buffers[i], lengths[i] bytes) `count` files. A failed file has lengths[i] == -1. use_uring asks for io_uring (Linux); returns 1 when it was used.
+int32_t __djinn_files_batch(int32_t write, int32_t use_uring, const char** paths, char** buffers, int64_t* lengths, int32_t count);
 char* __djinn_executable_dir(void);
 int __djinn_path_exists(const char* path);
 

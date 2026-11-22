@@ -4,6 +4,7 @@
 
 ### Added
 - `switch` accepts a `str` or `string` value: `switch (name) { case "red": ... default: ... }`. Labels have the value's type and are compared in order with `operator ==`; a `constexpr` switch on text compares the contents. Other value types still report `E3046`.
+- `Files.read_all_many` and `Files.write_bytes_many` (compiler support) transfer a list of files at once through `__djinn_files_batch` with libc. `Files.read_all_many_uring` and `Files.write_bytes_many_uring` ask for one private io_uring on Linux instead (large batches, high latency storage; chunked reads, short transfers resubmitted); other platforms and kernels without it use libc. `djinnc` loads its inputs and the core library with the libc form.
 
 ### Fixed
 - `async void main` that suspends (an `await` on a real task such as `Task.delay`) failed to link with `undefined symbol: __djinn_coro_destroy`: the entry point declared the function before the coroutine wrappers were defined, so LLVM renamed the definition. The wrappers now reuse the existing declaration (`AsyncVoidMainWithSuspension`).
