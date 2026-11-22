@@ -89,7 +89,11 @@ export function runtimeLib(): string {
   const fromRepo = inRepo("build", "runtime", name) || inRepo("build", "bootstrap", "runtime", name);
   // Libraries built in a checkout (build/libs) pair with the checkout's runtime: the installed one can be older and miss symbols they use.
   const checkoutLibs = !installed("lib", "std.djlib") && !bundled("toolchain") && libDir() !== "";
-  return settings().get<string>("runtimeLib") || (checkoutLibs ? fromRepo : undefined) || installed("lib", name) || bundled("toolchain", name) || fromRepo || "";
+  // A runtime built in the open checkout that is newer than the installed one has symbols the installed one lacks (the checkout's
+  // sources use them), so it wins without any setting.
+  const installedLib = installed("lib", name);
+  const newerInCheckout = Boolean(fromRepo && installedLib && fs.statSync(fromRepo).mtimeMs > fs.statSync(installedLib).mtimeMs);
+  return settings().get<string>("runtimeLib") || (checkoutLibs || newerInCheckout ? fromRepo : undefined) || installedLib || bundled("toolchain", name) || fromRepo || "";
 }
 
 export function libDir(): string {
