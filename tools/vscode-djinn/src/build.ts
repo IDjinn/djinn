@@ -1,8 +1,9 @@
 import * as cp from "child_process";
 import * as fs from "fs";
+import * as os from "os";
 import * as path from "path";
 import * as toolchain from "./toolchain";
-import { BuildOptions, BuildPlan, ProjectManifest } from "./types";
+import { BuildOptions, BuildPlan, ProjectManifest, ServerInfo } from "./types";
 
 export function readProject(dir: string): ProjectManifest | undefined {
   const file = path.join(dir, "djinn.proj");
@@ -188,6 +189,143 @@ export async function ensureLibraries(target: string, options: BuildOptions, onO
       const errors = result.text.split("\n").filter((line) => line.includes("error")).slice(0, 5).join("\n");
       throw new Error(`Building the library ${name} failed:\n${errors || `djinnc exited with ${result.code}`}`);
     }
+  }
+}
+
+function samePath(root: string, name: string): string {
+  const full = path.resolve(root, name);
+  return process.platform === "win32" ? full.toLowerCase() : full;
+}
+
+export interface IrText {
+  text: string;
+  /** For each line of `text`, the 1-based source line it was generated from (0 when none). Empty for whole-program output. */
+  map: number[];
+}
+
+/**
+ * The module's definitions that come from `file`, without debug metadata: what the optimizer made of that one file.
+ * Every run of instructions that comes from one source line is preceded by a `; <line>: <source>` comment, and the map says
+ * which source line each output line belongs to.
+ */
+export function onlyFile(text: string, root: string, file: string, source?: string[]): IrText {
+  const wanted = samePath(root, file);
+  const names = new Map<string, string>();
+  const subprograms = new Map<string, { file: string; line: number }>();
+  const locations = new Map<string, number>();
+  const lines = text.split(/\r?\n/);
+  for (const line of lines) {
+    const named = /^!(\d+) = !DIFile\(filename: "([^"]*)"/.exec(line);
+    if (named) {
+      names.set(named[1], named[2].replace(/\\/g, "\\"));
+      continue;
+    }
+    const program = /^!(\d+) = distinct !DISubprogram\(.*?[ (]file: !(\d+).*?[ (]line: (\d+)/.exec(line);
+    if (program) {
+      subprograms.set(program[1], { file: program[2], line: Number(program[3]) });
+      continue;
+    }
+    const location = /^!(\d+) = !DILocation\(line: (\d+)/.exec(line);
+    if (location) {
+      locations.set(location[1], Number(location[2]));
+    }
+  }
+  const out: string[] = [];
+  const map: number[] = [];
+  const add = (line: string, from: number): void => {
+    out.push(line);
+    map.push(from);
+  };
+  add(`; LLVM IR of ${path.basename(file)} only (functions defined in this file)`, 0);
+  for (const line of lines) {
+    if (/^(source_filename|target |%)/.test(line) || /^attributes #/.test(line)) {
+      add(line, 0);
+    }
+  }
+  add("", 0);
+  let kept = 0;
+  for (let i = 0; i < lines.length; i++) {
+    if (!lines[i].startsWith("define ")) {
+      continue;
+    }
+    const at = /!dbg !(\d+) \{$/.exec(lines[i]);
+    const program = at ? subprograms.get(at[1]) : undefined;
+    const name = program ? names.get(program.file) : undefined;
+    let end = i;
+    while (end < lines.length && lines[end] !== "}") {
+      end++;
+    }
+    if (program && name && samePath(root, name) === wanted) {
+      if (i > 0 && lines[i - 1].startsWith(";")) {
+        add(lines[i - 1], 0);
+      }
+      add(lines[i].replace(/ !dbg !\d+/g, ""), program.line);
+      let current = 0;
+      for (let n = i + 1; n <= end; n++) {
+        const line = lines[n];
+        if (line.trimStart().startsWith("#dbg_")) {
+          continue;
+        }
+        const tag = /, !dbg !(\d+)/.exec(line);
+        const from = tag ? locations.get(tag[1]) || 0 : 0;
+        if (from > 0 && from !== current) {
+          current = from;
+          const code = source && source[from - 1] !== undefined ? source[from - 1].trim() : "";
+          add(`  ; ${from}: ${code}`.trimEnd(), from);
+        }
+        add(line.replace(/, !dbg !\d+/g, "").replace(/ !dbg !\d+/g, ""), from || current);
+      }
+      add("", 0);
+      kept++;
+    }
+    i = end;
+  }
+  if (kept === 0) {
+    add("; no function in this file reaches the output (unused generics and library code are left out)", 0);
+  }
+  return { text: out.join("\n") + "\n", map };
+}
+
+/**
+ * Compiles `target` with `--emit-ir` at one optimization level and returns the LLVM IR text. Only the project's own functions
+ * are written (djinnc leaves the library code out), and the build stays out of the project's output folder.
+ */
+export async function emitIR(target: string, level: string, info?: ServerInfo, file?: string): Promise<IrText> {
+  const { compiler, args, plan } = invocation(target, { mode: "build", info });
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "djinn-ir-"));
+  const output = path.join(directory, plan.name);
+  const flags: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === plan.program && args[i - 1] === "-o") {
+      flags.push(output);
+    } else if (args[i] !== "-g" && !/^-O[0-3sz]$/.test(args[i]) && args[i] !== "--lld") {
+      flags.push(args[i]);
+    }
+  }
+  // Debug info tells which source file each function came from; it is read to cut the module down to `file` and then dropped.
+  flags.push("--emit-ir", `-${level}`);
+  if (file) {
+    flags.push("-g");
+  }
+  try {
+    const result = await spawnCompiler(compiler, flags, plan.root);
+    if (result.code !== 0 || !fs.existsSync(`${output}.ll`)) {
+      const errors = result.text.split("\n").filter((line) => line.includes("error")).slice(0, 8).join("\n");
+      throw new Error(errors || `djinnc exited with ${result.code}`);
+    }
+    const text = fs.readFileSync(`${output}.ll`, "utf8");
+    if (!file) {
+      return { text, map: [] };
+    }
+    let source: string[] | undefined;
+    try {
+      source = fs.readFileSync(file, "utf8").split(/\r?\n/);
+    } catch {
+      source = undefined;
+    }
+    return onlyFile(text, plan.root, file, source);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
   }
 }
 

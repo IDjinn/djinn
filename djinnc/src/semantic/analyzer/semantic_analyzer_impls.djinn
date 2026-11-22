@@ -88,9 +88,33 @@ impl SemanticAnalyzer {
         }
     }
 
+    unsafe void hint_redundant_not_equal(Node* declaration) {
+        mut Node* equal = (Node*)0;
+        mut Node* not_equal = (Node*)0;
+        for (mut i32 i = 0; i < declaration.count(); i = i + 1) {
+            Node* member = declaration.child(i);
+            if (member.kind() != NodeKind::FUNCTION || member.text() == null) {
+                continue;
+            }
+            if (Strings.same(member.text(), "operator==")) {
+                equal = member;
+            } else if (Strings.same(member.text(), "operator!=")) {
+                not_equal = member;
+            }
+        }
+        if (equal != null && not_equal != null) {
+            Diagnostics* diagnostics = this.diagnostics;
+            diagnostics.warning_in(DiagnosticWarnings.REDUNDANT_NOT_EQUAL, not_equal.file_name(), not_equal.line(), not_equal.column(),
+                "'operator!=' can be removed: '!=' is already the negation of 'operator=='");
+        }
+    }
+
     void verify_conformance(Node* container) {
         for (mut i32 i = 0; i < container.count(); i = i + 1) {
             Node* declaration = container.child(i);
+            if (declaration.kind() == NodeKind::STRUCT_DECL || declaration.kind() == NodeKind::IMPL_DECL) {
+                this.hint_redundant_not_equal(declaration);
+            }
             if (declaration.kind() == NodeKind::NAMESPACE_DECL) {
                 u32 saved = this.enter(declaration);
                 this.verify_conformance(declaration);
@@ -186,16 +210,22 @@ impl SemanticAnalyzer {
                 } else {
                     mut bool matched = false;
                     mut FunctionInfo* candidate = method;
+                    mut FunctionInfo* found = (FunctionInfo*)0;
                     while (candidate != null && !matched) {
                         if (member.generics() != null) {
                             matched = candidate.is_template;
                         } else {
                             matched = !candidate.is_template && this.signature_matches(candidate, member);
                         }
+                        if (matched) {
+                            found = candidate;
+                        }
                         candidate = candidate.overload;
                     }
                     if (!matched) {
                         this.conformance_error(at, owner, contract, "mismatched signature of method", member.text());
+                    } else {
+                        this.check_member_requirements(at, owner, contract, found, member);
                     }
                 }
             }
@@ -209,6 +239,55 @@ impl SemanticAnalyzer {
         if (!implemented.contains((ptr)contract)) {
             implemented.push((ptr)contract);
             owner.traits = 0;
+        }
+    }
+
+    unsafe Node* template_member(StructInfo* owner, Node* implementation) {
+        if (owner.origin == null || implementation.text() == null) {
+            return implementation;
+        }
+        StructInfo* origin = owner.origin;
+        PointerList* sources = PointerList.create();
+        sources.push((ptr)origin.node);
+        PointerList* impls = origin.impls;
+        for (mut i32 m = 0; impls != null && m < impls.length; m = m + 1) {
+            sources.push(impls.get(m));
+        }
+        for (mut i32 s = 0; s < sources.length; s = s + 1) {
+            Node* container = (Node*)sources.get(s);
+            for (mut i32 i = 0; i < container.count(); i = i + 1) {
+                Node* member = container.child(i);
+                if (member.kind() == NodeKind::FUNCTION && member.text() != null && Strings.same(member.text(), implementation.text())) {
+                    return member;
+                }
+            }
+        }
+        return implementation;
+    }
+
+    unsafe void check_member_requirements(Node* at, StructInfo* owner, InterfaceInfo* contract, FunctionInfo* method, Node* required) {
+        Node* implementation = method.node;
+        if (implementation == null) {
+            return;
+        }
+        i32 wanted = required.op() & 6;
+        i32 given = implementation.op() & 6;
+        if (wanted == 4 && given != 4) {
+            this.conformance_error(at, owner, contract, "method must be 'consteval':", required.text());
+        } else if (wanted == 2 && given == 0) {
+            this.conformance_error(at, owner, contract, "method must be 'constexpr' or 'consteval':", required.text());
+        }
+        Node* declared = this.template_member(owner, implementation);
+        PointerList* attributes = Attributes.of(required);
+        for (mut i32 a = 0; a < attributes.length; a = a + 1) {
+            AttributeUse* use = (AttributeUse*)attributes.get(a);
+            if (!Attributes.has(implementation, use.name) && !Attributes.has(declared, use.name)) {
+                ByteBuffer* problem = ByteBuffer.create();
+                problem.append("method must have attribute [");
+                problem.append(use.name);
+                problem.append("]:");
+                this.conformance_error(at, owner, contract, problem.cstr(), required.text());
+            }
         }
     }
 

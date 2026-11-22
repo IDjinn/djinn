@@ -104,6 +104,7 @@ void* __djinn_realloc(void* pointer, size_t new_size)
 {
     size_t before = pointer != NULL ? djinn_usable_size(pointer) : 0;
     void* chunk = realloc(pointer, new_size);
+    if (chunk == NULL) __djinn_hook_fire(DJINN_HOOK_OUT_OF_MEMORY, "Out of memory", NULL, 0);
     DJINN_ASSERT(chunk, "Out of memory");
     if (pointer == NULL) {
         djinn_stat_alloc(chunk);
@@ -125,6 +126,7 @@ void* __djinn_alloc(size_t size)
 {
     DJINN_ASSERT(size > 0, "Size need be greater than zero!");
     void* chunk = malloc(size);
+    if (chunk == NULL) __djinn_hook_fire(DJINN_HOOK_OUT_OF_MEMORY, "Out of memory", NULL, 0);
     DJINN_ASSERT(chunk, "Out of memory");
     djinn_stat_alloc(chunk);
     DJINN_TRACE("allocated size %zu on heap at %p", size, chunk);
@@ -136,6 +138,7 @@ void* __djinn_alloc_zeroed(size_t size)
 {
     DJINN_ASSERT(size > 0, "Size need be greater than zero!");
     void* chunk = calloc(1, size);
+    if (chunk == NULL) __djinn_hook_fire(DJINN_HOOK_OUT_OF_MEMORY, "Out of memory", NULL, 0);
     DJINN_ASSERT(chunk, "Out of memory");
     djinn_stat_alloc(chunk);
     DJINN_TRACE("allocated zeroed size %zu on heap at %p", size, chunk);
