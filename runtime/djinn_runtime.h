@@ -366,7 +366,7 @@ typedef void (*djinn_signal_hook_function)(int32_t signal_number);
 void* __djinn_hook_set(int32_t kind, void* handler);
 void* __djinn_hook_take(int32_t kind);
 void __djinn_hook_fire(int32_t kind, const char* message, const char* file, uint32_t line);
-extern _Thread_local int __djinn_task_depth;
+extern _Atomic int __djinn_task_depth;
 void __djinn_panic_default_report(const char* message, const char* file, uint32_t line);
 
 extern void __djinn_coro_resume(void* handle);

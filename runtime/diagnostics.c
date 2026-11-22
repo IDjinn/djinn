@@ -561,8 +561,8 @@ static void djinn_hook_crash(const int32_t code)
     fflush(stderr);
 }
 
-_Thread_local int __djinn_task_depth = 0;
-static _Thread_local int djinn_event_hook_running = 0;
+_Atomic int __djinn_task_depth = 0;
+static _Atomic int djinn_event_hook_running = 0;
 
 void __djinn_hook_fire(const int32_t kind, const char* message, const char* file, const uint32_t line)
 {
