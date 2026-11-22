@@ -1012,6 +1012,14 @@ void* __djinn_hook_set(int32_t kind, void* handler)
 
 void* __djinn_hook_take(int32_t kind) { return __djinn_hook_set(kind, 0); }
 
+void __djinn_hook_fire(int32_t kind, const char* message, const char* file, uint32_t line)
+{
+    (void)kind;
+    (void)message;
+    (void)file;
+    (void)line;
+}
+
 static void report_error(const char* message, const char* file, uint32_t line, uint32_t column, uint8_t op, uint8_t bits,
                          uint8_t is_signed, uint8_t has_operands, uint64_t left, uint64_t right)
 {
