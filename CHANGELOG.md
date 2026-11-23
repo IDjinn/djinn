@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.7.10] - 2026-11-22
+
 ### Added
 - Stacked `switch` labels: a `case` or `default` label with no statements shares the body of the arm after it, `case 1: case 2: case 3: return 10;`. A label with a body still does not fall through. Native, `--target web` (plain JavaScript fallthrough) and `constexpr` evaluation agree. The `comparison-chain` hint's "Convert to switch" fix produces this form.
 - `switch` accepts a `str` or `string` value: `switch (name) { case "red": ... default: ... }`. Labels have the value's type and are compared in order with `operator ==`; a `constexpr` switch on text compares the contents. Other value types still report `E3046`.
