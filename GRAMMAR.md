@@ -283,12 +283,14 @@ the arguments or the expected type when omitted. `impl Box<T> { ... }` names its
 
 ```ebnf
 type                 = [ "mut" ] base_type { "*" | "?" | "[" [ expression ] "]" } ;
-base_type            = primitive_type | qualified_name [ generic_args ] | "void" | "auto" | "var" | "ptr" [ "<" type ">" ] | fn_type ;
+base_type            = primitive_type | anonymous_struct | qualified_name [ generic_args ] | "void" | "auto" | "var" | "ptr" [ "<" type ">" ] | fn_type ;
+anonymous_struct     = "{" type IDENTIFIER { "," type IDENTIFIER } [ "," ] "}" ;  (* a struct declared in place; equal field lists are the same type *)
 fn_type              = "fn" "(" [ type { "," type } ] ")" [ "->" type ] ;    (* "fn" is a type only before "(" *)
 
-primitive_type       = integer_type | float_type | native_type | "bool" | "char" | "str" | "string" | "isize" | "usize" ;
+primitive_type       = integer_type | float_type | brain_float_type | native_type | "bool" | "char" | "str" | "string" | "isize" | "usize" ;
 integer_type         = ( "i" | "u" ) DIGITS { integer_suffix } ;    (* i8..i128, u8..u128, i32w, u32n, i32nt, ... *)
-float_type           = "f" DIGITS ;                                  (* f32, f64 *)
+float_type           = "f" DIGITS ;                                  (* f16, f32, f64 *)
+brain_float_type     = "bf16" ;                                       (* x86, ARM, AArch64 and RISC-V only; E3071 elsewhere *)
 native_type          = "nint" [ overflow_suffix ] | "nfloat" | "ndouble" ;
 integer_suffix       = "n" | overflow_suffix ;
 overflow_suffix      = "w" | "t" | "c" | "s" ;
@@ -425,3 +427,7 @@ with each pattern in source order (`==` unless a relation is written; integers, 
 and yields the first matching arm. A `_` arm without `when` is required. The arms are an ordinary chain of conditional
 expressions: they yield the same type. `condition ? a : b` evaluates one branch; the branches have the same type (numbers
 widen, a nullable pointer accepts a safe pointer, `null` and number literals take the other branch's type). *)
+
+`f16` is an IEEE half and `bf16` a brain float (8 exponent bits, 7 mantissa bits). Both widen to `f32`/`f64` implicitly and convert to each other only with a cast. `bf16` exists only on x86, ARM, AArch64 and RISC-V targets; elsewhere (web, wasm, other architectures) it is `E3071`.
+
+An anonymous struct type, `{ i32 result, f64 something } doMath(i32 a, i64 b) { return { .result = 1, .something = 0.5 }; }`, is turned by the parser into a struct named after its fields (`__anon_<hash>`): the same field types, names and order are the same type, and `auto { result, something } = doMath(1, 2);` destructures it. Its fields are immutable and it has no methods.

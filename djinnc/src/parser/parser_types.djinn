@@ -270,12 +270,59 @@ impl Parser {
         }
     }
 
+    // '{ i32 result, f32 other }': a struct declared in place. Its name comes from the shape, so every
+    // spelling of the same fields is the same type; the declaration is queued next to the one that uses it.
+    unsafe TypeRef* parse_anonymous_struct() {
+        i32 start = this.advance();
+        Node* node = Node.create_list(NodeKind::STRUCT_DECL, start);
+        ByteBuffer* shape = ByteBuffer.create();
+        while (!this.check(TokenKind::RBRACE) && !this.at_end() && !this.failed) {
+            Node* field = Node.create(NodeKind::FIELD_DECL, this.current());
+            TypeRef* field_type = this.parse_type();
+            field.set_type(field_type);
+            i32 field_name = this.expect(TokenKind::IDENTIFIER, "expected a field name");
+            field.set_text(this.copy_of(field_name));
+            field_type.describe(shape);
+            shape.append_char(' ');
+            shape.append(field.text());
+            shape.append_char(';');
+            node.add(field);
+            if (!this.match(TokenKind::COMMA)) {
+                break;
+            }
+        }
+        this.expect(TokenKind::RBRACE, "expected '}' to close the anonymous struct");
+        if (node.length() == 0) {
+            this.fail("an anonymous struct needs at least one field");
+        }
+        mut u64w hash = 14695981039346656037;
+        ptr<i8> text = shape.cstr();
+        i32 length = strlen(text);
+        for (mut i32 i = 0; i < length; i = i + 1) {
+            hash = (hash ^ (u64w)(u8)text[i]) * 1099511628211;
+        }
+        ByteBuffer* name = ByteBuffer.create();
+        name.append("__anon_");
+        name.append_int((i64)(hash >> 2));
+        node.set_text(Strings.duplicate(name.cstr(), strlen(name.cstr())));
+        if (this.extra_declarations == null) {
+            this.extra_declarations = PointerList.create();
+        }
+        PointerList* pending = this.extra_declarations;
+        pending.push((ptr)node);
+        TypeRef* result = TypeRef.named(node.text());
+        return result;
+    }
+
     unsafe TypeRef* parse_type() {
         i32 token = this.current();
         mut TypeRef* base = (TypeRef*)0;
 
         if (this.is_fn_type_start(0)) {
             return this.parse_fn_type();
+        }
+        if (this.kind_of(token) == TokenKind::LBRACE) {
+            return this.parse_anonymous_struct();
         }
         if (this.kind_of(token) == TokenKind::VOID || this.kind_of(token) == TokenKind::AUTO) {
             this.advance();
