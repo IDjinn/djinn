@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [0.7.11] - 2026-11-23
+
+### Added
+- Contracts: `require` and `ensure` clauses on functions, with `old(...)` in `ensure` to read a value as it was on entry. Each library has a contract mode, `check`, `observe` or `ignore`, recorded in its `.djlib` manifest; the library's code, and the generics a consumer recompiles, follow it, and a consumer in `check` is told when an imported library only observes or ignores. `ignore` never becomes an assumption for the optimizer.
+- `invariant(...)` on a struct, checked when its methods return. A write to the struct from outside its own methods is `E7002`.
+- Effects inference: every function is classified as `writes`, `io`, `suspends` or `unknown`, and the table travels in the library manifest. `[Pure]` (`E7003`) and `[Effects]` (`E7004`) are verified against it, and a contract clause with an effect is `E7009`.
+- `--obligations` and `--obligations=json` list the tracked guarantees and the inferred effects.
+- Atomic regions: `atomic(ops) { } after_commit { }` undoes by move, cannot suspend (`E7005`), follows the pivot rule (`E7006`) and checks the write set (`E7008`); `cooperative { }` marks a region that may suspend. See `examples/bank_transfer.djinn`.
+- `[NativeError]` on an `extern` function turns its failure protocol into a Djinn error; it works across libraries.
+- The language server, the web target and the VS Code grammar understand contracts, invariants and atomic regions.
+
 ### Fixed
 - String literals with the same contents share one private global instead of one `.str` per use (the `djinnc` binary carried about 450 repeated strings, 330 KB, among them every function and file name used by stack traces).
 
