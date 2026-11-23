@@ -801,6 +801,10 @@ struct Library {
         // the platforms the library supports (0 = any), after the links
         Library.put_u32(manifest, (u32)options.target_mask);
 
+        // the IEEE 754 revision the library was built with, after the platforms: consumers warn when the modes cross
+        FloatSettings* library_floats = options.float_settings;
+        Library.put_text(manifest, library_floats.standard.name(), strlen(library_floats.standard.name()));
+
         mut u32 flags = (u32)Library.FLAG_TEXT_HASH;
         if (options.use_std) {
             flags = flags | (u32)Library.FLAG_STD;
@@ -904,6 +908,53 @@ struct Library {
             return 0;
         }
         return (i32)Library.get_u32(data, cursor);
+    }
+
+    // The IEEE 754 revision a library was built with ("2019", "2008", "1985" or "none"): the text after the platforms of
+    // the manifest, null in libraries written before it existed.
+    static unsafe ptr<i8> float_standard_of(ptr<i8> data, i32 manifest_offset, i32 manifest_size) {
+        i32 end = manifest_offset + manifest_size;
+        i32 name_length = (i32)Library.get_u32(data, manifest_offset);
+        i32 triple_at = manifest_offset + 4 + name_length;
+        i32 links_at = triple_at + 4 + (i32)Library.get_u32(data, triple_at) + 4;
+        if (links_at + 4 > end) {
+            return null;
+        }
+        mut i32 pending = (i32)Library.get_u32(data, links_at);
+        mut i32 cursor = links_at + 4;
+        while (pending > 0 && cursor + 4 <= end) {
+            cursor = cursor + 4 + (i32)Library.get_u32(data, cursor);
+            pending = pending - 1;
+        }
+        i32 text_at = cursor + 4;
+        if (text_at + 4 > end) {
+            return null;
+        }
+        i32 size = (i32)Library.get_u32(data, text_at);
+        if (size <= 0 || text_at + 4 + size > end) {
+            return null;
+        }
+        return Strings.duplicate(data + text_at + 4, size);
+    }
+
+    // Floats cross the boundary of two builds with different IEEE 754 settings. Values a conforming program passes
+    // (NaN, infinity) become poison inside code built with 'none' (it assumes they never occur); the other direction is
+    // safe, and two conforming revisions only differ in which operations exist.
+    static unsafe void check_float_standard(Options* options, ptr<i8> path, ptr<i8> data, i32 manifest_offset, i32 manifest_size) {
+        ptr<i8> library = Library.float_standard_of(data, manifest_offset, manifest_size);
+        if (library == null) {
+            return;
+        }
+        FloatSettings* project = options.float_settings;
+        ptr<i8> mine = project.standard.name();
+        if (Strings.same(library, mine)) {
+            return;
+        }
+        if (Strings.same(library, "none")) {
+            logger_warn(Log.get(), "djinnc: library '%s' was built with ieee754 none and this project uses %s: a NaN or an infinity passed to it is undefined behavior there, and its results may not be IEEE 754 values", path, mine);
+        } else if (!Strings.same(mine, "none")) {
+            logger_info(Log.get(), "djinnc: library '%s' was built with ieee754 %s and this project uses %s: results of + - * / agree; only which operations exist (fma, minimum) differs", path, library, mine);
+        }
     }
 
     // The library must support the platform being built for, and every platform the project supports.
@@ -1314,6 +1365,7 @@ struct Library {
         if (!Library.check_platforms(options, path, data, manifest_offset, manifest_size)) {
             return -1;
         }
+        Library.check_float_standard(options, path, data, manifest_offset, manifest_size);
         if (!for_target && !macros_only) {
             logger_error(Log.get(), "djinnc: '%s' targets a different triple than '%s'", path, Target.triple());
             return -1;

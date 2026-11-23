@@ -39,6 +39,26 @@ case "$(uname -s)" in
         ;;
 esac
 
+# A library built with another IEEE 754 revision: a conforming project that imports an `ieee754 none` library is warned,
+# the other direction and equal modes are silent, two conforming revisions are only informational.
+sample="$root/tests/djinnc/library"
+for standard in none 2008 2019; do
+    "$compiler" "$sample/mathlib.djinn" --library --ieee754=$standard -o "$out/math_$standard.djlib" "${flags[@]}" > "$out/math_$standard.log" 2>&1 || { cat "$out/math_$standard.log"; fail "the $standard library must build"; }
+done
+cross() { # <library standard> <project standard>
+    "$compiler" "$sample/app.djinn" --lib "$out/math_$1.djlib" --ieee754=$2 -o "$out/app_$1_$2" "${flags[@]}" > "$out/app_$1_$2.log" 2>&1 || { cat "$out/app_$1_$2.log"; fail "a $2 project must build against the $1 library"; }
+}
+cross none 2019
+grep -q "built with ieee754 none" "$out/app_none_2019.log" || fail "a 2019 project must be warned about an ieee754 none library"
+cross none 2008
+grep -q "built with ieee754 none" "$out/app_none_2008.log" || fail "a 2008 project must be warned about an ieee754 none library"
+cross none none
+grep -q "built with ieee754" "$out/app_none_none.log" && fail "equal modes must not warn"
+cross 2019 none
+grep -q "built with ieee754" "$out/app_2019_none.log" && fail "a none project using a conforming library must not warn"
+cross 2008 2019
+grep -q "built with ieee754 none" "$out/app_2008_2019.log" && fail "two conforming revisions must not give the undefined-behavior warning"
+
 # Invalid values are rejected.
 bad="$out/bad_project"
 rm -rf "$bad"; mkdir -p "$bad/src"; cp tests/opt_project/src/main.djinn "$bad/src/"
