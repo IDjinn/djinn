@@ -11,7 +11,7 @@
 - `--obligations` and `--obligations=json` list the tracked guarantees and the inferred effects.
 - Atomic regions: `atomic(ops) { } after_commit { }` undoes by move, cannot suspend (`E7005`), follows the pivot rule (`E7006`) and checks the write set (`E7008`); `cooperative { }` marks a region that may suspend. See `examples/bank_transfer.djinn`.
 - `[NativeError]` on an `extern` function turns its failure protocol into a Djinn error; it works across libraries.
-- The language server, the web target and the VS Code grammar understand contracts, invariants and atomic regions.
+- The language server, the web target and the VS Code grammar understand contracts, invariants and atomic regions. The language server offers hover documentation and completion for `require`, `ensure`, `invariant`, `old`, `atomic`, `cooperative` and `after_commit`, keeps the outline of a struct with an invariant, and colors the contextual words (`invariant`, `atomic`, `cooperative`, `after_commit`, `old`) as keywords only where they act as one.
 
 ### Fixed
 - String literals with the same contents share one private global instead of one `.str` per use (the `djinnc` binary carried about 450 repeated strings, 330 KB, among them every function and file name used by stack traces).
