@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 set -eu
-compiler="${1:?usage: contracts.sh <djinnc> <runtime lib> [runtime dir]}"
-runtime_lib="${2:?usage: contracts.sh <djinnc> <runtime lib> [runtime dir]}"
+compiler="${1:?usage: guarantees.sh <djinnc> <runtime lib> [runtime dir]}"
+runtime_lib="${2:?usage: guarantees.sh <djinnc> <runtime lib> [runtime dir]}"
 runtime="${3:-runtime}"
 root="$(cd "$(dirname "$0")/../.." && pwd)"
-out="$root/build/unit/contracts"
+out="$root/build/unit/guarantees"
 mkdir -p "$out"
 cd "$root"
 flags=(--runtime-dir "$runtime" --runtime-lib "$runtime_lib")
 
-fail() { echo "FAIL contracts: $1"; exit 1; }
+fail() { echo "FAIL guarantees: $1"; exit 1; }
 
 # 'contracts: observe' in djinn.proj reports the failed clause and goes on.
 "$compiler" tests/contracts_project -o "$out/project" --run "${flags[@]}" > "$out/project.log" 2>&1 && status=0 || status=$?
@@ -57,4 +57,48 @@ grep -q "observed: R10013: contract violated: require(a != b)" "$out/app_run.log
 grep -q "panic" "$out/app_run.log" || fail "the consumer clause must panic"
 grep -q "require(x > 0)" "$out/app_run.log" || fail "the consumer report must name its clause"
 
-echo "PASS contracts"
+# The effects a library infers for the functions it compiles cross into the consumer, which only sees signatures.
+cat > "$out/lib_effects.djinn" <<'SRC'
+namespace counters;
+
+struct Counter {
+    mut i32 value;
+
+    public void bump() {
+        this.value = this.value + 1;
+    }
+
+    public i32 peek() {
+        return this.value;
+    }
+}
+SRC
+cat > "$out/pure_ok.djinn" <<'SRC'
+import counters;
+
+[Pure] i32 seen(Counter* counter) {
+    return counter.peek();
+}
+
+i32 main() {
+    return 0;
+}
+SRC
+cat > "$out/pure_bad.djinn" <<'SRC'
+import counters;
+
+[Pure] i32 sneaky(Counter* counter) {
+    counter.bump();
+    return 0;
+}
+
+i32 main() {
+    return 0;
+}
+SRC
+"$compiler" "$out/lib_effects.djinn" --library -o "$out/counters.djlib" "${flags[@]}" > "$out/lib_effects.log" 2>&1 || { cat "$out/lib_effects.log"; fail "the effects library must compile"; }
+"$compiler" "$out/pure_ok.djinn" --lib "$out/counters.djlib" --check "${flags[@]}" > "$out/pure_ok.log" 2>&1 || { cat "$out/pure_ok.log"; fail "a [Pure] function may call a library reader"; }
+"$compiler" "$out/pure_bad.djinn" --lib "$out/counters.djlib" --check "${flags[@]}" > "$out/pure_bad.log" 2>&1 && fail "a [Pure] function must not call a library writer"
+grep -q "E7003" "$out/pure_bad.log" || { cat "$out/pure_bad.log"; fail "the library writer must be reported with E7003"; }
+
+echo "PASS guarantees"

@@ -1,0 +1,158 @@
+namespace djinnc;
+
+unsafe static mut ptr library_effect_names = null;
+unsafe static mut ptr library_effect_bits = null;
+unsafe static mut ptr exported_effect_names = null;
+unsafe static mut ptr exported_effect_bits = null;
+
+// What a function can do beyond computing its result. writes: memory that is not a local of the function; io: the
+// outside world (files, network, processes, tasks); suspends: await; unknown: code the compiler cannot see (extern
+// functions without [Effects], fn values, interface calls), which counts as all of them.
+struct Effects {
+    const u32 NONE = 0;
+    const u32 WRITES = 1;
+    const u32 IO = 2;
+    const u32 SUSPENDS = 4;
+    const u32 UNKNOWN = 8;
+    const u32 INVALID = 4294967295;
+
+    public static u32 parse(ptr<i8> word) {
+        if (Strings.same(word, "none")) { return Effects.NONE; }
+        if (Strings.same(word, "writes")) { return Effects.WRITES; }
+        if (Strings.same(word, "io")) { return Effects.IO; }
+        if (Strings.same(word, "suspends")) { return Effects.SUSPENDS; }
+        if (Strings.same(word, "unknown")) { return Effects.UNKNOWN; }
+        return Effects.INVALID;
+    }
+
+    public static ptr<i8> describe(u32 effects) {
+        if (effects == 0) {
+            return "none";
+        }
+        ByteBuffer* text = ByteBuffer.create();
+        Effects.append_word(text, effects, Effects.WRITES, "writes");
+        Effects.append_word(text, effects, Effects.IO, "io");
+        Effects.append_word(text, effects, Effects.SUSPENDS, "suspends");
+        Effects.append_word(text, effects, Effects.UNKNOWN, "unknown");
+        return text.cstr();
+    }
+
+    static void append_word(ByteBuffer* text, u32 effects, u32 bit, ptr<i8> word) {
+        if ((effects & bit) == 0) {
+            return;
+        }
+        if (text.length > 0) {
+            text.append(", ");
+        }
+        text.append(word);
+    }
+
+    // unknown stands for every effect when a ceiling is compared.
+    public static u32 expanded(u32 effects) {
+        if ((effects & Effects.UNKNOWN) != 0) {
+            return effects | Effects.WRITES | Effects.IO | Effects.SUSPENDS;
+        }
+        return effects;
+    }
+
+    public static bool within(u32 effects, u32 ceiling) {
+        if ((ceiling & Effects.UNKNOWN) != 0) {
+            return true;
+        }
+        return (Effects.expanded(effects) & ~ceiling) == 0;
+    }
+
+    static unsafe PointerList* library_names() {
+        if (library_effect_names == null) {
+            library_effect_names = (ptr)PointerList.create();
+            library_effect_bits = (ptr)PointerList.create();
+        }
+        return (PointerList*)library_effect_names;
+    }
+
+    static unsafe PointerList* library_bits() {
+        Effects.library_names();
+        return (PointerList*)library_effect_bits;
+    }
+
+    public static unsafe PointerList* exported_names() {
+        if (exported_effect_names == null) {
+            exported_effect_names = (ptr)PointerList.create();
+            exported_effect_bits = (ptr)PointerList.create();
+        }
+        return (PointerList*)exported_effect_names;
+    }
+
+    public static unsafe PointerList* exported_bits() {
+        Effects.exported_names();
+        return (PointerList*)exported_effect_bits;
+    }
+
+    // Standard C functions the compiler knows, the way LLVM's library info does: an extern declaration of one of these
+    // names without [Effects] gets these effects instead of unknown.
+    public static u32 of_c_library(ptr<i8> name) {
+        if (Strings.same(name, "strlen") || Strings.same(name, "memcmp") || Strings.same(name, "strcmp") || Strings.same(name, "strncmp")
+            || Strings.same(name, "atoi") || Strings.same(name, "atol") || Strings.same(name, "atoll") || Strings.same(name, "atof")
+            || Strings.same(name, "abs") || Strings.same(name, "labs") || Strings.same(name, "llabs") || Strings.same(name, "strchr")
+            || Strings.same(name, "strrchr") || Strings.same(name, "strstr") || Strings.same(name, "memchr") || Strings.same(name, "toupper")
+            || Strings.same(name, "tolower") || Strings.same(name, "isdigit") || Strings.same(name, "isalpha") || Strings.same(name, "isspace")
+            || Strings.same(name, "malloc") || Strings.same(name, "calloc") || Strings.same(name, "__djinn_reflected_count")
+            || Strings.same(name, "__djinn_reflected_type")) {
+            return Effects.NONE;
+        }
+        if (Strings.same(name, "memcpy") || Strings.same(name, "memmove") || Strings.same(name, "memset") || Strings.same(name, "strcpy")
+            || Strings.same(name, "strncpy") || Strings.same(name, "strcat") || Strings.same(name, "snprintf") || Strings.same(name, "sprintf")
+            || Strings.same(name, "vsnprintf") || Strings.same(name, "strtod") || Strings.same(name, "strtof") || Strings.same(name, "strtol")
+            || Strings.same(name, "strtoll") || Strings.same(name, "strtoul") || Strings.same(name, "strtoull") || Strings.same(name, "free")
+            || Strings.same(name, "realloc") || Strings.same(name, "qsort")) {
+            return Effects.WRITES;
+        }
+        if (Strings.same(name, "printf") || Strings.same(name, "puts") || Strings.same(name, "putchar") || Strings.same(name, "fprintf")
+            || Strings.same(name, "fputs") || Strings.same(name, "fflush") || Strings.same(name, "write") || Strings.same(name, "read")
+            || Strings.same(name, "exit") || Strings.same(name, "abort") || Strings.same(name, "getchar") || Strings.same(name, "time")
+            || Strings.same(name, "clock") || Strings.same(name, "rand") || Strings.same(name, "srand") || Strings.same(name, "getenv")) {
+            return Effects.IO;
+        }
+        return Effects.INVALID;
+    }
+
+    // Attributes that already describe an extern: a [Foldable] function is pure math, an allocator only hands out
+    // fresh memory, a free or a copy writes memory it was given.
+    public static unsafe u32 implied_by_attributes(Node* declaration) {
+        if (Attributes.has(declaration, "Foldable") || Attributes.has(declaration, "ConstAlloc") || Attributes.has(declaration, "AllocFn")) {
+            return Effects.NONE;
+        }
+        if (Attributes.has(declaration, "ConstMemCopy") || Attributes.has(declaration, "ConstMemSet") || Attributes.has(declaration, "ConstFree")
+            || Attributes.has(declaration, "FreeFn") || Attributes.has(declaration, "ConstRealloc") || Attributes.has(declaration, "ReallocFn")) {
+            return Effects.WRITES;
+        }
+        return Effects.INVALID;
+    }
+
+    // The effects a loaded library recorded for the functions it compiled (their bodies are not in its interface).
+    public static unsafe void remember_library(ptr<i8> name, u32 effects) {
+        PointerList* names = Effects.library_names();
+        PointerList* bits = Effects.library_bits();
+        names.push((ptr)name);
+        bits.push((ptr)(u64)(effects + 1));
+    }
+
+    public static unsafe u32 of_library(ptr<i8> name) {
+        PointerList* names = Effects.library_names();
+        PointerList* bits = Effects.library_bits();
+        for (mut i32 i = 0; i < names.length; i = i + 1) {
+            if (Strings.same((ptr<i8>)names.get(i), name)) {
+                return (u32)(u64)bits.get(i) - 1;
+            }
+        }
+        return Effects.INVALID;
+    }
+
+    // The effects of the functions this compilation defines, written to the manifest of a library.
+    public static unsafe void export(ptr<i8> name, u32 effects) {
+        PointerList* names = Effects.exported_names();
+        PointerList* bits = Effects.exported_bits();
+        names.push((ptr)name);
+        bits.push((ptr)(u64)effects);
+    }
+}

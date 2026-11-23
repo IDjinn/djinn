@@ -810,6 +810,17 @@ struct Library {
         ptr<i8> contracts_name = ContractMode.name(options.contract_mode);
         Library.put_text(manifest, contracts_name, strlen(contracts_name));
 
+        // the effects inferred for each function it compiles, after the contracts mode: a consumer only sees their
+        // signatures, and would otherwise count them as unknown
+        PointerList* effect_names = Effects.exported_names();
+        PointerList* effect_bits = Effects.exported_bits();
+        Library.put_u32(manifest, (u32)effect_names.length);
+        for (mut i32 e = 0; e < effect_names.length; e = e + 1) {
+            ptr<i8> effect_name = (ptr<i8>)effect_names.get(e);
+            Library.put_text(manifest, effect_name, strlen(effect_name));
+            Library.put_u32(manifest, (u32)(u64)effect_bits.get(e));
+        }
+
         mut u32 flags = (u32)Library.FLAG_TEXT_HASH;
         if (options.use_std) {
             flags = flags | (u32)Library.FLAG_STD;
@@ -975,6 +986,47 @@ struct Library {
             return ContractMode.CHECK;
         }
         return mode;
+    }
+
+    // The effects table after the contracts mode: a count, then the symbol name and the effect bits of each function
+    // the library compiled. Libraries written before it existed have none, and their functions stay unknown.
+    static unsafe void read_effects(ptr<i8> data, i32 manifest_offset, i32 manifest_size) {
+        i32 end = manifest_offset + manifest_size;
+        i32 name_length = (i32)Library.get_u32(data, manifest_offset);
+        i32 triple_at = manifest_offset + 4 + name_length;
+        i32 links_at = triple_at + 4 + (i32)Library.get_u32(data, triple_at) + 4;
+        if (links_at + 4 > end) {
+            return;
+        }
+        mut i32 pending = (i32)Library.get_u32(data, links_at);
+        mut i32 cursor = links_at + 4;
+        while (pending > 0 && cursor + 4 <= end) {
+            cursor = cursor + 4 + (i32)Library.get_u32(data, cursor);
+            pending = pending - 1;
+        }
+        i32 float_at = cursor + 4;
+        if (float_at + 4 > end) {
+            return;
+        }
+        i32 mode_at = float_at + 4 + (i32)Library.get_u32(data, float_at);
+        if (mode_at + 4 > end) {
+            return;
+        }
+        i32 table_at = mode_at + 4 + (i32)Library.get_u32(data, mode_at);
+        if (table_at + 4 > end) {
+            return;
+        }
+        mut i32 remaining = (i32)Library.get_u32(data, table_at);
+        mut i32 entry = table_at + 4;
+        while (remaining > 0 && entry + 4 <= end) {
+            i32 size = (i32)Library.get_u32(data, entry);
+            if (entry + 4 + size + 4 > end) {
+                return;
+            }
+            Effects.remember_library(Strings.duplicate(data + entry + 4, size), Library.get_u32(data, entry + 4 + size));
+            entry = entry + 4 + size + 4;
+            remaining = remaining - 1;
+        }
     }
 
     // Each library keeps the contracts mode it was built with; a weaker one than the project's is reported so that a
@@ -1416,6 +1468,7 @@ struct Library {
         Library.check_float_standard(options, path, data, manifest_offset, manifest_size);
         i32 library_contracts = Library.contract_mode_of(data, manifest_offset, manifest_size);
         Library.check_contract_mode(options, path, library_contracts);
+        Library.read_effects(data, manifest_offset, manifest_size);
         if (!for_target && !macros_only) {
             logger_error(Log.get(), "djinnc: '%s' targets a different triple than '%s'", path, Target.triple());
             return -1;
