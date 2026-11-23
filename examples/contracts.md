@@ -1,31 +1,47 @@
 ```djinn
-import std::types;
-
-constexpr i32 abs(i32 value)
-    require(value != i32::MIN_VALUE)               // allow as block as well { return ... }
-    ensure(return == (value < 0 ? -value : value))
+// require is checked on entry, ensure on every return (result is the returned value, old(x) its value at entry).
+i32 abs(i32 value)
+    require(value != -2147483648)
+    ensure(result >= 0)
+    ensure(result == value || result == -value)
 {
     return value < 0 ? -value : value;
 }
 ```
 
 ```djinn
+// An invariant holds whenever a method or constructor returns; its fields are only written by its own methods.
+struct Account {
+    mut i64 balance;
+    invariant(this.balance >= 0);
 
-struct DivisionByZeroException : ArgumentException;
-
-constexpr i32 division(i32 value, i32 divisor) throws(DivisionByZeroException) {
-    if (unlikely(divisor == 0)) {
-        throw DivisionByZeroException("Division {value}/0 is not allowed");
+    Account(i64 start) {
+        this.balance = start;
     }
-    return value / divisor;
+
+    public void withdraw(i64 amount) require(amount > 0) ensure(this.balance == old(this.balance) - amount) {
+        this.balance = this.balance - amount;
+    }
 }
 ```
 
 ```djinn
-void main() throws {
-    i32 result = try division(1, 0) ?: -1;
-    i32 result = division(1, 0); // compiler error
-    i32 result = abs(1, -1);
+// An atomic region restores its operands when an error leaves it; after_commit runs only when it completes.
+unsafe i32 transfer(Account* from, Account* to, i64 amount) throws(InsufficientFunds, AuditUnavailable) {
+    atomic(*from, *to) {
+        if (from.balance < amount) {
+            throw InsufficientFunds();
+        }
+        from.balance = from.balance - amount;
+        try audit(amount);
+        to.balance = to.balance + amount;
+    } after_commit {
+        printf("committed %lld\n", amount);
+    }
+    return 0;
 }
 ```
 
+Build modes: `--contracts=check` (trap, default), `observe` (report and go on) or `ignore`; `contracts:` in `djinn.proj`.
+Each `.djlib` keeps the mode it was built with. `--obligations[=json]` lists every guarantee and the inferred effects.
+See `examples/bank_transfer.djinn` for the complete transfer.

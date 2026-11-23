@@ -1,0 +1,365 @@
+namespace conformance;
+
+import testing;
+import djinnc::testing;
+import djinnc;
+
+struct AtomicTests {
+    [Test]
+    void bank_transfer_rolls_back_on_error() {
+        str source = """
+struct InsufficientFunds;
+struct AuditUnavailable;
+
+struct Account {
+    i64 id;
+    mut i64 balance;
+}
+
+i32 audit(i64 amount) throws(AuditUnavailable) {
+    if (amount == 13) {
+        throw AuditUnavailable();
+    }
+    return 0;
+}
+
+unsafe i32 transfer(Account* from, Account* to, i64 amount) throws(InsufficientFunds, AuditUnavailable) require(amount > 0) {
+    atomic(*from, *to) {
+        if (from.balance < amount) {
+            throw InsufficientFunds();
+        }
+        from.balance = from.balance - amount;
+        try audit(amount);
+        to.balance = to.balance + amount;
+    }
+    return 0;
+}
+
+unsafe i32 run(Account* a, Account* b, i64 amount) {
+    return switch transfer(a, b, amount) {
+        Result v -> 0,
+        InsufficientFunds e -> 1,
+        AuditUnavailable e -> 2
+    };
+}
+
+unsafe i32 main() {
+    Account alice = Account { .id = 1, .balance = 100 };
+    Account bob = Account { .id = 2, .balance = 50 };
+    i32 failed = run(&alice, &bob, 13);
+    if (failed != 2 || alice.balance != 100 || bob.balance != 50) {
+        return 1;
+    }
+    i32 moved = run(&alice, &bob, 30);
+    if (moved != 0 || alice.balance != 70 || bob.balance != 80) {
+        return 2;
+    }
+    i32 short = run(&alice, &bob, 500);
+    if (short != 1 || alice.balance != 70 || bob.balance != 80) {
+        return 3;
+    }
+    return 42;
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void after_commit_runs_only_when_the_region_completes() {
+        str source = """
+struct Failed;
+
+struct Ledger {
+    mut i64 total;
+    mut i64 commits;
+}
+
+unsafe i32 add(Ledger* ledger, i64 amount) throws(Failed) {
+    atomic(ledger.total) {
+        ledger.total = ledger.total + amount;
+        if (amount < 0) {
+            throw Failed();
+        }
+    } after_commit {
+        ledger.commits = ledger.commits + 1;
+    }
+    return 0;
+}
+
+unsafe i32 main() {
+    Ledger ledger = Ledger { .total = 0, .commits = 0 };
+    i32 a = switch add(&ledger, 5) { Result v -> 0, Failed e -> 1 };
+    i32 b = switch add(&ledger, -3) { Result v -> 0, Failed e -> 1 };
+    i32 c = switch add(&ledger, 7) { Result v -> 0, Failed e -> 1 };
+    return (i32)ledger.total * 10 + (i32)ledger.commits + a + b * 100 + c;
+}
+""";
+        Verify.source(source).runs(Expected.exit(222));
+    }
+
+    [Test]
+    void return_and_break_commit_the_region() {
+        str source = """
+struct Box {
+    mut i32 value;
+    mut i32 commits;
+}
+
+unsafe i32 early(Box* box) {
+    atomic(box.value) {
+        box.value = box.value + 1;
+        if (box.value > 1) {
+            return box.value;
+        }
+    } after_commit {
+        box.commits = box.commits + 1;
+    }
+    return 0;
+}
+
+unsafe i32 main() {
+    Box box = Box { .value = 0, .commits = 0 };
+    early(&box);
+    early(&box);
+    for (i32 i in 0..5) {
+        atomic(box.value) {
+            box.value = box.value + 10;
+            if (i == 2) {
+                break;
+            }
+        } after_commit {
+            box.commits = box.commits + 1;
+        }
+    }
+    return box.value + box.commits;
+}
+""";
+        Verify.source(source).runs(Expected.exit(37));
+    }
+
+    [Test]
+    void value_operand_is_undone_by_move() {
+        str source = """
+import std::types;
+
+struct Failed;
+
+struct Person {
+    mut string name;
+    mut i32 age;
+}
+
+unsafe i32 rename(Person* person, string next, bool fail) throws(Failed) {
+    atomic(person.name) {
+        person.name = next;
+        person.name = $"{person.name}!";
+        if (fail) {
+            throw Failed();
+        }
+    }
+    return 0;
+}
+
+unsafe i32 main() {
+    Person person = Person { .name = "ana", .age = 3 };
+    i32 failed = switch rename(&person, "bia", true) { Result v -> 0, Failed e -> 1 };
+    if (failed != 1 || person.name != "ana") {
+        return 1;
+    }
+    i32 done = switch rename(&person, "caio", false) { Result v -> 0, Failed e -> 1 };
+    if (done != 0 || person.name != "caio!") {
+        return 2;
+    }
+    return 42;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(42));
+    }
+
+    [Test]
+    void writes_outside_the_operands_are_rejected() {
+        str source = """
+struct Account {
+    mut i64 balance;
+    mut i64 fee;
+    mut i64* history;
+}
+
+unsafe void charge(Account* account, i64 amount) {
+    mut i64 seen = 0;
+    atomic(account.balance) {
+        i64 before = account.balance;
+        account.balance = before - amount;
+        account.fee = 1;
+        seen = before;
+        *account.history = amount;
+    }
+}
+
+i32 main() {
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.ATOMIC_EXTERNAL_EFFECT).at(12, 21).and_error(DiagnosticErrors.ATOMIC_EXTERNAL_EFFECT).at(13, 14).and_error(DiagnosticErrors.ATOMIC_EXTERNAL_EFFECT).at(14, 26));
+    }
+
+    [Test]
+    void calls_may_only_write_the_operands() {
+        str source = """
+struct Counter {
+    mut i32 value;
+
+    public void bump() {
+        this.value = this.value + 1;
+    }
+}
+
+unsafe void both(Counter* mine, Counter* other) {
+    atomic(*mine) {
+        mine.bump();
+        other.bump();
+    }
+}
+
+i32 main() {
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.ATOMIC_EXTERNAL_EFFECT).at(12, 19));
+    }
+
+    [Test]
+    void regions_cannot_suspend() {
+        str source = """
+import std::sys;
+
+struct Box {
+    mut i32 value;
+}
+
+unsafe async void waits(Box* box) {
+    atomic(*box) {
+        box.value = 1;
+        await Task.pause();
+    }
+    cooperative {
+        await Task.pause();
+    }
+}
+
+i32 main() {
+    return 0;
+}
+""";
+        Verify.source(source).with_std().diagnostics(Expected.error(DiagnosticErrors.ATOMIC_SUSPENDS).at(10, 9).and_error(DiagnosticErrors.ATOMIC_SUSPENDS).at(13, 9));
+    }
+
+    [Test]
+    void regions_cannot_call_unknown_code() {
+        str source = """
+extern "C" {
+    i32 opaque(i32 x);
+    [Effects(none)] i32 known(i32 x);
+}
+
+struct Box {
+    mut i32 value;
+}
+
+unsafe void calls(Box* box) {
+    atomic(*box) {
+        box.value = known(1);
+        box.value = opaque(2);
+    }
+}
+
+i32 main() {
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.ATOMIC_SUSPENDS).at(13, 27));
+    }
+
+    [Test]
+    void nothing_may_fail_after_an_external_effect() {
+        str source = """
+extern "C" {
+    i32 puts(i8* text);
+}
+
+struct Failed;
+
+struct Box {
+    mut i32 value;
+}
+
+i32 check(i32 x) throws(Failed) {
+    if (x < 0) {
+        throw Failed();
+    }
+    return x;
+}
+
+unsafe i32 pivots(Box* box) throws(Failed) {
+    atomic(*box) {
+        box.value = try check(box.value);
+        puts("audit");
+        box.value = try check(box.value - 1);
+    }
+    return 0;
+}
+
+i32 main() {
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.ATOMIC_FAILURE_AFTER_EFFECT).at(22, 21));
+    }
+
+    [Test]
+    void value_operand_parts_cannot_be_replaced() {
+        str source = """
+import std::types;
+
+struct Person {
+    mut string name;
+    mut i32 age;
+}
+
+unsafe void edit(Person* person) {
+    atomic(*person) {
+        person.age = 4;
+        person.name = "bia";
+    }
+}
+
+i32 main() {
+    return 0;
+}
+""";
+        Verify.source(source).with_std().diagnostics(Expected.error(DiagnosticErrors.ATOMIC_NOT_RESTORABLE).at(11, 21));
+    }
+
+    [Test]
+    void after_commit_cannot_leave() {
+        str source = """
+struct Box {
+    mut i32 value;
+}
+
+unsafe i32 leaves(Box* box) {
+    atomic(*box) {
+        box.value = 1;
+    } after_commit {
+        return 1;
+    }
+    return 0;
+}
+
+i32 main() {
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.AFTER_COMMIT_EXIT).at(9, 9));
+    }
+}
