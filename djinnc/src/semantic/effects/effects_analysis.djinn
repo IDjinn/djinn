@@ -1,0 +1,401 @@
+namespace djinnc;
+
+// Infers the effects of every function over the call graph by a pessimistic fixpoint: a function has the effects of
+// its own body plus those of everything it calls. An extern function has what its [Effects] declares, or unknown; a
+// function compiled into a library has what the library recorded. The result is audited against [Pure], [Const] and
+// [Effects] on functions with a body, and the clauses of a contract may only call functions without effects.
+struct EffectsAnalysis {
+    SymbolTable* symbols;
+    Diagnostics* diagnostics;
+    PointerList* contract_edges;
+    PointerList* regions;
+    PointerList* region_owners;
+
+    public static unsafe void run(SymbolTable* symbols, Diagnostics* diagnostics) {
+        EffectsAnalysis* analysis = (EffectsAnalysis*)Memory.zalloc(sizeof(EffectsAnalysis));
+        analysis.symbols = symbols;
+        analysis.diagnostics = diagnostics;
+        analysis.contract_edges = PointerList.create();
+        analysis.regions = PointerList.create();
+        analysis.region_owners = PointerList.create();
+        analysis.seed();
+        analysis.settle();
+        analysis.audit();
+        analysis.export();
+    }
+
+    static unsafe bool has_body(FunctionInfo* info) {
+        Node* declaration = info.node;
+        return !info.is_extern && !info.is_template && !info.is_disabled && declaration != null
+            && declaration.kind() == NodeKind::FUNCTION && declaration.first() != null;
+    }
+
+    unsafe void seed() {
+        SymbolTable* symbols = this.symbols;
+        PointerList* functions = symbols.functions;
+        for (mut i32 i = 0; i < functions.length; i = i + 1) {
+            FunctionInfo* info = (FunctionInfo*)functions.get(i);
+            info.effect_edges = PointerList.create();
+            if (EffectsAnalysis.has_body(info)) {
+                Node* declaration = info.node;
+                this.scan(declaration.first(), info, false);
+                info.effects = info.own_effects;
+                continue;
+            }
+            mut u32 declared = this.declared(info);
+            if (declared == Effects.INVALID) {
+                declared = EffectsAnalysis.coroutine_primitive(info);
+            }
+            if (declared != Effects.INVALID) {
+                info.effects = declared;
+                continue;
+            }
+            if (info.is_extern && !info.from_library && info.node != null) {
+                mut u32 implied = Effects.implied_by_attributes(info.node);
+                if (implied == Effects.INVALID) {
+                    implied = Effects.of_c_library(CodeGenerator.base_name(info.name));
+                }
+                if (implied != Effects.INVALID) {
+                    info.effects = implied;
+                    continue;
+                }
+            }
+            if (info.from_library) {
+                u32 recorded = Effects.of_library(info.name);
+                if (recorded != Effects.INVALID) {
+                    info.effects = recorded;
+                    continue;
+                }
+            }
+            info.effects = Effects.UNKNOWN;
+        }
+    }
+
+    // [Effects(writes, io)] on a declaration; INVALID when there is none.
+    unsafe u32 declared(FunctionInfo* info) {
+        Node* declaration = info.node;
+        if (declaration == null) {
+            return Effects.INVALID;
+        }
+        PointerList* uses = Attributes.of(declaration);
+        for (mut i32 i = 0; i < uses.length; i = i + 1) {
+            AttributeUse* use = (AttributeUse*)uses.get(i);
+            if (!Strings.same(use.name, "Effects")) {
+                continue;
+            }
+            mut u32 effects = Effects.NONE;
+            Node* payload = use.payload;
+            Diagnostics* diagnostics = this.diagnostics;
+            if (payload == null) {
+                diagnostics.error_in(DiagnosticErrors.EFFECTS_EXCEEDED, declaration.file_name(), use.line, use.column, "[Effects] needs a list: none, writes, io, suspends or unknown");
+                return Effects.UNKNOWN;
+            }
+            for (mut i32 k = 0; k < payload.count(); k = k + 1) {
+                Node* field = payload.child(k);
+                Node* value = field.first();
+                mut u32 effect = Effects.INVALID;
+                if (value != null && value.kind() == NodeKind::IDENTIFIER) {
+                    effect = Effects.parse(value.text());
+                }
+                if (effect == Effects.INVALID) {
+                    diagnostics.error_in(DiagnosticErrors.EFFECTS_EXCEEDED, declaration.file_name(), use.line, use.column, "unknown effect in [Effects]: use none, writes, io, suspends or unknown");
+                    return Effects.UNKNOWN;
+                }
+                effects = effects | effect;
+            }
+            return effects;
+        }
+        return Effects.INVALID;
+    }
+
+    static unsafe bool local_place(Node* target) {
+        NodeKind kind = target.kind();
+        if (kind == NodeKind::IDENTIFIER) {
+            return target.symbol_kind() == SymbolKind.LOCAL;
+        }
+        if (kind == NodeKind::FIELD_ACCESS && target.symbol_kind() == SymbolKind.FIELD) {
+            Node* base = target.first();
+            return !Types.is_pointer(base.value_type()) && EffectsAnalysis.local_place(base);
+        }
+        return false;
+    }
+
+    unsafe void own(FunctionInfo* info, u32 effect, Node* at, bool in_contract) {
+        if (in_contract) {
+            this.contract_error(at, "a contract clause must not change state or suspend");
+            return;
+        }
+        if (info.effect_cause == null) {
+            info.effect_cause = at;
+        }
+        info.own_effects = info.own_effects | effect;
+    }
+
+    unsafe void scan(Node* node, FunctionInfo* info, bool in_contract) {
+        if (node == null) {
+            return;
+        }
+        NodeKind kind = node.kind();
+        if (kind == NodeKind::LAMBDA || kind == NodeKind::FUNCTION) {
+            return;
+        }
+        if (kind == NodeKind::ATOMIC_STMT && !node.is_library_interface()) {
+            PointerList* regions = this.regions;
+            regions.push((ptr)node);
+            PointerList* owners = this.region_owners;
+            owners.push((ptr)info);
+        }
+        if (kind == NodeKind::INTRINSIC && node.op() == Intrinsic.CONTRACT) {
+            i32 packed = (i32)node.int_value();
+            Obligations.record(Obligations.clause_kind(packed & 15), Obligations.contract_provenance(packed >> 4), info, node.text(), node);
+            this.scan(node.first(), info, true);
+            return;
+        }
+        if (kind == NodeKind::ASSIGN && !EffectsAnalysis.local_place(node.first())) {
+            this.own(info, Effects.WRITES, node, in_contract);
+        }
+        if (kind == NodeKind::UNARY && (node.op_kind() == TokenKind::PLUS_PLUS || node.op_kind() == TokenKind::MINUS_MINUS)
+            && !EffectsAnalysis.local_place(node.first())) {
+            this.own(info, Effects.WRITES, node, in_contract);
+        }
+        if (kind == NodeKind::INTRINSIC && Intrinsic.is_atomic(node.op()) && node.op() != Intrinsic.ATOMIC_LOAD && node.op() != Intrinsic.ATOMIC_FENCE) {
+            this.own(info, Effects.WRITES, node, in_contract);
+        }
+        if (kind == NodeKind::AWAIT_EXPR && EffectsAnalysis.may_suspend(node)) {
+            this.own(info, Effects.SUSPENDS, node, in_contract);
+        }
+        if (kind == NodeKind::SPAWN_STMT) {
+            this.own(info, Effects.IO, node, in_contract);
+        }
+        if (kind == NodeKind::CALL && !ProgressProof.direct_callee(node.first())) {
+            this.own(info, Effects.UNKNOWN, node, in_contract);
+        }
+        if (ProgressProof.calls_function(node.symbol_kind()) && node.symbol() != null) {
+            EffectEdge* edge = (EffectEdge*)Memory.zalloc(sizeof(EffectEdge));
+            edge.callee = (FunctionInfo*)node.symbol();
+            edge.at = node;
+            edge.in_contract = in_contract;
+            if (in_contract) {
+                PointerList* contract_edges = this.contract_edges;
+                contract_edges.push((ptr)edge);
+            } else {
+                PointerList* edges = info.effect_edges;
+                edges.push((ptr)edge);
+            }
+        }
+        for (mut i32 field = NodeField.FIRST; field <= NodeField.FOURTH; field = field + 1) {
+            u32 stored = node.get_field(field);
+            if (stored != 0) {
+                this.scan(Ast.at((i32)stored), info, in_contract);
+            }
+        }
+        if (node.has_items()) {
+            for (mut i32 i = 0; i < node.count(); i = i + 1) {
+                this.scan(node.child(i), info, in_contract);
+            }
+        }
+    }
+
+    // A region inside another one is checked as part of the outer region.
+    static unsafe bool nested_region(PointerList* regions, i32 index) {
+        Node* region = (Node*)regions.get(index);
+        for (mut i32 i = 0; i < index; i = i + 1) {
+            if (EffectsAnalysis.contains((Node*)regions.get(i), region)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static unsafe bool contains(Node* outer, Node* inner) {
+        if (outer == inner) {
+            return true;
+        }
+        for (mut i32 field = NodeField.FIRST; field <= NodeField.FOURTH; field = field + 1) {
+            u32 stored = outer.get_field(field);
+            if (stored != 0 && EffectsAnalysis.contains(Ast.at((i32)stored), inner)) {
+                return true;
+            }
+        }
+        if (outer.has_items()) {
+            for (mut i32 i = 0; i < outer.count(); i = i + 1) {
+                if (EffectsAnalysis.contains(outer.child(i), inner)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    // Awaiting a function the async elision compiled as a plain one does not suspend.
+    static unsafe bool may_suspend(Node* await_node) {
+        FunctionInfo* awaited = AsyncElision.awaited_call(await_node);
+        return awaited == null || awaited.is_async;
+    }
+
+    // The coroutine primitives of std::builtin::coro: suspend is the suspension point, handle and done only read.
+    static unsafe u32 coroutine_primitive(FunctionInfo* info) {
+        StructInfo* owner = info.owner;
+        if (owner == null || owner.node == null || !Attributes.has(owner.node, "intrinsic")) {
+            return Effects.INVALID;
+        }
+        ptr<i8> name = CodeGenerator.base_name(info.name);
+        if (Strings.same(name, "coro.suspend")) {
+            return Effects.SUSPENDS;
+        }
+        if (Strings.same(name, "coro.handle") || Strings.same(name, "coro.done")) {
+            return Effects.NONE;
+        }
+        return Effects.INVALID;
+    }
+
+    // Calling an async function without awaiting it only creates the task: its suspensions are not the caller's.
+    static unsafe u32 inherited(FunctionInfo* callee) {
+        if (callee.is_async) {
+            return callee.effects & ~Effects.SUSPENDS;
+        }
+        return callee.effects;
+    }
+
+    unsafe void settle() {
+        SymbolTable* symbols = this.symbols;
+        PointerList* functions = symbols.functions;
+        mut bool changed = true;
+        while (changed) {
+            changed = false;
+            for (mut i32 i = 0; i < functions.length; i = i + 1) {
+                FunctionInfo* info = (FunctionInfo*)functions.get(i);
+                PointerList* edges = info.effect_edges;
+                for (mut i32 e = 0; e < edges.length; e = e + 1) {
+                    EffectEdge* edge = (EffectEdge*)edges.get(e);
+                    u32 merged = info.effects | EffectsAnalysis.inherited(edge.callee);
+                    if (merged != info.effects) {
+                        info.effects = merged;
+                        changed = true;
+                    }
+                }
+            }
+        }
+    }
+
+    static unsafe bool is_pure(FunctionInfo* info) {
+        Node* declaration = info.node;
+        return declaration != null && (Attributes.has(declaration, "Pure") || Attributes.has(declaration, "Const"));
+    }
+
+    unsafe void audit() {
+        SymbolTable* symbols = this.symbols;
+        PointerList* functions = symbols.functions;
+        for (mut i32 i = 0; i < functions.length; i = i + 1) {
+            FunctionInfo* info = (FunctionInfo*)functions.get(i);
+            if (!EffectsAnalysis.has_body(info)) {
+                continue;
+            }
+            Node* declaration = info.node;
+            if (declaration.is_library_interface()) {
+                continue;
+            }
+            Obligations.function(info);
+            if (EffectsAnalysis.is_pure(info)) {
+                if (this.require_within(info, Effects.NONE, DiagnosticErrors.PURE_VIOLATION, "is [Pure]")) {
+                    Obligations.record("pure", "proved", info, "[Pure]", declaration);
+                }
+                continue;
+            }
+            u32 ceiling = this.declared(info);
+            if (ceiling != Effects.INVALID) {
+                ByteBuffer* claim = ByteBuffer.create();
+                claim.append("declares [Effects(");
+                claim.append(Effects.describe(ceiling));
+                claim.append(")]");
+                if (this.require_within(info, ceiling, DiagnosticErrors.EFFECTS_EXCEEDED, claim.cstr())) {
+                    ByteBuffer* text = ByteBuffer.create();
+                    text.append("[Effects(");
+                    text.append(Effects.describe(ceiling));
+                    text.append(")]");
+                    Obligations.record("effects", "proved", info, text.cstr(), declaration);
+                }
+            }
+        }
+        PointerList* regions = this.regions;
+        PointerList* owners = this.region_owners;
+        for (mut i32 r = 0; r < regions.length; r = r + 1) {
+            if (!EffectsAnalysis.nested_region(regions, r)) {
+                RegionCheck.run(this.symbols, this.diagnostics, (FunctionInfo*)owners.get(r), (Node*)regions.get(r));
+            }
+        }
+        PointerList* contract_edges = this.contract_edges;
+        for (mut i32 e = 0; e < contract_edges.length; e = e + 1) {
+            EffectEdge* edge = (EffectEdge*)contract_edges.get(e);
+            u32 effects = EffectsAnalysis.inherited(edge.callee);
+            if (effects != 0) {
+                this.contract_error(edge.at, EffectsAnalysis.call_message("a contract clause may only call functions without effects; '", edge.callee, effects));
+            }
+        }
+    }
+
+    unsafe void contract_error(Node* at, ptr<i8> message) {
+        Diagnostics* diagnostics = this.diagnostics;
+        diagnostics.error_span(DiagnosticErrors.CONTRACT_EFFECT, at.file_name(), at.line(), at.column(), at.length(), message);
+    }
+
+    static unsafe ptr<i8> call_message(ptr<i8> prefix, FunctionInfo* callee, u32 effects) {
+        ByteBuffer* message = ByteBuffer.create();
+        message.append(prefix);
+        message.append(CodeGenerator.base_name(callee.name));
+        message.append("' has effects: ");
+        message.append(Effects.describe(effects));
+        return message.cstr();
+    }
+
+    // Reports the first own operation or call that goes beyond the ceiling the declaration states.
+    unsafe bool require_within(FunctionInfo* info, u32 ceiling, i32 code, ptr<i8> claim) {
+        if (Effects.within(info.effects, ceiling)) {
+            return true;
+        }
+        Diagnostics* diagnostics = this.diagnostics;
+        if (!Effects.within(info.own_effects, ceiling) && info.effect_cause != null) {
+            Node* cause = info.effect_cause;
+            ByteBuffer* message = ByteBuffer.create();
+            message.append("this function ");
+            message.append(claim);
+            message.append(", but this operation has effects: ");
+            message.append(Effects.describe(info.own_effects & ~ceiling));
+            diagnostics.error_span(code, cause.file_name(), cause.line(), cause.column(), cause.length(), message.cstr());
+            return false;
+        }
+        PointerList* edges = info.effect_edges;
+        for (mut i32 e = 0; e < edges.length; e = e + 1) {
+            EffectEdge* edge = (EffectEdge*)edges.get(e);
+            u32 inherited = EffectsAnalysis.inherited(edge.callee);
+            if (Effects.within(inherited, ceiling)) {
+                continue;
+            }
+            ByteBuffer* prefix = ByteBuffer.create();
+            prefix.append("this function ");
+            prefix.append(claim);
+            prefix.append(", but '");
+            Node* at = edge.at;
+            diagnostics.error_span(code, at.file_name(), at.line(), at.column(), at.length(), EffectsAnalysis.call_message(prefix.cstr(), edge.callee, inherited));
+            return false;
+        }
+        Node* declaration = info.node;
+        diagnostics.error_span(code, declaration.file_name(), declaration.line(), declaration.column(), declaration.length(), "this function has more effects than it declares");
+        return false;
+    }
+
+    unsafe void export() {
+        SymbolTable* symbols = this.symbols;
+        PointerList* functions = symbols.functions;
+        for (mut i32 i = 0; i < functions.length; i = i + 1) {
+            FunctionInfo* info = (FunctionInfo*)functions.get(i);
+            if (!EffectsAnalysis.has_body(info) || info.bindings != null) {
+                continue;
+            }
+            Node* declaration = info.node;
+            if (!declaration.is_library_interface()) {
+                Effects.export(info.name, info.effects);
+            }
+        }
+    }
+}

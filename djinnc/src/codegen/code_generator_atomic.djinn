@@ -1,0 +1,183 @@
+namespace djinnc;
+
+// An atomic region saves its operands when it starts. A value operand (one that owns memory) is undone by move: the
+// first whole assignment inside the region keeps the old value in the save instead of disposing it, so a rollback
+// disposes the new value and moves the old one back, and a commit disposes the old one. Errors that leave the region
+// roll back every active region; normal exits (end, return, break, continue) commit and run after_commit.
+impl CodeGenerator {
+    unsafe void gen_atomic(Node* node) {
+        if (node.op() == 1) {
+            this.gen_statement(node.first());
+            return;
+        }
+        AtomicRegion* region = (AtomicRegion*)Memory.zalloc(sizeof(AtomicRegion));
+        region.saves = PointerList.create();
+        region.after = node.third();
+        PointerList* saves = region.saves;
+        Node* operands = node.second();
+        SymbolTable* symbols = this.symbols;
+        ptr flag_type = LLVMIntTypeInContext(this.context, 1);
+        for (mut i32 i = 0; i < operands.count(); i = i + 1) {
+            Node* operand = operands.child(i);
+            AtomicSave* entry = (AtomicSave*)Memory.zalloc(sizeof(AtomicSave));
+            entry.operand = operand;
+            entry.type = operand.value_type();
+            entry.llvm_type = this.llvm_type(entry.type);
+            entry.address = this.gen_address(operand);
+            entry.save = LLVMBuildAlloca(this.alloca_builder, entry.llvm_type, "atomic.save");
+            LLVMBuildStore(this.builder, LLVMBuildLoad2(this.builder, entry.llvm_type, entry.address, "atomic.value"), entry.save);
+            entry.is_value = Ownership.needs_dispose(symbols, entry.type);
+            if (entry.is_value) {
+                entry.replaced = LLVMBuildAlloca(this.alloca_builder, flag_type, "atomic.replaced");
+                LLVMBuildStore(this.builder, LLVMConstInt(flag_type, 0, 0), entry.replaced);
+            }
+            saves.push((ptr)entry);
+        }
+        FunctionContext* function_context = this.function_context;
+        PointerList* regions = function_context.atomics;
+        regions.push((ptr)region);
+        this.gen_statement(node.first());
+        regions.truncate(regions.length - 1);
+        if (!this.is_terminated()) {
+            this.commit_region(region);
+        }
+    }
+
+    static unsafe bool same_place(Node* left, Node* right) {
+        if (left.kind() != right.kind()) {
+            return false;
+        }
+        NodeKind kind = left.kind();
+        if (kind == NodeKind::IDENTIFIER) {
+            return left.symbol_kind() == right.symbol_kind() && left.symbol() == right.symbol();
+        }
+        if (kind == NodeKind::FIELD_ACCESS) {
+            return left.symbol() == right.symbol() && CodeGenerator.same_place(left.first(), right.first());
+        }
+        if (kind == NodeKind::UNARY && left.op_kind() == TokenKind::STAR && right.op_kind() == TokenKind::STAR) {
+            return CodeGenerator.same_place(left.first(), right.first());
+        }
+        return false;
+    }
+
+    // A whole assignment to a value operand of an active region: the first one keeps the old value in the save, a
+    // later one disposes the value the region itself stored. Returns false when the target is not such an operand.
+    unsafe bool replace_atomic_operand(Node* target, ptr address) {
+        FunctionContext* function_context = this.function_context;
+        PointerList* regions = function_context.atomics;
+        for (mut i32 r = regions.length - 1; r >= 0; r = r - 1) {
+            AtomicRegion* region = (AtomicRegion*)regions.get(r);
+            PointerList* saves = region.saves;
+            for (mut i32 i = 0; i < saves.length; i = i + 1) {
+                AtomicSave* entry = (AtomicSave*)saves.get(i);
+                if (!entry.is_value || !CodeGenerator.same_place(entry.operand, target)) {
+                    continue;
+                }
+                ptr flag_type = LLVMIntTypeInContext(this.context, 1);
+                ptr replaced = LLVMBuildLoad2(this.builder, flag_type, entry.replaced, "atomic.was_replaced");
+                ptr dispose_block = this.new_block("atomic.drop_new");
+                ptr keep_block = this.new_block("atomic.keep_old");
+                ptr next_block = this.new_block("atomic.assigned");
+                LLVMBuildCondBr(this.builder, replaced, dispose_block, keep_block);
+                LLVMPositionBuilderAtEnd(this.builder, dispose_block);
+                this.dispose_value(address, entry.type);
+                LLVMBuildBr(this.builder, next_block);
+                LLVMPositionBuilderAtEnd(this.builder, keep_block);
+                LLVMBuildStore(this.builder, LLVMConstInt(flag_type, 1, 0), entry.replaced);
+                LLVMBuildBr(this.builder, next_block);
+                LLVMPositionBuilderAtEnd(this.builder, next_block);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    unsafe void when_replaced(AtomicSave* entry, ptr address) {
+        ptr flag_type = LLVMIntTypeInContext(this.context, 1);
+        ptr replaced = LLVMBuildLoad2(this.builder, flag_type, entry.replaced, "atomic.was_replaced");
+        ptr dispose_block = this.new_block("atomic.drop");
+        ptr next_block = this.new_block("atomic.dropped");
+        LLVMBuildCondBr(this.builder, replaced, dispose_block, next_block);
+        LLVMPositionBuilderAtEnd(this.builder, dispose_block);
+        this.dispose_value(address, entry.type);
+        LLVMBuildBr(this.builder, next_block);
+        LLVMPositionBuilderAtEnd(this.builder, next_block);
+    }
+
+    unsafe void commit_region(AtomicRegion* region) {
+        PointerList* saves = region.saves;
+        for (mut i32 i = saves.length - 1; i >= 0; i = i - 1) {
+            AtomicSave* entry = (AtomicSave*)saves.get(i);
+            if (entry.is_value) {
+                this.when_replaced(entry, entry.save);
+            }
+        }
+        if (region.after != null && !this.is_terminated()) {
+            this.gen_statement(region.after);
+        }
+    }
+
+    unsafe void rollback_region(AtomicRegion* region) {
+        PointerList* saves = region.saves;
+        for (mut i32 i = saves.length - 1; i >= 0; i = i - 1) {
+            AtomicSave* entry = (AtomicSave*)saves.get(i);
+            if (entry.is_value) {
+                this.when_replaced(entry, entry.address);
+            }
+            LLVMBuildStore(this.builder, LLVMBuildLoad2(this.builder, entry.llvm_type, entry.save, "atomic.restore"), entry.address);
+        }
+    }
+
+    // Commits the regions a return, break or continue leaves (those from depth up), innermost first. Each one is taken
+    // off the active list while its after_commit runs, and the list is put back for the code that follows.
+    unsafe void emit_commits(i32 depth) {
+        FunctionContext* function_context = this.function_context;
+        PointerList* regions = function_context.atomics;
+        if (regions.length <= depth) {
+            return;
+        }
+        PointerList* active = PointerList.create();
+        for (mut i32 i = 0; i < regions.length; i = i + 1) {
+            active.push(regions.get(i));
+        }
+        for (mut i32 i = active.length - 1; i >= depth; i = i - 1) {
+            regions.truncate(i);
+            this.commit_region((AtomicRegion*)active.get(i));
+        }
+        regions.truncate(0);
+        for (mut i32 i = 0; i < active.length; i = i + 1) {
+            regions.push(active.get(i));
+        }
+    }
+
+    unsafe void emit_rollbacks() {
+        FunctionContext* function_context = this.function_context;
+        PointerList* regions = function_context.atomics;
+        for (mut i32 r = regions.length - 1; r >= 0; r = r - 1) {
+            this.rollback_region((AtomicRegion*)regions.get(r));
+        }
+    }
+
+    // The exit of a throwing function: an error rolls back every active region, a value commits them.
+    unsafe void settle_regions(ptr record) {
+        FunctionContext* function_context = this.function_context;
+        PointerList* regions = function_context.atomics;
+        if (regions.length == 0) {
+            return;
+        }
+        ptr i32_type = LLVMIntTypeInContext(this.context, 32);
+        ptr tag = LLVMBuildExtractValue(this.builder, record, 0, "atomic.tag");
+        ptr failed = LLVMBuildICmp(this.builder, LlvmConst.INT_NE, tag, LLVMConstInt(i32_type, 0, 0), "atomic.failed");
+        ptr rollback_block = this.new_block("atomic.rollback");
+        ptr commit_block = this.new_block("atomic.commit");
+        ptr next_block = this.new_block("atomic.settled");
+        LLVMBuildCondBr(this.builder, failed, rollback_block, commit_block);
+        LLVMPositionBuilderAtEnd(this.builder, rollback_block);
+        this.emit_rollbacks();
+        LLVMBuildBr(this.builder, next_block);
+        LLVMPositionBuilderAtEnd(this.builder, commit_block);
+        this.emit_commits(0);
+        LLVMBuildBr(this.builder, next_block);
+        LLVMPositionBuilderAtEnd(this.builder, next_block);
+    }
+}

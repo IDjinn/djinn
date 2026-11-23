@@ -1,0 +1,96 @@
+namespace conformance;
+
+import testing;
+import djinnc::testing;
+import djinnc;
+
+struct NativeErrorTests {
+    [Test]
+    void errno_becomes_a_djinn_error() {
+        str source = """
+struct OsError {
+    i32 code;
+}
+
+extern "C" {
+    [NativeError(detect = result != 0, capture = errno)]
+    i32 remove(i8* path) throws(OsError);
+}
+
+unsafe i32 main() {
+    return switch remove("native_errors_missing_file.txt") {
+        Result v -> 100,
+        OsError e -> e.code
+    };
+}
+""";
+        Verify.source(source).runs(Expected.exit(2));
+    }
+
+    [Test]
+    void return_code_capture_and_success_path() {
+        str source = """
+struct StatusError {
+    i32 code;
+}
+
+extern "C" {
+    [NativeError(detect = result < 0, capture = return_code)]
+    i32 abs(i32 value) throws(StatusError);
+}
+
+i32 absolute(i32 value) throws(StatusError) {
+    return try abs(value);
+}
+
+i32 main() {
+    return switch absolute(-42) {
+        Result v -> v,
+        StatusError e -> 1
+    };
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void native_error_needs_handling() {
+        str source = """
+struct OsError {
+    i32 code;
+}
+
+extern "C" {
+    [NativeError(detect = result != 0, capture = errno)]
+    i32 remove(i8* path) throws(OsError);
+}
+
+unsafe i32 main() {
+    return remove("x");
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.MISSING_TRY).at(11, 18));
+    }
+
+    [Test]
+    void native_error_needs_throws_and_a_known_capture() {
+        str source = """
+struct OsError {
+    i32 code;
+}
+
+extern "C" {
+    [NativeError(detect = result != 0, capture = errno)]
+    i32 remove(i8* path);
+
+    [NativeError(detect = result != 0, capture = signal)]
+    i32 rename(i8* from, i8* to) throws(OsError);
+}
+
+i32 main() {
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.NATIVE_ERROR).at(6, 6).and_error(DiagnosticErrors.NATIVE_ERROR).at(9, 6));
+    }
+}

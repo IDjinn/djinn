@@ -1,0 +1,173 @@
+#!/usr/bin/env bash
+set -eu
+compiler="${1:?usage: guarantees.sh <djinnc> <runtime lib> [runtime dir]}"
+runtime_lib="${2:?usage: guarantees.sh <djinnc> <runtime lib> [runtime dir]}"
+runtime="${3:-runtime}"
+root="$(cd "$(dirname "$0")/../.." && pwd)"
+out="$root/build/unit/guarantees"
+mkdir -p "$out"
+cd "$root"
+flags=(--runtime-dir "$runtime" --runtime-lib "$runtime_lib")
+
+fail() { echo "FAIL guarantees: $1"; exit 1; }
+
+# 'contracts: observe' in djinn.proj reports the failed clause and goes on.
+"$compiler" tests/contracts_project -o "$out/project" --run "${flags[@]}" > "$out/project.log" 2>&1 && status=0 || status=$?
+[ "$status" = 42 ] || { cat "$out/project.log"; fail "the observing project must exit with 42, got $status"; }
+grep -q "observed: R10013: contract violated: require(x % 2 == 0)" "$out/project.log" || fail "observe must report the clause"
+
+# An unknown mode is rejected.
+"$compiler" tests/contracts_project -o "$out/bad" --check --contracts=sometimes "${flags[@]}" > "$out/bad.log" 2>&1 && fail "--contracts=sometimes must be rejected"
+grep -q "unknown contracts mode 'sometimes'" "$out/bad.log" || fail "an unknown mode must be explained"
+
+# The command line wins over djinn.proj.
+"$compiler" tests/contracts_project -o "$out/ignore" --run --contracts=ignore "${flags[@]}" > "$out/ignore.log" 2>&1 && status=0 || status=$?
+[ "$status" = 42 ] || { cat "$out/ignore.log"; fail "--contracts=ignore must exit with 42, got $status"; }
+grep -q "observed" "$out/ignore.log" && fail "--contracts=ignore must not report"
+
+# Each library keeps the mode it was built with: lib_observe only reports, also in the generic the consumer instantiates,
+# while the consumer, built with check, traps on its own clause.
+cat > "$out/lib_observe.djinn" <<'SRC'
+namespace observed;
+
+public i64 halve(i64 x) require(x % 2 == 0) {
+    return x / 2;
+}
+
+public T first<T>(T a, T b) require(a != b) {
+    return a;
+}
+SRC
+cat > "$out/app.djinn" <<'SRC'
+import observed;
+
+i64 positive(i64 x) require(x > 0) {
+    return x;
+}
+
+i32 main() {
+    i64 sum = observed::halve(3) + observed::first<i64>(4, 4);
+    return (i32)positive(sum - 5);
+}
+SRC
+"$compiler" "$out/lib_observe.djinn" --library -o "$out/observed.djlib" --contracts=observe "${flags[@]}" > "$out/lib.log" 2>&1 || { cat "$out/lib.log"; fail "the library must compile"; }
+"$compiler" --inspect-lib "$out/observed.djlib" | grep -q "contracts:  observe" || fail "the manifest must record the contracts mode"
+"$compiler" "$out/app.djinn" --lib "$out/observed.djlib" -o "$out/app" "${flags[@]}" ${DJINN_USE_LLD:+--lld} > "$out/app.log" 2>&1 || { cat "$out/app.log"; fail "the consumer must compile"; }
+grep -q "was built with contracts observe and this project uses check" "$out/app.log" || fail "a weaker library mode must be reported"
+"$out/app" > "$out/app_run.log" 2>&1 && status=0 || status=$?
+[ "$status" != 0 ] || fail "the consumer clause must trap"
+grep -q "observed: R10013: contract violated: require(x % 2 == 0)" "$out/app_run.log" || fail "the library clause must only be observed"
+grep -q "observed: R10013: contract violated: require(a != b)" "$out/app_run.log" || fail "the instantiated generic must keep the library mode"
+grep -q "panic" "$out/app_run.log" || fail "the consumer clause must panic"
+grep -q "require(x > 0)" "$out/app_run.log" || fail "the consumer report must name its clause"
+
+# The effects a library infers for the functions it compiles cross into the consumer, which only sees signatures.
+cat > "$out/lib_effects.djinn" <<'SRC'
+namespace counters;
+
+struct Counter {
+    mut i32 value;
+
+    public void bump() {
+        this.value = this.value + 1;
+    }
+
+    public i32 peek() {
+        return this.value;
+    }
+}
+SRC
+cat > "$out/pure_ok.djinn" <<'SRC'
+import counters;
+
+[Pure] i32 seen(Counter* counter) {
+    return counter.peek();
+}
+
+i32 main() {
+    return 0;
+}
+SRC
+cat > "$out/pure_bad.djinn" <<'SRC'
+import counters;
+
+[Pure] i32 sneaky(Counter* counter) {
+    counter.bump();
+    return 0;
+}
+
+i32 main() {
+    return 0;
+}
+SRC
+"$compiler" "$out/lib_effects.djinn" --library -o "$out/counters.djlib" "${flags[@]}" > "$out/lib_effects.log" 2>&1 || { cat "$out/lib_effects.log"; fail "the effects library must compile"; }
+"$compiler" "$out/pure_ok.djinn" --lib "$out/counters.djlib" --check "${flags[@]}" > "$out/pure_ok.log" 2>&1 || { cat "$out/pure_ok.log"; fail "a [Pure] function may call a library reader"; }
+"$compiler" "$out/pure_bad.djinn" --lib "$out/counters.djlib" --check "${flags[@]}" > "$out/pure_bad.log" 2>&1 && fail "a [Pure] function must not call a library writer"
+grep -q "E7003" "$out/pure_bad.log" || { cat "$out/pure_bad.log"; fail "the library writer must be reported with E7003"; }
+
+# --obligations lists every clause once with its provenance, and the inferred effects of the program's functions.
+cat > "$out/report.djinn" <<'SRC'
+struct Account {
+    mut i64 balance;
+    invariant(this.balance >= 0);
+
+    Account(i64 start) {
+        this.balance = start;
+    }
+
+    public void withdraw(i64 amount) require(amount > 0) ensure(this.balance == old(this.balance) - amount) {
+        this.balance = this.balance - amount;
+    }
+}
+
+[Pure] i64 doubled(i64 x) ensure(result >= x) {
+    if (x < 0) {
+        return x;
+    }
+    return x * 2;
+}
+
+i32 main() {
+    return 0;
+}
+SRC
+"$compiler" "$out/report.djinn" --check --obligations=json --contracts=observe "${flags[@]}" > "$out/report.json" 2> "$out/report.log" || { cat "$out/report.log"; fail "--obligations=json must succeed"; }
+grep -q '"kind":"require","provenance":"observed","function":"Account.withdraw","text":"require(amount > 0)"' "$out/report.json" || { cat "$out/report.json"; fail "the require clause must be listed as observed"; }
+grep -q '"kind":"pure","provenance":"proved","function":"doubled"' "$out/report.json" || fail "a verified [Pure] must be listed as proved"
+grep -q '{"name":"doubled","effects":\[\]' "$out/report.json" || fail "the inferred effects of doubled must be empty"
+grep -q '{"name":"Account.withdraw","effects":\["writes"\]' "$out/report.json" || fail "withdraw must write"
+[ "$(grep -o '"text":"ensure(result >= x)"' "$out/report.json" | wc -l)" = 1 ] || fail "a clause guarding two returns must be listed once"
+grep -q 'core' "$out/report.json" && fail "the core library must not be listed"
+"$compiler" "$out/report.djinn" --check --obligations "${flags[@]}" > "$out/report.txt" 2>&1 || fail "--obligations must succeed"
+grep -q "checked invariant in Account.withdraw: invariant(this.balance >= 0)" "$out/report.txt" || { cat "$out/report.txt"; fail "the text report must list the invariant"; }
+
+# An extern with [NativeError] in a library: the consumer re-declares the wrapper from the interface and links the
+# library's definition.
+cat > "$out/lib_native.djinn" <<'SRC'
+namespace natives;
+
+struct OsError {
+    i32 code;
+}
+
+extern "C" {
+    [NativeError(detect = result != 0, capture = errno)]
+    i32 remove(i8* path) throws(OsError);
+}
+SRC
+cat > "$out/native_app.djinn" <<'SRC'
+import natives;
+
+unsafe i32 main() {
+    return switch natives::remove("guarantees_missing_file.txt") {
+        Result v -> 100,
+        OsError e -> e.code + 40
+    };
+}
+SRC
+"$compiler" "$out/lib_native.djinn" --library -o "$out/natives.djlib" "${flags[@]}" > "$out/lib_native.log" 2>&1 || { cat "$out/lib_native.log"; fail "the native error library must compile"; }
+"$compiler" "$out/native_app.djinn" --lib "$out/natives.djlib" -o "$out/native_app" "${flags[@]}" ${DJINN_USE_LLD:+--lld} > "$out/native_app.log" 2>&1 || { cat "$out/native_app.log"; fail "the native error consumer must compile"; }
+"$out/native_app" && status=0 || status=$?
+[ "$status" = 42 ] || fail "the library [NativeError] must report ENOENT (exit 42, got $status)"
+
+echo "PASS guarantees"

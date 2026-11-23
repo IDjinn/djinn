@@ -1,5 +1,6 @@
 #include "runtime_internal.h"
 
+#include <errno.h>
 #include <signal.h>
 #include <stdlib.h>
 
@@ -615,6 +616,34 @@ void __djinn_panic(const char* message, const char* file, const uint32_t line)
     }
     __djinn_panic_default_report(message, file, line);
     djinn_abort();
+}
+
+// [NativeError] reads the error of the last C call right after it returns: errno, or GetLastError on Windows. They are
+// not inlined so that nothing the compiler moves can run between the call and the read.
+__attribute__((noinline)) int32_t __djinn_errno(void)
+{
+    return (int32_t)errno;
+}
+
+__attribute__((noinline)) void __djinn_errno_clear(void)
+{
+    errno = 0;
+}
+
+__attribute__((noinline)) int32_t __djinn_last_error(void)
+{
+#ifdef _WIN32
+    return (int32_t)GetLastError();
+#else
+    return (int32_t)errno;
+#endif
+}
+
+// A contract clause built in observe mode failed: report it and let the program go on.
+void __djinn_contract_observed(const char* message, const char* file, const uint32_t line)
+{
+    fprintf(stderr, "observed: %s\n  --> %s:%u\n", message, file, (unsigned)line);
+    fflush(stderr);
 }
 
 

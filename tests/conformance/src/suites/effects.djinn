@@ -1,0 +1,221 @@
+namespace conformance;
+
+import testing;
+import djinnc::testing;
+import djinnc;
+
+struct EffectsTests {
+    [Test]
+    void pure_function_with_local_writes_runs() {
+        str source = """
+struct Pair {
+    mut i32 left;
+    mut i32 right;
+}
+
+[Pure] i32 sum_of_squares(i32 a, i32 b) {
+    mut Pair pair = Pair { .left = a, .right = b };
+    pair.left = pair.left * pair.left;
+    pair.right = pair.right * pair.right;
+    mut i32 total = 0;
+    total += pair.left;
+    total++;
+    return total + pair.right - 1;
+}
+
+i32 main() {
+    return sum_of_squares(3, 4) + 17;
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void pure_function_cannot_write_through_a_pointer() {
+        str source = """
+struct Counter {
+    mut i32 value;
+}
+
+[Pure] unsafe i32 bump(Counter* counter) {
+    counter.value = counter.value + 1;
+    return counter.value;
+}
+
+i32 main() {
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.PURE_VIOLATION).at(6, 19));
+    }
+
+    [Test]
+    void pure_function_cannot_call_a_writer() {
+        str source = """
+struct Counter {
+    mut i32 value;
+
+    public void bump() {
+        this.value = this.value + 1;
+    }
+}
+
+i32 twice(Counter* counter) {
+    counter.bump();
+    return counter.value;
+}
+
+[Pure] i32 sneaky(Counter* counter) {
+    return twice(counter);
+}
+
+i32 main() {
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.PURE_VIOLATION).at(15, 12));
+    }
+
+    [Test]
+    void unknown_extern_is_not_pure() {
+        str source = """
+extern "C" {
+    i32 custom_native(i32 x);
+    [Effects(none)] i32 custom_math(i32 x);
+}
+
+[Pure] i32 calls_math(i32 x) {
+    return custom_math(x);
+}
+
+[Pure] unsafe i32 calls_native(i32 x) {
+    return custom_native(x);
+}
+
+i32 main() {
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.PURE_VIOLATION).at(11, 12));
+    }
+
+    [Test]
+    void known_c_functions_have_effects() {
+        str source = """
+extern "C" {
+    i32 strlen(i8* text);
+    i32 puts(i8* text);
+}
+
+[Pure] unsafe i32 measured(i8* text) {
+    return strlen(text);
+}
+
+[Pure] unsafe i32 printed(i8* text) {
+    return puts(text);
+}
+
+i32 main() {
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.PURE_VIOLATION).at(11, 12));
+    }
+
+    [Test]
+    void declared_effects_are_audited() {
+        str source = """
+extern "C" {
+    i32 puts(i8* text);
+}
+
+struct Counter {
+    mut i32 value;
+}
+
+[Effects(writes)] unsafe void store(Counter* counter) {
+    counter.value = 1;
+}
+
+[Effects(writes)] unsafe void store_and_print(Counter* counter) {
+    counter.value = 1;
+    puts("stored");
+}
+
+i32 main() {
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.EFFECTS_EXCEEDED).at(15, 5));
+    }
+
+    [Test]
+    void unknown_effect_name_is_rejected() {
+        str source = """
+[Effects(teleports)] i32 strange() {
+    return 0;
+}
+
+i32 main() {
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.EFFECTS_EXCEEDED).at(1, 2));
+    }
+
+    [Test]
+    void awaiting_is_an_effect() {
+        str source = """
+import std::sys;
+
+async i32 later() {
+    return 1;
+}
+
+[Effects(none)] async i32 computes() {
+    return await later();
+}
+
+[Effects(none)] async i32 waits() {
+    await Task.pause();
+    return 1;
+}
+
+i32 main() {
+    return 0;
+}
+""";
+        Verify.source(source).with_std().diagnostics(Expected.warning(DiagnosticWarnings.ASYNC_NEVER_SUSPENDS).at(3, 7).and_error(DiagnosticErrors.EFFECTS_EXCEEDED).at(12, 5));
+    }
+
+    [Test]
+    void contract_clauses_only_call_functions_without_effects() {
+        str source = """
+struct Counter {
+    mut i32 value;
+
+    public void bump() {
+        this.value = this.value + 1;
+    }
+
+    public i32 peek() {
+        return this.value;
+    }
+}
+
+bool bumped(Counter* counter) {
+    counter.bump();
+    return true;
+}
+
+i32 checked(Counter* counter) require(counter.peek() >= 0) require(bumped(counter)) {
+    return 0;
+}
+
+i32 main() {
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.CONTRACT_EFFECT).at(18, 68));
+    }
+}

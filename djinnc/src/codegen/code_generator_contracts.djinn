@@ -1,0 +1,53 @@
+namespace djinnc;
+
+impl CodeGenerator {
+    // A require/ensure/invariant clause, in the contracts mode of the file that declared it: check traps through the
+    // panic path, observe reports and goes on, ignore evaluates nothing (and never becomes an llvm.assume).
+    unsafe Value* generate_contract(Node* node) {
+        i32 mode = (i32)(node.int_value() >> 4);
+        if (mode == ContractMode.IGNORE) {
+            return Value.create(null, Types.void_type());
+        }
+        ptr holds = this.to_condition(this.gen_expression(node.first()));
+        if (LLVMIsConstant(holds) != 0 && LLVMIsNull(holds) == 0) {
+            return Value.create(null, Types.void_type());
+        }
+        ByteBuffer* message = ByteBuffer.create();
+        message.append(RuntimeErrors.report(RuntimeErrors.CONTRACT_VIOLATED));
+        message.append(": ");
+        message.append(node.text());
+        ptr violated = this.new_block("contract.violated");
+        ptr valid = this.new_block("contract.valid");
+        LLVMBuildCondBr(this.builder, holds, valid, violated);
+        LLVMPositionBuilderAtEnd(this.builder, violated);
+        if (mode == ContractMode.OBSERVE) {
+            this.call_contract_observed(this.string_constant(message.cstr()), node);
+            LLVMBuildBr(this.builder, valid);
+        } else {
+            this.call_panic(this.string_constant(message.cstr()), node);
+            LLVMBuildUnreachable(this.builder);
+        }
+        LLVMPositionBuilderAtEnd(this.builder, valid);
+        return Value.create(null, Types.void_type());
+    }
+
+    unsafe void call_contract_observed(ptr message, Node* at) {
+        ptr i32_type = LLVMIntTypeInContext(this.context, 32);
+        ptr pointer_llvm = LLVMPointerTypeInContext(this.context, 0);
+        ptr<ptr> params = CodeGenerator.array_of(3);
+        ptr<ptr> args = CodeGenerator.array_of(3);
+        params[0] = pointer_llvm;
+        params[1] = pointer_llvm;
+        params[2] = i32_type;
+        args[0] = message;
+        args[1] = this.string_constant(at.file_name());
+        args[2] = LLVMConstInt(i32_type, (u64)at.line(), 0);
+        bool declared = LLVMGetNamedFunction(this.module, "__djinn_contract_observed") != null;
+        this.call_runtime("__djinn_contract_observed", LLVMVoidTypeInContext(this.context), params, args, 3);
+        if (!declared) {
+            ptr function = LLVMGetNamedFunction(this.module, "__djinn_contract_observed");
+            this.add_function_attribute(function, Attributes.llvm_name("Cold"));
+            this.add_function_attribute(function, Attributes.llvm_name("NoUnwind"));
+        }
+    }
+}
