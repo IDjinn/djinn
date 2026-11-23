@@ -286,9 +286,10 @@ type                 = [ "mut" ] base_type { "*" | "?" | "[" [ expression ] "]" 
 base_type            = primitive_type | qualified_name [ generic_args ] | "void" | "auto" | "var" | "ptr" [ "<" type ">" ] | fn_type ;
 fn_type              = "fn" "(" [ type { "," type } ] ")" [ "->" type ] ;    (* "fn" is a type only before "(" *)
 
-primitive_type       = integer_type | float_type | native_type | "bool" | "char" | "str" | "string" | "isize" | "usize" ;
+primitive_type       = integer_type | float_type | brain_float_type | native_type | "bool" | "char" | "str" | "string" | "isize" | "usize" ;
 integer_type         = ( "i" | "u" ) DIGITS { integer_suffix } ;    (* i8..i128, u8..u128, i32w, u32n, i32nt, ... *)
-float_type           = "f" DIGITS ;                                  (* f32, f64 *)
+float_type           = "f" DIGITS ;                                  (* f16, f32, f64 *)
+brain_float_type     = "bf16" ;                                       (* x86, ARM, AArch64 and RISC-V only; E3071 elsewhere *)
 native_type          = "nint" [ overflow_suffix ] | "nfloat" | "ndouble" ;
 integer_suffix       = "n" | overflow_suffix ;
 overflow_suffix      = "w" | "t" | "c" | "s" ;
