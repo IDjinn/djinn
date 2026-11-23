@@ -1,0 +1,53 @@
+namespace djinnc;
+
+impl TypeChecker {
+    unsafe bool inside_methods_of(StructInfo* owner) {
+        FunctionInfo* function = this.function;
+        if (function == null) {
+            return false;
+        }
+        StructInfo* home = function.owner;
+        return home != null && home.node == owner.node;
+    }
+
+    // A struct with an invariant keeps writes to its mutable fields inside its own methods, which check the invariant
+    // when they return.
+    unsafe void require_invariant_owner(Node* target) {
+        if (target.kind() != NodeKind::FIELD_ACCESS || target.symbol_kind() != SymbolKind.FIELD) {
+            return;
+        }
+        FieldInfo* field = (FieldInfo*)target.symbol();
+        if (!field.guarded || this.inside_methods_of(field.owner)) {
+            return;
+        }
+        StructInfo* owner = field.owner;
+        Diagnostics.add_argument(field.name);
+        ByteBuffer* message = ByteBuffer.create();
+        message.append("'");
+        message.append(field.name);
+        message.append("' belongs to '");
+        message.append(owner.name);
+        message.append("', which declares an invariant: change it through a method of '");
+        message.append(owner.name);
+        message.append("' so the invariant is checked");
+        this.error_code(target, DiagnosticErrors.INVARIANT_MUTABLE_FIELD, message.cstr());
+    }
+}
+
+impl TypeChecker {
+    unsafe void check_region(Node* node) {
+        Node* operands = node.second();
+        for (mut i32 i = 0; i < operands.count(); i = i + 1) {
+            Node* operand = operands.child(i);
+            if (!this.is_addressable(operand)) {
+                this.error_code(operand, DiagnosticErrors.ATOMIC_OPERAND, "an atomic operand must be a variable, a field or a dereference whose value the region can restore");
+                continue;
+            }
+            this.check_lvalue(operand);
+        }
+        this.check_statement(node.first());
+        if (node.third() != null) {
+            this.check_statement(node.third());
+        }
+    }
+}

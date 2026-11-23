@@ -30,9 +30,27 @@ struct Options {
     bool async_threads_set;
     bool async_threads_forced;
     bool verify_ranges;
+    i32 contract_mode;
+    i32 obligations;
+    bool contract_mode_set;
     ptr<i8> opt_level;
     ptr<i8> cpu;
     ptr<i8> features;
+    // set by the command line: it wins over 'optimization:', 'cpu:', 'features:' and 'range-opt:' in djinn.proj
+    bool opt_level_set;
+    bool cpu_set;
+    bool features_set;
+    bool range_opt_set;
+    // hardening level (HardenLevel): 0 means the default (standard); --harden=<level> or 'harden:' in djinn.proj
+    i32 harden;
+    bool harden_set;
+    // drop the code and data nothing refers to at link time (--gc-sections, 'gc-sections: true'); off by default because
+    // djinnc itself links the runtime and std for its JIT
+    bool gc_sections;
+    bool gc_sections_set;
+    // sanitizers (--sanitize=address,undefined,thread or 'sanitize:' in djinn.proj), a mask of Sanitizer
+    i32 sanitize;
+    bool sanitize_set;
     bool debug;
     bool emit_tokens;
     bool emit_ast;
@@ -196,10 +214,42 @@ struct Options {
                 || Strings.same(argument, "-O3") || Strings.same(argument, "-Os") || Strings.same(argument, "-Oz")) {
                 options.opt_level = argument + 1;
                 options.optimize = !Strings.same(argument, "-O0");
+                options.opt_level_set = true;
+            } else if (Strings.starts_with(argument, 0, strlen(argument), "--harden=")) {
+                options.harden = Linker.parse_harden(argument + 9);
+                options.harden_set = true;
+                if (options.harden == 0) {
+                    logger_error(Log.get(), "djinnc: unknown hardening level '%s' (expected off, basic, standard, strict or on)", argument + 9);
+                    options.ok = false;
+                    return options;
+                }
+            } else if (Strings.starts_with(argument, 0, strlen(argument), "--sanitize=")) {
+                options.sanitize = Linker.parse_sanitize(argument + 11);
+                options.sanitize_set = true;
+                if (options.sanitize < 0) {
+                    options.ok = false;
+                    return options;
+                }
+            } else if (Strings.same(argument, "--gc-sections") || Strings.same(argument, "--no-gc-sections")) {
+                options.gc_sections = Strings.same(argument, "--gc-sections");
+                options.gc_sections_set = true;
+            } else if (Strings.starts_with(argument, 0, strlen(argument), "--contracts=")) {
+                options.contract_mode = ContractMode.parse(argument + 12);
+                options.contract_mode_set = true;
+                if (options.contract_mode == ContractMode.UNKNOWN) {
+                    logger_error(Log.get(), "djinnc: unknown contracts mode '%s' (expected check, observe or ignore)", argument + 12);
+                    options.ok = false;
+                    return options;
+                }
+            } else if (Strings.same(argument, "--obligations")) {
+                options.obligations = 1;
+            } else if (Strings.same(argument, "--obligations=json")) {
+                options.obligations = 2;
             } else if (Strings.same(argument, "--verify-ranges")) {
                 options.verify_ranges = true;
             } else if (Strings.same(argument, "--no-range-opt")) {
                 options.no_range_opt = true;
+                options.range_opt_set = true;
             } else if (Strings.same(argument, "--strict-externs")) {
                 options.strict_externs = true;
             } else if (Strings.same(argument, "--no-async-elision")) {
@@ -270,8 +320,10 @@ struct Options {
                     options.inspect_path = value;
                 } else if (Strings.same(argument, "--cpu")) {
                     options.cpu = value;
+                    options.cpu_set = true;
                 } else if (Strings.same(argument, "--features")) {
                     options.features = value;
+                    options.features_set = true;
                 } else if (Strings.same(argument, "--lib-dir")) {
                     options.library_dir = value;
                 } else if (Strings.same(argument, "--lib")) {

@@ -20,6 +20,8 @@ function nativeConfiguration(config: LaunchConfig, program: string, cwd: string)
       cwd,
       stopAtEntry: Boolean(config.stopAtEntry),
       symbolSearchPath: path.dirname(program),
+      // djinnc writes <program>.natvis (summaries of the program's own structs); older compilers leave only the bundled handle/array rules
+      visualizerFile: fs.existsSync(`${program}.natvis`) ? `${program}.natvis` : path.join(__dirname, "..", "djinn.natvis"),
       environment: [],
       console: config.console || "integratedTerminal",
     };

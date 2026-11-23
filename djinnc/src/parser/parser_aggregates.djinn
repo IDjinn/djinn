@@ -116,16 +116,53 @@ impl Parser {
         return node;
     }
 
-    void parse_interface_member(Node* owner) {
+    unsafe void parse_interface_member(Node* owner) {
+        PointerList* found = this.parse_attributes();
+        i32 before = owner.count();
+        this.parse_interface_signature(owner);
+        if (this.platform_excluded(found)) {
+            owner.truncate_children(before);
+            return;
+        }
+        if (found.length == 0) {
+            return;
+        }
+        if (owner.count() <= before) {
+            this.attach_attributes(found, (Node*)0, AttributeTarget.OTHER);
+            return;
+        }
+        Node* member = owner.child(before);
+        mut i32 target_kind = AttributeTarget.OTHER;
+        if (member.kind() == NodeKind::FUNCTION) {
+            target_kind = AttributeTarget.METHOD;
+        } else if (member.kind() == NodeKind::FIELD_DECL) {
+            target_kind = AttributeTarget.FIELD;
+        }
+        this.attach_attributes(found, member, target_kind);
+    }
+
+    void parse_interface_signature(Node* owner) {
+        mut i32 compile_time = 0;
+        while (this.check(TokenKind::CONSTEXPR) || this.check(TokenKind::CONSTEVAL)) {
+            if (this.kind_of(this.current()) == TokenKind::CONSTEVAL) {
+                compile_time = 4;
+            } else {
+                compile_time = 2;
+            }
+            this.advance();
+        }
         i32 start = this.current();
         if (this.check(TokenKind::OPERATOR)) {
-            owner.add(this.parse_operator(false));
+            Node* operator_node = this.parse_operator(false);
+            operator_node.set_op(compile_time);
+            owner.add(operator_node);
             return;
         }
         TypeRef* type = this.parse_type();
         i32 name = this.expect(TokenKind::IDENTIFIER, "expected interface member name");
         if (this.check(TokenKind::LPAREN) || this.check(TokenKind::LESS)) {
             Node* method = Node.create_list(NodeKind::FUNCTION, start);
+            method.set_op(compile_time);
             method.set_type(type);
             method.set_text(this.copy_of(name));
             if (this.check(TokenKind::LESS)) {
@@ -261,13 +298,19 @@ impl Parser {
         if (generic_struct) {
             this.generic_depth = this.generic_depth + 1;
         }
+        PointerList* invariants = PointerList.create();
         while (!this.check(TokenKind::RBRACE) && !this.at_end()) {
+            if (this.at_invariant()) {
+                this.parse_invariant(invariants);
+                continue;
+            }
             this.parse_member(node);
         }
         if (generic_struct) {
             this.generic_depth = this.generic_depth - 1;
         }
         this.expect(TokenKind::RBRACE, "expected '}' to close struct body");
+        this.apply_invariants(node, invariants);
         if (!declares_all_fields_mutable && this.declared_field_count > 3 && this.declared_field_count == this.declared_mutable_field_count) {
             Diagnostics* warnings = this.diagnostics;
             ByteBuffer* message = ByteBuffer.create();

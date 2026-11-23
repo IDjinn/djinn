@@ -3,6 +3,7 @@ import { Android } from "./android";
 import { DebugAdapterFactory, DebugProvider } from "./debug";
 import { InlineDiagnostics } from "./diagnostics";
 import { InlineFixes } from "./inlinefix";
+import { IrView } from "./ir";
 import { Profiling } from "./profiling";
 import { ServerClient } from "./server";
 import { runSetup } from "./setup";
@@ -39,6 +40,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     diagnostics,
     ...profiling.register(),
     ...android.register(),
+    ...new IrView(getInfo).register(),
     vscode.debug.registerDebugConfigurationProvider("djinn", new DebugProvider(getInfo, android)),
     vscode.debug.registerDebugAdapterDescriptorFactory("djinn", new DebugAdapterFactory()),
     vscode.tasks.registerTaskProvider("djinn", taskProvider(getInfo)),

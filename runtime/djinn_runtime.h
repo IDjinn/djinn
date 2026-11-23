@@ -48,9 +48,12 @@ extern "C" {
 #define DJINN_ASSERT_COLD_NORETURN __attribute__((cold, __noreturn__))
 #endif
 
+void __djinn_hook_fire(int32_t kind, const char* message, const char* file, uint32_t line);
+
 DJINN_ASSERT_COLD_NORETURN
 static void djinn_assert_fail(const char* msg, const char* file, const int line, const char* function_name)
 {
+    __djinn_hook_fire(6, msg, file, (uint32_t)line);
     fprintf(stderr, "[RUNTIME] ASSERTION ERROR: %s\nFile: %s:%d\nFunction: %s\n", msg, file, line, function_name);
     abort();
 }
@@ -330,19 +333,44 @@ const char* __djinn_error_stack_text(void);
 
 // Unrecoverable failure (a bug, not an error value): prints the message with the live stack and aborts.
 void __djinn_panic(const char* message, const char* file, uint32_t line);
+void __djinn_contract_observed(const char* message, const char* file, uint32_t line);
+int32_t __djinn_errno(void);
+void __djinn_errno_clear(void);
+int32_t __djinn_last_error(void);
 
 // Hooks let a program intercept runtime events (std::system, System.hook). Each kind has one handler; set and take
 // return the previous handler. The PANIC hook, void handler(const char* message, const char* file, uint32_t line),
 // runs instead of the default report and the process aborts when it returns (like Rust's panic::set_hook). A panic
 // raised inside the hook falls back to the default report.
+// The libc hooks: EXIT, void handler(), runs at normal process exit (atexit); ABORT, void handler(int32_t signal),
+// runs on SIGABRT before the process dies (panics and abort()); CRASH, void handler(int32_t code), runs once on
+// SIGSEGV/SIGBUS/SIGFPE/SIGILL (POSIX, the signal number) or on an unhandled exception (Windows, the exception code),
+// before the crash report; INTERRUPT, void handler(int32_t signal), runs on SIGINT and SIGTERM.
+// The event hooks take the PANIC signature (message, file, line) and run before the default behavior, which still follows
+// (an observer, not a replacement): OUT_OF_MEMORY when an allocation fails, ASSERT when an assertion fails, UNCAUGHT_ERROR
+// when an error escapes 'main', RUNTIME_ERROR on a trap (overflow, division by zero, bounds), TASK_PANIC on a panic raised
+// while a scheduler task runs. A hook that fires another event is not re-entered.
 enum
 {
     DJINN_HOOK_PANIC = 0,
-    DJINN_HOOK_COUNT = 1
+    DJINN_HOOK_EXIT = 1,
+    DJINN_HOOK_ABORT = 2,
+    DJINN_HOOK_CRASH = 3,
+    DJINN_HOOK_INTERRUPT = 4,
+    DJINN_HOOK_OUT_OF_MEMORY = 5,
+    DJINN_HOOK_ASSERT = 6,
+    DJINN_HOOK_UNCAUGHT_ERROR = 7,
+    DJINN_HOOK_RUNTIME_ERROR = 8,
+    DJINN_HOOK_TASK_PANIC = 9,
+    DJINN_HOOK_COUNT = 10
 };
 typedef void (*djinn_panic_hook_function)(const char* message, const char* file, uint32_t line);
+typedef void (*djinn_exit_hook_function)(void);
+typedef void (*djinn_signal_hook_function)(int32_t signal_number);
 void* __djinn_hook_set(int32_t kind, void* handler);
 void* __djinn_hook_take(int32_t kind);
+void __djinn_hook_fire(int32_t kind, const char* message, const char* file, uint32_t line);
+extern _Atomic int __djinn_task_depth;
 void __djinn_panic_default_report(const char* message, const char* file, uint32_t line);
 
 extern void __djinn_coro_resume(void* handle);

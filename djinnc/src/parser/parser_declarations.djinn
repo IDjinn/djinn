@@ -429,6 +429,7 @@ impl Parser {
         if (access != 0) {
             node.set_op(access);
         }
+        AttributeUse* native = this.take_native_error(found);
         if (found != null) {
             this.attach_attributes(found, node, AttributeTarget.FUNCTION);
         }
@@ -444,7 +445,14 @@ impl Parser {
             }
         }
         this.expect(TokenKind::RPAREN, "expected ')' after parameters");
+        Node* throws_holder = Node.create_list(NodeKind::FUNCTION, this.current());
+        if (native != null) {
+            this.parse_throws_clause(throws_holder);
+        }
         this.expect(TokenKind::SEMICOLON, "expected ';' after extern function");
+        if (native != null) {
+            return this.native_error_wrapper(node, native, throws_holder.second());
+        }
         return node;
     }
 
@@ -520,31 +528,20 @@ impl Parser {
             || this.check(TokenKind::CONSTEXPR) || this.check(TokenKind::CONSTEVAL)) {
             bool abstract_word = this.is_abstract_modifier(0);
             i32 modifier = this.advance();
-            if (abstract_word) {
-                is_abstract = true;
-            } else if (this.kind_of(modifier) == TokenKind::IDENTIFIER) {
-                is_sync = true;
-            }
-            if (this.kind_of(modifier) == TokenKind::PRIVATE) {
-                is_private = true;
-            }
-            if (this.kind_of(modifier) == TokenKind::PUBLIC) {
-                is_public = true;
-            }
-            if (this.kind_of(modifier) == TokenKind::STATIC) {
-                is_static = true;
-            }
-            if (this.kind_of(modifier) == TokenKind::ASYNC) {
-                is_async = true;
-            }
-            if (this.kind_of(modifier) == TokenKind::UNSAFE) {
-                is_unsafe = true;
-            }
-            if (this.kind_of(modifier) == TokenKind::CONSTEXPR) {
-                compile_time = 2;
-            }
-            if (this.kind_of(modifier) == TokenKind::CONSTEVAL) {
-                compile_time = 4;
+            switch (this.kind_of(modifier)) {
+                case TokenKind::IDENTIFIER:
+                    if (abstract_word) {
+                        is_abstract = true;
+                    } else {
+                        is_sync = true;
+                    }
+                case TokenKind::PRIVATE: is_private = true;
+                case TokenKind::PUBLIC: is_public = true;
+                case TokenKind::STATIC: is_static = true;
+                case TokenKind::ASYNC: is_async = true;
+                case TokenKind::UNSAFE: is_unsafe = true;
+                case TokenKind::CONSTEXPR: compile_time = 2;
+                case TokenKind::CONSTEVAL: compile_time = 4;
             }
         }
 
@@ -602,23 +599,29 @@ impl Parser {
         }
 
         this.parse_throws_clause(function);
-        if (this.check(TokenKind::REQUIRE) || this.check(TokenKind::ENSURE)) {
-            this.fail("contracts are not supported yet");
-            return function;
-        }
+        FunctionContracts* contracts = this.parse_function_contracts();
 
         if (this.check(TokenKind::ARROW) || this.check(TokenKind::LBRACE)) {
             this.reject_extern_member(this.current(), "a method of an extern struct has no body (the platform provides it)");
         }
+        // The contracts wrap the body once, at the end, whichever form the body has.
+        Node* body = this.parse_function_body(function, is_abstract);
+        if (body != null) {
+            function.set_first(this.with_contracts(this.body_token, function, body, contracts));
+        }
+        return function;
+    }
+
+    unsafe Node* parse_function_body(Node* function, bool is_abstract) {
         if (this.match(TokenKind::ARROW)) {
             i32 arrow = this.current();
+            this.body_token = arrow;
             Node* body = Node.create_list(NodeKind::BLOCK, arrow);
             Node* ret = Node.create(NodeKind::RETURN, arrow);
             ret.set_first(this.parse_expression());
             body.add(ret);
             this.expect(TokenKind::SEMICOLON, "expected ';' after expression body");
-            function.set_first(body);
-            return function;
+            return body;
         }
 
         if (this.check(TokenKind::SEMICOLON)) {
@@ -629,7 +632,7 @@ impl Parser {
                 this.bodyless_token = this.current();
             }
             this.advance();
-            return function;
+            return (Node*)0;
         }
 
         // A function that uses 'await' is async without writing the keyword. Its body stays in a library interface so
@@ -645,8 +648,8 @@ impl Parser {
         if (!awaits && function.generics() == null && (function.op() & 7) == 0 && this.generic_depth == 0 && !this.failed && this.expansion_depth == 0) {
             Library.record_body(open, this.pos - 1);
         }
-        function.set_first(body);
-        return function;
+        this.body_token = open;
+        return body;
     }
 
     void parse_throws_clause(Node* function) {

@@ -277,108 +277,116 @@ impl Parser {
         mut Node* expr = start;
         while (!this.failed) {
             i32 token = this.current();
-            if (this.kind_of(token) == TokenKind::SWITCH && this.kind_of(this.peek_token(1)) == TokenKind::LBRACE) {
-                expr = this.parse_value_switch(expr);
-            } else if (this.kind_of(token) == TokenKind::LPAREN) {
-                this.advance();
-                Node* call = Node.create_list(NodeKind::CALL, token);
-                call.set_first(expr);
-                if (!this.check(TokenKind::RPAREN)) {
-                    call.add(this.parse_argument());
-                    while (this.match(TokenKind::COMMA)) {
-                        call.add(this.parse_argument());
+            switch (this.kind_of(token)) {
+                case TokenKind::SWITCH:
+                    if (this.kind_of(this.peek_token(1)) != TokenKind::LBRACE) {
+                        return expr;
                     }
-                }
-                this.expect(TokenKind::RPAREN, "expected ')' after arguments");
-                expr = call;
-            } else if (this.kind_of(token) == TokenKind::LBRACKET) {
-                this.advance();
-                Node* index = Node.create(NodeKind::INDEX, token);
-                index.set_first(expr);
-                index.set_second(this.parse_expression());
-                this.expect(TokenKind::RBRACKET, "expected ']' after index");
-                expr = index;
-            } else if (this.kind_of(token) == TokenKind::HASH && this.kind_of(this.peek_token(1)) == TokenKind::IDENTIFIER) {
-                TokenList* query_tokens = this.tokens;
-                i32 query_token = this.peek_token(1);
-                ByteBuffer* query_name = ByteBuffer.create();
-                query_name.append_slice(query_tokens.text(query_token), query_tokens.text_length(query_token));
-                i32 query = Intrinsic.member_query(query_name.cstr());
-                if (query == Intrinsic.NONE) {
-                    this.fail("unknown reflection query: expected fields, methods, properties, attributes, constructors or interfaces");
-                }
-                this.advance();
-                this.advance();
-                Node* inspection = Node.create(NodeKind::INTRINSIC, token);
-                inspection.set_op(query);
-                inspection.set_first(expr);
-                expr = inspection;
-            } else if (this.kind_of(token) == TokenKind::DOT && this.is_blocking_wait()) {
-                this.advance();
-                this.advance();
-                Node* blocking = Node.create(NodeKind::AWAIT_EXPR, token);
-                blocking.set_flag(true);
-                blocking.set_first(expr);
-                expr = blocking;
-            } else if (this.kind_of(token) == TokenKind::DOT) {
-                this.advance();
-                Node* access = Node.create(NodeKind::FIELD_ACCESS, token);
-                access.set_first(expr);
-                i32 member = this.expect(TokenKind::IDENTIFIER, "expected member name after '.'");
-                access.set_text(this.copy_of(member));
-                if (this.check(TokenKind::LESS)) {
-                    i32 close = this.scan_type_arguments(0);
-                    bool explicit = close > 0 && !this.scan_half && this.kind_of(this.peek_token(close)) == TokenKind::LPAREN;
-                    this.scan_half = false;
-                    if (explicit) {
-                        TypeRef* holder = TypeRef.create(TypeKind.NAMED);
-                        holder.args = this.parse_type_arguments();
-                        access.set_type(holder);
-                    }
-                }
-                expr = access;
-            } else if (this.kind_of(token) == TokenKind::QUESTION_DOT) {
-                this.advance();
-                Node* conditional_access = Node.create(NodeKind::FIELD_ACCESS, token);
-                conditional_access.set_first(expr);
-                i32 conditional_member = this.expect(TokenKind::IDENTIFIER, "expected member name after '?.'");
-                conditional_access.set_text(this.copy_of(conditional_member));
-                mut Node* conditional_chain = conditional_access;
-                if (this.check(TokenKind::LPAREN)) {
-                    i32 call_token = this.advance();
-                    Node* conditional_call = Node.create_list(NodeKind::CALL, call_token);
-                    conditional_call.set_first(conditional_access);
+                    expr = this.parse_value_switch(expr);
+                case TokenKind::LPAREN:
+                    this.advance();
+                    Node* call = Node.create_list(NodeKind::CALL, token);
+                    call.set_first(expr);
                     if (!this.check(TokenKind::RPAREN)) {
-                        conditional_call.add(this.parse_argument());
+                        call.add(this.parse_argument());
                         while (this.match(TokenKind::COMMA)) {
-                            conditional_call.add(this.parse_argument());
+                            call.add(this.parse_argument());
                         }
                     }
                     this.expect(TokenKind::RPAREN, "expected ')' after arguments");
-                    conditional_chain = conditional_call;
-                }
-                Node* conditional = Node.create(NodeKind::UNARY, token);
-                conditional.set_op_kind(TokenKind::QUESTION_DOT);
-                conditional.set_first(conditional_chain);
-                expr = conditional;
-            } else if (this.kind_of(token) == TokenKind::BANG_DOT) {
-                this.advance();
-                Node* unwrapped = Node.create(NodeKind::UNARY, token);
-                unwrapped.set_op_kind(TokenKind::BANG_DOT);
-                unwrapped.set_first(expr);
-                Node* access = Node.create(NodeKind::FIELD_ACCESS, token);
-                access.set_first(unwrapped);
-                i32 member = this.expect(TokenKind::IDENTIFIER, "expected member name after '!.'");
-                access.set_text(this.copy_of(member));
-                expr = access;
-            } else if (this.kind_of(token) == TokenKind::PLUS_PLUS) {
-                this.advance();
-                expr = this.make_count(expr, TokenKind::PLUS_PLUS, true, token);
-            } else if (this.kind_of(token) == TokenKind::MINUS_MINUS) {
-                this.advance();
-                expr = this.make_count(expr, TokenKind::MINUS_MINUS, true, token);
-            } else {
-                break;
+                    expr = call;
+                case TokenKind::LBRACKET:
+                    this.advance();
+                    Node* index = Node.create(NodeKind::INDEX, token);
+                    index.set_first(expr);
+                    index.set_second(this.parse_expression());
+                    this.expect(TokenKind::RBRACKET, "expected ']' after index");
+                    expr = index;
+                case TokenKind::HASH:
+                    if (this.kind_of(this.peek_token(1)) != TokenKind::IDENTIFIER) {
+                        return expr;
+                    }
+                    TokenList* query_tokens = this.tokens;
+                    i32 query_token = this.peek_token(1);
+                    ByteBuffer* query_name = ByteBuffer.create();
+                    query_name.append_slice(query_tokens.text(query_token), query_tokens.text_length(query_token));
+                    i32 query = Intrinsic.member_query(query_name.cstr());
+                    if (query == Intrinsic.NONE) {
+                        this.fail("unknown reflection query: expected fields, methods, properties, attributes, constructors or interfaces");
+                    }
+                    this.advance();
+                    this.advance();
+                    Node* inspection = Node.create(NodeKind::INTRINSIC, token);
+                    inspection.set_op(query);
+                    inspection.set_first(expr);
+                    expr = inspection;
+                case TokenKind::DOT:
+                    if (this.is_blocking_wait()) {
+                        this.advance();
+                        this.advance();
+                        Node* blocking = Node.create(NodeKind::AWAIT_EXPR, token);
+                        blocking.set_flag(true);
+                        blocking.set_first(expr);
+                        expr = blocking;
+                    } else {
+                        this.advance();
+                        Node* access = Node.create(NodeKind::FIELD_ACCESS, token);
+                        access.set_first(expr);
+                        i32 member = this.expect(TokenKind::IDENTIFIER, "expected member name after '.'");
+                        access.set_text(this.copy_of(member));
+                        if (this.check(TokenKind::LESS)) {
+                            i32 close = this.scan_type_arguments(0);
+                            bool explicit = close > 0 && !this.scan_half && this.kind_of(this.peek_token(close)) == TokenKind::LPAREN;
+                            this.scan_half = false;
+                            if (explicit) {
+                                TypeRef* holder = TypeRef.create(TypeKind.NAMED);
+                                holder.args = this.parse_type_arguments();
+                                access.set_type(holder);
+                            }
+                        }
+                        expr = access;
+                    }
+                case TokenKind::QUESTION_DOT:
+                    this.advance();
+                    Node* conditional_access = Node.create(NodeKind::FIELD_ACCESS, token);
+                    conditional_access.set_first(expr);
+                    i32 conditional_member = this.expect(TokenKind::IDENTIFIER, "expected member name after '?.'");
+                    conditional_access.set_text(this.copy_of(conditional_member));
+                    mut Node* conditional_chain = conditional_access;
+                    if (this.check(TokenKind::LPAREN)) {
+                        i32 call_token = this.advance();
+                        Node* conditional_call = Node.create_list(NodeKind::CALL, call_token);
+                        conditional_call.set_first(conditional_access);
+                        if (!this.check(TokenKind::RPAREN)) {
+                            conditional_call.add(this.parse_argument());
+                            while (this.match(TokenKind::COMMA)) {
+                                conditional_call.add(this.parse_argument());
+                            }
+                        }
+                        this.expect(TokenKind::RPAREN, "expected ')' after arguments");
+                        conditional_chain = conditional_call;
+                    }
+                    Node* conditional = Node.create(NodeKind::UNARY, token);
+                    conditional.set_op_kind(TokenKind::QUESTION_DOT);
+                    conditional.set_first(conditional_chain);
+                    expr = conditional;
+                case TokenKind::BANG_DOT:
+                    this.advance();
+                    Node* unwrapped = Node.create(NodeKind::UNARY, token);
+                    unwrapped.set_op_kind(TokenKind::BANG_DOT);
+                    unwrapped.set_first(expr);
+                    Node* access = Node.create(NodeKind::FIELD_ACCESS, token);
+                    access.set_first(unwrapped);
+                    i32 member = this.expect(TokenKind::IDENTIFIER, "expected member name after '!.'");
+                    access.set_text(this.copy_of(member));
+                    expr = access;
+                case TokenKind::PLUS_PLUS:
+                    this.advance();
+                    expr = this.make_count(expr, TokenKind::PLUS_PLUS, true, token);
+                case TokenKind::MINUS_MINUS:
+                    this.advance();
+                    expr = this.make_count(expr, TokenKind::MINUS_MINUS, true, token);
+                default: return expr;
             }
         }
         return expr;
@@ -399,234 +407,223 @@ impl Parser {
     Node* parse_primary() {
         i32 token = this.current();
 
-        if (this.kind_of(token) == TokenKind::INTEGER_LITERAL) {
-            this.advance();
-            Node* literal = Node.create(NodeKind::INT_LITERAL, token);
-            literal.set_text(this.copy_of(token));
-            literal.set_int_value(Strings.parse_integer(this.text_of(token), this.length_of(token)));
-            literal.set_mode(this.literal_mode(token));
-            return literal;
-        }
-        if (this.kind_of(token) == TokenKind::CHAR_LITERAL) {
-            this.advance();
-            Node* literal = Node.create(NodeKind::INT_LITERAL, token);
-            literal.set_text(this.copy_of(token));
-            literal.set_int_value(Strings.parse_integer(this.text_of(token), this.length_of(token)));
-            literal.set_flag(true);
-            return literal;
-        }
-        if (this.kind_of(token) == TokenKind::FLOAT_LITERAL) {
-            this.advance();
-            Node* literal = Node.create(NodeKind::FLOAT_LITERAL, token);
-            literal.set_text(this.copy_of(token));
-            return literal;
-        }
-        if (this.kind_of(token) == TokenKind::INTERP_BEGIN) {
-            return this.parse_interpolation();
-        }
-        if (this.kind_of(token) == TokenKind::STRING_LITERAL) {
-            this.advance();
-            Node* literal = Node.create(NodeKind::STRING_LITERAL, token);
-            literal.set_text_n(this.text_of(token), this.length_of(token));
-            literal.set_int_value(this.length_of(token));
-            return literal;
-        }
-        if (this.kind_of(token) == TokenKind::TRUE || this.kind_of(token) == TokenKind::FALSE) {
-            this.advance();
-            Node* literal = Node.create(NodeKind::BOOL_LITERAL, token);
-            if (this.kind_of(token) == TokenKind::TRUE) {
-                literal.set_int_value(1);
-            }
-            return literal;
-        }
-        if (this.kind_of(token) == TokenKind::NULL) {
-            this.advance();
-            return Node.create(NodeKind::NULL_LITERAL, token);
-        }
-        if (this.kind_of(token) == TokenKind::SWITCH) {
-            return this.parse_switch_expression();
-        }
-        if (this.kind_of(token) == TokenKind::LBRACKET) {
-            this.advance();
-            Node* literal = Node.create_list(NodeKind::ARRAY_LITERAL, token);
-            if (!this.check(TokenKind::RBRACKET)) {
-                literal.add(this.parse_expression());
-                while (this.match(TokenKind::COMMA)) {
+        switch (this.kind_of(token)) {
+            case TokenKind::INTEGER_LITERAL:
+                this.advance();
+                Node* literal = Node.create(NodeKind::INT_LITERAL, token);
+                literal.set_text(this.copy_of(token));
+                literal.set_int_value(Strings.parse_integer(this.text_of(token), this.length_of(token)));
+                literal.set_mode(this.literal_mode(token));
+                return literal;
+            case TokenKind::CHAR_LITERAL:
+                this.advance();
+                Node* literal = Node.create(NodeKind::INT_LITERAL, token);
+                literal.set_text(this.copy_of(token));
+                literal.set_int_value(Strings.parse_integer(this.text_of(token), this.length_of(token)));
+                literal.set_flag(true);
+                return literal;
+            case TokenKind::FLOAT_LITERAL:
+                this.advance();
+                Node* literal = Node.create(NodeKind::FLOAT_LITERAL, token);
+                literal.set_text(this.copy_of(token));
+                return literal;
+            case TokenKind::INTERP_BEGIN:
+                return this.parse_interpolation();
+            case TokenKind::STRING_LITERAL:
+                this.advance();
+                Node* literal = Node.create(NodeKind::STRING_LITERAL, token);
+                literal.set_text_n(this.text_of(token), this.length_of(token));
+                literal.set_int_value(this.length_of(token));
+                return literal;
+            case TokenKind::TRUE:
+                this.advance();
+                Node* truth = Node.create(NodeKind::BOOL_LITERAL, token);
+                truth.set_int_value(1);
+                return truth;
+            case TokenKind::FALSE:
+                this.advance();
+                return Node.create(NodeKind::BOOL_LITERAL, token);
+            case TokenKind::NULL:
+                this.advance();
+                return Node.create(NodeKind::NULL_LITERAL, token);
+            case TokenKind::SWITCH:
+                return this.parse_switch_expression();
+            case TokenKind::LBRACKET:
+                this.advance();
+                Node* literal = Node.create_list(NodeKind::ARRAY_LITERAL, token);
+                if (!this.check(TokenKind::RBRACKET)) {
                     literal.add(this.parse_expression());
+                    while (this.match(TokenKind::COMMA)) {
+                        literal.add(this.parse_expression());
+                    }
                 }
-            }
-            this.expect(TokenKind::RBRACKET, "expected ']' after the array elements");
-            return literal;
-        }
-        if (this.kind_of(token) == TokenKind::LBRACE) {
-            return this.parse_struct_init();
-        }
-        if (this.kind_of(token) == TokenKind::NEW) {
-            this.advance();
-            Node* created = Node.create_list(NodeKind::NEW_EXPR, token);
-            created.set_type(this.parse_type());
-            this.expect(TokenKind::LPAREN, "expected '(' after the type of 'new'");
-            if (!this.check(TokenKind::RPAREN)) {
-                created.add(this.parse_argument());
-                while (this.match(TokenKind::COMMA)) {
+                this.expect(TokenKind::RBRACKET, "expected ']' after the array elements");
+                return literal;
+            case TokenKind::LBRACE:
+                return this.parse_struct_init();
+            case TokenKind::NEW:
+                this.advance();
+                Node* created = Node.create_list(NodeKind::NEW_EXPR, token);
+                created.set_type(this.parse_type());
+                this.expect(TokenKind::LPAREN, "expected '(' after the type of 'new'");
+                if (!this.check(TokenKind::RPAREN)) {
                     created.add(this.parse_argument());
+                    while (this.match(TokenKind::COMMA)) {
+                        created.add(this.parse_argument());
+                    }
                 }
-            }
-            this.expect(TokenKind::RPAREN, "expected ')' after the constructor arguments");
-            return created;
-        }
-        if (this.kind_of(token) == TokenKind::THIS) {
-            this.advance();
-            Node* self = Node.create(NodeKind::IDENTIFIER, token);
-            self.set_text("this");
-            return self;
-        }
-
-        if (this.kind_of(token) == TokenKind::IDENTIFIER) {
-            MacroCall* called = this.find_macro_call();
-            if (called != null) {
-                return this.expand_macro(called, MacroMode.EXPRESSION);
-            }
-            if (this.kind_of(this.peek_token(1)) == TokenKind::LBRACKET && this.kind_of(this.peek_token(2)) != TokenKind::RBRACKET) {
-                TypeRef* element = TypeRef.from_primitive_atom(this.atom_of(token));
-                if (element != null) {
-                    this.advance();
-                    this.advance();
-                    Node* stack = Node.create(NodeKind::INTRINSIC, token);
-                    stack.set_op(Intrinsic.ALLOCA);
-                    stack.set_type(element);
-                    stack.set_first(this.parse_expression());
-                    this.expect(TokenKind::RBRACKET, "expected ']' after the array size");
-                    return stack;
-                }
-            }
-            i32 intrinsic = Intrinsic.lookup(this.atom_of(token));
-            if (intrinsic != Intrinsic.NONE && this.kind_of(this.peek_token(1)) == TokenKind::LPAREN) {
+                this.expect(TokenKind::RPAREN, "expected ')' after the constructor arguments");
+                return created;
+            case TokenKind::THIS:
                 this.advance();
-                this.advance();
-                Node* call = Node.create(NodeKind::INTRINSIC, token);
-                call.set_op(intrinsic);
-                bool measures_type = intrinsic == Intrinsic.SIZEOF || intrinsic == Intrinsic.TYPEOF || intrinsic == Intrinsic.ALIGNOF;
-                if (measures_type && this.operand_is_expression(intrinsic == Intrinsic.TYPEOF)) {
-                    call.set_first(this.parse_expression());
-                    this.expect(TokenKind::RPAREN, "expected ')' after intrinsic argument");
-                    return call;
+                Node* self = Node.create(NodeKind::IDENTIFIER, token);
+                self.set_text("this");
+                return self;
+            case TokenKind::IDENTIFIER:
+                MacroCall* called = this.find_macro_call();
+                if (called != null) {
+                    return this.expand_macro(called, MacroMode.EXPRESSION);
                 }
-                if (measures_type) {
-                    call.set_type(this.parse_type());
-                    if (intrinsic == Intrinsic.TYPEOF && this.check(TokenKind::DOT)) {
+                if (this.kind_of(this.peek_token(1)) == TokenKind::LBRACKET && this.kind_of(this.peek_token(2)) != TokenKind::RBRACKET) {
+                    TypeRef* element = TypeRef.from_primitive_atom(this.atom_of(token));
+                    if (element != null) {
                         this.advance();
-                        i32 member = this.expect(TokenKind::IDENTIFIER, "expected a method name after '.'");
-                        call.set_text(this.copy_of(member));
+                        this.advance();
+                        Node* stack = Node.create(NodeKind::INTRINSIC, token);
+                        stack.set_op(Intrinsic.ALLOCA);
+                        stack.set_type(element);
+                        stack.set_first(this.parse_expression());
+                        this.expect(TokenKind::RBRACKET, "expected ']' after the array size");
+                        return stack;
                     }
-                    this.expect(TokenKind::RPAREN, "expected ')' after intrinsic type argument");
+                }
+                if (this.at_old_call(token)) {
+                    return this.parse_old(token);
+                }
+                i32 intrinsic = Intrinsic.lookup(this.atom_of(token));
+                if (intrinsic != Intrinsic.NONE && this.kind_of(this.peek_token(1)) == TokenKind::LPAREN) {
+                    this.advance();
+                    this.advance();
+                    Node* call = Node.create(NodeKind::INTRINSIC, token);
+                    call.set_op(intrinsic);
+                    bool measures_type = intrinsic == Intrinsic.SIZEOF || intrinsic == Intrinsic.TYPEOF || intrinsic == Intrinsic.ALIGNOF;
+                    if (measures_type && this.operand_is_expression(intrinsic == Intrinsic.TYPEOF)) {
+                        call.set_first(this.parse_expression());
+                        this.expect(TokenKind::RPAREN, "expected ')' after intrinsic argument");
+                        return call;
+                    }
+                    if (measures_type) {
+                        call.set_type(this.parse_type());
+                        if (intrinsic == Intrinsic.TYPEOF && this.check(TokenKind::DOT)) {
+                            this.advance();
+                            i32 member = this.expect(TokenKind::IDENTIFIER, "expected a method name after '.'");
+                            call.set_text(this.copy_of(member));
+                        }
+                        this.expect(TokenKind::RPAREN, "expected ')' after intrinsic type argument");
+                        return call;
+                    }
+                    if (intrinsic == Intrinsic.UNLIKELY || intrinsic == Intrinsic.LIKELY || intrinsic == Intrinsic.ASSUME || intrinsic == Intrinsic.PANIC || intrinsic == Intrinsic.FLOAT_BITS) {
+                        call.set_first(this.parse_expression());
+                    }
+                    if (intrinsic == Intrinsic.EXPECT || intrinsic == Intrinsic.BOUNDS_CHECK) {
+                        call.set_first(this.parse_expression());
+                        this.expect(TokenKind::COMMA, "expected a second argument after the first one");
+                        call.set_second(this.parse_expression());
+                    }
+                    if (Intrinsic.is_atomic(intrinsic)) {
+                        this.parse_atomic_operands(call, Intrinsic.atomic_operands(intrinsic));
+                    }
+                    if (intrinsic == Intrinsic.PREFETCH) {
+                        call.set_first(this.parse_expression());
+                        if (this.match(TokenKind::COMMA)) {
+                            call.set_second(this.parse_expression());
+                            this.expect(TokenKind::COMMA, "expected the locality after the access kind in prefetch");
+                            call.set_third(this.parse_expression());
+                        }
+                    }
+                    this.expect(TokenKind::RPAREN, "expected ')' after the intrinsic arguments");
                     return call;
                 }
-                if (intrinsic == Intrinsic.UNLIKELY || intrinsic == Intrinsic.LIKELY || intrinsic == Intrinsic.ASSUME || intrinsic == Intrinsic.PANIC || intrinsic == Intrinsic.FLOAT_BITS) {
-                    call.set_first(this.parse_expression());
-                }
-                if (intrinsic == Intrinsic.EXPECT || intrinsic == Intrinsic.BOUNDS_CHECK) {
-                    call.set_first(this.parse_expression());
-                    this.expect(TokenKind::COMMA, "expected a second argument after the first one");
-                    call.set_second(this.parse_expression());
-                }
-                if (Intrinsic.is_atomic(intrinsic)) {
-                    this.parse_atomic_operands(call, Intrinsic.atomic_operands(intrinsic));
-                }
-                if (intrinsic == Intrinsic.PREFETCH) {
-                    call.set_first(this.parse_expression());
-                    if (this.match(TokenKind::COMMA)) {
-                        call.set_second(this.parse_expression());
-                        this.expect(TokenKind::COMMA, "expected the locality after the access kind in prefetch");
-                        call.set_third(this.parse_expression());
+
+                if (this.is_known_type(token) && this.kind_of(this.peek_token(1)) == TokenKind::LESS) {
+                    i32 end = this.scan_type_end(0);
+                    if (end > 0 && this.kind_of(this.peek_token(end)) == TokenKind::LPAREN) {
+                        TypeRef* constructed = this.parse_type();
+                        Node* constructor_name = Node.create(NodeKind::IDENTIFIER, token);
+                        constructor_name.set_text(constructed.name);
+                        constructor_name.set_type(constructed);
+                        constructor_name.set_flag(true);
+                        return constructor_name;
+                    }
+                    if (end > 0 && this.kind_of(this.peek_token(end)) == TokenKind::COLON_COLON
+                        && this.kind_of(this.peek_token(end + 1)) == TokenKind::IDENTIFIER) {
+                        TypeRef* owner = this.parse_type();
+                        this.advance();
+                        i32 variant = this.expect(TokenKind::IDENTIFIER, "expected an enum variant");
+                        Node* generic_variant = Node.create(NodeKind::IDENTIFIER, token);
+                        generic_variant.set_text(this.copy_of(variant));
+                        generic_variant.set_type(owner);
+                        return generic_variant;
                     }
                 }
-                this.expect(TokenKind::RPAREN, "expected ')' after the intrinsic arguments");
-                return call;
-            }
 
-            if (this.is_known_type(token) && this.kind_of(this.peek_token(1)) == TokenKind::LESS) {
-                i32 end = this.scan_type_end(0);
-                if (end > 0 && this.kind_of(this.peek_token(end)) == TokenKind::LPAREN) {
-                    TypeRef* constructed = this.parse_type();
-                    Node* constructor_name = Node.create(NodeKind::IDENTIFIER, token);
-                    constructor_name.set_text(constructed.name);
-                    constructor_name.set_type(constructed);
-                    constructor_name.set_flag(true);
-                    return constructor_name;
-                }
-                if (end > 0 && this.kind_of(this.peek_token(end)) == TokenKind::COLON_COLON
-                    && this.kind_of(this.peek_token(end + 1)) == TokenKind::IDENTIFIER) {
-                    TypeRef* owner = this.parse_type();
+                Node* identifier = Node.create(NodeKind::IDENTIFIER, token);
+                identifier.set_text(this.qualified_name());
+                if (this.check(TokenKind::HASH) && this.kind_of(this.peek_token(1)) == TokenKind::IDENTIFIER) {
+                    TokenList* query_tokens = this.tokens;
+                    i32 query_token = this.peek_token(1);
+                    ByteBuffer* query_name = ByteBuffer.create();
+                    query_name.append_slice(query_tokens.text(query_token), query_tokens.text_length(query_token));
+                    i32 query = Intrinsic.member_query(query_name.cstr());
+                    if (query == Intrinsic.NONE) {
+                        this.fail("unknown reflection query: expected fields, methods, properties, attributes, constructors or interfaces");
+                    }
                     this.advance();
-                    i32 variant = this.expect(TokenKind::IDENTIFIER, "expected an enum variant");
-                    Node* generic_variant = Node.create(NodeKind::IDENTIFIER, token);
-                    generic_variant.set_text(this.copy_of(variant));
-                    generic_variant.set_type(owner);
-                    return generic_variant;
+                    this.advance();
+                    Node* inspection = Node.create(NodeKind::INTRINSIC, token);
+                    inspection.set_op(query);
+                    inspection.set_type(TypeRef.named(identifier.text()));
+                    inspection.set_text(identifier.text());
+                    return inspection;
                 }
-            }
-
-            Node* identifier = Node.create(NodeKind::IDENTIFIER, token);
-            identifier.set_text(this.qualified_name());
-            if (this.check(TokenKind::HASH) && this.kind_of(this.peek_token(1)) == TokenKind::IDENTIFIER) {
-                TokenList* query_tokens = this.tokens;
-                i32 query_token = this.peek_token(1);
-                ByteBuffer* query_name = ByteBuffer.create();
-                query_name.append_slice(query_tokens.text(query_token), query_tokens.text_length(query_token));
-                i32 query = Intrinsic.member_query(query_name.cstr());
-                if (query == Intrinsic.NONE) {
-                    this.fail("unknown reflection query: expected fields, methods, properties, attributes, constructors or interfaces");
+                if (this.is_known_type(token) && this.check(TokenKind::LBRACE) && this.kind_of(this.peek_token(1)) == TokenKind::DOT) {
+                    Node* typed_init = this.parse_struct_init();
+                    typed_init.set_type(TypeRef.named(identifier.text()));
+                    return typed_init;
                 }
+                if (this.check(TokenKind::LESS) && !this.is_known_type(token)) {
+                    i32 close = this.scan_type_arguments(0);
+                    bool explicit = close > 0 && !this.scan_half && this.kind_of(this.peek_token(close)) == TokenKind::LPAREN;
+                    this.scan_half = false;
+                    if (explicit) {
+                        TypeRef* holder = TypeRef.create(TypeKind.NAMED);
+                        holder.args = this.parse_type_arguments();
+                        identifier.set_type(holder);
+                    }
+                }
+                if (this.is_known_type(token) && !this.check(TokenKind::LPAREN) && this.has_scope_separator(identifier.text())) {
+                    Node* variant_value = Node.create_list(NodeKind::CALL, token);
+                    variant_value.set_first(identifier);
+                    return variant_value;
+                }
+                return identifier;
+            case TokenKind::LPAREN:
+                if (this.is_lambda_start()) {
+                    return this.parse_lambda();
+                }
+                i32 typeEnd = this.scan_type_end(1);
+                bool isCast = typeEnd > 0 && this.kind_of(this.peek_token(typeEnd)) == TokenKind::RPAREN;
                 this.advance();
-                this.advance();
-                Node* inspection = Node.create(NodeKind::INTRINSIC, token);
-                inspection.set_op(query);
-                inspection.set_type(TypeRef.named(identifier.text()));
-                inspection.set_text(identifier.text());
-                return inspection;
-            }
-            if (this.is_known_type(token) && this.check(TokenKind::LBRACE) && this.kind_of(this.peek_token(1)) == TokenKind::DOT) {
-                Node* typed_init = this.parse_struct_init();
-                typed_init.set_type(TypeRef.named(identifier.text()));
-                return typed_init;
-            }
-            if (this.check(TokenKind::LESS) && !this.is_known_type(token)) {
-                i32 close = this.scan_type_arguments(0);
-                bool explicit = close > 0 && !this.scan_half && this.kind_of(this.peek_token(close)) == TokenKind::LPAREN;
-                this.scan_half = false;
-                if (explicit) {
-                    TypeRef* holder = TypeRef.create(TypeKind.NAMED);
-                    holder.args = this.parse_type_arguments();
-                    identifier.set_type(holder);
+                if (isCast) {
+                    Node* cast = Node.create(NodeKind::CAST, token);
+                    cast.set_type(this.parse_type());
+                    this.expect(TokenKind::RPAREN, "expected ')' after cast type");
+                    cast.set_first(this.parse_unary());
+                    return cast;
                 }
-            }
-            if (this.is_known_type(token) && !this.check(TokenKind::LPAREN) && this.has_scope_separator(identifier.text())) {
-                Node* variant_value = Node.create_list(NodeKind::CALL, token);
-                variant_value.set_first(identifier);
-                return variant_value;
-            }
-            return identifier;
-        }
-
-        if (this.kind_of(token) == TokenKind::LPAREN && this.is_lambda_start()) {
-            return this.parse_lambda();
-        }
-
-        if (this.kind_of(token) == TokenKind::LPAREN) {
-            i32 typeEnd = this.scan_type_end(1);
-            bool isCast = typeEnd > 0 && this.kind_of(this.peek_token(typeEnd)) == TokenKind::RPAREN;
-            this.advance();
-            if (isCast) {
-                Node* cast = Node.create(NodeKind::CAST, token);
-                cast.set_type(this.parse_type());
-                this.expect(TokenKind::RPAREN, "expected ')' after cast type");
-                cast.set_first(this.parse_unary());
-                return cast;
-            }
-            Node* inner = this.parse_expression();
-            this.expect(TokenKind::RPAREN, "expected ')'");
-            return inner;
+                Node* inner = this.parse_expression();
+                this.expect(TokenKind::RPAREN, "expected ')'");
+                return inner;
         }
 
         this.fail("expected an expression");
@@ -643,15 +640,20 @@ impl Parser {
             if (kind == TokenKind::END_OF_FILE) {
                 return false;
             }
-            if (kind == TokenKind::LPAREN) {
-                depth = depth + 1;
-            } else if (kind == TokenKind::RPAREN) {
-                depth = depth - 1;
-                if (depth == 0) {
-                    return this.kind_of(this.peek_token(offset + 1)) == TokenKind::ARROW;
-                }
-            } else if (kind == TokenKind::SEMICOLON || kind == TokenKind::LBRACE || kind == TokenKind::RBRACE) {
-                return false;
+            switch (kind) {
+                case TokenKind::LPAREN:
+                    depth = depth + 1;
+                case TokenKind::RPAREN:
+                    depth = depth - 1;
+                    if (depth == 0) {
+                        return this.kind_of(this.peek_token(offset + 1)) == TokenKind::ARROW;
+                    }
+                case TokenKind::SEMICOLON:
+                    return false;
+                case TokenKind::LBRACE:
+                    return false;
+                case TokenKind::RBRACE:
+                    return false;
             }
             offset = offset + 1;
         }

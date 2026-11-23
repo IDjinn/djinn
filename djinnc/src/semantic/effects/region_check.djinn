@@ -1,0 +1,383 @@
+namespace djinnc;
+
+// Checks an atomic or cooperative region once the effects of every function are known.
+// - No suspension (E7005): another task could see or change the half-done state, and a rollback would undo its work.
+// - Write set (E7008): every write, and every pointer handed to a function that writes, lands in an operand or in a
+//   local of the region, the only memory a rollback restores. A write through a pointer stored in an operand does not.
+// - Undo by move (E7007): a value operand (one that owns memory) can only be replaced whole, or have plain fields set.
+// - Pivot (E7006): after the first effect on the outside world nothing may fail, since that effect cannot be undone.
+// - after_commit (E7011) runs on the way out and cannot leave the function, the loop or the region itself.
+// A place is described by a key: a root symbol, then '.' and a field for a member and '*' for a dereference.
+struct RegionCheck {
+    SymbolTable* symbols;
+    Diagnostics* diagnostics;
+    FunctionInfo* function;
+    PointerList* operand_keys;
+    PointerList* operand_values;
+    PointerList* local_keys;
+    bool external;
+    bool pivot_only;
+    bool atomic;
+
+    public static unsafe void run(SymbolTable* symbols, Diagnostics* diagnostics, FunctionInfo* function, Node* region) {
+        RegionCheck* check = (RegionCheck*)Memory.zalloc(sizeof(RegionCheck));
+        check.symbols = symbols;
+        check.diagnostics = diagnostics;
+        check.function = function;
+        check.operand_keys = PointerList.create();
+        check.operand_values = PointerList.create();
+        check.local_keys = PointerList.create();
+        check.region(region);
+    }
+
+    unsafe void region(Node* node) {
+        bool atomic = node.op() == 0;
+        if (atomic) {
+            this.atomic = true;
+            Node* operands = node.second();
+            for (mut i32 i = 0; i < operands.count(); i = i + 1) {
+                Node* operand = operands.child(i);
+                ptr<i8> key = this.key(operand);
+                if (key == null) {
+                    this.error(operand, DiagnosticErrors.ATOMIC_OPERAND, "an atomic operand must be a variable, a field or a dereference, not an element whose index is only known at run time");
+                    continue;
+                }
+                PointerList* keys = this.operand_keys;
+                keys.push((ptr)key);
+                PointerList* values = this.operand_values;
+                values.push((ptr)(u64)Ownership.needs_dispose(this.symbols, operand.value_type()));
+            }
+            Obligations.record("atomic", "enforced", this.function, "operands are restored when an error leaves the region", node);
+        }
+        Obligations.record("no-suspension", "proved", this.function, "no other task runs inside the region", node);
+        this.scan(node.first());
+        if (atomic && node.third() != null) {
+            Obligations.record("after_commit", "enforced", this.function, "runs once the region completes without an error", node.third());
+            this.after_commit(node.third(), 0);
+        }
+    }
+
+    unsafe void error(Node* at, i32 code, ptr<i8> message) {
+        Diagnostics* diagnostics = this.diagnostics;
+        diagnostics.error_span(code, at.file_name(), at.line(), at.column(), at.length(), message);
+    }
+
+    unsafe ptr<i8> key(Node* place) {
+        NodeKind kind = place.kind();
+        if (kind == NodeKind::IDENTIFIER) {
+            ByteBuffer* text = ByteBuffer.create();
+            if (place.symbol_kind() == SymbolKind.IMPLICIT_FIELD) {
+                FunctionInfo* function = this.function;
+                if (function.this_variable == null) {
+                    return null;
+                }
+                text.append("L");
+                text.append_unsigned((u64)function.this_variable);
+                text.append("*.");
+                text.append_unsigned((u64)place.symbol());
+                return text.cstr();
+            }
+            if (place.symbol_kind() != SymbolKind.LOCAL && place.symbol_kind() != SymbolKind.GLOBAL) {
+                return null;
+            }
+            text.append("L");
+            text.append_unsigned((u64)place.symbol());
+            return text.cstr();
+        }
+        if (kind == NodeKind::FIELD_ACCESS && place.symbol_kind() == SymbolKind.FIELD) {
+            Node* base = place.first();
+            ptr<i8> base_key = this.key(base);
+            if (base_key == null) {
+                return null;
+            }
+            ByteBuffer* text = ByteBuffer.create();
+            text.append(base_key);
+            if (Types.is_pointer(base.value_type())) {
+                text.append("*");
+            }
+            text.append(".");
+            text.append_unsigned((u64)place.symbol());
+            return text.cstr();
+        }
+        if (kind == NodeKind::UNARY && place.op_kind() == TokenKind::STAR) {
+            ptr<i8> pointer_key = this.key(place.first());
+            if (pointer_key == null) {
+                return null;
+            }
+            ByteBuffer* text = ByteBuffer.create();
+            text.append(pointer_key);
+            text.append("*");
+            return text.cstr();
+        }
+        return null;
+    }
+
+    // The memory a pointer-typed expression points at: &place is the place, a pointer value is what it refers to.
+    unsafe ptr<i8> pointee_key(Node* pointer) {
+        if (pointer.kind() == NodeKind::UNARY && pointer.op_kind() == TokenKind::AMPERSAND) {
+            return this.key(pointer.first());
+        }
+        ptr<i8> held = this.key(pointer);
+        if (held == null) {
+            return null;
+        }
+        ByteBuffer* text = ByteBuffer.create();
+        text.append(held);
+        text.append("*");
+        return text.cstr();
+    }
+
+    static unsafe bool inside(ptr<i8> outer, ptr<i8> inner) {
+        i32 length = strlen(outer);
+        i32 total = strlen(inner);
+        if (total < length || !Strings.starts_with(inner, 0, total, outer)) {
+            return false;
+        }
+        if (total > length && inner[length] != 46 && inner[length] != 42) {
+            return false;
+        }
+        for (mut i32 i = length; i < total; i = i + 1) {
+            if (inner[i] == 42) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // -1: outside every operand and region local; otherwise the index of the covering operand (or operand count for a
+    // region local).
+    unsafe i32 cover(ptr<i8> key) {
+        if (key == null) {
+            return -1;
+        }
+        PointerList* keys = this.operand_keys;
+        for (mut i32 i = 0; i < keys.length; i = i + 1) {
+            if (RegionCheck.inside((ptr<i8>)keys.get(i), key)) {
+                return i;
+            }
+        }
+        PointerList* locals = this.local_keys;
+        for (mut i32 i = 0; i < locals.length; i = i + 1) {
+            if (RegionCheck.inside((ptr<i8>)locals.get(i), key)) {
+                return keys.length;
+            }
+        }
+        return -1;
+    }
+
+    unsafe bool value_operand(i32 index) {
+        PointerList* values = this.operand_values;
+        return index >= 0 && index < values.length && values.get(index) != null;
+    }
+
+    unsafe void check_write(Node* target, Node* at) {
+        if (!this.atomic || this.pivot_only) {
+            return;
+        }
+        ptr<i8> key = this.key(target);
+        i32 covering = this.cover(key);
+        if (covering < 0) {
+            this.error(at, DiagnosticErrors.ATOMIC_EXTERNAL_EFFECT, "this write is outside the atomic operands, so an error could not undo it; add the place to the operands or write a local of the region");
+            return;
+        }
+        if (this.value_operand(covering)) {
+            PointerList* keys = this.operand_keys;
+            bool whole = Strings.same((ptr<i8>)keys.get(covering), key);
+            if (!whole && Ownership.needs_dispose(this.symbols, target.value_type())) {
+                this.error(at, DiagnosticErrors.ATOMIC_NOT_RESTORABLE, "a part of a value operand that owns memory cannot be replaced inside the region; assign the whole operand instead");
+            }
+        }
+    }
+
+    unsafe void check_writing_call(Node* node, FunctionInfo* callee) {
+        if (!this.atomic || this.pivot_only) {
+            return;
+        }
+        Node* callee_node = node.first();
+        if (callee.is_instance && callee_node != null) {
+            mut ptr<i8> receiver = (ptr<i8>)0;
+            if (callee_node.kind() == NodeKind::FIELD_ACCESS) {
+                Node* object = callee_node.first();
+                if (Types.is_pointer(object.value_type())) {
+                    receiver = this.pointee_key(object);
+                } else {
+                    receiver = this.key(object);
+                }
+            } else {
+                FunctionInfo* function = this.function;
+                if (function.this_variable != null) {
+                    ByteBuffer* text = ByteBuffer.create();
+                    text.append("L");
+                    text.append_unsigned((u64)function.this_variable);
+                    text.append("*");
+                    receiver = text.cstr();
+                }
+            }
+            this.check_handed(receiver, node, callee);
+        }
+        for (mut i32 i = 0; i < node.count(); i = i + 1) {
+            Node* argument = node.child(i);
+            if (Types.is_pointer(argument.value_type())) {
+                this.check_handed(this.pointee_key(argument), argument, callee);
+            }
+        }
+    }
+
+    unsafe void check_handed(ptr<i8> key, Node* at, FunctionInfo* callee) {
+        i32 covering = this.cover(key);
+        if (covering < 0) {
+            Diagnostics.add_argument(CodeGenerator.base_name(callee.name));
+            this.error(at, DiagnosticErrors.ATOMIC_EXTERNAL_EFFECT, EffectsAnalysis.call_message("this call may write memory outside the atomic operands, so an error could not undo it; '", callee, Effects.WRITES));
+            return;
+        }
+        if (this.value_operand(covering)) {
+            this.error(at, DiagnosticErrors.ATOMIC_NOT_RESTORABLE, EffectsAnalysis.call_message("a value operand that owns memory can only be replaced whole inside the region; '", callee, Effects.WRITES));
+        }
+    }
+
+    unsafe void suspends(Node* at, ptr<i8> message) {
+        if (!this.pivot_only) {
+            this.error(at, DiagnosticErrors.ATOMIC_SUSPENDS, message);
+        }
+    }
+
+    unsafe void fallible(Node* at) {
+        if (this.atomic && this.external) {
+            this.error(at, DiagnosticErrors.ATOMIC_FAILURE_AFTER_EFFECT, "this can fail after the region already acted on the outside world, which a rollback cannot undo; move the external effect to the end of the region or to after_commit");
+        }
+    }
+
+    unsafe void scan(Node* node) {
+        if (node == null) {
+            return;
+        }
+        NodeKind kind = node.kind();
+        if (kind == NodeKind::LAMBDA || kind == NodeKind::FUNCTION) {
+            return;
+        }
+        if (kind == NodeKind::ATOMIC_STMT) {
+            if (node.op() == 0) {
+                Node* operands = node.second();
+                for (mut i32 i = 0; i < operands.count(); i = i + 1) {
+                    ptr<i8> inner = this.key(operands.child(i));
+                    if (inner != null) {
+                        PointerList* keys = this.operand_keys;
+                        keys.push((ptr)inner);
+                        PointerList* values = this.operand_values;
+                        values.push((ptr)(u64)Ownership.needs_dispose(this.symbols, operands.child(i).value_type()));
+                    }
+                }
+            }
+            this.scan(node.first());
+            if (node.third() != null) {
+                this.after_commit(node.third(), 0);
+            }
+            return;
+        }
+        if (kind == NodeKind::WHILE || kind == NodeKind::DO_WHILE || kind == NodeKind::FOR) {
+            bool before = this.external;
+            this.children(node);
+            if (!before && this.external && !this.pivot_only) {
+                this.pivot_only = true;
+                this.children(node);
+                this.pivot_only = false;
+            }
+            return;
+        }
+        if (kind == NodeKind::VAR_DECL && node.symbol() != null) {
+            ByteBuffer* local = ByteBuffer.create();
+            local.append("L");
+            local.append_unsigned((u64)node.symbol());
+            PointerList* locals = this.local_keys;
+            locals.push((ptr)local.cstr());
+        }
+        if (kind == NodeKind::TRY_EXPR || kind == NodeKind::THROW_STMT) {
+            this.fallible(node);
+        }
+        if (kind == NodeKind::AWAIT_EXPR && EffectsAnalysis.may_suspend(node)) {
+            this.suspends(node, "'await' cannot be used inside an atomic or cooperative region: another task could run in the middle of it");
+        }
+        if (kind == NodeKind::CALL && !ProgressProof.direct_callee(node.first())) {
+            this.suspends(node, "a call through a function value or an interface has unknown effects, which an atomic or cooperative region cannot allow");
+        }
+        if (kind == NodeKind::ASSIGN) {
+            this.check_write(node.first(), node);
+        }
+        if (kind == NodeKind::UNARY && (node.op_kind() == TokenKind::PLUS_PLUS || node.op_kind() == TokenKind::MINUS_MINUS)) {
+            this.check_write(node.first(), node);
+        }
+        this.children(node);
+        if (kind == NodeKind::SPAWN_STMT) {
+            this.external = true;
+        }
+        if (kind == NodeKind::CALL) {
+            this.call(node);
+        }
+    }
+
+    unsafe void call(Node* node) {
+        Node* callee_node = node.first();
+        if (callee_node == null || !ProgressProof.calls_function(callee_node.symbol_kind()) || callee_node.symbol() == null) {
+            return;
+        }
+        FunctionInfo* callee = (FunctionInfo*)callee_node.symbol();
+        u32 effects = EffectsAnalysis.inherited(callee);
+        if ((effects & Effects.UNKNOWN) != 0) {
+            this.suspends(node, EffectsAnalysis.call_message("a region cannot call code whose effects are unknown (declare them with [Effects]); '", callee, effects));
+            return;
+        }
+        if ((effects & Effects.SUSPENDS) != 0) {
+            this.suspends(node, EffectsAnalysis.call_message("a region cannot call code that suspends; '", callee, effects));
+        }
+        if ((effects & Effects.WRITES) != 0) {
+            this.check_writing_call(node, callee);
+        }
+        if ((effects & Effects.IO) != 0) {
+            this.external = true;
+        }
+    }
+
+    unsafe void children(Node* node) {
+        for (mut i32 field = NodeField.FIRST; field <= NodeField.FOURTH; field = field + 1) {
+            u32 stored = node.get_field(field);
+            if (stored != 0) {
+                this.scan(Ast.at((i32)stored));
+            }
+        }
+        if (node.has_items()) {
+            for (mut i32 i = 0; i < node.count(); i = i + 1) {
+                this.scan(node.child(i));
+            }
+        }
+    }
+
+    unsafe void after_commit(Node* node, i32 loops) {
+        if (node == null) {
+            return;
+        }
+        NodeKind kind = node.kind();
+        if (kind == NodeKind::LAMBDA || kind == NodeKind::FUNCTION) {
+            return;
+        }
+        bool leaves = kind == NodeKind::RETURN || kind == NodeKind::THROW_STMT || kind == NodeKind::TRY_EXPR || kind == NodeKind::AWAIT_EXPR
+            || ((kind == NodeKind::BREAK || kind == NodeKind::CONTINUE) && loops == 0);
+        if (leaves) {
+            this.error(node, DiagnosticErrors.AFTER_COMMIT_EXIT, "after_commit runs while the region is being left: it cannot return, break out, fail or suspend");
+        }
+        mut i32 depth = loops;
+        if (kind == NodeKind::WHILE || kind == NodeKind::DO_WHILE || kind == NodeKind::FOR || kind == NodeKind::SWITCH) {
+            depth = depth + 1;
+        }
+        for (mut i32 field = NodeField.FIRST; field <= NodeField.FOURTH; field = field + 1) {
+            u32 stored = node.get_field(field);
+            if (stored != 0) {
+                this.after_commit(Ast.at((i32)stored), depth);
+            }
+        }
+        if (node.has_items()) {
+            for (mut i32 i = 0; i < node.count(); i = i + 1) {
+                this.after_commit(node.child(i), depth);
+            }
+        }
+    }
+}

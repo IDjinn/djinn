@@ -2,9 +2,31 @@
 
 ## [Unreleased]
 
+### Fixed
+- String literals with the same contents share one private global instead of one `.str` per use (the `djinnc` binary carried about 450 repeated strings, 330 KB, among them every function and file name used by stack traces).
+
+## [0.7.10] - 2026-11-22
+
 ### Added
+- Stacked `switch` labels: a `case` or `default` label with no statements shares the body of the arm after it, `case 1: case 2: case 3: return 10;`. A label with a body still does not fall through. Native, `--target web` (plain JavaScript fallthrough) and `constexpr` evaluation agree. The `comparison-chain` hint's "Convert to switch" fix produces this form.
 - `switch` accepts a `str` or `string` value: `switch (name) { case "red": ... default: ... }`. Labels have the value's type and are compared in order with `operator ==`; a `constexpr` switch on text compares the contents. Other value types still report `E3046`.
 - `Files.read_all_many` and `Files.write_bytes_many` (compiler support) transfer a list of files at once through `__djinn_files_batch` with libc. `Files.read_all_many_uring` and `Files.write_bytes_many_uring` ask for one private io_uring on Linux instead (large batches, high latency storage; chunked reads, short transfers resubmitted); other platforms and kernels without it use libc. `djinnc` loads its inputs and the core library with the libc form.
+
+- `djinn.proj` accepts the optimization options in its `compiler:` section, so scripts and real runs build the same way: `optimization: "O2"` (O0, O1, O2, O3, Os, Oz), `cpu: "skylake"`, `features: "+avx2"`, `range-opt: false` and `harden: "standard"`. The command line wins over the project (`-O`, `--cpu`, `--features`, `--no-range-opt`, `--harden=<level>`). An unknown level or `harden` value is an error.
+- Hardening is on by default: ahead-of-time code on ELF targets gets `sspstrong` stack protectors, and the link adds `-z relro -z now -z noexecstack` (Linux, Android, `--lld`); the runtime built by `tools/build_runtime.sh` (or compiled by `djinnc` from source) uses `-fstack-protector-strong -fstack-clash-protection -D_FORTIFY_SOURCE=3`. The level is configurable (`--harden=off|basic|standard|strict`, `harden:` in `djinn.proj`, `DJINN_HARDEN` for the build script); `on` is `standard`, `strict` adds a canary in every function and zero-initialized locals in the C runtime. See "Hardening" in the compiler-flags docs page for the rest.
+
+- Full hardening: `-pie` and CET (`-fcf-protection=full`) or BTI/PAC (`-mbranch-protection=standard`) on Linux and Android; `strict` adds Control Flow Guard on Windows and ShadowCallStack on Android arm64. Written against `clang`'s flags; verified on Windows x64 only.
+- `--sanitize=address|undefined|thread` and `sanitize:` in `djinn.proj`: the Djinn code goes through the `asan`/`tsan` passes and the link and runtime sources use `-fsanitize`. `DJINN_SANITIZE` does the same in `tools/build_runtime.sh`. Not on Windows (`address`, `thread`), WebAssembly, Android or `--lld`.
+- `--gc-sections` / `gc-sections: true` removes unused code and data at link time; the runtime is built with function and data sections. WebAssembly links with `-O2`, the web runtime builds with real warnings instead of `-w`, and `DJINN_WASM_OPT` runs `wasm-opt -O2` when it is installed.
+- A library records its IEEE 754 revision in its manifest. Importing a library built with `ieee754 none` into a conforming project warns that a NaN or an infinity passed to it is undefined behavior; two different conforming revisions only log an information line, and a `none` project using a conforming library is silent. `std/djinn.proj` pins `ieee754: "2019"` (`tools/build_std.sh` passes the same values).
+
+### Changed
+- The runtime's coroutine frame cache is not compiled in under AddressSanitizer or with `-DDJINN_NO_FRAME_CACHE`: every frame goes straight to `malloc`/`free` with its exact size, so a use after free, a double free, a resume of a destroyed coroutine and a small overflow are reported by the sanitizer (`runtime/scheduler.c`). Normal builds are unchanged.
+
+- `tools/build_runtime.sh` compiles the runtime with `-ffunction-sections -fdata-sections` (every runtime object), and our own C code (not `yyjson`) with `-fno-strict-aliasing -fwrapv`: no strict-aliasing assumptions over memory Djinn code wrote with other types, and signed overflow wraps instead of being undefined. `djinnc` links as before.
+
+### Documentation
+- New docs page "Optimization & Build Flags" (`docs/content/docs/advanced/compiler-flags.mdx`): what `-O0`…`-Oz` run, what range analysis and async elision remove, the float and `--cpu native` caveats, the flags the link step passes on each target, how the runtime library is built, and a table of things that can surprise.
 
 ### Fixed
 - `async void main` that suspends (an `await` on a real task such as `Task.delay`) failed to link with `undefined symbol: __djinn_coro_destroy`: the entry point declared the function before the coroutine wrappers were defined, so LLVM renamed the definition. The wrappers now reuse the existing declaration (`AsyncVoidMainWithSuspension`).

@@ -122,7 +122,7 @@ operator_signature   = type "operator" operator_symbol "(" [ param_list ] ")" ";
 struct               = [ attributes ] [ "constexpr" | "abstract" ] "struct" [ "mut" ] IDENTIFIER [ generic_params ] [ where_clause ] [ struct_base ] ( ";" | struct_body ) ;
 struct_base          = ":" [ "interface" ] type { "," type } ;
 struct_body          = "{" { member } "}" ;
-member               = field_decl | property | method | constructor | operator_decl | const_decl ;
+member               = field_decl | property | method | constructor | operator_decl | const_decl | invariant_clause ;
 
 field_decl           = [ attributes ] [ modifiers ] [ "mut" ] type IDENTIFIER [ "=" expression ] ";" ;
 property             = [ modifiers ] type IDENTIFIER ( "{" { getter | setter } "}" | "=>" expression ";" ) ;
@@ -174,24 +174,52 @@ try_expression       = "try" expression [ "?:" expression ] ;
 - Runtime panics (bounds, null, overflow in `t` mode, ...) are `R<code>` errors from `runtime_errors.djinn`, reported with
   a source snippet and shadow-stack in debug builds and with message and `file:line` in release builds. *)
 
-### Contracts (require / ensure)
+### Contracts (require / ensure / invariant)
 
 ```ebnf
-contract_clause      = ( "require" | "ensure" ) ( "(" expression ")" | block ) ;
+contract_clause      = ( "require" | "ensure" ) "(" expression ")" ;
+invariant_clause     = "invariant" "(" expression ")" ";" ;      (* contextual word, inside a struct body *)
+old_expression       = "old" "(" expression ")" ;                 (* contextual, only inside ensure *)
 ```
 
-`require` runs at function entry, `ensure` before each return (the value is the `return` pseudo-variable). A function with
-contracts is implicitly throwing; `require` clauses decided by constant arguments are checked at compile time.
+`require` runs at function entry, `ensure` before every return: `result` is the returned value and `old(x)` the value `x`
+had at entry (a trivially copyable value, `E7001`). An `invariant` is checked when every method and constructor that is
+neither static nor private returns, and only the methods of its struct may write its fields or build it with an
+initializer (`E7002`). A clause may only call functions without effects (`E7009`).
+
+The contracts mode decides what a failed clause does: `check` (default) traps with `R10013`, `observe` reports and goes
+on, `ignore` evaluates nothing (and never becomes an assumption). It is set with `--contracts=<mode>` or `contracts:` in
+`djinn.proj`; a library keeps the mode it was built with, also for the bodies a consumer compiles from its interface.
 
 ```djinn
 i32 clamp(i32 value, i32 lo, i32 hi)
     require(lo <= hi)
-    ensure(return >= lo)
+    ensure(result >= lo && result <= hi)
 {
-    return value;
+    return value < lo ? lo : (value > hi ? hi : value);
 }
-i32 ok = try clamp(5, 1, 10) ?: 0;
 ```
+
+### Effects and regions (atomic / cooperative)
+
+```ebnf
+atomic_stmt          = "atomic" [ "(" [ expression { "," expression } ] ")" ] block [ "after_commit" block ] ;
+cooperative_stmt     = "cooperative" block ;
+```
+
+Effects (`writes`, `io`, `suspends`, `unknown`) are inferred for every function. `[Pure]` functions must have none
+(`E7003`), `[Effects(...)]` declares them on an extern and is an audited ceiling on a function with a body (`E7004`).
+An `atomic` region saves its operands (places: variables, fields, dereferences) and restores them when an error leaves
+it; a value operand that owns memory is undone by move. The region cannot suspend (`E7005`), nothing may fail after its
+first external effect (`E7006`), parts of a value operand that own memory cannot be replaced (`E7007`), and every write
+must land in an operand or a local of the region (`E7008`). `after_commit` runs when the region completes without an
+error and cannot leave it (`E7011`). `cooperative` only forbids suspension. `--obligations[=json]` lists every guarantee
+with its provenance and the inferred effects.
+
+### Native errors (`[NativeError]`)
+
+`[NativeError(detect = <condition on result>, capture = errno | last_error | return_code)]` on an `extern "C"` function
+that declares `throws(E)` makes a failed call throw `E { .code = <captured> }` (`E7012` for a malformed attribute).
 
 ### Constexpr / Consteval
 
@@ -283,12 +311,14 @@ the arguments or the expected type when omitted. `impl Box<T> { ... }` names its
 
 ```ebnf
 type                 = [ "mut" ] base_type { "*" | "?" | "[" [ expression ] "]" } ;
-base_type            = primitive_type | qualified_name [ generic_args ] | "void" | "auto" | "var" | "ptr" [ "<" type ">" ] | fn_type ;
+base_type            = primitive_type | anonymous_struct | qualified_name [ generic_args ] | "void" | "auto" | "var" | "ptr" [ "<" type ">" ] | fn_type ;
+anonymous_struct     = "{" type IDENTIFIER { "," type IDENTIFIER } [ "," ] "}" ;  (* a struct declared in place; equal field lists are the same type *)
 fn_type              = "fn" "(" [ type { "," type } ] ")" [ "->" type ] ;    (* "fn" is a type only before "(" *)
 
-primitive_type       = integer_type | float_type | native_type | "bool" | "char" | "str" | "string" | "isize" | "usize" ;
+primitive_type       = integer_type | float_type | brain_float_type | native_type | "bool" | "char" | "str" | "string" | "isize" | "usize" ;
 integer_type         = ( "i" | "u" ) DIGITS { integer_suffix } ;    (* i8..i128, u8..u128, i32w, u32n, i32nt, ... *)
-float_type           = "f" DIGITS ;                                  (* f32, f64 *)
+float_type           = "f" DIGITS ;                                  (* f16, f32, f64 *)
+brain_float_type     = "bf16" ;                                       (* x86, ARM, AArch64 and RISC-V only; E3071 elsewhere *)
 native_type          = "nint" [ overflow_suffix ] | "nfloat" | "ndouble" ;
 integer_suffix       = "n" | overflow_suffix ;
 overflow_suffix      = "w" | "t" | "c" | "s" ;
@@ -310,7 +340,7 @@ overflow_suffix      = "w" | "t" | "c" | "s" ;
 ```ebnf
 block                = "{" { statement } "}" ;
 statement            = [ attributes ] ( return_stmt | if_stmt | for_stmt | while_stmt | do_while_stmt | switch_stmt | break_stmt
-                     | continue_stmt | throw_statement | yield_stmt | spawn_stmt | unsafe_block | block | local_decl | destructure
+                     | continue_stmt | throw_statement | yield_stmt | spawn_stmt | unsafe_block | atomic_stmt | cooperative_stmt | block | local_decl | destructure
                      | expression_stmt ) ;
 
 return_stmt          = "return" [ expression ] ";" ;
@@ -337,7 +367,7 @@ expression_stmt      = expression ";" ;
 ```
 
 Range bounds: the start is inclusive unless the bracket is `(`; the end is inclusive with `..=` or `]`, exclusive with `..`
-or `)`. `for (0..5) { }` repeats without a variable. The `switch` statement has no fallthrough; `break` leaves it. Its value is an integer, a payload-less enum, a `str` or a `string`; text labels have the same type as the value and are tested in order with `operator ==`.
+or `)`. `for (0..5) { }` repeats without a variable. The `switch` statement has no fallthrough, except that a `case`/`default` label with no statements shares the body of the arm after it (`case 1: case 2: body`); `break` leaves it. Its value is an integer, a payload-less enum, a `str` or a `string`; text labels have the same type as the value and are tested in order with `operator ==`.
 
 ### Expressions
 
@@ -425,3 +455,7 @@ with each pattern in source order (`==` unless a relation is written; integers, 
 and yields the first matching arm. A `_` arm without `when` is required. The arms are an ordinary chain of conditional
 expressions: they yield the same type. `condition ? a : b` evaluates one branch; the branches have the same type (numbers
 widen, a nullable pointer accepts a safe pointer, `null` and number literals take the other branch's type). *)
+
+`f16` is an IEEE half and `bf16` a brain float (8 exponent bits, 7 mantissa bits). Both widen to `f32`/`f64` implicitly and convert to each other only with a cast. `bf16` exists only on x86, ARM, AArch64 and RISC-V targets; elsewhere (web, wasm, other architectures) it is `E3071`.
+
+An anonymous struct type, `{ i32 result, f64 something } doMath(i32 a, i64 b) { return { .result = 1, .something = 0.5 }; }`, is turned by the parser into a struct named after its fields (`__anon_<hash>`): the same field types, names and order are the same type, and `auto { result, something } = doMath(1, 2);` destructures it. Its fields are immutable and it has no methods.

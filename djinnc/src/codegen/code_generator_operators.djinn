@@ -60,8 +60,12 @@ impl CodeGenerator {
             return LLVMBuildCast(this.builder, LlvmConst.OP_FPTOUI, ref, destination, "fptoui");
         }
         if (Types.is_float(from) && Types.is_float(target)) {
-            if (Types.bits(from) == Types.bits(target)) {
+            if (from == target) {
                 return ref;
+            }
+            if (Types.bits(from) == 16 && Types.bits(target) == 16) {
+                ptr wide = LLVMBuildCast(this.builder, LlvmConst.OP_FPEXT, ref, LLVMFloatTypeInContext(this.context), "fpext");
+                return LLVMBuildCast(this.builder, LlvmConst.OP_FPTRUNC, wide, destination, "fptrunc");
             }
             if (Types.bits(from) < Types.bits(target)) {
                 return LLVMBuildCast(this.builder, LlvmConst.OP_FPEXT, ref, destination, "fpext");
@@ -204,7 +208,9 @@ impl CodeGenerator {
         u32 element = node.value_type();
         Value* value = this.gen_expression(node.second());
         ptr stored = this.coerce(value, element);
-        this.dispose_before_assign(node.first(), address);
+        if (!this.replace_atomic_operand(node.first(), address)) {
+            this.dispose_before_assign(node.first(), address);
+        }
         ptr store = LLVMBuildStore(this.builder, stored, address);
         this.mark_volatile(store, node.first());
         this.revive_after_assign(node.first(), node.second());
@@ -552,6 +558,10 @@ impl CodeGenerator {
         mut u32 mantissa = 53;
         if (Types.bits(from) == 32) {
             mantissa = 24;
+        } else if (Types.is_brain_float(from)) {
+            mantissa = 8;
+        } else if (Types.bits(from) == 16) {
+            mantissa = 11;
         }
         mut f64 upper = CodeGenerator.power_of_two(bits);
         mut f64 lower = 0.0 - 1.0;

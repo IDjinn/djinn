@@ -1,0 +1,226 @@
+namespace djinnc;
+
+impl Parser {
+    unsafe FunctionContracts* parse_function_contracts() {
+        PointerList* requires = this.parse_clauses(TokenKind::REQUIRE, Intrinsic.REQUIRE_CLAUSE);
+        PointerList* saved = this.old_captures;
+        this.old_captures = PointerList.create();
+        bool was_in_ensure = this.in_ensure;
+        this.in_ensure = true;
+        PointerList* ensures = this.parse_clauses(TokenKind::ENSURE, Intrinsic.ENSURE_CLAUSE);
+        this.in_ensure = was_in_ensure;
+        PointerList* captures = this.old_captures;
+        this.old_captures = saved;
+        if (requires.length == 0 && ensures.length == 0) {
+            return (FunctionContracts*)0;
+        }
+        return FunctionContracts.create(requires, ensures, captures);
+    }
+
+    unsafe Node* contract_check(i32 token, i32 clause, Node* condition, ptr<i8> text) {
+        Node* check = Node.create(NodeKind::INTRINSIC, token);
+        check.set_op(Intrinsic.CONTRACT);
+        check.set_int_value((i64)(clause | (this.contract_mode << 4)));
+        check.set_first(condition);
+        check.set_text(text);
+        Node* statement = Node.create(NodeKind::EXPR_STMT, token);
+        statement.set_first(check);
+        return statement;
+    }
+
+    unsafe PointerList* parse_clauses(TokenKind keyword, i32 clause) {
+        PointerList* checks = PointerList.create();
+        while (this.check(keyword) && !this.failed) {
+            i32 token = this.advance();
+            checks.push((ptr)this.parse_clause(token, clause));
+        }
+        return checks;
+    }
+
+    unsafe Node* parse_clause(i32 token, i32 clause) {
+        i32 open = this.expect(TokenKind::LPAREN, "expected '(' after the contract keyword");
+        Node* condition = this.parse_expression();
+        i32 close = this.expect(TokenKind::RPAREN, "expected ')' after the contract condition");
+        return this.contract_check(token, clause, condition, this.clause_text(token, close));
+    }
+
+    unsafe ptr<i8> clause_text(i32 first, i32 last) {
+        ByteBuffer* text = ByteBuffer.create();
+        for (mut i32 i = first; i <= last; i = i + 1) {
+            if (i > first && this.space_between(this.kind_of(i - 1), this.kind_of(i))) {
+                text.append_char(' ');
+            }
+            text.append_slice(this.text_of(i), this.length_of(i));
+        }
+        return text.cstr();
+    }
+
+    bool space_between(TokenKind before, TokenKind after) {
+        if (before == TokenKind::LPAREN || before == TokenKind::DOT || before == TokenKind::LBRACKET || before == TokenKind::BANG) {
+            return false;
+        }
+        if (after == TokenKind::RPAREN || after == TokenKind::COMMA || after == TokenKind::DOT || after == TokenKind::RBRACKET
+            || after == TokenKind::LPAREN || after == TokenKind::LBRACKET) {
+            return false;
+        }
+        return true;
+    }
+
+    unsafe Node* parse_old(i32 token) {
+        this.advance();
+        this.advance();
+        Node* captured = this.parse_expression();
+        this.expect(TokenKind::RPAREN, "expected ')' after old(");
+        PointerList* captures = this.old_captures;
+        ByteBuffer* name = ByteBuffer.create();
+        name.append("__old_");
+        name.append_int((i64)this.old_counter);
+        this.old_counter = this.old_counter + 1;
+        Node* declaration = Node.create(NodeKind::VAR_DECL, token);
+        declaration.set_type(TypeRef.create(TypeKind.AUTO));
+        declaration.set_text(name.cstr());
+        declaration.set_first(captured);
+        captures.push((ptr)declaration);
+        Node* reference = Node.create(NodeKind::IDENTIFIER, token);
+        reference.set_text(name.cstr());
+        return reference;
+    }
+
+    bool at_old_call(i32 token) {
+        return this.in_ensure && this.kind_of(token) == TokenKind::IDENTIFIER && Strings.equals(this.text_of(token), this.length_of(token), "old")
+            && this.kind_of(this.peek_token(1)) == TokenKind::LPAREN;
+    }
+
+    unsafe Node* with_contracts(i32 token, Node* function, Node* body, FunctionContracts* contracts) {
+        if (contracts == null || body == null) {
+            return body;
+        }
+        Node* checked = this.with_ensures(token, function, body, contracts.ensures, contracts.captures, "result");
+        return this.with_requires(token, checked, contracts.requires);
+    }
+
+    unsafe Node* with_ensures(i32 token, Node* function, Node* body, PointerList* checks, PointerList* captures, ptr<i8> name) {
+        if (checks.length == 0) {
+            return body;
+        }
+        TypeRef* type = function.type();
+        bool is_void = type == null || type.is_void();
+        this.guard_returns(body, checks, type, name);
+        if (is_void) {
+            bool ends_with_return = body.count() > 0 && body.child(body.count() - 1).kind() == NodeKind::RETURN;
+            if (!ends_with_return) {
+                for (mut i32 i = 0; i < checks.length; i = i + 1) {
+                    body.add(Node.clone((Node*)checks.get(i)));
+                }
+            }
+        }
+        return this.prepend(token, body, captures);
+    }
+
+    unsafe Node* with_requires(i32 token, Node* body, PointerList* checks) {
+        return this.prepend(token, body, checks);
+    }
+
+    unsafe Node* prepend(i32 token, Node* body, PointerList* statements) {
+        if (statements.length == 0) {
+            return body;
+        }
+        Node* joined = Node.create_list(NodeKind::BLOCK, token);
+        joined.set_op(body.op());
+        for (mut i32 i = 0; i < statements.length; i = i + 1) {
+            joined.add((Node*)statements.get(i));
+        }
+        for (mut i32 i = 0; i < body.count(); i = i + 1) {
+            joined.add(body.child(i));
+        }
+        return joined;
+    }
+
+    unsafe Node* guarded(Node* child, PointerList* checks, TypeRef* type, ptr<i8> name) {
+        if (child.kind() == NodeKind::RETURN) {
+            return this.guard_return(child, checks, type, name);
+        }
+        this.guard_returns(child, checks, type, name);
+        return child;
+    }
+
+    unsafe void guard_returns(Node* node, PointerList* checks, TypeRef* type, ptr<i8> name) {
+        NodeKind kind = node.kind();
+        if (kind == NodeKind::FUNCTION || kind == NodeKind::LAMBDA) {
+            return;
+        }
+        Node* first = node.first();
+        if (first != null) {
+            node.set_first(this.guarded(first, checks, type, name));
+        }
+        Node* second = node.second();
+        if (second != null) {
+            node.set_second(this.guarded(second, checks, type, name));
+        }
+        Node* third = node.third();
+        if (third != null) {
+            node.set_third(this.guarded(third, checks, type, name));
+        }
+        if (node.has_items()) {
+            for (mut i32 i = 0; i < node.count(); i = i + 1) {
+                node.set_child(i, this.guarded(node.child(i), checks, type, name));
+            }
+        }
+    }
+
+    unsafe Node* guard_return(Node* returned, PointerList* checks, TypeRef* type, ptr<i8> name) {
+        Node* block = Node.create_list(NodeKind::BLOCK, returned.token);
+        if (returned.first() == null) {
+            for (mut i32 i = 0; i < checks.length; i = i + 1) {
+                block.add(Node.clone((Node*)checks.get(i)));
+            }
+            block.add(returned);
+            return block;
+        }
+        Node* declaration = Node.create(NodeKind::VAR_DECL, returned.token);
+        declaration.set_type(type);
+        declaration.set_text(name);
+        declaration.set_first(returned.first());
+        block.add(declaration);
+        for (mut i32 i = 0; i < checks.length; i = i + 1) {
+            block.add(Node.clone((Node*)checks.get(i)));
+        }
+        Node* reference = Node.create(NodeKind::IDENTIFIER, returned.token);
+        reference.set_text(name);
+        returned.set_first(reference);
+        block.add(returned);
+        return block;
+    }
+
+    bool at_invariant() {
+        i32 token = this.current();
+        return this.kind_of(token) == TokenKind::IDENTIFIER && Strings.equals(this.text_of(token), this.length_of(token), "invariant")
+            && this.kind_of(this.peek_token(1)) == TokenKind::LPAREN;
+    }
+
+    unsafe void parse_invariant(PointerList* invariants) {
+        i32 token = this.advance();
+        invariants.push((ptr)this.parse_clause(token, Intrinsic.INVARIANT_CLAUSE));
+        this.expect(TokenKind::SEMICOLON, "expected ';' after the invariant");
+    }
+
+    // Every method and constructor that is neither static nor private checks the invariants when it returns; the
+    // struct is recorded so that the checker keeps writes to its fields inside its own methods.
+    unsafe void apply_invariants(Node* declaration, PointerList* invariants) {
+        if (invariants.length == 0) {
+            return;
+        }
+        StructInvariants.mark(declaration);
+        for (mut i32 i = 0; i < declaration.count(); i = i + 1) {
+            Node* member = declaration.child(i);
+            if (member.kind() != NodeKind::FUNCTION || member.flag() || (member.op() & 64) != 0 || member.first() == null) {
+                continue;
+            }
+            PointerList* checks = PointerList.create();
+            for (mut i32 k = 0; k < invariants.length; k = k + 1) {
+                checks.push((ptr)Node.clone((Node*)invariants.get(k)));
+            }
+            member.set_first(this.with_ensures(member.token, member, member.first(), checks, PointerList.create(), "__invariant_result"));
+        }
+    }
+}

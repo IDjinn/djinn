@@ -801,6 +801,26 @@ struct Library {
         // the platforms the library supports (0 = any), after the links
         Library.put_u32(manifest, (u32)options.target_mask);
 
+        // the IEEE 754 revision the library was built with, after the platforms: consumers warn when the modes cross
+        FloatSettings* library_floats = options.float_settings;
+        Library.put_text(manifest, library_floats.standard.name(), strlen(library_floats.standard.name()));
+
+        // the contracts mode its code was built with, after the IEEE 754 revision: checks compiled into the library
+        // keep it, and so do the bodies a consumer compiles again from the interface (generics, async)
+        ptr<i8> contracts_name = ContractMode.name(options.contract_mode);
+        Library.put_text(manifest, contracts_name, strlen(contracts_name));
+
+        // the effects inferred for each function it compiles, after the contracts mode: a consumer only sees their
+        // signatures, and would otherwise count them as unknown
+        PointerList* effect_names = Effects.exported_names();
+        PointerList* effect_bits = Effects.exported_bits();
+        Library.put_u32(manifest, (u32)effect_names.length);
+        for (mut i32 e = 0; e < effect_names.length; e = e + 1) {
+            ptr<i8> effect_name = (ptr<i8>)effect_names.get(e);
+            Library.put_text(manifest, effect_name, strlen(effect_name));
+            Library.put_u32(manifest, (u32)(u64)effect_bits.get(e));
+        }
+
         mut u32 flags = (u32)Library.FLAG_TEXT_HASH;
         if (options.use_std) {
             flags = flags | (u32)Library.FLAG_STD;
@@ -904,6 +924,137 @@ struct Library {
             return 0;
         }
         return (i32)Library.get_u32(data, cursor);
+    }
+
+    // The IEEE 754 revision a library was built with ("2019", "2008", "1985" or "none"): the text after the platforms of
+    // the manifest, null in libraries written before it existed.
+    static unsafe ptr<i8> float_standard_of(ptr<i8> data, i32 manifest_offset, i32 manifest_size) {
+        i32 end = manifest_offset + manifest_size;
+        i32 name_length = (i32)Library.get_u32(data, manifest_offset);
+        i32 triple_at = manifest_offset + 4 + name_length;
+        i32 links_at = triple_at + 4 + (i32)Library.get_u32(data, triple_at) + 4;
+        if (links_at + 4 > end) {
+            return null;
+        }
+        mut i32 pending = (i32)Library.get_u32(data, links_at);
+        mut i32 cursor = links_at + 4;
+        while (pending > 0 && cursor + 4 <= end) {
+            cursor = cursor + 4 + (i32)Library.get_u32(data, cursor);
+            pending = pending - 1;
+        }
+        i32 text_at = cursor + 4;
+        if (text_at + 4 > end) {
+            return null;
+        }
+        i32 size = (i32)Library.get_u32(data, text_at);
+        if (size <= 0 || text_at + 4 + size > end) {
+            return null;
+        }
+        return Strings.duplicate(data + text_at + 4, size);
+    }
+
+    // The contracts mode a library was built with: the text after the IEEE 754 revision of the manifest, check in
+    // libraries written before it existed.
+    static unsafe i32 contract_mode_of(ptr<i8> data, i32 manifest_offset, i32 manifest_size) {
+        i32 end = manifest_offset + manifest_size;
+        i32 name_length = (i32)Library.get_u32(data, manifest_offset);
+        i32 triple_at = manifest_offset + 4 + name_length;
+        i32 links_at = triple_at + 4 + (i32)Library.get_u32(data, triple_at) + 4;
+        if (links_at + 4 > end) {
+            return ContractMode.CHECK;
+        }
+        mut i32 pending = (i32)Library.get_u32(data, links_at);
+        mut i32 cursor = links_at + 4;
+        while (pending > 0 && cursor + 4 <= end) {
+            cursor = cursor + 4 + (i32)Library.get_u32(data, cursor);
+            pending = pending - 1;
+        }
+        i32 float_at = cursor + 4;
+        if (float_at + 4 > end) {
+            return ContractMode.CHECK;
+        }
+        i32 mode_at = float_at + 4 + (i32)Library.get_u32(data, float_at);
+        if (mode_at + 4 > end) {
+            return ContractMode.CHECK;
+        }
+        i32 size = (i32)Library.get_u32(data, mode_at);
+        if (size <= 0 || mode_at + 4 + size > end) {
+            return ContractMode.CHECK;
+        }
+        i32 mode = ContractMode.parse(Strings.duplicate(data + mode_at + 4, size));
+        if (mode == ContractMode.UNKNOWN) {
+            return ContractMode.CHECK;
+        }
+        return mode;
+    }
+
+    // The effects table after the contracts mode: a count, then the symbol name and the effect bits of each function
+    // the library compiled. Libraries written before it existed have none, and their functions stay unknown.
+    static unsafe void read_effects(ptr<i8> data, i32 manifest_offset, i32 manifest_size) {
+        i32 end = manifest_offset + manifest_size;
+        i32 name_length = (i32)Library.get_u32(data, manifest_offset);
+        i32 triple_at = manifest_offset + 4 + name_length;
+        i32 links_at = triple_at + 4 + (i32)Library.get_u32(data, triple_at) + 4;
+        if (links_at + 4 > end) {
+            return;
+        }
+        mut i32 pending = (i32)Library.get_u32(data, links_at);
+        mut i32 cursor = links_at + 4;
+        while (pending > 0 && cursor + 4 <= end) {
+            cursor = cursor + 4 + (i32)Library.get_u32(data, cursor);
+            pending = pending - 1;
+        }
+        i32 float_at = cursor + 4;
+        if (float_at + 4 > end) {
+            return;
+        }
+        i32 mode_at = float_at + 4 + (i32)Library.get_u32(data, float_at);
+        if (mode_at + 4 > end) {
+            return;
+        }
+        i32 table_at = mode_at + 4 + (i32)Library.get_u32(data, mode_at);
+        if (table_at + 4 > end) {
+            return;
+        }
+        mut i32 remaining = (i32)Library.get_u32(data, table_at);
+        mut i32 entry = table_at + 4;
+        while (remaining > 0 && entry + 4 <= end) {
+            i32 size = (i32)Library.get_u32(data, entry);
+            if (entry + 4 + size + 4 > end) {
+                return;
+            }
+            Effects.remember_library(Strings.duplicate(data + entry + 4, size), Library.get_u32(data, entry + 4 + size));
+            entry = entry + 4 + size + 4;
+            remaining = remaining - 1;
+        }
+    }
+
+    // Each library keeps the contracts mode it was built with; a weaker one than the project's is reported so that a
+    // project that checks its contracts knows which of its libraries only observe or ignore theirs.
+    static unsafe void check_contract_mode(Options* options, ptr<i8> path, i32 library) {
+        if (library > options.contract_mode) {
+            logger_info(Log.get(), "djinnc: library '%s' was built with contracts %s and this project uses %s: its own require/ensure/invariant clauses keep %s", path, ContractMode.name(library), ContractMode.name(options.contract_mode), ContractMode.name(library));
+        }
+    }
+
+    // Floats cross the boundary of two builds with different IEEE 754 settings. Values a conforming program passes
+    // (NaN, infinity) become poison inside code built with 'none' (it assumes they never occur); the other direction is
+    // safe, and two conforming revisions only differ in which operations exist.
+    static unsafe void check_float_standard(Options* options, ptr<i8> path, ptr<i8> data, i32 manifest_offset, i32 manifest_size) {
+        ptr<i8> library = Library.float_standard_of(data, manifest_offset, manifest_size);
+        if (library == null) {
+            return;
+        }
+        FloatSettings* project = options.float_settings;
+        ptr<i8> mine = project.standard.name();
+        if (Strings.same(library, mine)) {
+            return;
+        }
+        if (Strings.same(library, "none")) {
+            logger_warn(Log.get(), "djinnc: library '%s' was built with ieee754 none and this project uses %s: a NaN or an infinity passed to it is undefined behavior there, and its results may not be IEEE 754 values", path, mine);
+        } else if (!Strings.same(mine, "none")) {
+            logger_info(Log.get(), "djinnc: library '%s' was built with ieee754 %s and this project uses %s: results of + - * / agree; only which operations exist (fma, minimum) differs", path, library, mine);
+        }
     }
 
     // The library must support the platform being built for, and every platform the project supports.
@@ -1314,6 +1465,10 @@ struct Library {
         if (!Library.check_platforms(options, path, data, manifest_offset, manifest_size)) {
             return -1;
         }
+        Library.check_float_standard(options, path, data, manifest_offset, manifest_size);
+        i32 library_contracts = Library.contract_mode_of(data, manifest_offset, manifest_size);
+        Library.check_contract_mode(options, path, library_contracts);
+        Library.read_effects(data, manifest_offset, manifest_size);
         if (!for_target && !macros_only) {
             logger_error(Log.get(), "djinnc: '%s' targets a different triple than '%s'", path, Target.triple());
             return -1;
@@ -1321,7 +1476,7 @@ struct Library {
         if (macros_only) {
             Library.macro_objects().push((ptr)(data + object_offset));
             Library.macro_object_sizes().push((ptr)(u64)object_size);
-            return Library.read_packed_files(path, data, interface_offset, interface_size, options, diagnostics_list, true);
+            return Library.read_packed_files(path, data, interface_offset, interface_size, options, diagnostics_list, true, library_contracts);
         }
 
         if (!Library.link_dependencies(options, path, data, manifest_offset, manifest_size, triple_at + 4 + triple_size)) {
@@ -1362,11 +1517,11 @@ struct Library {
         }
 
         library_loaded = 1;
-        return Library.read_packed_files(path, data, interface_offset, interface_size, options, diagnostics_list, false);
+        return Library.read_packed_files(path, data, interface_offset, interface_size, options, diagnostics_list, false, library_contracts);
     }
 
     // Adds the source files packed in a library's interface, as headers of the program being compiled.
-    static unsafe i32 read_packed_files(ptr<i8> path, ptr<i8> data, i32 interface_offset, i32 interface_size, Options* options, PointerList* diagnostics_list, bool macros_only) {
+    static unsafe i32 read_packed_files(ptr<i8> path, ptr<i8> data, i32 interface_offset, i32 interface_size, Options* options, PointerList* diagnostics_list, bool macros_only, i32 contract_mode) {
         LibraryInterface* context = (LibraryInterface*)Memory.zalloc(sizeof(LibraryInterface));
         if (!Library.read_interface(data, interface_offset, interface_size, context)) {
             logger_error(Log.get(), "djinnc: '%s' has an interface this compiler cannot read; build the library again with this djinnc", path);
@@ -1386,6 +1541,7 @@ struct Library {
             file.packed_end = packed.end;
             file.packed_context = (ptr)context;
             file.macros_only = macros_only;
+            file.contract_mode = contract_mode;
             diagnostics_list.push((ptr)Diagnostics.create(name.cstr()));
             PointerList* dependencies = options.dependencies;
             dependencies.push((ptr)name.cstr());
@@ -1479,6 +1635,8 @@ struct Library {
             Target.append_platforms(names, platforms);
             Library.field(out, "targets:    ", names.data, names.length);
         }
+        ptr<i8> contracts_text = ContractMode.name(Library.contract_mode_of(data, manifest_offset, manifest_size));
+        Library.field(out, "contracts:  ", contracts_text, strlen(contracts_text));
         mut ptr<i8> needs_std = "no";
         if ((flags & (u32)Library.FLAG_STD) != 0) {
             needs_std = "yes";

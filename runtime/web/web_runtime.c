@@ -1002,6 +1002,18 @@ void __djinn_panic(const char* message, const char* file, uint32_t line)
     fail_with_report();
 }
 
+int32_t __djinn_errno(void) { return 0; }
+void __djinn_errno_clear(void) {}
+int32_t __djinn_last_error(void) { return 0; }
+
+void __djinn_contract_observed(const char* message, const char* file, uint32_t line)
+{
+    char report[512];
+    int32_t length = snprintf(report, sizeof(report), "observed: %s\n  --> %s:%u\n", message, file, (unsigned)line);
+    if (length > (int32_t)sizeof(report) - 1) length = (int32_t)sizeof(report) - 1;
+    web_console_write(2, report, length);
+}
+
 void* __djinn_hook_set(int32_t kind, void* handler)
 {
     if (kind != 0) return 0;
@@ -1011,6 +1023,14 @@ void* __djinn_hook_set(int32_t kind, void* handler)
 }
 
 void* __djinn_hook_take(int32_t kind) { return __djinn_hook_set(kind, 0); }
+
+void __djinn_hook_fire(int32_t kind, const char* message, const char* file, uint32_t line)
+{
+    (void)kind;
+    (void)message;
+    (void)file;
+    (void)line;
+}
 
 static void report_error(const char* message, const char* file, uint32_t line, uint32_t column, uint8_t op, uint8_t bits,
                          uint8_t is_signed, uint8_t has_operands, uint64_t left, uint64_t right)
@@ -1166,7 +1186,6 @@ static timer_t_* timers;
 static void* main_handle;
 static int main_has_result;
 static int main_finished;
-static int loop_depth;
 
 static void enqueue(void* handle)
 {
@@ -1412,7 +1431,6 @@ DJINN_EXPORT(djinn_tick) void djinn_tick(void)
 static void run_until_done(void* handle)
 {
     if (!is_in_waiting_set(handle)) enqueue(handle);
-    loop_depth++;
     while (!__djinn_coro_done(handle))
     {
         void* next = dequeue();
@@ -1435,7 +1453,6 @@ static void run_until_done(void* handle)
         if (next != handle) finish_coro(next);
     }
     take_waiting(handle);
-    loop_depth--;
 }
 
 void __djinn_event_loop_run(void* handle) { run_until_done(handle); }

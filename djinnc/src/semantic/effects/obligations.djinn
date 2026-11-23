@@ -1,0 +1,157 @@
+namespace djinnc;
+
+unsafe static mut ptr obligation_list = null;
+unsafe static mut ptr obligation_functions = null;
+
+// The guarantees the compiler tracks for the program, with how each one holds: proved (by analysis), enforced (by a
+// rule the compiler applies), checked (a run-time check that traps), observed (a run-time check that only reports)
+// or ignored (built without its check). --obligations prints them, as text or as JSON for tools and agents.
+struct Obligations {
+    public static unsafe PointerList* all() {
+        if (obligation_list == null) {
+            obligation_list = (ptr)PointerList.create();
+            obligation_functions = (ptr)PointerList.create();
+        }
+        return (PointerList*)obligation_list;
+    }
+
+    public static unsafe PointerList* functions() {
+        Obligations.all();
+        return (PointerList*)obligation_functions;
+    }
+
+    public static unsafe void record(ptr<i8> kind, ptr<i8> provenance, FunctionInfo* function, ptr<i8> text, Node* at) {
+        if (!at.is_program_source()) {
+            return;
+        }
+        PointerList* recorded = Obligations.all();
+        for (mut i32 i = 0; i < recorded.length; i = i + 1) {
+            Obligation* seen = (Obligation*)recorded.get(i);
+            if (seen.line == at.line() && seen.column == at.column() && Strings.same(seen.kind, kind) && seen.function_info == function
+                && Strings.same(seen.file, at.file_name())) {
+                return;
+            }
+        }
+        Obligation* obligation = (Obligation*)Memory.zalloc(sizeof(Obligation));
+        obligation.kind = kind;
+        obligation.function_info = function;
+        obligation.provenance = provenance;
+        obligation.function = "";
+        if (function != null) {
+            obligation.function = CodeGenerator.base_name(function.name);
+        }
+        obligation.text = text;
+        obligation.file = at.file_name();
+        obligation.line = at.line();
+        obligation.column = at.column();
+        PointerList* list = Obligations.all();
+        list.push((ptr)obligation);
+    }
+
+    public static unsafe void function(FunctionInfo* info) {
+        Node* declaration = info.node;
+        if (declaration == null || !declaration.is_program_source()) {
+            return;
+        }
+        PointerList* list = Obligations.functions();
+        list.push((ptr)info);
+    }
+
+    public static ptr<i8> contract_provenance(i32 mode) {
+        switch (mode) {
+            case ContractMode.OBSERVE: return "observed";
+            case ContractMode.IGNORE: return "ignored";
+            default: return "checked";
+        }
+    }
+
+    public static ptr<i8> clause_kind(i32 clause) {
+        switch (clause) {
+            case Intrinsic.ENSURE_CLAUSE: return "ensure";
+            case Intrinsic.INVARIANT_CLAUSE: return "invariant";
+            default: return "require";
+        }
+    }
+
+    public static unsafe void print(bool json) {
+        if (json) {
+            Obligations.print_json();
+            return;
+        }
+        PointerList* list = Obligations.all();
+        for (mut i32 i = 0; i < list.length; i = i + 1) {
+            Obligation* obligation = (Obligation*)list.get(i);
+            printf("%s:%d:%d: %s %s in %s: %s\n", obligation.file, obligation.line, obligation.column, obligation.provenance,
+                obligation.kind, obligation.function, obligation.text);
+        }
+        PointerList* functions = Obligations.functions();
+        for (mut i32 f = 0; f < functions.length; f = f + 1) {
+            FunctionInfo* info = (FunctionInfo*)functions.get(f);
+            Node* declaration = info.node;
+            printf("%s:%d:%d: effects of %s: %s\n", declaration.file_name(), declaration.line(), declaration.column(),
+                CodeGenerator.base_name(info.name), Effects.describe(info.effects));
+        }
+    }
+
+    static unsafe void print_json() {
+        ByteBuffer* out = ByteBuffer.create();
+        out.append("{\"obligations\":[");
+        PointerList* list = Obligations.all();
+        for (mut i32 i = 0; i < list.length; i = i + 1) {
+            Obligation* obligation = (Obligation*)list.get(i);
+            if (i > 0) {
+                out.append_char(',');
+            }
+            out.append("{\"kind\":");
+            out.append_json_string(obligation.kind);
+            out.append(",\"provenance\":");
+            out.append_json_string(obligation.provenance);
+            out.append(",\"function\":");
+            out.append_json_string(obligation.function);
+            out.append(",\"text\":");
+            out.append_json_string(obligation.text);
+            out.append(",\"file\":");
+            out.append_json_string(obligation.file);
+            out.append(",\"line\":");
+            out.append_int((i64)obligation.line);
+            out.append(",\"column\":");
+            out.append_int((i64)obligation.column);
+            out.append_char('}');
+        }
+        out.append("],\"functions\":[");
+        PointerList* functions = Obligations.functions();
+        for (mut i32 f = 0; f < functions.length; f = f + 1) {
+            FunctionInfo* info = (FunctionInfo*)functions.get(f);
+            Node* declaration = info.node;
+            if (f > 0) {
+                out.append_char(',');
+            }
+            out.append("{\"name\":");
+            out.append_json_string(CodeGenerator.base_name(info.name));
+            out.append(",\"effects\":[");
+            Obligations.append_effects(out, info.effects);
+            out.append("],\"file\":");
+            out.append_json_string(declaration.file_name());
+            out.append(",\"line\":");
+            out.append_int((i64)declaration.line());
+            out.append("}");
+        }
+        out.append("]}\n");
+        printf("%s", out.cstr());
+    }
+
+    static void append_effects(ByteBuffer* out, u32 effects) {
+        mut bool first = true;
+        mut u32 bit = 1;
+        while (bit <= Effects.UNKNOWN) {
+            if ((effects & bit) != 0) {
+                if (!first) {
+                    out.append_char(',');
+                }
+                out.append_json_string(Effects.describe(bit));
+                first = false;
+            }
+            bit = bit << 1;
+        }
+    }
+}

@@ -32,6 +32,7 @@ unsafe i32 run_compiler() {
     }
 
     Diagnostics.set_json(options.diagnostics_json);
+    ContractMode.set_project(options.contract_mode);
     Target.init(options.target);
     if (options.target_mask != 0 && (options.target_mask & Target.platform_bit()) == 0) {
         ByteBuffer* supported = ByteBuffer.create();
@@ -45,6 +46,8 @@ unsafe i32 run_compiler() {
     }
     FloatSettings.install(options.float_settings);
     ObjectWriter.set_target(options.cpu, options.features);
+    ObjectWriter.set_hardening(Linker.harden_level(options));
+    ObjectWriter.set_sanitizers(options.sanitize);
 
     if (options.inspect_path != null) {
         return Library.inspect(options.inspect_path, null, options.sections_only);
@@ -88,7 +91,8 @@ unsafe i32 run_compiler() {
         }
         dependencies.push((ptr)core_path);
         i32 core_length = strlen(core);
-        Sources.add(core_path, core, (u32)core_length);
+        SourceFile* core_file = Sources.add(core_path, core, (u32)core_length);
+        core_file.is_core = true;
         diagnostics_list.push((ptr)Diagnostics.create(core_path));
         total_bytes = total_bytes + core_length;
     }
@@ -213,12 +217,18 @@ unsafe i32 run_compiler() {
         if (!gen.check(program)) {
             return 1;
         }
+        if (options.obligations != 0) {
+            Obligations.print(options.obligations == 2);
+        }
         monitor.lap("check");
         monitor.finish();
         return 0;
     }
     if (!gen.generate(program)) {
         return 1;
+    }
+    if (options.obligations != 0) {
+        Obligations.print(options.obligations == 2);
     }
     monitor.lap("codegen");
     if (options.stats && gen.range_opt) {
@@ -301,6 +311,13 @@ unsafe i32 run_compiler() {
 
     if (options.opt_level != null && !Strings.same(options.opt_level, "O0")) {
         Internalize.run(gen.module);
+    }
+    if (options.debug && gen.debug != null) {
+        DebugInfo* debug = gen.debug;
+        ByteBuffer* natvis_path = ByteBuffer.create();
+        natvis_path.append(options.output);
+        natvis_path.append(".natvis");
+        debug.write_natvis(natvis_path.cstr());
     }
     ByteBuffer* object_path = ByteBuffer.create();
     object_path.append(options.output);

@@ -31,6 +31,8 @@ impl CodeGenerator {
                 this.gen_return(node);
             case THROW_STMT:
                 this.generate_throw_statement(node);
+            case ATOMIC_STMT:
+                this.gen_atomic(node);
             case IF:
                 this.gen_if(node);
             case WHILE:
@@ -43,11 +45,13 @@ impl CodeGenerator {
                 this.gen_switch(node);
             case BREAK:
                 FunctionContext* function_context = this.function_context;
+                this.emit_commits(function_context.break_atomics());
                 this.emit_drops(function_context.break_depth());
                 LLVMBuildBr(this.builder, function_context.break_block());
                 this.start_dead_block();
             case CONTINUE:
                 FunctionContext* function_context = this.function_context;
+                this.emit_commits(function_context.continue_atomics());
                 this.emit_drops(function_context.continue_depth());
                 LLVMBuildBr(this.builder, function_context.continue_block());
                 this.start_dead_block();
@@ -86,6 +90,7 @@ impl CodeGenerator {
                 LLVMBuildStore(this.builder, this.coerce(produced, this.current_function().return_type), function_context.promise);
                 this.release_moved(node.first());
             }
+            this.emit_commits(0);
             this.emit_drops(0);
             LLVMBuildBr(this.builder, function_context.final_block);
             this.start_dead_block();
@@ -93,6 +98,7 @@ impl CodeGenerator {
         }
         FunctionInfo* current = this.current_function();
         if (node.first() == null) {
+            this.emit_commits(0);
             this.emit_drops(0);
             this.emit_frame_pop();
             LLVMBuildRetVoid(this.builder);
@@ -100,6 +106,7 @@ impl CodeGenerator {
             Value* returned = this.gen_expression(node.first());
             ptr coerced = this.coerce(returned, current.return_type);
             this.release_moved(node.first());
+            this.emit_commits(0);
             this.emit_drops(0);
             this.emit_frame_pop();
             LLVMBuildRet(this.builder, coerced);
@@ -213,7 +220,12 @@ impl CodeGenerator {
                 this.gen_statement(arm.child(j));
             }
             this.end_scope(arm_mark);
-            this.branch_if_open(end_block);
+            if (arm.count() == 0 && i + 1 < node.count()) {
+                // A label with no statements shares the body of the arm after it ('case A: case B: body').
+                this.branch_if_open(blocks.get(i + 1));
+            } else {
+                this.branch_if_open(end_block);
+            }
         }
         function_context.leave_loop();
         LLVMPositionBuilderAtEnd(this.builder, end_block);

@@ -1,0 +1,52 @@
+extern "C" {
+    i32 printf(i8* format, ...);
+}
+
+struct InsufficientFunds;
+struct AuditUnavailable;
+
+struct Account {
+    i64 id;
+    mut i64 balance;
+}
+
+i32 audit(i64 amount) throws(AuditUnavailable) {
+    if (amount == 13) {
+        throw AuditUnavailable();
+    }
+    return 0;
+}
+
+unsafe i32 transfer(Account* from, Account* to, i64 amount) throws(InsufficientFunds, AuditUnavailable) require(amount > 0) {
+    atomic(*from, *to) {
+        if (from.balance < amount) {
+            throw InsufficientFunds();
+        }
+        from.balance = from.balance - amount;
+        try audit(amount);
+        to.balance = to.balance + amount;
+    } after_commit {
+        printf("committed %lld\n", amount);
+    }
+    return 0;
+}
+
+unsafe i32 run(Account* a, Account* b, i64 amount) {
+    return switch transfer(a, b, amount) {
+        Result v -> 0,
+        InsufficientFunds e -> 1,
+        AuditUnavailable e -> 2
+    };
+}
+
+unsafe i32 main() {
+    Account alice = Account { .id = 1, .balance = 100 };
+    Account bob = Account { .id = 2, .balance = 50 };
+    i32 r1 = run(&alice, &bob, 13);
+    printf("audit fails: %d alice=%lld bob=%lld\n", r1, alice.balance, bob.balance);
+    i32 r2 = run(&alice, &bob, 30);
+    printf("ok: %d alice=%lld bob=%lld\n", r2, alice.balance, bob.balance);
+    i32 r3 = run(&alice, &bob, 500);
+    printf("insufficient: %d alice=%lld bob=%lld\n", r3, alice.balance, bob.balance);
+    return 0;
+}

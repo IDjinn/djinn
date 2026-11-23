@@ -45,36 +45,35 @@ impl TypeChecker {
     u32 check_unary(Node* node, u32 expected) {
         TokenKind op = node.op_kind();
 
-        if (op == TokenKind::AMPERSAND) {
-            FunctionInfo* addressed_function = this.function_named_by_address_of(node.first());
-            if (addressed_function != null) {
-                node.first().set_symbol(SymbolKind.FUNCTION, (ptr)addressed_function);
-                return Types.pointer_to(Types.void_type());
-            }
-            u32 addressed = this.check_lvalue(node.first());
-            Node* operand = node.first();
-            if (operand.symbol_kind() == SymbolKind.PROPERTY_GET || operand.symbol_kind() == SymbolKind.INDEX_GET) {
-                this.error_code(node, DiagnosticErrors.NOT_ADDRESSABLE, "cannot take the address of a property or an indexer");
-            }
-            return Types.pointer_to(addressed);
-        }
-        if (op == TokenKind::STAR) {
-            return this.check_lvalue(node);
-        }
-        if (op == TokenKind::PLUS_PLUS || op == TokenKind::MINUS_MINUS) {
-            return this.check_count(node);
-        }
-        if (op == TokenKind::QUESTION_DOT) {
-            return this.check_conditional_member_access(node);
-        }
-        if (op == TokenKind::BANG_DOT) {
-            u32 nullable = this.check_expression(node.first(), 0);
-            u32 target = this.payload_inside_nullable_type(nullable);
-            if (target == 0) {
-                this.error_code(node, DiagnosticErrors.INVALID_OPERATOR_OPERAND, "the operand of '!.' must be a nullable type");
-                return nullable;
-            }
-            return target;
+        switch (op) {
+            case TokenKind::AMPERSAND:
+                FunctionInfo* addressed_function = this.function_named_by_address_of(node.first());
+                if (addressed_function != null) {
+                    node.first().set_symbol(SymbolKind.FUNCTION, (ptr)addressed_function);
+                    return Types.pointer_to(Types.void_type());
+                }
+                u32 addressed = this.check_lvalue(node.first());
+                Node* operand = node.first();
+                if (operand.symbol_kind() == SymbolKind.PROPERTY_GET || operand.symbol_kind() == SymbolKind.INDEX_GET) {
+                    this.error_code(node, DiagnosticErrors.NOT_ADDRESSABLE, "cannot take the address of a property or an indexer");
+                }
+                return Types.pointer_to(addressed);
+            case TokenKind::STAR:
+                return this.check_lvalue(node);
+            case TokenKind::PLUS_PLUS:
+                return this.check_count(node);
+            case TokenKind::MINUS_MINUS:
+                return this.check_count(node);
+            case TokenKind::QUESTION_DOT:
+                return this.check_conditional_member_access(node);
+            case TokenKind::BANG_DOT:
+                u32 nullable = this.check_expression(node.first(), 0);
+                u32 target = this.payload_inside_nullable_type(nullable);
+                if (target == 0) {
+                    this.error_code(node, DiagnosticErrors.INVALID_OPERATOR_OPERAND, "the operand of '!.' must be a nullable type");
+                    return nullable;
+                }
+                return target;
         }
 
         Node* negated = node.first();
@@ -114,6 +113,7 @@ impl TypeChecker {
             return Types.i32_type();
         }
         u32 type = this.check_lvalue(target);
+        this.require_invariant_owner(target);
         if (target.symbol_kind() == SymbolKind.PROPERTY_GET || target.symbol_kind() == SymbolKind.INDEX_GET
             || target.symbol_kind() == SymbolKind.IMPLICIT_GET) {
             this.error_code(node, DiagnosticErrors.INVALID_OPERATOR_OPERAND, "++ and -- cannot be applied to a property or an indexer");
@@ -579,6 +579,7 @@ impl TypeChecker {
         this.assign_target = target;
         u32 type = this.check_lvalue(target);
         this.assign_target = (Node*)0;
+        this.require_invariant_owner(target);
         if (target.kind() == NodeKind::FIELD_ACCESS && target.symbol_kind() == SymbolKind.PROPERTY_GET) {
             FunctionInfo* getter = (FunctionInfo*)target.symbol();
             FunctionInfo* setter = this.find_accessor(getter.owner, "set:", target.text());
