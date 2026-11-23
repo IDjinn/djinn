@@ -1,6 +1,30 @@
 namespace djinnc;
 
+// The hardening levels of --harden and 'harden:' in djinn.proj (0 is "not set", which means STANDARD).
+struct HardenLevel {
+    const i32 OFF = 1;
+    const i32 BASIC = 2;
+    const i32 STANDARD = 3;
+    const i32 STRICT = 4;
+}
+
 struct Linker {
+    // off, basic (link protections), standard (plus stack protectors; "on"/"true" are this) or strict; 0 when unknown.
+    public static i32 parse_harden(ptr<i8> text) {
+        if (Strings.same(text, "off") || Strings.same(text, "false")) { return HardenLevel.OFF; }
+        if (Strings.same(text, "basic")) { return HardenLevel.BASIC; }
+        if (Strings.same(text, "standard") || Strings.same(text, "on") || Strings.same(text, "true")) { return HardenLevel.STANDARD; }
+        if (Strings.same(text, "strict")) { return HardenLevel.STRICT; }
+        return 0;
+    }
+
+    public static i32 harden_level(Options* options) {
+        if (options.harden == 0) {
+            return HardenLevel.STANDARD;
+        }
+        return options.harden;
+    }
+
     public static bool is_windows() {
         return getenv("OS") != null;
     }
@@ -28,6 +52,9 @@ struct Linker {
         command.append("\" -L/usr/lib -L/lib/x86_64-linux-gnu -lc -lm \"");
         command.append(crt);
         command.append("/crtn.o\"");
+        if (Linker.harden_level(options) >= HardenLevel.BASIC) {
+            command.append(" -z relro -z now -z noexecstack");
+        }
         ByteBuffer* link_args = options.link_args;
         command.append(link_args.cstr());
         command.append(" -o \"");
@@ -335,6 +362,9 @@ struct Linker {
         command.append("\" \"");
         command.append(runtime);
         command.append("\" -lm -llog -landroid");
+        if (Linker.harden_level(options) >= HardenLevel.BASIC) {
+            command.append(" -Wl,-z,relro,-z,now,-z,noexecstack");
+        }
         i32 output_length = strlen(options.output);
         if (output_length > 3 && Strings.equals(options.output + (output_length - 3), 3, ".so")) {
             command.append(" -shared -Wl,-u,ANativeActivity_onCreate");
@@ -378,6 +408,12 @@ struct Linker {
         } else {
             Linker.append_runtime_sources(command, options.runtime_dir);
             command.append(" -O2");
+            if (Linker.harden_level(options) >= HardenLevel.STANDARD && !Linker.is_windows()) {
+                command.append(" -fstack-protector-strong -fstack-clash-protection -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3");
+                if (Linker.harden_level(options) == HardenLevel.STRICT) {
+                    command.append(" -fstack-protector-all -ftrivial-auto-var-init=zero");
+                }
+            }
         }
         if (options.debug || Linker.is_windows()) {
             command.append(" -g");
@@ -392,6 +428,10 @@ struct Linker {
         if (!Linker.is_windows()) {
             // the runtime and std use libm (cbrt, cos, exp, fmod)
             command.append(" -lm");
+            if (Linker.harden_level(options) >= HardenLevel.BASIC) {
+                // read-only GOT after startup, no executable stack
+                command.append(" -Wl,-z,relro,-z,now,-z,noexecstack");
+            }
         }
         ByteBuffer* link_args = options.link_args;
         command.append(link_args.cstr());

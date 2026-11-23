@@ -62,6 +62,18 @@ case "$(uname -s)" in
 esac
 fi
 
+# Hardening for the C runtime, the same levels as djinnc --harden: DJINN_HARDEN=off|basic|standard|strict (also 0 and 1;
+# default standard). standard: stack protector on frames with arrays or taken addresses, stack-clash probes and checked
+# memcpy/snprintf (_FORTIFY_SOURCE=3, needs -O); strict: a canary in every function and zero-initialized locals
+# (-ftrivial-auto-var-init=zero). basic and off add nothing here (basic only changes the link of a program). Windows
+# gets none of them: its CRT is linked as a DLL. Same flags linker.djinn passes when it compiles the runtime from source.
+case "${DJINN_HARDEN:-standard}" in
+    off|basic|0) ;;
+    standard|on|1) [ "$windows" = 0 ] && flags+=(-fstack-protector-strong -fstack-clash-protection -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3) ;;
+    strict) [ "$windows" = 0 ] && flags+=(-fstack-protector-all -fstack-clash-protection -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3 -ftrivial-auto-var-init=zero) ;;
+    *) echo "build_runtime: unknown DJINN_HARDEN '$DJINN_HARDEN' (off, basic, standard, strict)"; exit 2 ;;
+esac
+
 mkdir -p "$out"
 rm -f "$archive"
 for name in runtime_all logger; do

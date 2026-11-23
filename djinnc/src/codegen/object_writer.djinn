@@ -3,10 +3,36 @@ namespace djinnc;
 unsafe static mut ptr<i8> target_cpu = null;
 unsafe static mut ptr<i8> target_features = null;
 
+unsafe static mut i32 harden_code = 1;
+
 struct ObjectWriter {
     public static void set_target(ptr<i8> cpu, ptr<i8> features) {
         target_cpu = cpu;
         target_features = features;
+    }
+
+    // Ahead-of-time code gets stack protectors where the platform C library has __stack_chk_fail (ELF targets).
+    public static void set_hardening(i32 level) {
+        harden_code = level;
+    }
+
+    // 'sspstrong' on every defined function: a canary guards each frame that has an array or a taken address.
+    static unsafe void hardening_attributes(ptr module) {
+        // standard (3): sspstrong; strict (4): sspreq, a canary in every function
+        if (harden_code < HardenLevel.STANDARD || Target.is_wasm() || Linker.is_windows()) {
+            return;
+        }
+        mut ptr<i8> name = "sspstrong";
+        if (harden_code == HardenLevel.STRICT) {
+            name = "sspreq";
+        }
+        u32 kind = LLVMGetEnumAttributeKindForName(name, (u64)strlen(name));
+        ptr attribute = LLVMCreateEnumAttribute(LLVMGetModuleContext(module), kind, 0);
+        for (mut ptr function = LLVMGetFirstFunction(module); function != null; function = LLVMGetNextFunction(function)) {
+            if (LLVMIsDeclaration(function) == 0) {
+                LLVMAddAttributeAtIndex(function, AttributeIndex.FUNCTION, attribute);
+            }
+        }
     }
 
     static ptr<i8> cpu_name() {
@@ -162,6 +188,7 @@ struct ObjectWriter {
         }
 
         ObjectWriter.size_attributes(module, level);
+        ObjectWriter.hardening_attributes(module);
         ptr<i8> pipeline = ObjectWriter.pipeline(level, drop_dependencies, true);
         if (!ObjectWriter.run_passes(module, machine, pipeline)) {
             LLVMDisposeTargetMachine(machine);
