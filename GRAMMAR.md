@@ -283,7 +283,8 @@ the arguments or the expected type when omitted. `impl Box<T> { ... }` names its
 
 ```ebnf
 type                 = [ "mut" ] base_type { "*" | "?" | "[" [ expression ] "]" } ;
-base_type            = primitive_type | qualified_name [ generic_args ] | "void" | "auto" | "var" | "ptr" [ "<" type ">" ] | fn_type ;
+base_type            = primitive_type | anonymous_struct | qualified_name [ generic_args ] | "void" | "auto" | "var" | "ptr" [ "<" type ">" ] | fn_type ;
+anonymous_struct     = "{" type IDENTIFIER { "," type IDENTIFIER } [ "," ] "}" ;  (* a struct declared in place; equal field lists are the same type *)
 fn_type              = "fn" "(" [ type { "," type } ] ")" [ "->" type ] ;    (* "fn" is a type only before "(" *)
 
 primitive_type       = integer_type | float_type | brain_float_type | native_type | "bool" | "char" | "str" | "string" | "isize" | "usize" ;
