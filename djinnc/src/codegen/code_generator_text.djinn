@@ -217,9 +217,29 @@ impl CodeGenerator {
         return this.string_constant_n(literal, (u64)strlen(literal));
     }
 
-    ptr string_constant_n(ptr<i8> text, u64 length) {
+    unsafe ptr string_constant_n(ptr<i8> text, u64 length) {
+        // One private global per distinct content: the name encodes length and a 64-bit hash, the content is verified on reuse.
+        mut u64 hash = 14695981039346656037;
+        for (mut u64 i = 0; i < length; i = i + 1) {
+            hash = (hash ^ (u64)(u8)text[i]) * 1099511628211w;
+        }
+        ptr<i8> name = (ptr<i8>)Memory.zalloc(64);
+        snprintf(name, 64, ".str.%llx.%llx", length, hash);
+        ptr existing = LLVMGetNamedGlobal(this.module, name);
+        if (existing != null) {
+            mut u64 existing_length = 0;
+            ptr<i8> existing_text = LLVMGetAsString(LLVMGetInitializer(existing), &existing_length);
+            if (existing_length == length + 1 && memcmp(existing_text, text, length) == 0) {
+                return existing;
+            }
+            return this.add_string_global(text, length, ".str");
+        }
+        return this.add_string_global(text, length, name);
+    }
+
+    ptr add_string_global(ptr<i8> text, u64 length, ptr<i8> name) {
         ptr initializer = LLVMConstStringInContext2(this.context, text, length, 0);
-        ptr global = LLVMAddGlobal(this.module, LLVMTypeOf(initializer), ".str");
+        ptr global = LLVMAddGlobal(this.module, LLVMTypeOf(initializer), name);
         LLVMSetInitializer(global, initializer);
         LLVMSetGlobalConstant(global, 1);
         LLVMSetLinkage(global, LlvmConst.LINKAGE_PRIVATE);

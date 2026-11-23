@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- String literals with the same contents share one private global instead of one `.str` per use (the `djinnc` binary carried about 450 repeated strings, 330 KB, among them every function and file name used by stack traces).
+
 ## [0.7.10] - 2026-11-22
 
 ### Added
