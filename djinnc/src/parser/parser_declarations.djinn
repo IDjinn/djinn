@@ -429,7 +429,7 @@ impl Parser {
         if (access != 0) {
             node.set_op(access);
         }
-        AttributeUse*? native = this.take_native_error(found);
+        AttributeUse* native = this.take_native_error(found);
         if (found != null) {
             this.attach_attributes(found, node, AttributeTarget.FUNCTION);
         }
@@ -451,7 +451,7 @@ impl Parser {
         }
         this.expect(TokenKind::SEMICOLON, "expected ';' after extern function");
         if (native != null) {
-            return this.native_error_wrapper(node, (AttributeUse*)native, throws_holder.second());
+            return this.native_error_wrapper(node, native, throws_holder.second());
         }
         return node;
     }
@@ -599,20 +599,29 @@ impl Parser {
         }
 
         this.parse_throws_clause(function);
-        FunctionContracts*? contracts = this.parse_function_contracts();
+        FunctionContracts* contracts = this.parse_function_contracts();
 
         if (this.check(TokenKind::ARROW) || this.check(TokenKind::LBRACE)) {
             this.reject_extern_member(this.current(), "a method of an extern struct has no body (the platform provides it)");
         }
+        // The contracts wrap the body once, at the end, whichever form the body has.
+        Node* body = this.parse_function_body(function, is_abstract);
+        if (body != null) {
+            function.set_first(this.with_contracts(this.body_token, function, body, contracts));
+        }
+        return function;
+    }
+
+    unsafe Node* parse_function_body(Node* function, bool is_abstract) {
         if (this.match(TokenKind::ARROW)) {
             i32 arrow = this.current();
+            this.body_token = arrow;
             Node* body = Node.create_list(NodeKind::BLOCK, arrow);
             Node* ret = Node.create(NodeKind::RETURN, arrow);
             ret.set_first(this.parse_expression());
             body.add(ret);
             this.expect(TokenKind::SEMICOLON, "expected ';' after expression body");
-            function.set_first(this.with_contracts(arrow, function, body, contracts));
-            return function;
+            return body;
         }
 
         if (this.check(TokenKind::SEMICOLON)) {
@@ -623,7 +632,7 @@ impl Parser {
                 this.bodyless_token = this.current();
             }
             this.advance();
-            return function;
+            return (Node*)0;
         }
 
         // A function that uses 'await' is async without writing the keyword. Its body stays in a library interface so
@@ -639,8 +648,8 @@ impl Parser {
         if (!awaits && function.generics() == null && (function.op() & 7) == 0 && this.generic_depth == 0 && !this.failed && this.expansion_depth == 0) {
             Library.record_body(open, this.pos - 1);
         }
-        function.set_first(this.with_contracts(open, function, body, contracts));
-        return function;
+        this.body_token = open;
+        return body;
     }
 
     void parse_throws_clause(Node* function) {
