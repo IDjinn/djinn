@@ -1,0 +1,209 @@
+namespace conformance;
+
+import testing;
+import djinnc::testing;
+import djinnc;
+
+struct ContractTests {
+    [Test]
+    void require_that_holds_runs() {
+        str source = """
+i32 half(i32 x) require(x % 2 == 0) require(x > 0) {
+    return x / 2;
+}
+
+i32 main() {
+    return half(14);
+}
+""";
+        Verify.source(source).runs(Expected.exit(7));
+    }
+
+    [Test]
+    void require_violation_traps() {
+        str source = """
+i32 half(i32 x) require(x % 2 == 0) {
+    return x / 2;
+}
+
+i32 main() {
+    return half(3);
+}
+""";
+        Verify.source(source).crashes(Expected.contains("R10013: contract violated: require(x % 2 == 0)").and_contains("require_violation_traps.djinn:1"));
+    }
+
+    [Test]
+    void ensure_checks_every_return() {
+        str source = """
+i32 clamp(i32 x) ensure(result >= 0) ensure(result <= 10) {
+    if (x < 0) {
+        return 0;
+    }
+    if (x > 10) {
+        return 11;
+    }
+    return x;
+}
+
+i32 main() {
+    return clamp(-4) + clamp(5) + clamp(40);
+}
+""";
+        Verify.source(source).crashes(Expected.contains("R10013: contract violated: ensure(result <= 10)"));
+    }
+
+    [Test]
+    void ensure_on_void_function_runs_at_the_end() {
+        str source = """
+struct Counter {
+    mut i32 value;
+
+    public void add(i32 amount) ensure(this.value > 0) {
+        this.value = this.value + amount;
+    }
+}
+
+i32 main() {
+    Counter counter = Counter { .value = 0 };
+    counter.add(3);
+    counter.add(-5);
+    return counter.value;
+}
+""";
+        Verify.source(source).crashes(Expected.contains("R10013: contract violated: ensure(this.value > 0)"));
+    }
+
+    [Test]
+    void old_captures_the_value_at_entry() {
+        str source = """
+struct Account {
+    mut i64 balance;
+
+    public void withdraw(i64 amount)
+        require(amount > 0)
+        require(amount <= this.balance)
+        ensure(this.balance == old(this.balance) - amount) {
+        this.balance = this.balance - amount;
+    }
+}
+
+i32 main() {
+    Account account = Account { .balance = 100 };
+    account.withdraw(30);
+    account.withdraw(28);
+    return (i32)account.balance;
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void old_reports_a_wrong_postcondition() {
+        str source = """
+struct Account {
+    mut i64 balance;
+
+    public void deposit(i64 amount) ensure(this.balance == old(this.balance) + amount) {
+        this.balance = this.balance + amount + 1;
+    }
+}
+
+i32 main() {
+    Account account = Account { .balance = 1 };
+    account.deposit(2);
+    return (i32)account.balance;
+}
+""";
+        Verify.source(source).crashes(Expected.contains("ensure(this.balance == old(this.balance) + amount)"));
+    }
+
+    [Test]
+    void old_needs_a_trivially_copyable_value() {
+        str source = """
+struct Named {
+    mut string name;
+
+    public void rename(string next) ensure(old(this.name) == this.name) {
+        this.name = next;
+    }
+}
+
+i32 main() {
+    return 0;
+}
+""";
+        Verify.source(source).with_std().diagnostics(Expected.error(DiagnosticErrors.OLD_NEEDS_COPY).at(4, 44).and_error(DiagnosticErrors.MOVE_OUT_OF_PLACE).at(4, 52));
+    }
+
+    [Test]
+    void returns_inside_a_lambda_are_not_checked() {
+        str source = """
+i32 apply(fn(i32) -> i32 f, i32 x) {
+    return f(x);
+}
+
+i32 outer(i32 x) ensure(result > 0) {
+    i32 inner = apply((i32 v) => v + 1, x);
+    return inner + 100;
+}
+
+i32 main() {
+    return outer(-50) - 50;
+}
+""";
+        Verify.source(source).runs(Expected.exit(1));
+    }
+
+    [Test]
+    void contracts_hold_in_async_functions() {
+        str source = """
+async i32 twice(i32 x) require(x >= 0) ensure(result == x * 2) {
+    return x * 2;
+}
+
+i32 main() {
+    return await twice(21);
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void observe_mode_reports_and_continues() {
+        str source = """
+i32 half(i32 x) require(x % 2 == 0) {
+    return x / 2;
+}
+
+i32 main() {
+    return half(15);
+}
+""";
+        Verify.source(source).with_flag("--contracts=observe").runs_linked(Expected.exit(7));
+    }
+
+    [Test]
+    void ignore_mode_does_not_evaluate_the_clause() {
+        str source = """
+i32 checked(i32 x, i32 zero) require(10 / zero == 1) {
+    return x;
+}
+
+i32 main() {
+    return checked(5, 0);
+}
+""";
+        Verify.source(source).with_flag("--contracts=ignore").runs(Expected.exit(5));
+    }
+
+    [Test]
+    void unknown_contracts_mode_is_rejected() {
+        str source = """
+i32 main() {
+    return 0;
+}
+""";
+        Verify.source(source).with_flag("--contracts=sometimes").runs(Expected.failure());
+    }
+}

@@ -1002,6 +1002,14 @@ void __djinn_panic(const char* message, const char* file, uint32_t line)
     fail_with_report();
 }
 
+void __djinn_contract_observed(const char* message, const char* file, uint32_t line)
+{
+    char report[512];
+    int32_t length = snprintf(report, sizeof(report), "observed: %s\n  --> %s:%u\n", message, file, (unsigned)line);
+    if (length > (int32_t)sizeof(report) - 1) length = (int32_t)sizeof(report) - 1;
+    web_console_write(2, report, length);
+}
+
 void* __djinn_hook_set(int32_t kind, void* handler)
 {
     if (kind != 0) return 0;

@@ -617,6 +617,13 @@ void __djinn_panic(const char* message, const char* file, const uint32_t line)
     djinn_abort();
 }
 
+// A contract clause built in observe mode failed: report it and let the program go on.
+void __djinn_contract_observed(const char* message, const char* file, const uint32_t line)
+{
+    fprintf(stderr, "observed: %s\n  --> %s:%u\n", message, file, (unsigned)line);
+    fflush(stderr);
+}
+
 
 // ── Native stack trace (symbolized through the debug info emitted by -g) ──
 // Windows resolves frames with dbghelp and the PDB; POSIX with addr2line
