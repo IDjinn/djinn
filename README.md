@@ -131,7 +131,7 @@ constexpr i32 BUFFER = 64 * 1024;
 
 ## Features
 
-- **Types**: `i8`..`i64`, `u8`..`u64`, `f32`/`f64`, `nint`/`nfloat`/`ndouble`, `bool`, `char` (Unicode scalar), `str`
+- **Types**: `i8`..`i64`, `u8`..`u64`, `f32`/`f64`, `nint`, `bool`, `char` (Unicode scalar), `str`
   (view), `string` (owned), `arr<T>`, `slice<T>`, pointers (`T*`, `ptr<T>`), `object`, `auto`; integer overflow modes
   (`w`rapped / `t`rapped / `c`hecked / `s`aturating) and non-zero types (`i32n`)
 - **Control flow**: if/else, while, do-while, for (classic, range, each), `switch` statement and expression, break/continue
