@@ -337,7 +337,7 @@ expression_stmt      = expression ";" ;
 ```
 
 Range bounds: the start is inclusive unless the bracket is `(`; the end is inclusive with `..=` or `]`, exclusive with `..`
-or `)`. `for (0..5) { }` repeats without a variable. The `switch` statement has no fallthrough; `break` leaves it. Its value is an integer, a payload-less enum, a `str` or a `string`; text labels have the same type as the value and are tested in order with `operator ==`.
+or `)`. `for (0..5) { }` repeats without a variable. The `switch` statement has no fallthrough, except that a `case`/`default` label with no statements shares the body of the arm after it (`case 1: case 2: body`); `break` leaves it. Its value is an integer, a payload-less enum, a `str` or a `string`; text labels have the same type as the value and are tested in order with `operator ==`.
 
 ### Expressions
 
