@@ -137,4 +137,33 @@ grep -q 'core' "$out/report.json" && fail "the core library must not be listed"
 "$compiler" "$out/report.djinn" --check --obligations "${flags[@]}" > "$out/report.txt" 2>&1 || fail "--obligations must succeed"
 grep -q "checked invariant in Account.withdraw: invariant(this.balance >= 0)" "$out/report.txt" || { cat "$out/report.txt"; fail "the text report must list the invariant"; }
 
+# An extern with [NativeError] in a library: the consumer re-declares the wrapper from the interface and links the
+# library's definition.
+cat > "$out/lib_native.djinn" <<'SRC'
+namespace natives;
+
+struct OsError {
+    i32 code;
+}
+
+extern "C" {
+    [NativeError(detect = result != 0, capture = errno)]
+    i32 remove(i8* path) throws(OsError);
+}
+SRC
+cat > "$out/native_app.djinn" <<'SRC'
+import natives;
+
+unsafe i32 main() {
+    return switch natives::remove("guarantees_missing_file.txt") {
+        Result v -> 100,
+        OsError e -> e.code + 40
+    };
+}
+SRC
+"$compiler" "$out/lib_native.djinn" --library -o "$out/natives.djlib" "${flags[@]}" > "$out/lib_native.log" 2>&1 || { cat "$out/lib_native.log"; fail "the native error library must compile"; }
+"$compiler" "$out/native_app.djinn" --lib "$out/natives.djlib" -o "$out/native_app" "${flags[@]}" ${DJINN_USE_LLD:+--lld} > "$out/native_app.log" 2>&1 || { cat "$out/native_app.log"; fail "the native error consumer must compile"; }
+"$out/native_app" && status=0 || status=$?
+[ "$status" = 42 ] || fail "the library [NativeError] must report ENOENT (exit 42, got $status)"
+
 echo "PASS guarantees"

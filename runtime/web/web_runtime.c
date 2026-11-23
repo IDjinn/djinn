@@ -1002,6 +1002,10 @@ void __djinn_panic(const char* message, const char* file, uint32_t line)
     fail_with_report();
 }
 
+int32_t __djinn_errno(void) { return 0; }
+void __djinn_errno_clear(void) {}
+int32_t __djinn_last_error(void) { return 0; }
+
 void __djinn_contract_observed(const char* message, const char* file, uint32_t line)
 {
     char report[512];

@@ -334,6 +334,9 @@ const char* __djinn_error_stack_text(void);
 // Unrecoverable failure (a bug, not an error value): prints the message with the live stack and aborts.
 void __djinn_panic(const char* message, const char* file, uint32_t line);
 void __djinn_contract_observed(const char* message, const char* file, uint32_t line);
+int32_t __djinn_errno(void);
+void __djinn_errno_clear(void);
+int32_t __djinn_last_error(void);
 
 // Hooks let a program intercept runtime events (std::system, System.hook). Each kind has one handler; set and take
 // return the previous handler. The PANIC hook, void handler(const char* message, const char* file, uint32_t line),

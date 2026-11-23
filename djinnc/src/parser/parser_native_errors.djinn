@@ -1,0 +1,179 @@
+namespace djinnc;
+
+// [NativeError(detect = <condition on result>, capture = errno | last_error | return_code)] on an extern "C" function
+// with throws(E) turns its failure protocol into a Djinn error (issue #55). The extern is kept under a hidden name
+// that still binds the C symbol, and a function with the visible name calls it:
+//     T name(params) throws(E) { [__djinn_errno_clear();] T result = __native_name(params);
+//                                if (detect) { throw E { .code = <captured> }; } return result; }
+// so try, switch and libraries use the existing throws machinery. E is a struct whose field 'code' takes the captured
+// integer. In a library interface the function is only declared: the object of the library defines it.
+impl Parser {
+    unsafe AttributeUse*? take_native_error(PointerList*? found) {
+        if (found == null) {
+            return null;
+        }
+        mut AttributeUse*? taken = null;
+        mut i32 write = 0;
+        for (mut i32 i = 0; i < found.length; i = i + 1) {
+            AttributeUse* use = (AttributeUse*)found.get(i);
+            if (Strings.same(use.name, "NativeError")) {
+                taken = use;
+                continue;
+            }
+            found.data[write] = (ptr)use;
+            write = write + 1;
+        }
+        found.length = write;
+        return taken;
+    }
+
+    unsafe Node*? native_argument(AttributeUse* use, ptr<i8> name) {
+        Node*? payload = use.payload;
+        if (payload == null) {
+            return null;
+        }
+        for (mut i32 i = 0; i < payload.count(); i = i + 1) {
+            Node* field = payload.child(i);
+            if (field.text() != null && Strings.same(field.text(), name)) {
+                return field.first();
+            }
+        }
+        return null;
+    }
+
+    unsafe void native_error(AttributeUse* use, ptr<i8> message) {
+        Diagnostics* diagnostics = this.diagnostics;
+        diagnostics.error(DiagnosticErrors.NATIVE_ERROR, use.line, use.column, message);
+    }
+
+    unsafe Node* runtime_call(i32 token, ptr<i8> name) {
+        Node* callee = Node.create(NodeKind::IDENTIFIER, token);
+        callee.set_text(name);
+        Node* call = Node.create_list(NodeKind::CALL, token);
+        call.set_first(callee);
+        return call;
+    }
+
+    unsafe Node* native_error_wrapper(Node* raw, AttributeUse* use, Node*? clause) {
+        i32 token = raw.token;
+        ptr<i8> visible = raw.text();
+        Node*? detect = this.native_argument(use, "detect");
+        Node*? capture = this.native_argument(use, "capture");
+        if (detect == null || capture == null || capture.kind() != NodeKind::IDENTIFIER) {
+            this.native_error(use, "[NativeError] needs detect = <condition on result> and capture = errno, last_error or return_code");
+            return raw;
+        }
+        if (clause == null || clause.count() == 0 || raw.is_variadic()) {
+            this.native_error(use, "[NativeError] needs throws(E) on a non-variadic extern function, with E a struct whose field 'code' receives the error");
+            return raw;
+        }
+        ptr<i8> strategy = capture.text();
+        bool errno_capture = Strings.same(strategy, "errno");
+        if (!errno_capture && !Strings.same(strategy, "last_error") && !Strings.same(strategy, "return_code")) {
+            this.native_error(use, "unknown [NativeError] capture: use errno, last_error or return_code");
+            return raw;
+        }
+        TypeRef* returned = raw.type();
+        if (returned == null || returned.is_void()) {
+            this.native_error(use, "[NativeError] needs a function that returns a value for detect to test");
+            return raw;
+        }
+
+        ByteBuffer* hidden = ByteBuffer.create();
+        hidden.append("__native_");
+        hidden.append(visible);
+        raw.set_text(hidden.cstr());
+        AttributeUse* symbol = (AttributeUse*)Memory.zalloc(sizeof(AttributeUse));
+        symbol.name = "Symbol";
+        symbol.text_arg = visible;
+        symbol.line = use.line;
+        symbol.column = use.column;
+        PointerList* uses = PointerList.create();
+        uses.push((ptr)symbol);
+        this.attach_attributes(uses, raw, AttributeTarget.FUNCTION);
+
+        Node* wrapper = Node.create_list(NodeKind::FUNCTION, token);
+        wrapper.set_type(returned);
+        wrapper.set_text(visible);
+        wrapper.set_op(16 | 128);
+        wrapper.set_second((Node*)clause);
+        Node* forward = this.runtime_call(token, hidden.cstr());
+        for (mut i32 i = 0; i < raw.count(); i = i + 1) {
+            Node* parameter = raw.child(i);
+            if (parameter.text() == null) {
+                ByteBuffer* named = ByteBuffer.create();
+                named.append("__arg");
+                named.append_int((i64)i);
+                parameter.set_text(named.cstr());
+            }
+            Node* copy = Node.create(NodeKind::PARAMETER, parameter.token);
+            copy.set_type(parameter.type());
+            copy.set_text(parameter.text());
+            wrapper.add(copy);
+            Node* argument = Node.create(NodeKind::IDENTIFIER, parameter.token);
+            argument.set_text(parameter.text());
+            forward.add(argument);
+        }
+        if (this.library_interface) {
+            wrapper.set_op(wrapper.op() | 512);
+            this.queue_declaration(wrapper);
+            return raw;
+        }
+
+        Node* body = Node.create_list(NodeKind::BLOCK, token);
+        if (errno_capture) {
+            Node* clear = Node.create(NodeKind::EXPR_STMT, token);
+            clear.set_first(this.runtime_call(token, "__djinn_errno_clear"));
+            body.add(clear);
+        }
+        Node* result = Node.create(NodeKind::VAR_DECL, token);
+        result.set_type(returned);
+        result.set_text("result");
+        result.set_first(forward);
+        body.add(result);
+
+        mut Node* code = (Node*)0;
+        if (errno_capture) {
+            code = this.runtime_call(token, "__djinn_errno");
+        } else if (Strings.same(strategy, "last_error")) {
+            code = this.runtime_call(token, "__djinn_last_error");
+        } else {
+            Node* value = Node.create(NodeKind::IDENTIFIER, token);
+            value.set_text("result");
+            code = Node.create(NodeKind::CAST, token);
+            code.set_type(TypeRef.integer(32, true));
+            code.set_first(value);
+        }
+        Node* error_type = clause.child(0);
+        Node* failure = Node.create_list(NodeKind::STRUCT_INIT, token);
+        failure.set_type(error_type.type());
+        Node* field = Node.create(NodeKind::FIELD_INIT, token);
+        field.set_text("code");
+        field.set_first(code);
+        failure.add(field);
+        Node* thrown = Node.create(NodeKind::THROW_STMT, token);
+        thrown.set_first(failure);
+        Node* failed = Node.create_list(NodeKind::BLOCK, token);
+        failed.add(thrown);
+        Node* check = Node.create(NodeKind::IF, token);
+        check.set_first((Node*)detect);
+        check.set_second(failed);
+        body.add(check);
+        Node* done = Node.create(NodeKind::RETURN, token);
+        Node* returned_value = Node.create(NodeKind::IDENTIFIER, token);
+        returned_value.set_text("result");
+        done.set_first(returned_value);
+        body.add(done);
+        wrapper.set_first(body);
+        this.queue_declaration(wrapper);
+        return raw;
+    }
+
+    unsafe void queue_declaration(Node* declaration) {
+        if (this.extra_declarations == null) {
+            this.extra_declarations = PointerList.create();
+        }
+        PointerList* pending = this.extra_declarations;
+        pending.push((ptr)declaration);
+    }
+}
