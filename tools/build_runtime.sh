@@ -22,7 +22,13 @@ while [ $# -gt 0 ]; do
 done
 
 clang="${DJINN_CLANG:-clang}"
-flags=(-c -O2 -I "$root/runtime")
+# -ffunction-sections -fdata-sections: one section per function and variable, so a link with --gc-sections (or
+# /OPT:REF) drops what a program does not use instead of keeping the whole object. No effect on behavior.
+flags=(-c -O2 -ffunction-sections -fdata-sections -I "$root/runtime")
+# Our own C code only (not yyjson or stb): the runtime receives memory that Djinn code wrote with other types, so the
+# optimizer must not assume pointers of different types never alias (-fno-strict-aliasing), and signed overflow wraps
+# instead of being undefined behavior (-fwrapv). Asserts (DJINN_ASSERT) never depend on NDEBUG and stay on.
+own_flags=(-fno-strict-aliasing -fwrapv)
 if [ -n "$android" ]; then
     # Bionic through the NDK: the NDK clang wrapper already carries the triple and the sysroot.
     ndk="${DJINN_NDK:-${ANDROID_NDK_HOME:-}}"
@@ -59,15 +65,15 @@ fi
 mkdir -p "$out"
 rm -f "$archive"
 for name in runtime_all logger; do
-    "$clang" "${flags[@]}" "$root/runtime/$name.c" -o "$out/$name.o"
+    "$clang" "${flags[@]}" "${own_flags[@]}" "$root/runtime/$name.c" -o "$out/$name.o"
 done
-"$clang" "${flags[@]}" "$root/runtime/tier.c" -o "$out/tier.o"
+"$clang" "${flags[@]}" "${own_flags[@]}" "$root/runtime/tier.c" -o "$out/tier.o"
 "$clang" "${flags[@]}" "$root/runtime/third_party/yyjson/yyjson.c" -o "$out/yyjson.o"
-"$clang" "${flags[@]}" "$root/runtime/json/djinn_json.c" -o "$out/djinn_json.o"
+"$clang" "${flags[@]}" "${own_flags[@]}" "$root/runtime/json/djinn_json.c" -o "$out/djinn_json.o"
 android_objects=()
 if [ -n "$android" ]; then
     # the UI host shim (looper, window, touch, fonts) and the NDK's native_app_glue, which defines ANativeActivity_onCreate
-    "$clang" "${flags[@]}" -w "$root/runtime/android/android_host.c" -I "$ndk/sources/android/native_app_glue" -o "$out/android_host.o"
+    "$clang" "${flags[@]}" "${own_flags[@]}" -w "$root/runtime/android/android_host.c" -I "$ndk/sources/android/native_app_glue" -o "$out/android_host.o"
     "$clang" "${flags[@]}" -w "$ndk/sources/android/native_app_glue/android_native_app_glue.c" -o "$out/android_glue.o"
     android_objects=("$out/android_host.o" "$out/android_glue.o")
 fi

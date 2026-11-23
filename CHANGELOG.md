@@ -10,6 +10,8 @@
 ### Changed
 - The runtime's coroutine frame cache is not compiled in under AddressSanitizer or with `-DDJINN_NO_FRAME_CACHE`: every frame goes straight to `malloc`/`free` with its exact size, so a use after free, a double free, a resume of a destroyed coroutine and a small overflow are reported by the sanitizer (`runtime/scheduler.c`). Normal builds are unchanged.
 
+- `tools/build_runtime.sh` compiles the runtime with `-ffunction-sections -fdata-sections` (every runtime object), and our own C code (not `yyjson`) with `-fno-strict-aliasing -fwrapv`: no strict-aliasing assumptions over memory Djinn code wrote with other types, and signed overflow wraps instead of being undefined. `djinnc` links as before.
+
 ### Documentation
 - New docs page "Optimization & Build Flags" (`docs/content/docs/advanced/compiler-flags.mdx`): what `-O0`…`-Oz` run, what range analysis and async elision remove, the float and `--cpu native` caveats, the flags the link step passes on each target, how the runtime library is built, and a table of things that can surprise.
 
