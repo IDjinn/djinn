@@ -1,6 +1,84 @@
 namespace djinnc;
 
+// The hardening levels of --harden and 'harden:' in djinn.proj (0 is "not set", which means STANDARD).
+struct HardenLevel {
+    const i32 OFF = 1;
+    const i32 BASIC = 2;
+    const i32 STANDARD = 3;
+    const i32 STRICT = 4;
+}
+
+// The sanitizers of --sanitize (a mask).
+struct Sanitizer {
+    const i32 ADDRESS = 1;
+    const i32 UNDEFINED = 2;
+    const i32 THREAD = 4;
+}
+
 struct Linker {
+    // "address,undefined" -> a mask of Sanitizer; "off" and "" are 0; -1 when a name is unknown or the set cannot be
+    // combined (address and thread both instrument memory accesses). Reports the error.
+    public static unsafe i32 parse_sanitize(ptr<i8> text) {
+        mut i32 mask = 0;
+        mut i32 start = 0;
+        i32 length = strlen(text);
+        for (mut i32 i = 0; i <= length; i = i + 1) {
+            if (i == length || text[i] == 44) {
+                ptr<i8> name = Strings.duplicate(text + start, i - start);
+                if (Strings.same(name, "address")) {
+                    mask = mask | Sanitizer.ADDRESS;
+                } else if (Strings.same(name, "undefined")) {
+                    mask = mask | Sanitizer.UNDEFINED;
+                } else if (Strings.same(name, "thread")) {
+                    mask = mask | Sanitizer.THREAD;
+                } else if (!Strings.same(name, "off") && !Strings.same(name, "")) {
+                    logger_error(Log.get(), "djinnc: unknown sanitizer '%s' (expected address, undefined, thread or off)", name);
+                    return 0 - 1;
+                }
+                start = i + 1;
+            }
+        }
+        if ((mask & Sanitizer.ADDRESS) != 0 && (mask & Sanitizer.THREAD) != 0) {
+            logger_error(Log.get(), "djinnc: the address and thread sanitizers cannot be used together");
+            return 0 - 1;
+        }
+        return mask;
+    }
+
+    // The -fsanitize= list for a mask.
+    public static unsafe ptr<i8> sanitize_list(i32 mask) {
+        ByteBuffer* list = ByteBuffer.create();
+        if ((mask & Sanitizer.ADDRESS) != 0) {
+            list.append("address");
+        }
+        if ((mask & Sanitizer.THREAD) != 0) {
+            list.append("thread");
+        }
+        if ((mask & Sanitizer.UNDEFINED) != 0) {
+            if (list.length > 0) {
+                list.append(",");
+            }
+            list.append("undefined");
+        }
+        return list.cstr();
+    }
+
+    // off, basic (link protections), standard (plus stack protectors; "on"/"true" are this) or strict; 0 when unknown.
+    public static i32 parse_harden(ptr<i8> text) {
+        if (Strings.same(text, "off") || Strings.same(text, "false")) { return HardenLevel.OFF; }
+        if (Strings.same(text, "basic")) { return HardenLevel.BASIC; }
+        if (Strings.same(text, "standard") || Strings.same(text, "on") || Strings.same(text, "true")) { return HardenLevel.STANDARD; }
+        if (Strings.same(text, "strict")) { return HardenLevel.STRICT; }
+        return 0;
+    }
+
+    public static i32 harden_level(Options* options) {
+        if (options.harden == 0) {
+            return HardenLevel.STANDARD;
+        }
+        return options.harden;
+    }
+
     public static bool is_windows() {
         return getenv("OS") != null;
     }
@@ -13,7 +91,11 @@ struct Linker {
         ByteBuffer* command = ByteBuffer.create();
         command.append("\"");
         command.append(lld);
-        command.append("\" --eh-frame-hdr -dynamic-linker \"");
+        command.append("\" --eh-frame-hdr");
+        if (options.gc_sections) {
+            command.append(" --gc-sections");
+        }
+        command.append(" -dynamic-linker \"");
         command.append(loader);
         command.append("\" \"");
         command.append(crt);
@@ -28,6 +110,9 @@ struct Linker {
         command.append("\" -L/usr/lib -L/lib/x86_64-linux-gnu -lc -lm \"");
         command.append(crt);
         command.append("/crtn.o\"");
+        if (Linker.harden_level(options) >= HardenLevel.BASIC) {
+            command.append(" -z relro -z now -z noexecstack");
+        }
         ByteBuffer* link_args = options.link_args;
         command.append(link_args.cstr());
         command.append(" -o \"");
@@ -98,6 +183,9 @@ struct Linker {
         command.append(options.runtime_lib);
         if (options.windowed) {
             command.append("\" /subsystem:windows /entry:mainCRTStartup /defaultlib:msvcrt /defaultlib:legacy_stdio_definitions /debug");
+            if (options.gc_sections) {
+                command.append(" /opt:ref,icf");
+            }
         } else {
             command.append("\" /subsystem:console /defaultlib:msvcrt /defaultlib:legacy_stdio_definitions /debug");
         }
@@ -172,7 +260,7 @@ struct Linker {
         }
         command.append("\"");
         command.append(clang);
-        command.append("\" --target=wasm32-unknown-unknown -nostdlib -ffreestanding -fno-builtin -O2 -w \"-I");
+        command.append("\" --target=wasm32-unknown-unknown -nostdlib -ffreestanding -fno-builtin -O2 -Wall -Wextra -Wno-unused-parameter \"-I");
         command.append(options.runtime_dir);
         command.append("/web/include\" -c \"");
         command.append(options.runtime_dir);
@@ -208,6 +296,10 @@ struct Linker {
         command.append("\" \"");
         command.append(runtime);
         command.append("\" --no-entry --export=main --export-if-defined=__djinn_last_error_report --stack-first -z stack-size=1048576 --initial-memory=16777216 --gc-sections --fatal-warnings");
+        if (options.optimize) {
+            // wasm-ld's own size optimizations (string tail merging, ...); the code was already optimized by LLVM
+            command.append(" -O2");
+        }
         if (!options.debug) {
             command.append(" --strip-debug");
         }
@@ -222,6 +314,27 @@ struct Linker {
         i32 status = Process.run(command.cstr());
         if (status != 0) {
             return status;
+        }
+        // Binaryen's wasm-opt shrinks the module further when DJINN_WASM_OPT names it (not required: no wasm-opt, no pass)
+        ptr<i8> wasm_opt = getenv("DJINN_WASM_OPT");
+        if (wasm_opt != null && options.optimize) {
+            ByteBuffer* optimize = ByteBuffer.create();
+            if (Linker.is_windows()) {
+                optimize.append("\"");
+            }
+            optimize.append("\"");
+            optimize.append(wasm_opt);
+            optimize.append("\" -O2 \"");
+            optimize.append(options.output);
+            optimize.append("\" -o \"");
+            optimize.append(options.output);
+            optimize.append("\"");
+            if (Linker.is_windows()) {
+                optimize.append("\"");
+            }
+            if (Process.run(optimize.cstr()) != 0) {
+                logger_warn(Log.get(), "djinnc: wasm-opt failed; keeping the module as wasm-ld wrote it");
+            }
         }
         ByteBuffer* glue_source = ByteBuffer.create();
         glue_source.append(options.runtime_dir);
@@ -335,6 +448,9 @@ struct Linker {
         command.append("\" \"");
         command.append(runtime);
         command.append("\" -lm -llog -landroid");
+        if (Linker.harden_level(options) >= HardenLevel.BASIC) {
+            command.append(" -Wl,-z,relro,-z,now,-z,noexecstack");
+        }
         i32 output_length = strlen(options.output);
         if (output_length > 3 && Strings.equals(options.output + (output_length - 3), 3, ".so")) {
             command.append(" -shared -Wl,-u,ANativeActivity_onCreate");
@@ -351,6 +467,15 @@ struct Linker {
     }
 
     public static i32 link(Options* options, ptr<i8> object_path) {
+        if (options.sanitize != 0 && (Target.is_wasm() || Target.is_android() || options.use_lld)) {
+            logger_error(Log.get(), "djinnc: --sanitize needs the clang driver to link: it is not available for wasm, Android or --lld");
+            return 1;
+        }
+        if ((options.sanitize & (Sanitizer.ADDRESS | Sanitizer.THREAD)) != 0 && Linker.is_windows()) {
+            // the sanitizer's malloc thunks clash with the dynamic UCRT the runtime links against
+            logger_error(Log.get(), "djinnc: the address and thread sanitizers are not available when linking on Windows (undefined is)");
+            return 1;
+        }
         if (Target.is_android()) {
             return Linker.link_android(options, object_path);
         }
@@ -378,6 +503,28 @@ struct Linker {
         } else {
             Linker.append_runtime_sources(command, options.runtime_dir);
             command.append(" -O2");
+            if (Linker.harden_level(options) >= HardenLevel.STANDARD && !Linker.is_windows()) {
+                command.append(" -fstack-protector-strong -fstack-clash-protection -U_FORTIFY_SOURCE");
+                if (options.sanitize == 0) {
+                    // the checked memcpy and friends overlap with what the sanitizers report
+                    command.append(" -D_FORTIFY_SOURCE=3");
+                }
+                if (Linker.harden_level(options) == HardenLevel.STRICT) {
+                    command.append(" -fstack-protector-all -ftrivial-auto-var-init=zero");
+                }
+                if (Target.is_x64()) {
+                    command.append(" -fcf-protection=full");
+                } else if (Target.is_arm64()) {
+                    command.append(" -mbranch-protection=standard");
+                }
+            }
+        }
+        if (options.sanitize != 0) {
+            command.append(" -fno-omit-frame-pointer -fsanitize=");
+            command.append(Linker.sanitize_list(options.sanitize));
+            if (options.runtime_lib != null) {
+                logger_warn(Log.get(), "djinnc: --runtime-lib is not instrumented: build it with DJINN_SANITIZE=%s tools/build_runtime.sh to see errors inside the runtime", Linker.sanitize_list(options.sanitize));
+            }
         }
         if (options.debug || Linker.is_windows()) {
             command.append(" -g");
@@ -388,10 +535,29 @@ struct Linker {
             if (options.windowed) {
                 command.append(" -Wl,/subsystem:windows,/entry:mainCRTStartup");
             }
+            if (Linker.harden_level(options) == HardenLevel.STRICT) {
+                // the module carries the cfguard flag; this makes the linker build the guard function table
+                command.append(" -Wl,/guard:cf");
+            }
+            if (options.gc_sections) {
+                command.append(" -Wl,/opt:ref,/opt:icf");
+            }
         }
         if (!Linker.is_windows()) {
             // the runtime and std use libm (cbrt, cos, exp, fmod)
             command.append(" -lm");
+            if (options.gc_sections) {
+                command.append(" -Wl,--gc-sections");
+            }
+            if (Linker.harden_level(options) >= HardenLevel.BASIC) {
+                // read-only GOT after startup, no executable stack
+                command.append(" -Wl,-z,relro,-z,now,-z,noexecstack");
+                // a position independent executable, so ASLR moves the program too (not for a shared object)
+                ByteBuffer* user_args = options.link_args;
+                if (strstr(user_args.cstr(), "-shared") == null) {
+                    command.append(" -pie");
+                }
+            }
         }
         ByteBuffer* link_args = options.link_args;
         command.append(link_args.cstr());

@@ -1174,7 +1174,6 @@ static timer_t_* timers;
 static void* main_handle;
 static int main_has_result;
 static int main_finished;
-static int loop_depth;
 
 static void enqueue(void* handle)
 {
@@ -1420,7 +1419,6 @@ DJINN_EXPORT(djinn_tick) void djinn_tick(void)
 static void run_until_done(void* handle)
 {
     if (!is_in_waiting_set(handle)) enqueue(handle);
-    loop_depth++;
     while (!__djinn_coro_done(handle))
     {
         void* next = dequeue();
@@ -1443,7 +1441,6 @@ static void run_until_done(void* handle)
         if (next != handle) finish_coro(next);
     }
     take_waiting(handle);
-    loop_depth--;
 }
 
 void __djinn_event_loop_run(void* handle) { run_until_done(handle); }

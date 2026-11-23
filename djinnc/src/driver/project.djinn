@@ -294,6 +294,43 @@ i32 main() {
                     if (!options.float_environment_set && !environment_settings.set_environment(Project.read_value(manifest, first + 7, i))) {
                         options.ok = false;
                     }
+                } else if (Strings.starts_with(manifest, first, i, "optimization:")) {
+                    ptr<i8> level_text = Project.read_value(manifest, first + 13, i);
+                    if (!options.opt_level_set && !Project.apply_opt_level(options, level_text)) {
+                        options.ok = false;
+                    }
+                } else if (Strings.starts_with(manifest, first, i, "cpu:")) {
+                    if (!options.cpu_set) {
+                        options.cpu = Project.read_value(manifest, first + 4, i);
+                    }
+                } else if (Strings.starts_with(manifest, first, i, "features:")) {
+                    if (!options.features_set) {
+                        options.features = Project.read_value(manifest, first + 9, i);
+                    }
+                } else if (Strings.starts_with(manifest, first, i, "range-opt:")) {
+                    if (!options.range_opt_set) {
+                        options.no_range_opt = Strings.same(Project.read_value(manifest, first + 10, i), "false");
+                    }
+                } else if (Strings.starts_with(manifest, first, i, "harden:")) {
+                    if (!options.harden_set) {
+                        ptr<i8> harden_text = Project.read_value(manifest, first + 7, i);
+                        options.harden = Linker.parse_harden(harden_text);
+                        if (options.harden == 0) {
+                            logger_error(Log.get(), "djinnc: unknown harden value '%s' in djinn.proj (expected off, basic, standard, strict or on)", harden_text);
+                            options.ok = false;
+                        }
+                    }
+                } else if (Strings.starts_with(manifest, first, i, "sanitize:")) {
+                    if (!options.sanitize_set) {
+                        options.sanitize = Linker.parse_sanitize(Project.read_value(manifest, first + 9, i));
+                        if (options.sanitize < 0) {
+                            options.ok = false;
+                        }
+                    }
+                } else if (Strings.starts_with(manifest, first, i, "gc-sections:")) {
+                    if (!options.gc_sections_set) {
+                        options.gc_sections = Strings.same(Project.read_value(manifest, first + 12, i), "true");
+                    }
                 } else if (Strings.starts_with(manifest, first, i, "generate:")) {
                     options.no_generate = Strings.same(Project.read_value(manifest, first + 9, i), "false");
                 } else if (Strings.starts_with(manifest, first, i, "file:")) {
@@ -384,6 +421,22 @@ i32 main() {
         path.append(item);
         PointerList* inputs = options.inputs;
         inputs.push((ptr)path.cstr());
+    }
+
+    // 'optimization: "O2"' in the compiler: section: the same levels as -O0 ... -Oz (a leading '-' is accepted).
+    static unsafe bool apply_opt_level(Options* options, ptr<i8> text) {
+        mut ptr<i8> level = text;
+        if (level[0] == 45) {
+            level = level + 1;
+        }
+        if (Strings.same(level, "O0") || Strings.same(level, "O1") || Strings.same(level, "O2") || Strings.same(level, "O3")
+            || Strings.same(level, "Os") || Strings.same(level, "Oz")) {
+            options.opt_level = level;
+            options.optimize = !Strings.same(level, "O0");
+            return true;
+        }
+        logger_error(Log.get(), "djinnc: unknown optimization level '%s' in djinn.proj (expected O0, O1, O2, O3, Os or Oz)", text);
+        return false;
     }
 
     static unsafe i32 skip_blanks(ptr<i8> text, i32 from, i32 to) {
