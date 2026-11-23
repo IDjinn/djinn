@@ -67,10 +67,24 @@ fi
 # memcpy/snprintf (_FORTIFY_SOURCE=3, needs -O); strict: a canary in every function and zero-initialized locals
 # (-ftrivial-auto-var-init=zero). basic and off add nothing here (basic only changes the link of a program). Windows
 # gets none of them: its CRT is linked as a DLL. Same flags linker.djinn passes when it compiles the runtime from source.
+# hardware control-flow markers: endbr64 on x86-64 (IBT), BTI and pointer authentication on arm64
+cfi_flags=()
+case "${android:-$(uname -m)}" in
+    x86_64|amd64) cfi_flags=(-fcf-protection=full) ;;
+    arm64-v8a|aarch64|arm64) cfi_flags=(-mbranch-protection=standard) ;;
+esac
+# DJINN_SANITIZE=address|undefined|thread (a comma list, like djinnc --sanitize) builds a runtime instrumented for programs
+# linked with that sanitizer (the coroutine frame cache turns itself off under AddressSanitizer). It drops FORTIFY_SOURCE.
+sanitize="${DJINN_SANITIZE:-}"
+fortify=-D_FORTIFY_SOURCE=3
+if [ -n "$sanitize" ]; then
+    flags+=("-fsanitize=$sanitize" -fno-omit-frame-pointer)
+    fortify=-U_FORTIFY_SOURCE
+fi
 case "${DJINN_HARDEN:-standard}" in
     off|basic|0) ;;
-    standard|on|1) [ "$windows" = 0 ] && flags+=(-fstack-protector-strong -fstack-clash-protection -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3) ;;
-    strict) [ "$windows" = 0 ] && flags+=(-fstack-protector-all -fstack-clash-protection -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3 -ftrivial-auto-var-init=zero) ;;
+    standard|on|1) [ "$windows" = 0 ] && flags+=(-fstack-protector-strong -fstack-clash-protection -U_FORTIFY_SOURCE $fortify "${cfi_flags[@]}") ;;
+    strict) [ "$windows" = 0 ] && flags+=(-fstack-protector-all -fstack-clash-protection -U_FORTIFY_SOURCE $fortify -ftrivial-auto-var-init=zero "${cfi_flags[@]}") ;;
     *) echo "build_runtime: unknown DJINN_HARDEN '$DJINN_HARDEN' (off, basic, standard, strict)"; exit 2 ;;
 esac
 

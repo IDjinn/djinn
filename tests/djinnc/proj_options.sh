@@ -71,3 +71,27 @@ printf 'project: "bad"\nversion: "0.1.0"\n\ncompiler:\n  harden: "maybe"\n  libs
 grep -q "unknown harden value" "$out/bad_harden.log" || fail "harden: maybe must explain the error"
 
 echo "PASS proj_options"
+
+# --gc-sections and --sanitize: accepted, validated, and the instrumentation is present in the object.
+"$compiler" tests/opt_project -o "$out/gc" --gc-sections "${flags[@]}" > "$out/gc.log" 2>&1 || { cat "$out/gc.log"; fail "--gc-sections must link"; }
+"$out/gc" && status=0 || status=$?
+[ "$status" = 42 ] || fail "a program linked with --gc-sections must still exit with 42, got $status"
+
+"$compiler" tests/opt_project -o "$out/san_bad" --sanitize=nope "${flags[@]}" > "$out/san_bad.log" 2>&1 && fail "--sanitize=nope must be rejected"
+grep -q "unknown sanitizer" "$out/san_bad.log" || fail "--sanitize=nope must explain the error"
+"$compiler" tests/opt_project -o "$out/san_both" --sanitize=address,thread "${flags[@]}" > "$out/san_both.log" 2>&1 && fail "address with thread must be rejected"
+grep -q "cannot be used together" "$out/san_both.log" || fail "address with thread must explain the error"
+
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) echo "skip proj_options: address sanitizer run (the dynamic UCRT clashes with its malloc thunks on Windows)" ;;
+    *)
+        "$compiler" tests/opt_project -o "$out/san_address" --sanitize=address "${flags[@]}" > "$out/san_address.log" 2>&1 || { cat "$out/san_address.log"; fail "--sanitize=address must link"; }
+        "$out/san_address" && status=0 || status=$?
+        [ "$status" = 42 ] || fail "an address-sanitized program must still exit with 42, got $status"
+        "$compiler" tests/opt_project -o "$out/san_asm" --emit-asm --sanitize=address "${flags[@]}" > "$out/san_asm.log" 2>&1 || fail "--sanitize=address --emit-asm must compile"
+        grep -rq "__asan" "$out"/san_asm* || fail "--sanitize=address must instrument the program"
+        ;;
+esac
+"$compiler" tests/opt_project -o "$out/san_undefined" --sanitize=undefined "${flags[@]}" > "$out/san_undefined.log" 2>&1 || { cat "$out/san_undefined.log"; fail "--sanitize=undefined must link"; }
+"$out/san_undefined" && status=0 || status=$?
+[ "$status" = 42 ] || fail "an undefined-sanitized program must still exit with 42, got $status"

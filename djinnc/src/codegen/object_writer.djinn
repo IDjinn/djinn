@@ -4,6 +4,7 @@ unsafe static mut ptr<i8> target_cpu = null;
 unsafe static mut ptr<i8> target_features = null;
 
 unsafe static mut i32 harden_code = 1;
+unsafe static mut i32 sanitize_code = 0;
 
 struct ObjectWriter {
     public static void set_target(ptr<i8> cpu, ptr<i8> features) {
@@ -18,9 +19,73 @@ struct ObjectWriter {
         harden_code = level;
     }
 
+    public static void set_sanitizers(i32 mask) {
+        sanitize_code = mask;
+    }
+
+    // The sanitizer passes run after the optimizer, as clang does; the attribute makes the functions eligible.
+    static unsafe ptr<i8> with_sanitizers(ptr module, ptr<i8> pipeline) {
+        if ((sanitize_code & Sanitizer.ADDRESS) == 0 && (sanitize_code & Sanitizer.THREAD) == 0) {
+            return pipeline;
+        }
+        ByteBuffer* text = ByteBuffer.create();
+        text.append(pipeline);
+        if ((sanitize_code & Sanitizer.ADDRESS) != 0) {
+            ObjectWriter.add_function_attribute(module, "sanitize_address");
+            text.append(",asan");
+        } else {
+            ObjectWriter.add_function_attribute(module, "sanitize_thread");
+            text.append(",tsan-module,function(tsan)");
+        }
+        return text.cstr();
+    }
+
     // 'sspstrong' on every defined function: a canary guards each frame that has an array or a taken address.
+    static unsafe void add_flag(ptr module, ptr<i8> key, i32 value) {
+        ptr i32_type = LLVMIntTypeInContext(LLVMGetModuleContext(module), 32);
+        LLVMAddModuleFlag(module, 2, key, (u64)strlen(key), LLVMValueAsMetadata(LLVMConstInt(i32_type, (u64)value, 0)));
+    }
+
+    static unsafe void add_function_attribute(ptr module, ptr<i8> name) {
+        u32 kind = LLVMGetEnumAttributeKindForName(name, (u64)strlen(name));
+        ptr attribute = LLVMCreateEnumAttribute(LLVMGetModuleContext(module), kind, 0);
+        for (mut ptr function = LLVMGetFirstFunction(module); function != null; function = LLVMGetNextFunction(function)) {
+            if (LLVMIsDeclaration(function) == 0) {
+                LLVMAddAttributeAtIndex(function, AttributeIndex.FUNCTION, attribute);
+            }
+        }
+    }
+
+    // Module flags LLVM turns into code: hardware control-flow markers (endbr64 / BTI+PAC) at standard, Control Flow
+    // Guard tables and checks on Windows and ShadowCallStack on Android arm64 at strict.
+    static unsafe void flow_hardening(ptr module) {
+        if (harden_code < HardenLevel.STANDARD || Target.is_wasm()) {
+            return;
+        }
+        if (Target.is_x64() && !Linker.is_windows()) {
+            ObjectWriter.add_flag(module, "cf-protection-branch", 1);
+        }
+        if (Target.is_arm64() && !Linker.is_windows()) {
+            ObjectWriter.add_flag(module, "branch-target-enforcement", 1);
+            ObjectWriter.add_flag(module, "sign-return-address", 1);
+            ObjectWriter.add_flag(module, "sign-return-address-all", 0);
+            ObjectWriter.add_flag(module, "sign-return-address-with-bkey", 0);
+        }
+        if (harden_code == HardenLevel.STRICT) {
+            if (Linker.is_windows() && !Target.is_android()) {
+                ObjectWriter.add_flag(module, "cfguard", 2);
+            }
+            if (Target.is_android() && Target.is_arm64()) {
+                ObjectWriter.add_function_attribute(module, "shadowcallstack");
+            }
+        }
+    }
+
     static unsafe void hardening_attributes(ptr module) {
-        // standard (3): sspstrong; strict (4): sspreq, a canary in every function
+        ObjectWriter.flow_hardening(module);
+        // standard (3): sspstrong; strict (4): sspreq, a canary in every function. Not on Windows (the canary calls
+        // __security_cookie, which the JIT cannot resolve when it runs a library's procedural macros) and not on Android
+        // (bionic's guard needs TLS module flags).
         if (harden_code < HardenLevel.STANDARD || Target.is_wasm() || Linker.is_windows() || Target.is_android()) {
             return;
         }
@@ -51,10 +116,21 @@ struct ObjectWriter {
         if (target_cpu != null && Strings.same(target_cpu, "native") && target_features == null) {
             return LLVMGetHostCPUFeatures();
         }
-        if (target_features == null) {
-            return "";
+        mut ptr<i8> features = "";
+        if (target_features != null) {
+            features = target_features;
         }
-        return target_features;
+        // ShadowCallStack keeps return addresses in x18 (strict hardening, Android arm64)
+        if (harden_code == HardenLevel.STRICT && Target.is_android() && Target.is_arm64()) {
+            ByteBuffer* joined = ByteBuffer.create();
+            joined.append(features);
+            if (strlen(features) > 0) {
+                joined.append(",");
+            }
+            joined.append("+reserve-x18");
+            return joined.cstr();
+        }
+        return features;
     }
 
     public static bool run_passes(ptr module, ptr machine, ptr<i8> pipeline) {
@@ -191,7 +267,7 @@ struct ObjectWriter {
 
         ObjectWriter.size_attributes(module, level);
         ObjectWriter.hardening_attributes(module);
-        ptr<i8> pipeline = ObjectWriter.pipeline(level, drop_dependencies, true);
+        ptr<i8> pipeline = ObjectWriter.with_sanitizers(module, ObjectWriter.pipeline(level, drop_dependencies, true));
         if (!ObjectWriter.run_passes(module, machine, pipeline)) {
             LLVMDisposeTargetMachine(machine);
             return false;

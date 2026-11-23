@@ -55,7 +55,7 @@ The runtime (the `.c` files in `runtime/`) is compiled together with the program
 ## Options
 
 What the optimization levels, `--cpu`, the float settings and the link step do, and what can surprise you, is
-explained in the docs page "Optimization & Build Flags" (`docs/content/docs/advanced/compiler-flags.mdx`). Hardening is `--harden=off|basic|standard|strict` (default `standard`); `-O`, `--cpu`, `--features`, `--no-range-opt`, `--ieee754`, `--fp-env` and `--harden` can also be set in the `compiler:` section of `djinn.proj` (`optimization:`, `cpu:`, `features:`, `range-opt:`, `ieee754:`, `fp-env:`, `harden:`); the command line wins.
+explained in the docs page "Optimization & Build Flags" (`docs/content/docs/advanced/compiler-flags.mdx`). Hardening is `--harden=off|basic|standard|strict` (default `standard`); `-O`, `--cpu`, `--features`, `--no-range-opt`, `--ieee754`, `--fp-env` and `--harden` can also be set in the `compiler:` section of `djinn.proj` (`optimization:`, `cpu:`, `features:`, `range-opt:`, `ieee754:`, `fp-env:`, `harden:`); the command line wins. `--gc-sections` drops unused code at link time (`gc-sections:`), and `--sanitize=address,undefined,thread` (`sanitize:`) instruments the program (clang link only; `address` and `thread` are not available on Windows).
 
 | Option | Effect |
 |---|---|
