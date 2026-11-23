@@ -206,4 +206,90 @@ i32 main() {
 """;
         Verify.source(source).with_flag("--contracts=sometimes").runs(Expected.failure());
     }
+
+    [Test]
+    void invariant_is_checked_when_a_method_returns() {
+        str source = """
+struct Account {
+    mut i64 balance;
+    invariant(this.balance >= 0);
+
+    Account(i64 start) {
+        this.balance = start;
+    }
+
+    public void withdraw(i64 amount) {
+        this.balance = this.balance - amount;
+    }
+
+    public i64 peek() {
+        return this.balance;
+    }
+}
+
+i32 main() {
+    Account account = Account(50);
+    account.withdraw(8);
+    account.withdraw(100);
+    return (i32)account.peek();
+}
+""";
+        Verify.source(source).crashes(Expected.contains("R10013: contract violated: invariant(this.balance >= 0)"));
+    }
+
+    [Test]
+    void invariant_that_holds_runs() {
+        str source = """
+struct Range {
+    mut i32 low;
+    mut i32 high;
+    invariant(this.low <= this.high);
+
+    Range(i32 low, i32 high) {
+        this.low = low;
+        this.high = high;
+    }
+
+    public void widen(i32 amount) {
+        this.low = this.low - amount;
+        this.high = this.high + amount;
+    }
+
+    public i32 size() {
+        return this.high - this.low;
+    }
+
+    private void unchecked_swap() {
+        i32 low = this.low;
+        this.low = this.high;
+        this.high = low;
+    }
+}
+
+i32 main() {
+    Range range = Range(10, 20);
+    range.widen(16);
+    return range.size();
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void invariant_fields_are_written_only_by_their_methods() {
+        str source = """
+struct Account {
+    mut i64 balance;
+    invariant(this.balance >= 0);
+}
+
+i32 main() {
+    Account account = Account { .balance = 3 };
+    account.balance = -1;
+    account.balance++;
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.INVARIANT_MUTABLE_FIELD).at(7, 31).and_error(DiagnosticErrors.INVARIANT_MUTABLE_FIELD).at(8, 12).and_error(DiagnosticErrors.INVARIANT_MUTABLE_FIELD).at(9, 12));
+    }
 }
