@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- Stacked `switch` labels: a `case` or `default` label with no statements shares the body of the arm after it, `case 1: case 2: case 3: return 10;`. A label with a body still does not fall through. Native, `--target web` (plain JavaScript fallthrough) and `constexpr` evaluation agree. The `comparison-chain` hint's "Convert to switch" fix produces this form.
 - `switch` accepts a `str` or `string` value: `switch (name) { case "red": ... default: ... }`. Labels have the value's type and are compared in order with `operator ==`; a `constexpr` switch on text compares the contents. Other value types still report `E3046`.
 - `Files.read_all_many` and `Files.write_bytes_many` (compiler support) transfer a list of files at once through `__djinn_files_batch` with libc. `Files.read_all_many_uring` and `Files.write_bytes_many_uring` ask for one private io_uring on Linux instead (large batches, high latency storage; chunked reads, short transfers resubmitted); other platforms and kernels without it use libc. `djinnc` loads its inputs and the core library with the libc form.
 
