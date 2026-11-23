@@ -136,6 +136,8 @@ struct EffectsAnalysis {
             return;
         }
         if (kind == NodeKind::INTRINSIC && node.op() == Intrinsic.CONTRACT) {
+            i32 packed = (i32)node.int_value();
+            Obligations.record(Obligations.clause_kind(packed & 15), Obligations.contract_provenance(packed >> 4), info, node.text(), node);
             this.scan(node.first(), info, true);
             return;
         }
@@ -252,8 +254,11 @@ struct EffectsAnalysis {
             if (declaration.is_library_interface()) {
                 continue;
             }
+            Obligations.function(info);
             if (EffectsAnalysis.is_pure(info)) {
-                this.require_within(info, Effects.NONE, DiagnosticErrors.PURE_VIOLATION, "is [Pure]");
+                if (this.require_within(info, Effects.NONE, DiagnosticErrors.PURE_VIOLATION, "is [Pure]")) {
+                    Obligations.record("pure", "proved", info, "[Pure]", declaration);
+                }
                 continue;
             }
             u32 ceiling = this.declared(info);
@@ -262,7 +267,13 @@ struct EffectsAnalysis {
                 claim.append("declares [Effects(");
                 claim.append(Effects.describe(ceiling));
                 claim.append(")]");
-                this.require_within(info, ceiling, DiagnosticErrors.EFFECTS_EXCEEDED, claim.cstr());
+                if (this.require_within(info, ceiling, DiagnosticErrors.EFFECTS_EXCEEDED, claim.cstr())) {
+                    ByteBuffer* text = ByteBuffer.create();
+                    text.append("[Effects(");
+                    text.append(Effects.describe(ceiling));
+                    text.append(")]");
+                    Obligations.record("effects", "proved", info, text.cstr(), declaration);
+                }
             }
         }
         PointerList* contract_edges = this.contract_edges;
@@ -290,9 +301,9 @@ struct EffectsAnalysis {
     }
 
     // Reports the first own operation or call that goes beyond the ceiling the declaration states.
-    unsafe void require_within(FunctionInfo* info, u32 ceiling, i32 code, ptr<i8> claim) {
+    unsafe bool require_within(FunctionInfo* info, u32 ceiling, i32 code, ptr<i8> claim) {
         if (Effects.within(info.effects, ceiling)) {
-            return;
+            return true;
         }
         Diagnostics* diagnostics = this.diagnostics;
         if (!Effects.within(info.own_effects, ceiling) && info.effect_cause != null) {
@@ -303,7 +314,7 @@ struct EffectsAnalysis {
             message.append(", but this operation has effects: ");
             message.append(Effects.describe(info.own_effects & ~ceiling));
             diagnostics.error_span(code, cause.file_name(), cause.line(), cause.column(), cause.length(), message.cstr());
-            return;
+            return false;
         }
         PointerList* edges = info.effect_edges;
         for (mut i32 e = 0; e < edges.length; e = e + 1) {
@@ -318,10 +329,11 @@ struct EffectsAnalysis {
             prefix.append(", but '");
             Node* at = edge.at;
             diagnostics.error_span(code, at.file_name(), at.line(), at.column(), at.length(), EffectsAnalysis.call_message(prefix.cstr(), edge.callee, inherited));
-            return;
+            return false;
         }
         Node* declaration = info.node;
         diagnostics.error_span(code, declaration.file_name(), declaration.line(), declaration.column(), declaration.length(), "this function has more effects than it declares");
+        return false;
     }
 
     unsafe void export() {

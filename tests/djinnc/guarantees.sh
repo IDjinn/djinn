@@ -101,4 +101,40 @@ SRC
 "$compiler" "$out/pure_bad.djinn" --lib "$out/counters.djlib" --check "${flags[@]}" > "$out/pure_bad.log" 2>&1 && fail "a [Pure] function must not call a library writer"
 grep -q "E7003" "$out/pure_bad.log" || { cat "$out/pure_bad.log"; fail "the library writer must be reported with E7003"; }
 
+# --obligations lists every clause once with its provenance, and the inferred effects of the program's functions.
+cat > "$out/report.djinn" <<'SRC'
+struct Account {
+    mut i64 balance;
+    invariant(this.balance >= 0);
+
+    Account(i64 start) {
+        this.balance = start;
+    }
+
+    public void withdraw(i64 amount) require(amount > 0) ensure(this.balance == old(this.balance) - amount) {
+        this.balance = this.balance - amount;
+    }
+}
+
+[Pure] i64 doubled(i64 x) ensure(result >= x) {
+    if (x < 0) {
+        return x;
+    }
+    return x * 2;
+}
+
+i32 main() {
+    return 0;
+}
+SRC
+"$compiler" "$out/report.djinn" --check --obligations=json --contracts=observe "${flags[@]}" > "$out/report.json" 2> "$out/report.log" || { cat "$out/report.log"; fail "--obligations=json must succeed"; }
+grep -q '"kind":"require","provenance":"observed","function":"Account.withdraw","text":"require(amount > 0)"' "$out/report.json" || { cat "$out/report.json"; fail "the require clause must be listed as observed"; }
+grep -q '"kind":"pure","provenance":"proved","function":"doubled"' "$out/report.json" || fail "a verified [Pure] must be listed as proved"
+grep -q '{"name":"doubled","effects":\[\]' "$out/report.json" || fail "the inferred effects of doubled must be empty"
+grep -q '{"name":"Account.withdraw","effects":\["writes"\]' "$out/report.json" || fail "withdraw must write"
+[ "$(grep -o '"text":"ensure(result >= x)"' "$out/report.json" | wc -l)" = 1 ] || fail "a clause guarding two returns must be listed once"
+grep -q 'core' "$out/report.json" && fail "the core library must not be listed"
+"$compiler" "$out/report.djinn" --check --obligations "${flags[@]}" > "$out/report.txt" 2>&1 || fail "--obligations must succeed"
+grep -q "checked invariant in Account.withdraw: invariant(this.balance >= 0)" "$out/report.txt" || { cat "$out/report.txt"; fail "the text report must list the invariant"; }
+
 echo "PASS guarantees"
