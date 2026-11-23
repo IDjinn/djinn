@@ -122,7 +122,7 @@ operator_signature   = type "operator" operator_symbol "(" [ param_list ] ")" ";
 struct               = [ attributes ] [ "constexpr" | "abstract" ] "struct" [ "mut" ] IDENTIFIER [ generic_params ] [ where_clause ] [ struct_base ] ( ";" | struct_body ) ;
 struct_base          = ":" [ "interface" ] type { "," type } ;
 struct_body          = "{" { member } "}" ;
-member               = field_decl | property | method | constructor | operator_decl | const_decl ;
+member               = field_decl | property | method | constructor | operator_decl | const_decl | invariant_clause ;
 
 field_decl           = [ attributes ] [ modifiers ] [ "mut" ] type IDENTIFIER [ "=" expression ] ";" ;
 property             = [ modifiers ] type IDENTIFIER ( "{" { getter | setter } "}" | "=>" expression ";" ) ;
@@ -174,24 +174,52 @@ try_expression       = "try" expression [ "?:" expression ] ;
 - Runtime panics (bounds, null, overflow in `t` mode, ...) are `R<code>` errors from `runtime_errors.djinn`, reported with
   a source snippet and shadow-stack in debug builds and with message and `file:line` in release builds. *)
 
-### Contracts (require / ensure)
+### Contracts (require / ensure / invariant)
 
 ```ebnf
-contract_clause      = ( "require" | "ensure" ) ( "(" expression ")" | block ) ;
+contract_clause      = ( "require" | "ensure" ) "(" expression ")" ;
+invariant_clause     = "invariant" "(" expression ")" ";" ;      (* contextual word, inside a struct body *)
+old_expression       = "old" "(" expression ")" ;                 (* contextual, only inside ensure *)
 ```
 
-`require` runs at function entry, `ensure` before each return (the value is the `return` pseudo-variable). A function with
-contracts is implicitly throwing; `require` clauses decided by constant arguments are checked at compile time.
+`require` runs at function entry, `ensure` before every return: `result` is the returned value and `old(x)` the value `x`
+had at entry (a trivially copyable value, `E7001`). An `invariant` is checked when every method and constructor that is
+neither static nor private returns, and only the methods of its struct may write its fields or build it with an
+initializer (`E7002`). A clause may only call functions without effects (`E7009`).
+
+The contracts mode decides what a failed clause does: `check` (default) traps with `R10013`, `observe` reports and goes
+on, `ignore` evaluates nothing (and never becomes an assumption). It is set with `--contracts=<mode>` or `contracts:` in
+`djinn.proj`; a library keeps the mode it was built with, also for the bodies a consumer compiles from its interface.
 
 ```djinn
 i32 clamp(i32 value, i32 lo, i32 hi)
     require(lo <= hi)
-    ensure(return >= lo)
+    ensure(result >= lo && result <= hi)
 {
-    return value;
+    return value < lo ? lo : (value > hi ? hi : value);
 }
-i32 ok = try clamp(5, 1, 10) ?: 0;
 ```
+
+### Effects and regions (atomic / cooperative)
+
+```ebnf
+atomic_stmt          = "atomic" [ "(" [ expression { "," expression } ] ")" ] block [ "after_commit" block ] ;
+cooperative_stmt     = "cooperative" block ;
+```
+
+Effects (`writes`, `io`, `suspends`, `unknown`) are inferred for every function. `[Pure]` functions must have none
+(`E7003`), `[Effects(...)]` declares them on an extern and is an audited ceiling on a function with a body (`E7004`).
+An `atomic` region saves its operands (places: variables, fields, dereferences) and restores them when an error leaves
+it; a value operand that owns memory is undone by move. The region cannot suspend (`E7005`), nothing may fail after its
+first external effect (`E7006`), parts of a value operand that own memory cannot be replaced (`E7007`), and every write
+must land in an operand or a local of the region (`E7008`). `after_commit` runs when the region completes without an
+error and cannot leave it (`E7011`). `cooperative` only forbids suspension. `--obligations[=json]` lists every guarantee
+with its provenance and the inferred effects.
+
+### Native errors (`[NativeError]`)
+
+`[NativeError(detect = <condition on result>, capture = errno | last_error | return_code)]` on an `extern "C"` function
+that declares `throws(E)` makes a failed call throw `E { .code = <captured> }` (`E7012` for a malformed attribute).
 
 ### Constexpr / Consteval
 
@@ -312,7 +340,7 @@ overflow_suffix      = "w" | "t" | "c" | "s" ;
 ```ebnf
 block                = "{" { statement } "}" ;
 statement            = [ attributes ] ( return_stmt | if_stmt | for_stmt | while_stmt | do_while_stmt | switch_stmt | break_stmt
-                     | continue_stmt | throw_statement | yield_stmt | spawn_stmt | unsafe_block | block | local_decl | destructure
+                     | continue_stmt | throw_statement | yield_stmt | spawn_stmt | unsafe_block | atomic_stmt | cooperative_stmt | block | local_decl | destructure
                      | expression_stmt ) ;
 
 return_stmt          = "return" [ expression ] ";" ;
