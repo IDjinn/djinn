@@ -54,6 +54,9 @@ The runtime (the `.c` files in `runtime/`) is compiled together with the program
 
 ## Options
 
+What the optimization levels, `--cpu`, the float settings and the link step do, and what can surprise you, is
+explained in the docs page "Optimization & Build Flags" (`docs/content/docs/advanced/compiler-flags.mdx`).
+
 | Option | Effect |
 |---|---|
 | `-o <path>` | Output executable (default `a.out`). |

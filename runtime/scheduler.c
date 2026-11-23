@@ -10,6 +10,23 @@ LPFN_ACCEPTEX djinn_pfn_accept_ex = NULL;
 LPFN_CONNECTEX djinn_pfn_connect_ex = NULL;
 #endif
 
+// Coroutine frames are kept in a small cache of free lists instead of going back to malloc. A cached frame is never
+// freed, so AddressSanitizer (and valgrind) could not see a use after free, a double free or a resume of a destroyed
+// coroutine, and the rounding up to a 64-byte class would hide small overflows. Under a sanitizer, or with
+// -DDJINN_NO_FRAME_CACHE, every frame goes straight to malloc/free with its exact size, so those bugs are reported.
+// (C has no `if constexpr`: this is decided by the preprocessor, so the cache costs nothing when it is off.)
+#if defined(DJINN_NO_FRAME_CACHE) || defined(__SANITIZE_ADDRESS__)
+#define DJINN_FRAME_CACHE_ENABLED 0
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#define DJINN_FRAME_CACHE_ENABLED 0
+#endif
+#endif
+#ifndef DJINN_FRAME_CACHE_ENABLED
+#define DJINN_FRAME_CACHE_ENABLED 1
+#endif
+
+#if DJINN_FRAME_CACHE_ENABLED
 #define DJINN_FRAME_GRANULE 64
 #define DJINN_FRAME_CLASSES 32
 #define DJINN_FRAME_CACHE 64
@@ -102,6 +119,27 @@ static void release_frame_cache(void)
     }
     frame_lock_release();
 }
+
+#else
+
+void* __djinn_coro_alloc(size_t size)
+{
+    void* frame = malloc(size);
+    DJINN_ASSERT(frame, "Out of memory");
+    DJINN_TRACE("allocated coroutine frame of %zu bytes at %p", size, frame);
+    return frame;
+}
+
+void __djinn_coro_free(void* frame, size_t size)
+{
+    if (!frame) return;
+    DJINN_TRACE("released coroutine frame of %zu bytes at %p", size, frame);
+    free(frame);
+}
+
+static void release_frame_cache(void) {}
+
+#endif
 
 void djinn_init_queue(djinn_task_queue_t* q)
 {
