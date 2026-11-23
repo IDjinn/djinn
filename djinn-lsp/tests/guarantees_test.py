@@ -60,7 +60,8 @@ client = Client(exe)
 options = {"runtimeDir": os.path.abspath(runtime)}
 if os.environ.get("DJINNC"):
     options["compilerPath"] = os.environ["DJINNC"]
-client.request("initialize", {"processId": None, "rootUri": uri_of(root), "capabilities": {}, "initializationOptions": options})
+init = client.request("initialize", {"processId": None, "rootUri": uri_of(root), "capabilities": {}, "initializationOptions": options})
+types = init["capabilities"]["semanticTokensProvider"]["legend"]["tokenTypes"]
 client.notify("initialized", {})
 path = os.path.join(root, "src", "guarantees_demo.djinn")
 uri = uri_of(path)
@@ -87,6 +88,18 @@ def walk(items):
 walk(symbols or [])
 check("outline keeps the methods next to an invariant", "withdraw" in names and "move" in names, names)
 check("the invariant is not a member", "invariant" not in names, names)
+
+data = client.request("textDocument/semanticTokens/full", {"textDocument": {"uri": uri}})["data"]
+lines = SOURCE.split(chr(10))
+found = {}
+line = character = 0
+for i in range(0, len(data), 5):
+    dl, ds, length, kind, mods = data[i:i + 5]
+    line += dl
+    character = ds if dl else character + ds
+    found.setdefault(lines[line][character:character + length], []).append(types[kind])
+for word in ["invariant", "atomic", "cooperative", "after_commit", "old"]:
+    check("semantic tokens color " + word + " as a keyword", "keyword" in found.get(word, []), found.get(word))
 
 client.request("shutdown", None)
 client.notify("exit", None)
