@@ -319,7 +319,7 @@ primitive_type       = integer_type | float_type | brain_float_type | native_typ
 integer_type         = ( "i" | "u" ) DIGITS { integer_suffix } ;    (* i8..i128, u8..u128, i32w, u32n, i32nt, ... *)
 float_type           = "f" DIGITS ;                                  (* f16, f32, f64 *)
 brain_float_type     = "bf16" ;                                       (* x86, ARM, AArch64 and RISC-V only; E3071 elsewhere *)
-native_type          = "nint" [ overflow_suffix ] | "nfloat" | "ndouble" ;
+native_type          = "nint" [ overflow_suffix ] ;
 integer_suffix       = "n" | overflow_suffix ;
 overflow_suffix      = "w" | "t" | "c" | "s" ;
 ```

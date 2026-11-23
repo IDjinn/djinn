@@ -13,7 +13,7 @@ as a plain function, see `--no-async-elision`).
 Full references: `README.md` (tour), `GRAMMAR.md` (EBNF syntax, keep it in sync with parser changes), `djinnc/SUBSET.md` (what the compiler actually supports, the most
 detailed one), `djinnc/USAGE.md` (options), `djinnc/LIBRARY.md`, `examples/`.
 
-- **Types**: `i8`–`i64`, `u8`–`u64`, `f32`/`f64`, `nint`/`nfloat`/`ndouble`, `bool`, `str` (trivial view), `string` (owned
+- **Types**: `i8`–`i64`, `u8`–`u64`, `f32`/`f64`, `nint`, `bool`, `str` (trivial view), `string` (owned
   heap text), `arr<T>`, `slice<T>`, pointers (`T*`, `ptr<T>`), `T?` nullable with `??`, `object`, `auto`. Integer overflow
   modes via literal suffix or type: `w`rapped / `t`rapped / `c`hecked / `s`aturating.
 - **Declarations**: structs (methods, properties, static methods, brace init), `enum`/`union` as tagged unions with
