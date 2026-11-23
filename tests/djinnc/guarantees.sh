@@ -16,6 +16,10 @@ fail() { echo "FAIL guarantees: $1"; exit 1; }
 [ "$status" = 42 ] || { cat "$out/project.log"; fail "the observing project must exit with 42, got $status"; }
 grep -q "observed: R10013: contract violated: require(x % 2 == 0)" "$out/project.log" || fail "observe must report the clause"
 
+# An unknown mode is rejected.
+"$compiler" tests/contracts_project -o "$out/bad" --check --contracts=sometimes "${flags[@]}" > "$out/bad.log" 2>&1 && fail "--contracts=sometimes must be rejected"
+grep -q "unknown contracts mode 'sometimes'" "$out/bad.log" || fail "an unknown mode must be explained"
+
 # The command line wins over djinn.proj.
 "$compiler" tests/contracts_project -o "$out/ignore" --run --contracts=ignore "${flags[@]}" > "$out/ignore.log" 2>&1 && status=0 || status=$?
 [ "$status" = 42 ] || { cat "$out/ignore.log"; fail "--contracts=ignore must exit with 42, got $status"; }

@@ -113,6 +113,9 @@ impl JsEmitter {
         if (kind == NodeKind::INTRINSIC && (node.op() == Intrinsic.LIKELY || node.op() == Intrinsic.UNLIKELY)) {
             return this.expression(node.first());
         }
+        if (kind == NodeKind::INTRINSIC && node.op() == Intrinsic.CONTRACT) {
+            return this.contract(node);
+        }
         this.error(node, "this expression is not supported by the web target yet");
         return "undefined";
     }
@@ -824,6 +827,33 @@ impl JsEmitter {
             out.append((ptr<i8>)args.get(i));
         }
         out.append(")");
+        return out.cstr();
+    }
+}
+
+impl JsEmitter {
+    // A contract clause in the mode of the file that declared it: check stops like a panic, observe reports to the
+    // console and goes on, ignore evaluates nothing.
+    unsafe ptr<i8> contract(Node* node) {
+        i32 mode = (i32)(node.int_value() >> 4);
+        if (mode == ContractMode.IGNORE) {
+            return "undefined";
+        }
+        ByteBuffer* message = ByteBuffer.create();
+        message.append(RuntimeErrors.report(RuntimeErrors.CONTRACT_VIOLATED));
+        message.append(": ");
+        message.append(node.text());
+        ByteBuffer* out = ByteBuffer.create();
+        out.append("((");
+        out.append(this.expression(node.first()));
+        out.append(") || ");
+        if (mode == ContractMode.OBSERVE) {
+            out.append("console.error(\"observed: \" + ");
+        } else {
+            out.append("$panic(");
+        }
+        out.append(JsEmitter.quote(message.cstr()));
+        out.append("))");
         return out.cstr();
     }
 }
