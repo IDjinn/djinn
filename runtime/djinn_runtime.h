@@ -226,6 +226,8 @@ char* __djinn_list_files(const char* directory, const char* extension);
 int32_t __djinn_files_batch(int32_t write, int32_t use_uring, const char** paths, char** buffers, int64_t* lengths, int32_t count);
 char* __djinn_executable_dir(void);
 int __djinn_path_exists(const char* path);
+// 1 when stdin and stdout are a terminal (prompts can be answered), 0 when piped or redirected.
+int __djinn_stdin_is_tty(void);
 
 // Calls a JIT-compiled entry point `int main(void)` at `address` and returns its exit code.
 int __djinn_call_entry(void* address);

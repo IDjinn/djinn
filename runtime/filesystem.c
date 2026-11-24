@@ -438,6 +438,16 @@ char* __djinn_executable_dir(void)
     return copy;
 }
 
+int __djinn_stdin_is_tty(void)
+{
+#ifdef _WIN32
+    DWORD mode;
+    return GetConsoleMode(GetStdHandle(STD_INPUT_HANDLE), &mode) != 0 && GetConsoleMode(GetStdHandle(STD_OUTPUT_HANDLE), &mode) != 0;
+#else
+    return isatty(0) && isatty(1);
+#endif
+}
+
 int __djinn_path_exists(const char* path)
 {
 #ifdef _WIN32
