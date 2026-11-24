@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Added
+- `E7020`: a call whose constant arguments make a callee's `require` clause provably false (`half(3)` against `require(x % 2 == 0)`) is a compile error instead of a run-time panic. Only parameters that receive compile-time constants are evaluated; anything else is left to run time. The clause is not removed or weakened: it still runs in the callee for callers the compiler cannot see (unsafe, extern, other libraries).
+
+### Fixed
+- `E7008` no longer rejects `throw MyError("message")` inside an `atomic` region: a string literal argument is static read-only data, and a constructor only initializes the value it builds, so neither can write memory a rollback must restore.
+
 ## [0.7.12] - 2026-11-24
 
 ### Added

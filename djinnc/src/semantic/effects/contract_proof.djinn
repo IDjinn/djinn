@@ -1,0 +1,98 @@
+namespace djinnc;
+
+// A call whose arguments are compile-time constants can be checked against the callee's 'require' clauses before the
+// program runs: when a clause is provably false the call can only ever panic, so it is reported as an error. Nothing
+// is removed or weakened: the clause still runs in the callee for every caller the compiler cannot see, and a clause
+// the evaluator cannot decide is left to run time.
+struct ContractProof {
+    Diagnostics* diagnostics;
+    ConstEval* evaluator;
+
+    public static unsafe void run(SymbolTable* symbols, Diagnostics* diagnostics, ConstEval* evaluator) {
+        if (evaluator == null) {
+            return;
+        }
+        ContractProof* proof = (ContractProof*)Memory.zalloc(sizeof(ContractProof));
+        proof.diagnostics = diagnostics;
+        proof.evaluator = evaluator;
+        PointerList* functions = symbols.functions;
+        for (mut i32 i = 0; i < functions.length; i = i + 1) {
+            FunctionInfo* info = (FunctionInfo*)functions.get(i);
+            Node* declaration = info.node;
+            if (info.is_extern || info.is_template || info.is_disabled || declaration == null || declaration.kind() != NodeKind::FUNCTION
+                || declaration.first() == null || declaration.is_library_interface()) {
+                continue;
+            }
+            proof.walk(declaration.first());
+        }
+    }
+
+    unsafe void call(Node* node) {
+        Node* callee_node = node.first();
+        if (callee_node == null || callee_node.symbol() == null) {
+            return;
+        }
+        i32 kind = callee_node.symbol_kind();
+        if (kind != SymbolKind.FUNCTION && kind != SymbolKind.STATIC_METHOD) {
+            return;
+        }
+        FunctionInfo* callee = (FunctionInfo*)callee_node.symbol();
+        Node* declaration = callee.node;
+        if (callee.is_extern || callee.is_template || callee.is_disabled || callee.is_instance || declaration == null
+            || declaration.kind() != NodeKind::FUNCTION || declaration.first() == null || declaration.is_library_interface()) {
+            return;
+        }
+        Node* body = declaration.first();
+        for (mut i32 i = 0; i < body.count(); i = i + 1) {
+            Node* statement = body.child(i);
+            if (statement.kind() != NodeKind::EXPR_STMT || statement.first() == null) {
+                return;
+            }
+            Node* clause = statement.first();
+            if (clause.kind() != NodeKind::INTRINSIC || clause.op() != Intrinsic.CONTRACT) {
+                return;
+            }
+            i64 packed = clause.int_value();
+            if ((i32)(packed & 15) != Intrinsic.REQUIRE_CLAUSE || (i32)(packed >> 4) != ContractMode.CHECK) {
+                continue;
+            }
+            ConstEval* evaluator = this.evaluator;
+            if (!evaluator.contract_violated(callee, node, clause.first())) {
+                continue;
+            }
+            ByteBuffer* message = ByteBuffer.create();
+            message.append("this call always violates '");
+            message.append(clause.text());
+            message.append("' of '");
+            message.append(CodeGenerator.base_name(callee.name));
+            message.append("' and can only panic at run time");
+            Diagnostics* diagnostics = this.diagnostics;
+            diagnostics.error_span(DiagnosticErrors.CONTRACT_STATICALLY_VIOLATED, node.file_name(), node.line(), node.column(), node.length(), message.cstr());
+            return;
+        }
+    }
+
+    unsafe void walk(Node* node) {
+        if (node == null) {
+            return;
+        }
+        NodeKind kind = node.kind();
+        if (kind == NodeKind::LAMBDA || kind == NodeKind::FUNCTION) {
+            return;
+        }
+        if (kind == NodeKind::CALL) {
+            this.call(node);
+        }
+        for (mut i32 field = NodeField.FIRST; field <= NodeField.FOURTH; field = field + 1) {
+            u32 stored = node.get_field(field);
+            if (stored != 0) {
+                this.walk(Ast.at((i32)stored));
+            }
+        }
+        if (node.has_items()) {
+            for (mut i32 i = 0; i < node.count(); i = i + 1) {
+                this.walk(node.child(i));
+            }
+        }
+    }
+}

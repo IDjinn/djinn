@@ -194,7 +194,10 @@ struct RegionCheck {
             return;
         }
         Node* callee_node = node.first();
-        if (callee.is_instance && callee_node != null) {
+        // A constructor initializes the value it is building, memory that did not exist before the region, so the
+        // receiver needs no cover; only the pointers handed to it as arguments can reach older memory.
+        bool constructs = callee_node != null && callee_node.symbol_kind() == SymbolKind.CONSTRUCTOR;
+        if (callee.is_instance && callee_node != null && !constructs) {
             mut ptr<i8> receiver = (ptr<i8>)0;
             if (callee_node.kind() == NodeKind::FIELD_ACCESS) {
                 Node* object = callee_node.first();
@@ -217,6 +220,10 @@ struct RegionCheck {
         }
         for (mut i32 i = 0; i < node.count(); i = i + 1) {
             Node* argument = node.child(i);
+            // A string literal points at static read-only data: no write can reach memory a rollback must restore.
+            if (argument.kind() == NodeKind::STRING_LITERAL) {
+                continue;
+            }
             if (Types.is_pointer(argument.value_type())) {
                 this.check_handed(this.pointee_key(argument), argument, callee);
             }
