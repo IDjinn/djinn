@@ -21,6 +21,10 @@ struct RegionRequirement {
         PointerList* uses = Attributes.all();
         for (mut i32 i = 0; i < uses.length; i = i + 1) {
             AttributeUse* use = (AttributeUse*)uses.get(i);
+            if (Strings.same(use.name, "uow_use")) {
+                this.record_use(use);
+                continue;
+            }
             if (!Strings.same(use.name, "requires_uow")) {
                 continue;
             }
@@ -29,6 +33,31 @@ struct RegionRequirement {
                 if (info.node == use.target) {
                     info.requires_region = true;
                 }
+            }
+        }
+    }
+
+    unsafe void record_use(AttributeUse* use) {
+        SymbolTable* symbols = this.symbols;
+        PointerList* functions = symbols.functions;
+        for (mut i32 f = 0; f < functions.length; f = f + 1) {
+            FunctionInfo* info = (FunctionInfo*)functions.get(f);
+            Node* declaration = info.node;
+            if (declaration != use.target || declaration.is_library_interface()) {
+                continue;
+            }
+            ByteBuffer* text = ByteBuffer.create();
+            text.append("uow ");
+            text.append(use.text_arg);
+            text.append(" strategy cooperative");
+            Obligations.record("uow", "enforced", info, text.cstr(), declaration);
+            UowDeclaration* uow = UowDeclaration.find(use.text_arg);
+            if (uow != null && uow.isolation != null) {
+                ByteBuffer* isolation = ByteBuffer.create();
+                isolation.append("isolation(");
+                isolation.append(uow.isolation);
+                isolation.append(") sustained by the cooperative strategy: no other task runs inside the region");
+                Obligations.record("isolation", "proved", info, isolation.cstr(), declaration);
             }
         }
     }
