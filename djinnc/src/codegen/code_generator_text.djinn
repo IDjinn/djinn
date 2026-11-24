@@ -6,6 +6,12 @@ impl CodeGenerator {
         if (conversion == 0) {
             return this.gen_expression_plain(node);
         }
+        if (conversion >= 3) {
+            ptr constant = this.constant_cstring(node);
+            if (constant != null) {
+                return Value.create(constant, Types.byte_pointer());
+            }
+        }
         Value* pointer = this.gen_expression_plain(node);
         if (conversion >= 3) {
             return this.cstring_of_text(pointer.ref, conversion == 4);
@@ -299,6 +305,54 @@ impl CodeGenerator {
             return this.fold_constant(initial, out, depth + 1);
         }
         return false;
+    }
+
+    unsafe ptr constant_cstring(Node* node) {
+        u32 type = node.value_type();
+        if (type != this.symbols_core_type("str") && type != this.symbols_core_type("string")) {
+            return (ptr)0;
+        }
+        NodeKind kind = node.kind();
+        if (kind != NodeKind::STRING_LITERAL && kind != NodeKind::INT_LITERAL && kind != NodeKind::INTERPOLATION && kind != NodeKind::IDENTIFIER) {
+            return (ptr)0;
+        }
+        ByteBuffer* folded = ByteBuffer.create();
+        if (!this.fold_constant(node, folded, 0)) {
+            return (ptr)0;
+        }
+        return this.string_constant(folded.cstr());
+    }
+
+    unsafe void force_inline(FunctionInfo* function) {
+        if (function == null || function.function == null) {
+            return;
+        }
+        u32 kind = LLVMGetEnumAttributeKindForName("alwaysinline", 12);
+        LLVMAddAttributeAtIndex(function.function, AttributeIndex.FUNCTION, LLVMCreateEnumAttribute(this.context, kind, 0));
+    }
+
+    unsafe void inline_for_constant_text(Node* node, FunctionInfo* callee) {
+        if (callee.function == null || callee.is_async || callee.is_extern) {
+            return;
+        }
+        for (mut i32 i = 0; i < node.count(); i = i + 1) {
+            if (this.constant_cstring(node.child(i)) != null) {
+                this.force_inline(callee);
+                SymbolTable* symbols = this.symbols;
+                StructInfo* helper = symbols.find_core_struct(Ast.intern_base_name("Reflection", 10));
+                this.force_inline(symbols.find_method(helper, Ast.intern_base_name("terminated", 10)));
+                this.force_inline(symbols.find_method(helper, Ast.intern_base_name("terminated_view", 15)));
+                ObjectWriter.request_inlined_text_folding();
+                return;
+            }
+        }
+    }
+
+    unsafe bool is_terminate_call(FunctionInfo* info) {
+        if (info.owner == null || info.owner.name_atom != Ast.intern_base_name("Reflection", 10)) {
+            return false;
+        }
+        return info.name_atom == Ast.intern_base_name("terminated", 10) || info.name_atom == Ast.intern_base_name("terminated_view", 15);
     }
 
     unsafe Node* initial_of(Node* node) {
