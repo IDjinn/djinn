@@ -404,6 +404,47 @@ i32 main() {
 
 
     [Test]
+    void shared_try_retain_fails_when_released() {
+        str source = """
+import std::memory;
+import std::types;
+import std::types::constraints;
+import std::sys;
+import std::libc;
+namespace app;
+
+unsafe static mut i32 disposals = 0;
+
+struct Payload : Disposable {
+    i32 id;
+
+    public void disposable() {
+        atomic_add(&disposals, 1);
+    }
+}
+
+i32 main() {
+    unsafe {
+        shared<Payload> live = shared<Payload>({ .id = 7 });
+        if (live.tryRetain() == false) { return 90; }
+        if (live.references() != 2) { return 91; }
+        live.block.count.store(1);
+
+        shared_block<Payload>* dead_block = (shared_block<Payload>*)__djinn_alloc(sizeof(shared_block<Payload>));
+        dead_block.count = atomic<i32>(0);
+        dead_block.payload = owner<Payload>({ .id = 1 });
+        shared<Payload> dead = { .block = dead_block };
+        if (dead.tryRetain()) { return 92; }
+        if (dead.references() != 0) { return 93; }
+        dead_block.count.store(1);
+    }
+    return atomic_load(&disposals) + 40;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(42));
+    }
+
+    [Test]
     void shared_clone_and_drop_from_many_threads() {
         str source = """
 import std::memory;

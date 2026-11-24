@@ -54,6 +54,7 @@ Implemented in `djinnc/src/semantic/` (`symbols/ownership.djinn`, `symbols/borro
   are shared. Diagnostic `BORROW_CONFLICT`. Limits: only a declaration initialized directly with `&x` is tracked (not
   borrows passed to calls or stored in fields), reads are not checked, there is no flow analysis (the borrow lasts the
   whole scope), and `return &local;` is an error.
+- **Pointers across a suspend** (`POINTER_ACROSS_SUSPEND`, E5010): a local or parameter of type `T*`/`ptr<T>` declared before an `await` cannot be used after it (a resume may happen on another thread; atomic pointer access is not implemented, issue #54). Assigning it again re-arms it. Exempt: `void*` handles, `this`, and uses inside `unsafe`. Not tracked: `.sync`, loops that carry the pointer into the next iteration, `str`/`arr`/`slice` views.
 - Heap ownership types live in `std/memory`: `owner<T>` (single owner, frees on dispose), `shared<T>` (atomic refcount),
   plus `arena`, `pool` and `allocator`.
 
