@@ -1,0 +1,147 @@
+import std::types;
+import std::io;
+import std::sys;
+namespace scaffold;
+
+struct Targets {
+    const i32 EXECUTABLE = 0;
+    const i32 WEB = 1;
+    const i32 WINDOWS = 2;
+    const i32 LIBRARY = 3;
+
+    public static unsafe i32 parse(i8* name) {
+        if (Files.same(name, "executable") || Files.same(name, "exe")) { return Targets.EXECUTABLE; }
+        if (Files.same(name, "web")) { return Targets.WEB; }
+        if (Files.same(name, "windows")) { return Targets.WINDOWS; }
+        if (Files.same(name, "library") || Files.same(name, "lib")) { return Targets.LIBRARY; }
+        return -1;
+    }
+
+    public static unsafe i8* name(i32 target) {
+        if (target == Targets.WEB) { return "web"; }
+        if (target == Targets.WINDOWS) { return "windows"; }
+        if (target == Targets.LIBRARY) { return "library"; }
+        return "executable";
+    }
+
+    public static unsafe i32 choose(i8* given, i8* question) {
+        if (given != null) {
+            i32 parsed = Targets.parse(given);
+            if (parsed < 0) {
+                SpectreEmoji.printCross("unknown target, expected web, windows, executable or library");
+            }
+            return parsed;
+        }
+        SpectreSelect select = SpectreSelect.create();
+        select.addOption("executable  console program");
+        select.addOption("web         compiled to JavaScript (djinnc --target web)");
+        select.addOption("windows     native window (ui + win32)");
+        select.addOption("library     a .djlib other projects import");
+        return select.prompt(question);
+    }
+
+    public static unsafe i32 write_project(i8* path, i8* name, i32 target) {
+        i8* text = i8[2048];
+        mut i8* platforms = "";
+        if (target == Targets.WEB) { platforms = "\n  targets: [web]\n"; }
+        if (target == Targets.WINDOWS) { platforms = "\n  targets: [windows]\n"; }
+        mut i8* mode = "false";
+        if (target == Targets.LIBRARY) { mode = "true"; }
+        mut i8* libs = "'std'";
+        if (target == Targets.WEB) { libs = "'std', 'ui_macros', 'ui'"; }
+        if (target == Targets.WINDOWS) { libs = "'std', 'ui_macros', 'ui', 'spirv', 'vulkan', 'win32'"; }
+        snprintf(text, 2048, "project: \"%s\"\nversion: \"0.1.0\"\n\ncompiler:\n  library-mode: %s\n\n  output:\n    file: \"%s\"\n    directory: \"build\"\n\n  libs: [%s]\n%s", name, mode, name, libs, platforms);
+        FILE* file = fopen(path, "wb");
+        if (file == null) {
+            return 1;
+        }
+        fputs(text, file);
+        fclose(file);
+        return 0;
+    }
+
+    public static str main_source(i32 target) {
+        if (target == Targets.WEB) {
+            return """import ui;
+
+namespace @NAME@;
+
+[Application(render: client)]
+struct App {
+    public Node render() {
+        signal<i32> count = state(0);
+        return html!{
+            <main class="page stack">
+                <h1>@NAME@</h1>
+                <button on_click={() => count.set(count.get() + 1)}>clicked {count}</button>
+            </main>
+        };
+    }
+}
+
+i32 main() {
+    App app = { .unused = 0 };
+    return App.run<App>(app, RenderMode.CLIENT);
+}
+""";
+        }
+        if (target == Targets.WINDOWS) {
+            return """import ui;
+import win32;
+
+namespace @NAME@;
+
+[Application(render: client)]
+struct App {
+    public Node render() {
+        signal<i32> count = state(0);
+        return html!{
+            <main class="page stack">
+                <h1>@NAME@</h1>
+                <button on_click={() => count.set(count.get() + 1)}>clicked {count}</button>
+            </main>
+        };
+    }
+}
+
+unsafe i32 main() {
+    App app = { .unused = 0 };
+    return WinHost.run<App>(app, "@NAME@", 900, 720);
+}
+""";
+        }
+        if (target == Targets.LIBRARY) {
+            return """namespace @NAME@;
+
+struct Greeter {
+    public static i32 add(i32 a, i32 b) {
+        return a + b;
+    }
+}
+""";
+        }
+        return """import std::sys;
+
+namespace @NAME@;
+
+i32 main() {
+    Spectre.markupLine("[green]hello from @NAME@[/]");
+    return 0;
+}
+""";
+    }
+
+    public static str index_html() {
+        return """<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>@NAME@</title>
+    <script type="module" src="app.js"></script>
+</head>
+<body></body>
+</html>
+""";
+    }
+}

@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+- `djinnc new [name] [--target=web|windows|executable|library]` creates a project (`djinn.proj`, a starter source, `index.html` for web); without `--target` it asks with a spectre selection. `djinnc init` writes a `djinn.proj` for the current folder step by step, and `djinnc doctor [dir] [--target=...]` checks the toolchain, `djinn.proj` and the libraries the target needs. They run in `djinn-scaffold` (`tools/scaffold`, installed next to `djinnc`).
+- The language server understands record structs (`struct Name(T a, U b);`): the parameters are listed as fields of the struct.
+- The VS Code extension runs a lone file without a `djinn.proj` when it has `main()` and imports only `std`; otherwise it says that a project is needed.
+
 ## [0.7.11] - 2026-11-23
 
 ### Added
