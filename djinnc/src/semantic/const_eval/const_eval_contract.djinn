@@ -1,0 +1,100 @@
+namespace djinnc;
+
+impl ConstEval {
+    // True only when 'condition', a require clause of 'info', is provably false for the arguments of 'call': every
+    // parameter the clause reads must receive a compile-time constant, and anything the evaluator cannot decide leaves
+    // the answer false. It never changes the clause or the call: the runtime check stays in the callee.
+    public unsafe bool contract_violated(FunctionInfo* info, Node* call, Node* condition) {
+        this.ensure_storage();
+        Node* declaration = info.node;
+        if (this.nesting != 0 || info.is_instance || info.is_variadic || info.is_async || info.is_extern || info.is_template || declaration == null) {
+            return false;
+        }
+        i32 count = declaration.count();
+        if (call.count() != count || count > 60) {
+            return false;
+        }
+        i32 saved_base = this.base;
+        i32 saved_top = this.top;
+        bool saved_frame = this.in_frame;
+        ptr<i8> saved_reason = this.reason;
+        Node* saved_blame = this.blame;
+        this.steps = 0;
+        this.deadline = __djinn_now_us() + ConstEval.TIME_LIMIT_US;
+        this.heap_reset();
+        this.nesting = 1;
+        this.in_frame = false;
+        this.reason = null;
+        this.blame = (Node*)0;
+
+        mut bool violated = false;
+        if (this.prepare(call, info)) {
+            i32 frame_base = this.top;
+            i32 frame_top = frame_base + info.eval_slots;
+            if (frame_top <= ConstEval.FRAME_CAPACITY) {
+                this.top = frame_top;
+                mut i64 known = 0;
+                IdList* param_types = info.param_types;
+                for (mut i32 i = 0; i < count; i = i + 1) {
+                    Node* argument = call.child(i);
+                    u32 param_type = param_types.get(i);
+                    i32 param_shape = this.shape_of(param_type);
+                    bool plain = (param_shape & ConstEval.NUMERIC) != 0 && (param_shape & (ConstEval.STRUCT | ConstEval.POINTER | ConstEval.TEXT | ConstEval.STRING)) == 0 && !ConstEval.wide(param_shape);
+                    if (!plain) {
+                        continue;
+                    }
+                    if (this.eval(argument)) {
+                        this.convert(this.shape_of(argument.value_type()), param_shape);
+                        this.ints[frame_base + i] = this.ri;
+                        this.floats[frame_base + i] = this.rf;
+                        known = known | ((i64)1 << i);
+                    }
+                    this.reason = null;
+                }
+                this.base = frame_base;
+                this.in_frame = true;
+                if (ConstEval.reads_only(condition, known, count) && this.eval_condition(condition) && this.ri == 0) {
+                    violated = true;
+                }
+                this.top = frame_base;
+            }
+        }
+
+        this.nesting = 0;
+        this.base = saved_base;
+        this.top = saved_top;
+        this.in_frame = saved_frame;
+        this.reason = saved_reason;
+        this.blame = saved_blame;
+        return violated;
+    }
+
+    // Every name the clause reads is a parameter that received a constant, a constant local or a global.
+    static unsafe bool reads_only(Node* node, i64 known, i32 count) {
+        if (node == null) {
+            return true;
+        }
+        if (node.kind() == NodeKind::IDENTIFIER && node.symbol_kind() == SymbolKind.LOCAL) {
+            LocalVariable* variable = (LocalVariable*)node.symbol();
+            i32 slot = variable.eval_slot;
+            if (slot >= 1 && slot <= count) {
+                return ((known >> (slot - 1)) & 1) != 0;
+            }
+            return variable.const_state == 2;
+        }
+        for (mut i32 field = NodeField.FIRST; field <= NodeField.FOURTH; field = field + 1) {
+            u32 stored = node.get_field(field);
+            if (stored != 0 && !ConstEval.reads_only(Ast.at((i32)stored), known, count)) {
+                return false;
+            }
+        }
+        if (node.has_items()) {
+            for (mut i32 i = 0; i < node.count(); i = i + 1) {
+                if (!ConstEval.reads_only(node.child(i), known, count)) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+}

@@ -65,6 +65,55 @@ unsafe i32 main() {
     }
 
     [Test]
+    void throwing_an_error_with_a_message_inside_a_region_is_allowed() {
+        str source = """
+struct InsufficientFunds {
+    i8* message;
+
+    public InsufficientFunds(i8* message) {
+        this.message = message;
+    }
+}
+
+struct Account {
+    i64 id;
+    mut i64 balance;
+}
+
+unsafe i32 transfer(Account* from, Account* to, i64 amount) throws(InsufficientFunds) {
+    atomic(*from, *to) {
+        from.balance = from.balance - amount;
+        if (from.balance < 0) {
+            throw InsufficientFunds("insufficient funds for transfer");
+        }
+        to.balance = to.balance + amount;
+    }
+    return 0;
+}
+
+unsafe i32 main() {
+    Account alice = Account { .id = 1, .balance = 10 };
+    Account bob = Account { .id = 2, .balance = 0 };
+    i32 code = switch transfer(&alice, &bob, 50) {
+        Result v -> 0,
+        InsufficientFunds e -> 1
+    };
+    if (code != 1) {
+        return 10 + code;
+    }
+    if (alice.balance != 10) {
+        return 2;
+    }
+    if (bob.balance != 0) {
+        return 3;
+    }
+    return 42;
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
     void after_commit_runs_only_when_the_region_completes() {
         str source = """
 struct Failed;
