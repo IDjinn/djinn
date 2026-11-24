@@ -95,3 +95,9 @@ esac
 "$compiler" tests/opt_project -o "$out/san_undefined" --sanitize=undefined "${flags[@]}" > "$out/san_undefined.log" 2>&1 || { cat "$out/san_undefined.log"; fail "--sanitize=undefined must link"; }
 "$out/san_undefined" && status=0 || status=$?
 [ "$status" = 42 ] || fail "an undefined-sanitized program must still exit with 42, got $status"
+
+# The JIT is hardened like ahead-of-time code (no CFG or ShadowCallStack); --no-jit-harden turns that off.
+for extra in "" "--no-jit-harden" "--harden=strict" "--harden=strict --no-jit-harden" "--tiered"; do
+    "$compiler" tests/opt_project -o "$out/jit" --run $extra "${flags[@]}" > "$out/jit.log" 2>&1 && status=0 || status=$?
+    [ "$status" = 42 ] || { cat "$out/jit.log"; fail "--run $extra must exit with 42, got $status"; }
+done
