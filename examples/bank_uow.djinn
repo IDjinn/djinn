@@ -1,0 +1,52 @@
+extern "C" {
+    i32 printf(i8* format, ...);
+}
+
+struct InsufficientFunds;
+
+struct Account {
+    i64 id;
+    mut i64 balance;
+}
+
+uow Transfer {
+    Account* from;
+    Account* to;
+    i64 amount;
+
+    require(amount > 0)
+    require(from.id != to.id)
+    ensure(from.balance + to.balance == old(from.balance) + old(to.balance))
+    writes(*from, *to)
+    access(exclusive from, exclusive to)
+    ordering(Account.id ascending)
+    isolation(serializable)
+}
+
+unsafe i32 transfer(Account* from, Account* to, i64 amount) throws(InsufficientFunds)
+    uow(Transfer) strategy cooperative
+{
+    from.balance = from.balance - amount;
+    if (from.balance < 0) {
+        throw InsufficientFunds();
+    }
+    to.balance = to.balance + amount;
+    return 0;
+}
+
+unsafe i32 run(Account* a, Account* b, i64 amount) {
+    return switch transfer(a, b, amount) {
+        Result v -> 0,
+        InsufficientFunds e -> 1
+    };
+}
+
+unsafe i32 main() {
+    Account alice = Account { .id = 1, .balance = 100 };
+    Account bob = Account { .id = 2, .balance = 50 };
+    i32 r1 = run(&alice, &bob, 500);
+    printf("insufficient: %d alice=%lld bob=%lld\n", r1, alice.balance, bob.balance);
+    i32 r2 = run(&alice, &bob, 30);
+    printf("ok: %d alice=%lld bob=%lld\n", r2, alice.balance, bob.balance);
+    return 0;
+}

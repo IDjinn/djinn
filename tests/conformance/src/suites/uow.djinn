@@ -197,4 +197,61 @@ i32 main() {
 """;
         Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.UOW_ACCESS_ORDER).at(5, 1));
     }
+
+    [Test]
+    void the_bank_pilot_commits_and_rolls_back() {
+        str source = """
+struct InsufficientFunds;
+
+struct Account {
+    i64 id;
+    mut i64 balance;
+}
+
+uow Transfer {
+    Account* from;
+    Account* to;
+    i64 amount;
+
+    require(amount > 0)
+    require(from.id != to.id)
+    ensure(from.balance + to.balance == old(from.balance) + old(to.balance))
+    writes(*from, *to)
+    access(exclusive from, exclusive to)
+    ordering(Account.id ascending)
+    isolation(serializable)
+}
+
+unsafe i32 transfer(Account* from, Account* to, i64 amount) throws(InsufficientFunds)
+    uow(Transfer) strategy cooperative
+{
+    from.balance = from.balance - amount;
+    if (from.balance < 0) {
+        throw InsufficientFunds();
+    }
+    to.balance = to.balance + amount;
+    return 0;
+}
+
+unsafe i32 run(Account* a, Account* b, i64 amount) {
+    return switch transfer(a, b, amount) {
+        Result v -> 0,
+        InsufficientFunds e -> 1
+    };
+}
+
+unsafe i32 main() {
+    Account alice = Account { .id = 1, .balance = 100 };
+    Account bob = Account { .id = 2, .balance = 50 };
+    if (run(&alice, &bob, 500) != 1 || alice.balance != 100 || bob.balance != 50) {
+        return 1;
+    }
+    if (run(&alice, &bob, 30) != 0 || alice.balance != 70 || bob.balance != 80) {
+        return 2;
+    }
+    return 42;
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
 }

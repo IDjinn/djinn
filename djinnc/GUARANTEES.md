@@ -1635,6 +1635,25 @@ de testes baseados em propriedades a partir das cláusulas; tipos refinados; `in
 3. **Critério de parada:** se as cláusulas não forem usadas voluntariamente nem o rollback automático reduzir bugs em
    código real, não avançar para providers.
 
+#### Resultado do piloto (2026-11-23, etapa 5 do plano UOW)
+
+Os `demos/bank-*` do branch antigo não existem em nenhum branch local; os cenários foram reconstruídos a partir de
+§8.1: `examples/bank_uow.djinn` (válido, com rollback), e em `tests/conformance/src/suites/uow.djinn` o piloto
+completo, escrita fora do conjunto declarado, ligação/estratégia erradas, `access` sem `exclusive` e `ordering` em
+conflito.
+
+| Métrica | Medido |
+|---|---|
+| Obrigações do piloto (`bank_uow`) | 11 linhas: 4 `proved` (writes, isolation, no-suspension, e o conjunto de escrita), 2 `enforced` (uow, atomic), 3 `checked` em execução (require, require, ensure), 2 de efeitos |
+| Custo de rollback (100M chamadas que falham) | 6,2 ns/chamada sem região, 9,4 ns com `uow` (≈ +3,2 ns, o desfazer por movimentação de 2 operandos) |
+| Sem a região, o mesmo código deixa `balance` em -400 | o rollback é o que mantém o invariante |
+| Compilar o próprio `djinnc` | ~0,8 s (compilador instalado) contra ~1,05 s (este branch); a diferença inclui outras mudanças desde a release instalada, então é um limite superior, não o custo das passes |
+| Uso voluntário no código real | **zero**: `djinnc` não declara nenhuma cláusula (0 obrigações), então a taxa de falsos positivos de `writes` não foi exercitada |
+
+**Decisão:** o rollback em memória e a auditoria de `writes` funcionam e custam pouco, mas o critério de parada do
+item 3 ainda não pode ser avaliado: nenhum código real adotou as cláusulas. Não avançar para providers (etapa 6) nem
+`strategy lock` (etapa 7) antes de usar `uow` em código real (`std` ou `djinnc`) e medir os falsos positivos.
+
 ---
 
 ## 13. Recomendações finais
