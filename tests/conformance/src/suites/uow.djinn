@@ -112,4 +112,89 @@ i32 main() {
 """;
         Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.UOW_STRATEGY).at(12, 50).and_error(DiagnosticErrors.UOW_BINDING).at(12, 50).and_error(DiagnosticErrors.UOW_DECLARATION).at(15, 48));
     }
+
+    [Test]
+    void declared_access_and_ordering_are_accepted() {
+        str source = """
+struct Account {
+    mut i64 balance;
+}
+
+uow Move {
+    Account* from;
+    Account* to;
+    access(exclusive from, exclusive to)
+    ordering(Account.id ascending, Order.id ascending)
+    writes(*from, *to)
+}
+
+uow Audit {
+    Account* from;
+    access(shared from)
+    ordering(Account.id ascending)
+}
+
+i32 main() {
+    return 42;
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void a_write_without_exclusive_access_is_an_error() {
+        str source = """
+struct Account {
+    mut i64 balance;
+}
+
+uow Move {
+    Account* from;
+    Account* to;
+    access(exclusive from, shared to)
+    writes(*from, *to)
+}
+
+i32 main() {
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.UOW_ACCESS_ORDER).at(5, 1));
+    }
+
+    [Test]
+    void orderings_that_disagree_are_an_error() {
+        str source = """
+uow First {
+    ordering(Account.id ascending, Order.id ascending)
+}
+
+uow Second {
+    ordering(Order.id ascending, Account.id ascending)
+}
+
+i32 main() {
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.UOW_ACCESS_ORDER).at(5, 1));
+    }
+
+    [Test]
+    void opposite_directions_for_one_key_are_an_error() {
+        str source = """
+uow First {
+    ordering(Account.id ascending)
+}
+
+uow Second {
+    ordering(Account.id descending)
+}
+
+i32 main() {
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.UOW_ACCESS_ORDER).at(5, 1));
+    }
 }
