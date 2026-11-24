@@ -14,6 +14,7 @@ bash tools/scaffold/build.sh "$compiler" "$runtime" "$runtime_lib" >/dev/null
 cp "$compiler" "$work/bin/djinnc$exe"
 cp "tools/scaffold/build/djinn-scaffold$exe" "$work/bin/"
 tool="$work/bin/djinnc$exe"
+export PATH="$work/bin:$PATH"
 cd "$work/project"
 
 fail() { echo "FAIL $1"; exit 1; }
