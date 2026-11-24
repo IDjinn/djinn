@@ -235,6 +235,8 @@ int __djinn_stdin_is_tty(void);
 int __djinn_call_entry(void* address);
 uint64_t __djinn_call_proc(void* address, const char* data, uint64_t length, char** result);
 void __djinn_proc_stub(void);
+void* __djinn_jit_security_cookie_address(void);
+void __djinn_jit_security_check(uint64_t value);
 void __djinn_call_method(void* address, void* target);
 void* __djinn_call_entry_handle(void* address);
 void* __djinn_call_method_handle(void* address, void* target);

@@ -261,6 +261,26 @@ void __djinn_call_method(void* address, void* target)
     ((void (*)(void*))address)(target);
 }
 
+// Windows stack protector for JIT code: the guard value and the check the canary calls (the MSVC CRT supplies them to
+// programs that are linked, not to the JIT).
+static uint64_t jit_security_cookie;
+
+void* __djinn_jit_security_cookie_address(void)
+{
+    if (jit_security_cookie == 0) {
+        jit_security_cookie = ((0x2B992DDFA232ULL ^ (uint64_t)(uintptr_t)&jit_security_cookie) & 0x0000FFFFFFFFFFFFULL) | 1;
+    }
+    return &jit_security_cookie;
+}
+
+void __djinn_jit_security_check(uint64_t value)
+{
+    if (value != jit_security_cookie) {
+        fputs("stack smashing detected\n", stderr);
+        abort();
+    }
+}
+
 // Stands in for the coroutine wrappers every program generates, in the JIT that runs procedural macros.
 void __djinn_proc_stub(void)
 {

@@ -11,6 +11,22 @@ struct Jit {
         return false;
     }
 
+    // The stack protector of Windows code calls __security_check_cookie and reads __security_cookie, which the CRT
+    // provides to linked programs; the JIT defines them from the runtime.
+    public static unsafe bool define_security_symbols(ptr jit, ptr dylib) {
+        if (!Linker.is_windows()) {
+            return true;
+        }
+        ptr<u64> pairs = (ptr<u64>)Memory.zalloc(48);
+        pairs[0] = (u64)LLVMOrcLLJITMangleAndIntern(jit, "__security_cookie");
+        pairs[1] = (u64)__djinn_jit_security_cookie_address();
+        pairs[2] = 3;
+        pairs[3] = (u64)LLVMOrcLLJITMangleAndIntern(jit, "__security_check_cookie");
+        pairs[4] = (u64)(ptr)&__djinn_jit_security_check;
+        pairs[5] = 3;
+        return Jit.check(LLVMOrcJITDylibDefine(dylib, LLVMOrcAbsoluteSymbols((ptr)pairs, 2)), "cannot define the stack protector symbols");
+    }
+
     public static unsafe i32 run(CodeGenerator* gen, Options* options) {
         if (!Target.is_native()) {
             logger_error(Log.get(), "djinnc: --run needs the host target, but the target is '%s'", Target.triple());
@@ -92,6 +108,9 @@ struct Jit {
             return 1;
         }
         LLVMOrcJITDylibAddGenerator(dylib, process);
+        if (!Jit.define_security_symbols(jit, dylib)) {
+            return 1;
+        }
 
         if (objects.length > 0 && Linker.is_windows()) {
             u64 target = 0;
