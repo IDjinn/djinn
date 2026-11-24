@@ -414,4 +414,70 @@ i32 main() throws {
 """;
         Verify.source(source).crashes(Expected.contains("Failure"));
     }
+
+    [Test]
+    void literal_error_messages_are_static_data() {
+        str source = """
+i8* shared() {
+    return "negative value";
+}
+
+i32 fail(i32 x) throws(Error) {
+    if (x < 0) {
+        throw Error("negative value");
+    }
+    return x;
+}
+
+unsafe i32 main() {
+    i32 same = switch fail(-1) {
+        Result v -> 0,
+        Error e -> e.message == shared() ? 1 : 2
+    };
+    return same == 1 ? 42 : same;
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void a_str_that_came_from_a_literal_is_not_copied() {
+        str source = """
+i8* shared() {
+    return "static message";
+}
+
+i32 fail(str message) throws(Error) {
+    throw Error(message);
+}
+
+unsafe i32 main() {
+    str literal = "static message";
+    i32 kept = switch fail(literal) {
+        Result v -> 0,
+        Error e -> e.message == shared() ? 1 : 2
+    };
+    if (kept != 1) {
+        return 10 + kept;
+    }
+    str slice = str.view(literal.ptr(), 6);
+    i32 copied = switch fail(slice) {
+        Result v -> 0,
+        Error e -> e.message == shared() ? 2 : (e.message[6] == 0 ? 1 : 3)
+    };
+    return copied == 1 ? 42 : 20 + copied;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(42));
+    }
+
+    [Test]
+    void str_is_sixteen_bytes() {
+        str source = """
+i32 main() {
+    return (i32)sizeof(str);
+}
+""";
+        Verify.source(source).runs(Expected.exit(16));
+    }
 }
