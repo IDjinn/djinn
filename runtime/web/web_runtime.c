@@ -1486,6 +1486,7 @@ int __djinn_argc(void) { return 0; }
 char* __djinn_argv(int index) { (void)index; return 0; }
 char* __djinn_executable_dir(void) { return 0; }
 int __djinn_path_exists(const char* path) { (void)path; return 0; }
+void __djinn_make_parent_directories(const char* path) { (void)path; }
 int __djinn_stdin_is_tty(void) { return 0; }
 char* __djinn_list_files(const char* directory, const char* extension) { (void)directory; (void)extension; return 0; }
 

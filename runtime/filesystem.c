@@ -457,3 +457,28 @@ int __djinn_path_exists(const char* path)
     return stat(path, &info) == 0;
 #endif
 }
+
+// Creates every missing parent folder of `path` (the last component is left alone). Errors are ignored: the caller
+// opens the file next and reports the failure there.
+void __djinn_make_parent_directories(const char* path)
+{
+    char buffer[4096];
+    size_t length = strlen(path);
+    if (length >= sizeof(buffer)) return;
+    memcpy(buffer, path, length + 1);
+    for (size_t i = 1; i < length; i++)
+    {
+        if (buffer[i] != '/' && buffer[i] != '\\') continue;
+        char separator = buffer[i];
+        buffer[i] = '\0';
+        if (!__djinn_path_exists(buffer))
+        {
+#ifdef _WIN32
+            CreateDirectoryA(buffer, NULL);
+#else
+            mkdir(buffer, 0777);
+#endif
+        }
+        buffer[i] = separator;
+    }
+}
