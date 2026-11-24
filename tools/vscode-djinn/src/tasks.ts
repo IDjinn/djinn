@@ -47,6 +47,11 @@ export async function runTask(mode: BuildMode, getInfo: () => Promise<ServerInfo
     return;
   }
   await saveActiveEditor();
+  const problem = build.standaloneProblem(target, mode);
+  if (problem) {
+    vscode.window.showErrorMessage(problem);
+    return;
+  }
   let line: string;
   try {
     const info = await getInfo();

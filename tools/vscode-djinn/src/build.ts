@@ -58,6 +58,25 @@ export function describe(target: string): BuildPlan {
   return { isDirectory, project, root, name, outputDirectory, program, isLibrary };
 }
 
+/**
+ * A lone file runs without a djinn.proj as long as it has a main() and only imports the standard library; anything else
+ * (another library, another file's namespace) needs a project that lists it.
+ */
+export function standaloneProblem(target: string, mode: string): string | undefined {
+  if (!fs.existsSync(target) || fs.statSync(target).isDirectory()) {
+    return undefined;
+  }
+  const text = fs.readFileSync(target, "utf8");
+  const foreign = [...text.matchAll(/^\s*import\s+([A-Za-z_]\w*)/gm)].map((match) => match[1]).filter((name) => name !== "std");
+  if (foreign.length > 0) {
+    return `${path.basename(target)} imports ${[...new Set(foreign)].join(", ")}, which needs a djinn.proj that lists it in libs. Run "djinnc init" in the folder to create one.`;
+  }
+  if (mode === "run" && !/\w[\w<>*?]*\s+main\s*\(/.test(text)) {
+    return `${path.basename(target)} has no main() to run.`;
+  }
+  return undefined;
+}
+
 interface CompilerInvocation {
   compiler: string;
   args: string[];

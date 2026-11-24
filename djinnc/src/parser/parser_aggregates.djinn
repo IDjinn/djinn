@@ -266,6 +266,38 @@ impl Parser {
         }
     }
 
+    unsafe void parse_primary_constructor(Node* owner, i32 name, bool all_mutable) {
+        this.advance();
+        Node* constructor = Node.create_list(NodeKind::FUNCTION, name);
+        constructor.set_type(TypeRef.create(TypeKind.VOID));
+        constructor.set_text(".ctor");
+        this.parse_parameters(constructor);
+        this.expect(TokenKind::RPAREN, "expected ')' after the struct parameters");
+        Node* body = Node.create_list(NodeKind::BLOCK, name);
+        for (mut i32 i = 0; i < constructor.count(); i = i + 1) {
+            Node* parameter = constructor.child(i);
+            Node* field = Node.create(NodeKind::FIELD_DECL, name);
+            field.set_flag(all_mutable || parameter.flag());
+            field.set_type(parameter.type());
+            field.set_text(parameter.text());
+            owner.add(field);
+            this.declared_field_count = this.declared_field_count + 1;
+            if (field.flag()) {
+                this.declared_mutable_field_count = this.declared_mutable_field_count + 1;
+            }
+            Node* assign = Node.create(NodeKind::ASSIGN, name);
+            assign.set_first(this.backing_access(name, parameter.text()));
+            Node* value = Node.create(NodeKind::IDENTIFIER, name);
+            value.set_text(parameter.text());
+            assign.set_second(value);
+            Node* statement = Node.create(NodeKind::EXPR_STMT, name);
+            statement.set_first(assign);
+            body.add(statement);
+        }
+        constructor.set_first(body);
+        owner.add(constructor);
+    }
+
     Node* parse_struct() {
         i32 start = this.advance();
         Node* node = Node.create_list(NodeKind::STRUCT_DECL, start);
@@ -284,6 +316,9 @@ impl Parser {
         if (this.check(TokenKind::LESS)) {
             node.set_generics(this.parse_generic_params());
             generic_struct = true;
+        }
+        if (this.check(TokenKind::LPAREN)) {
+            this.parse_primary_constructor(node, name, declares_all_fields_mutable);
         }
         this.parse_bases_and_constraints(node);
 
