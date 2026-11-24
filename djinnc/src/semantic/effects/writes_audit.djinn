@@ -365,32 +365,43 @@ struct WritesAudit {
             return;
         }
         FunctionInfo* callee = (FunctionInfo*)callee_node.symbol();
+        mut Node* receiver = (Node*)0;
+        if (callee_node.kind() == NodeKind::FIELD_ACCESS) {
+            receiver = callee_node.first();
+        }
+        this.invoke(callee, receiver, node, node);
+    }
+
+    // A call, or the getter or setter an access stands for: receiver is the object of a method call (null for an implicit
+    // this), arguments holds the argument nodes (null when there are none).
+    unsafe void invoke(FunctionInfo* callee, Node* receiver, Node* arguments, Node* at) {
         u32 effects = EffectsAnalysis.inherited(callee);
         if ((effects & (Effects.WRITES | Effects.UNKNOWN)) == 0) {
             return;
         }
         if ((effects & Effects.UNKNOWN) != 0 || callee.write_untraced) {
-            this.indirect(node);
+            this.indirect(at);
             return;
         }
         if (callee.is_instance) {
-            if (callee_node.kind() == NodeKind::FIELD_ACCESS) {
-                Node* object = callee_node.first();
-                if (Types.is_pointer(object.value_type())) {
-                    this.hand(object, node);
+            if (receiver != null) {
+                if (Types.is_pointer(receiver.value_type())) {
+                    this.hand(receiver, at);
                 } else {
-                    this.write_to(object, node);
+                    this.write_to(receiver, at);
                 }
             } else {
                 this.through = true;
                 this.root_global = false;
-                this.note("this", node);
+                this.note("this", at);
             }
         }
-        for (mut i32 i = 0; i < node.count(); i = i + 1) {
-            Node* argument = node.child(i);
-            if (Types.is_pointer(argument.value_type())) {
-                this.hand(argument, argument);
+        if (arguments != null) {
+            for (mut i32 i = 0; i < arguments.count(); i = i + 1) {
+                Node* argument = arguments.child(i);
+                if (Types.is_pointer(argument.value_type())) {
+                    this.hand(argument, argument);
+                }
             }
         }
         PointerList* globals = callee.write_globals;
@@ -400,7 +411,20 @@ struct WritesAudit {
         for (mut i32 g = 0; g < globals.length; g = g + 1) {
             this.through = true;
             this.root_global = true;
-            this.note((ptr<i8>)globals.get(g), node);
+            this.note((ptr<i8>)globals.get(g), at);
+        }
+    }
+
+    unsafe void accessor(Node* target, Node* at) {
+        if (target.symbol() == null) {
+            this.indirect(at);
+            return;
+        }
+        FunctionInfo* accessor = (FunctionInfo*)target.symbol();
+        if (target.kind() == NodeKind::FIELD_ACCESS) {
+            this.invoke(accessor, target.first(), (Node*)0, at);
+        } else {
+            this.invoke(accessor, (Node*)0, (Node*)0, at);
         }
     }
 
@@ -422,7 +446,16 @@ struct WritesAudit {
             return;
         }
         if (kind == NodeKind::ASSIGN) {
-            this.write_to(node.first(), node);
+            Node* target = node.first();
+            i32 target_kind = target.symbol_kind();
+            if (target_kind == SymbolKind.PROPERTY_SET || target_kind == SymbolKind.IMPLICIT_SET) {
+                this.accessor(target, node);
+            } else {
+                this.write_to(target, node);
+            }
+        }
+        if ((kind == NodeKind::FIELD_ACCESS && node.symbol_kind() == SymbolKind.PROPERTY_GET) || (kind == NodeKind::IDENTIFIER && node.symbol_kind() == SymbolKind.IMPLICIT_GET)) {
+            this.accessor(node, node);
         }
         if (kind == NodeKind::UNARY && (node.op_kind() == TokenKind::PLUS_PLUS || node.op_kind() == TokenKind::MINUS_MINUS)) {
             this.write_to(node.first(), node);
