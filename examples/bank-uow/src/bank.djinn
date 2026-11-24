@@ -1,0 +1,55 @@
+// Moves money: any error leaves both accounts and the ledger as they were.
+unsafe i32 transfer(Account* from, Account* to, Ledger* ledger, i64 amount) throws(InsufficientFunds)
+    uow(Transfer) strategy cooperative
+{
+    from.balance = from.balance - amount;
+    if (from.balance < 0) {
+        throw InsufficientFunds();
+    }
+    to.balance = to.balance + amount;
+    ledger.record(amount);
+    return 0;
+}
+
+// Only makes sense inside a region: calling it from plain code is E7015.
+unsafe void take_fee(Account* from, i64 fee) writes(*from) requires uow {
+    from.balance = from.balance - fee;
+}
+
+unsafe i32 charge(Account* from, Ledger* ledger, i64 fee) throws(InsufficientFunds)
+    uow(Charge) strategy cooperative
+{
+    take_fee(from, fee);
+    if (from.balance < 0) {
+        throw InsufficientFunds();
+    }
+    ledger.record(fee);
+    return 0;
+}
+
+// Reads only: the audit proves it writes nothing.
+unsafe i64 statement(Account* from) writes() uow(Statement) strategy cooperative {
+    return from.balance;
+}
+
+i32 audit(i64 amount) throws(AuditUnavailable) {
+    if (amount == 13) {
+        throw AuditUnavailable();
+    }
+    return 0;
+}
+
+// The explicit form: the region restores both accounts, and after_commit runs only when it is left without an error.
+unsafe i32 settle(Account* from, Account* to, i64 amount) throws(InsufficientFunds, AuditUnavailable) require(amount > 0) {
+    atomic(*from, *to) {
+        if (from.balance < amount) {
+            throw InsufficientFunds();
+        }
+        from.balance = from.balance - amount;
+        try audit(amount);
+        to.balance = to.balance + amount;
+    } after_commit {
+        printf("settled %lld\n", amount);
+    }
+    return 0;
+}
