@@ -119,7 +119,8 @@ operator_signature   = type "operator" operator_symbol "(" [ param_list ] ")" ";
 ### Struct and Impl
 
 ```ebnf
-struct               = [ attributes ] [ "constexpr" | "abstract" ] "struct" [ "mut" ] IDENTIFIER [ generic_params ] [ where_clause ] [ struct_base ] ( ";" | struct_body ) ;
+struct               = [ attributes ] [ "constexpr" | "abstract" ] "struct" [ "mut" ] IDENTIFIER [ generic_params ] [ primary_ctor ] [ where_clause ] [ struct_base ] ( ";" | struct_body ) ;
+primary_ctor         = "(" [ param_list ] ")" ;   (* record form: each parameter becomes a field plus a constructor that assigns it *)
 struct_base          = ":" [ "interface" ] type { "," type } ;
 struct_body          = "{" { member } "}" ;
 member               = field_decl | property | method | constructor | operator_decl | const_decl | invariant_clause ;
