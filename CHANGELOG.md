@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.7.12] - 2026-11-24
+
 ### Added
 - `writes(a, b.field)` on a function lists the memory it may change besides its own locals; the body and every callee are audited (`E7013`, and `E7014` for a write the compiler cannot trace). Getters and setters count as calls. The clause and a marker for library functions that write globals travel in the `.djlib`.
 - `requires uow` on a function: it can only be called inside an `atomic` or `cooperative` region or from a function marked the same way (`E7015`).
