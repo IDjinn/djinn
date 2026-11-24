@@ -12,6 +12,7 @@ impl Parser {
         PointerList* captures = this.old_captures;
         this.old_captures = saved;
         this.function_writes = this.parse_writes();
+        this.requires_region = this.parse_requires_uow();
         if (requires.length == 0 && ensures.length == 0) {
             return (FunctionContracts*)0;
         }
@@ -42,6 +43,36 @@ impl Parser {
             this.expect(TokenKind::RPAREN, "expected ')' after the writes list");
         }
         return places;
+    }
+
+    // requires uow: the function may only be called from inside an atomic or cooperative region, or from a function that
+    // says the same.
+    bool parse_requires_uow() {
+        i32 token = this.current();
+        if (this.kind_of(token) != TokenKind::IDENTIFIER || !Strings.equals(this.text_of(token), this.length_of(token), "requires")) {
+            return false;
+        }
+        i32 next = this.peek_token(1);
+        if (this.kind_of(next) != TokenKind::IDENTIFIER || !Strings.equals(this.text_of(next), this.length_of(next), "uow")) {
+            return false;
+        }
+        this.advance();
+        this.advance();
+        return true;
+    }
+
+    unsafe void record_requires_region(Node* function, i32 token) {
+        if (!this.requires_region) {
+            return;
+        }
+        this.requires_region = false;
+        AttributeUse* use = (AttributeUse*)Memory.zalloc(sizeof(AttributeUse));
+        use.target = function;
+        use.name = "requires_uow";
+        use.target_kind = AttributeTarget.FUNCTION;
+        use.line = this.line_of(token);
+        use.column = this.column_of(token);
+        Attributes.record(use);
     }
 
     unsafe void record_writes(Node* function, i32 token) {

@@ -65,6 +65,7 @@ O update guardado gerado de `require` + `writes` (§6.2) sai do compilador. A pa
 | `atomic(operandos) { } after_commit { }` | Salva os operandos; erro que sai da região restaura; saídas normais (fim, `return`, `break`, `continue`) confirmam e rodam `after_commit`; operando de valor que possui memória é desfeito por move | E7005–E7008, E7010, E7011 |
 | `cooperative { }` | Só a regra de não suspender | E7005 |
 | `writes(a, b)` na função (etapa 1 da UOW) | Cláusula contextual depois de `require`/`ensure`. O conjunto escrito pelo corpo tem de estar contido na lista: escrita direta, ponteiro entregue a chamado que escreve, receptor e **globais escritos por chamados** (resumo por ponto fixo no grafo de chamadas). Escrita por ponteiro que o compilador não rastreia até um parâmetro, campo ou global é erro. Um chamado com cláusula é resumido pela cláusula. Granularidade por objeto/campo, sem `reads` | E7013, E7014 |
+| `requires uow` na função (etapa 2 da UOW) | Cláusula contextual depois de `writes`. Chamar a função fora de `atomic`/`cooperative` é erro, salvo se o chamador também declara `requires uow` (a exigência sobe para os chamadores dele). Marcação explícita, sem inferência | E7015 |
 | `[NativeError(detect, capture)]` | `extern` com `throws(E)`; `capture = errno \| last_error \| return_code`; o erro vira `E { .code }` | E7012 |
 
 Não implementado (continua como proposta): elisão por fatos dos chamadores (item 7), claims `reads`/`writes` (8),
