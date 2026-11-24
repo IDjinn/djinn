@@ -3,7 +3,7 @@
 ## [Unreleased]
 
 ### Changed
-- A string literal (or a constexpr text that folds to one) passed where an overload takes `i8*` now picks that overload over the `str` one, since the literal is static NUL-terminated data. `Error`, `Overflow` and `DivisionByZero` gained `i8*` constructors, so `throw Error("message")` keeps the pointer and allocates nothing at run time; a `str` value that is not a literal is still copied.
+- A string literal passed where overloads take both `str` and `string` now picks `string`: the literal converts at compile time to a `string` tagged STATIC. `Error`, `Overflow` and `DivisionByZero` gained `string` constructors that keep a static NUL-terminated message as it is, so `throw Error("message")` allocates nothing at run time; a `str` value that is not a literal is still copied.
 
 ## [0.7.13] - 2026-11-24
 
