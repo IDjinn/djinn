@@ -1,0 +1,449 @@
+namespace djinnc;
+
+// Audits the writes(...) clause of a function: the memory it may change besides its own locals. A place is a key, a root
+// name followed by '.' and a field for each member; dereferences do not appear, so writes(from) covers from.balance.
+// Every function gets a summary (the globals it may write, and whether it writes through memory the compiler cannot
+// trace) by a fixpoint over the call graph, so a callee that writes a global shows in its callers. A function with a
+// clause is summarized by the clause, since the clause is what is audited.
+struct WritesAudit {
+    SymbolTable* symbols;
+    Diagnostics* diagnostics;
+    FunctionInfo* function;
+    bool auditing;
+    bool through;
+    bool root_global;
+
+    public static unsafe void run(SymbolTable* symbols, Diagnostics* diagnostics) {
+        WritesAudit* audit = (WritesAudit*)Memory.zalloc(sizeof(WritesAudit));
+        audit.symbols = symbols;
+        audit.diagnostics = diagnostics;
+        audit.declare();
+        audit.summarize();
+        audit.settle();
+        audit.check();
+    }
+
+    unsafe PointerList* functions() {
+        SymbolTable* symbols = this.symbols;
+        return symbols.functions;
+    }
+
+    static unsafe bool has_body(FunctionInfo* info) {
+        Node* declaration = info.node;
+        return !info.is_extern && !info.is_template && !info.is_disabled && declaration != null
+            && declaration.kind() == NodeKind::FUNCTION && declaration.first() != null;
+    }
+
+    static unsafe bool is_parameter(FunctionInfo* info, ptr<i8> name) {
+        if (Strings.same(name, "this")) {
+            return true;
+        }
+        Node* declaration = info.node;
+        for (mut i32 i = 0; i < declaration.count(); i = i + 1) {
+            Node* parameter = declaration.child(i);
+            if (parameter.kind() == NodeKind::PARAMETER && Strings.same(parameter.text(), name)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static unsafe ptr<i8> root_of(ptr<i8> key) {
+        ByteBuffer* root = ByteBuffer.create();
+        i32 length = strlen(key);
+        for (mut i32 i = 0; i < length; i = i + 1) {
+            if (key[i] == 46) {
+                break;
+            }
+            root.append_char((char)key[i]);
+        }
+        return root.cstr();
+    }
+
+    // The place a writes(...) argument names, ignoring dereferences; null when it is not a place.
+    unsafe ptr<i8> declared_key(Node* place) {
+        NodeKind kind = place.kind();
+        if (kind == NodeKind::IDENTIFIER) {
+            return place.text();
+        }
+        if (kind == NodeKind::UNARY && place.op_kind() == TokenKind::STAR) {
+            return this.declared_key(place.first());
+        }
+        if (kind == NodeKind::FIELD_ACCESS) {
+            ptr<i8> base = this.declared_key(place.first());
+            if (base == null) {
+                return null;
+            }
+            ByteBuffer* text = ByteBuffer.create();
+            text.append(base);
+            text.append(".");
+            text.append(place.text());
+            return text.cstr();
+        }
+        return null;
+    }
+
+    unsafe void error(Node* at, i32 code, ptr<i8> message) {
+        Diagnostics* diagnostics = this.diagnostics;
+        diagnostics.error_span(code, at.file_name(), at.line(), at.column(), at.length(), message);
+    }
+
+    unsafe void declare() {
+        PointerList* functions = this.functions();
+        PointerList* uses = Attributes.all();
+        for (mut i32 i = 0; i < uses.length; i = i + 1) {
+            AttributeUse* use = (AttributeUse*)uses.get(i);
+            if (!Strings.same(use.name, "writes") || use.payload == null) {
+                continue;
+            }
+            for (mut i32 f = 0; f < functions.length; f = f + 1) {
+                FunctionInfo* info = (FunctionInfo*)functions.get(f);
+                if (info.node == use.target && WritesAudit.has_body(info) && !info.has_writes_clause) {
+                    this.declare_function(info, use.payload);
+                }
+            }
+        }
+    }
+
+    unsafe void declare_function(FunctionInfo* info, Node* payload) {
+        info.has_writes_clause = true;
+        info.declared_writes = PointerList.create();
+        info.write_globals = PointerList.create();
+        PointerList* declared = info.declared_writes;
+        PointerList* globals = info.write_globals;
+        for (mut i32 i = 0; i < payload.count(); i = i + 1) {
+            Node* place = payload.child(i);
+            ptr<i8> key = this.declared_key(place);
+            if (key == null) {
+                this.error(place, DiagnosticErrors.WRITES_UNKNOWN_PLACE, "writes names a parameter, a field or a global, not an expression");
+                continue;
+            }
+            declared.push((ptr)key);
+            ptr<i8> root = WritesAudit.root_of(key);
+            if (WritesAudit.is_parameter(info, root)) {
+                continue;
+            }
+            if (info.is_instance) {
+                ByteBuffer* member = ByteBuffer.create();
+                member.append("this.");
+                member.append(key);
+                declared.push((ptr)member.cstr());
+                continue;
+            }
+            if (!globals.contains_string(key)) {
+                globals.push((ptr)key);
+            }
+        }
+    }
+
+    unsafe void summarize() {
+        PointerList* functions = this.functions();
+        for (mut i32 i = 0; i < functions.length; i = i + 1) {
+            FunctionInfo* info = (FunctionInfo*)functions.get(i);
+            if (info.write_globals == null) {
+                info.write_globals = PointerList.create();
+            }
+            if (!WritesAudit.has_body(info) || info.has_writes_clause) {
+                continue;
+            }
+            this.function = info;
+            this.auditing = false;
+            Node* declaration = info.node;
+            this.walk(declaration.first());
+        }
+    }
+
+    unsafe void settle() {
+        PointerList* functions = this.functions();
+        mut bool changed = true;
+        while (changed) {
+            changed = false;
+            for (mut i32 i = 0; i < functions.length; i = i + 1) {
+                FunctionInfo* info = (FunctionInfo*)functions.get(i);
+                if (info.has_writes_clause || info.effect_edges == null) {
+                    continue;
+                }
+                PointerList* edges = info.effect_edges;
+                PointerList* globals = info.write_globals;
+                for (mut i32 e = 0; e < edges.length; e = e + 1) {
+                    EffectEdge* edge = (EffectEdge*)edges.get(e);
+                    FunctionInfo* callee = edge.callee;
+                    PointerList* inherited = callee.write_globals;
+                    if (inherited != null) {
+                        for (mut i32 g = 0; g < inherited.length; g = g + 1) {
+                            ptr<i8> key = (ptr<i8>)inherited.get(g);
+                            if (!globals.contains_string(key)) {
+                                globals.push((ptr)key);
+                                changed = true;
+                            }
+                        }
+                    }
+                    bool untraced = callee.write_untraced || (EffectsAnalysis.inherited(callee) & Effects.UNKNOWN) != 0;
+                    if (untraced && !info.write_untraced && (EffectsAnalysis.inherited(callee) & Effects.WRITES) != 0) {
+                        info.write_untraced = true;
+                        changed = true;
+                    }
+                }
+            }
+        }
+    }
+
+    unsafe void check() {
+        PointerList* functions = this.functions();
+        for (mut i32 i = 0; i < functions.length; i = i + 1) {
+            FunctionInfo* info = (FunctionInfo*)functions.get(i);
+            if (!info.has_writes_clause) {
+                continue;
+            }
+            Node* declaration = info.node;
+            if (declaration.is_library_interface()) {
+                continue;
+            }
+            this.function = info;
+            this.auditing = true;
+            u32 before = this.diagnostics_count();
+            this.walk(declaration.first());
+            if (this.diagnostics_count() == before) {
+                Obligations.record("writes", "proved", info, "writes stay inside the declared places", declaration);
+            }
+        }
+    }
+
+    unsafe u32 diagnostics_count() {
+        Diagnostics* diagnostics = this.diagnostics;
+        return (u32)diagnostics.errors;
+    }
+
+    // The key of a place a write lands in, or null; sets through when it goes through a pointer and root_global when its
+    // root is a global.
+    unsafe ptr<i8> trace(Node* node) {
+        NodeKind kind = node.kind();
+        if (kind == NodeKind::IDENTIFIER) {
+            i32 symbol_kind = node.symbol_kind();
+            if (symbol_kind == SymbolKind.IMPLICIT_FIELD) {
+                ByteBuffer* text = ByteBuffer.create();
+                text.append("this.");
+                text.append(node.text());
+                this.through = true;
+                return text.cstr();
+            }
+            if (symbol_kind == SymbolKind.GLOBAL) {
+                this.root_global = true;
+                return node.text();
+            }
+            if (symbol_kind == SymbolKind.LOCAL) {
+                return node.text();
+            }
+            return null;
+        }
+        if (kind == NodeKind::FIELD_ACCESS && node.symbol_kind() == SymbolKind.FIELD) {
+            Node* base = node.first();
+            if (Types.is_pointer(base.value_type())) {
+                this.through = true;
+            }
+            ptr<i8> held = this.trace(base);
+            if (held == null) {
+                return null;
+            }
+            ByteBuffer* text = ByteBuffer.create();
+            text.append(held);
+            text.append(".");
+            text.append(node.text());
+            return text.cstr();
+        }
+        if (kind == NodeKind::UNARY && node.op_kind() == TokenKind::STAR) {
+            this.through = true;
+            return this.trace(node.first());
+        }
+        if (kind == NodeKind::INDEX) {
+            Node* base = node.first();
+            if (Types.is_pointer(base.value_type())) {
+                this.through = true;
+            }
+            return this.trace(base);
+        }
+        return null;
+    }
+
+    unsafe bool covered(FunctionInfo* info, ptr<i8> key) {
+        PointerList* declared = info.declared_writes;
+        i32 total = strlen(key);
+        for (mut i32 i = 0; i < declared.length; i = i + 1) {
+            ptr<i8> place = (ptr<i8>)declared.get(i);
+            i32 length = strlen(place);
+            if (total < length || !Strings.starts_with(key, 0, total, place)) {
+                continue;
+            }
+            if (total == length || key[length] == 46) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Records one write: the place is untraced when the compiler cannot say where it lands.
+    unsafe void note(ptr<i8> key, Node* at) {
+        FunctionInfo* info = this.function;
+        mut bool traced = key != null;
+        mut ptr<i8> place = key;
+        if (traced) {
+            ptr<i8> root = WritesAudit.root_of(key);
+            bool parameter = WritesAudit.is_parameter(info, root);
+            bool member = Strings.starts_with(key, 0, strlen(key), "this.");
+            if (!this.root_global && !parameter && !member) {
+                if (!this.through) {
+                    return;
+                }
+                traced = false;
+            } else if (!this.root_global && !this.through && !member && !Strings.same(root, "this")) {
+                return;
+            }
+        }
+        if (!this.auditing) {
+            if (!traced) {
+                info.write_untraced = true;
+                return;
+            }
+            if (this.root_global) {
+                PointerList* globals = info.write_globals;
+                if (!globals.contains_string(place)) {
+                    globals.push((ptr)place);
+                }
+            }
+            return;
+        }
+        if (!traced) {
+            this.error(at, DiagnosticErrors.WRITES_UNKNOWN_PLACE, "this write goes through memory the compiler cannot trace to a parameter, a field or a global, so writes cannot vouch for it; write through the parameter instead");
+            return;
+        }
+        if (!this.covered(info, place)) {
+            ByteBuffer* message = ByteBuffer.create();
+            message.append("this function writes '");
+            message.append(place);
+            message.append("', which its writes clause does not list");
+            this.error(at, DiagnosticErrors.WRITES_OUTSIDE, message.cstr());
+        }
+    }
+
+    unsafe void write_to(Node* target, Node* at) {
+        this.through = false;
+        this.root_global = false;
+        ptr<i8> key = this.trace(target);
+        this.note(key, at);
+    }
+
+    // A pointer handed to a callee that writes: the memory it points at may be changed.
+    unsafe void hand(Node* pointer, Node* at) {
+        this.through = true;
+        this.root_global = false;
+        mut ptr<i8> key = (ptr<i8>)0;
+        if (pointer.kind() == NodeKind::UNARY && pointer.op_kind() == TokenKind::AMPERSAND) {
+            this.through = false;
+            key = this.trace(pointer.first());
+        } else {
+            key = this.trace(pointer);
+            this.through = true;
+        }
+        if (key != null && Strings.same(WritesAudit.root_of(key), "this") && !Strings.starts_with(key, 0, strlen(key), "this.")) {
+            this.note(key, at);
+            return;
+        }
+        this.note(key, at);
+    }
+
+    unsafe void call(Node* node) {
+        Node* callee_node = node.first();
+        FunctionInfo* info = this.function;
+        if (callee_node == null) {
+            return;
+        }
+        if (!ProgressProof.direct_callee(callee_node)) {
+            this.indirect(node);
+            return;
+        }
+        if (!ProgressProof.calls_function(callee_node.symbol_kind()) || callee_node.symbol() == null) {
+            return;
+        }
+        FunctionInfo* callee = (FunctionInfo*)callee_node.symbol();
+        u32 effects = EffectsAnalysis.inherited(callee);
+        if ((effects & (Effects.WRITES | Effects.UNKNOWN)) == 0) {
+            return;
+        }
+        if ((effects & Effects.UNKNOWN) != 0 || callee.write_untraced) {
+            this.indirect(node);
+            return;
+        }
+        if (callee.is_instance) {
+            if (callee_node.kind() == NodeKind::FIELD_ACCESS) {
+                Node* object = callee_node.first();
+                if (Types.is_pointer(object.value_type())) {
+                    this.hand(object, node);
+                } else {
+                    this.write_to(object, node);
+                }
+            } else {
+                this.through = true;
+                this.root_global = false;
+                this.note("this", node);
+            }
+        }
+        for (mut i32 i = 0; i < node.count(); i = i + 1) {
+            Node* argument = node.child(i);
+            if (Types.is_pointer(argument.value_type())) {
+                this.hand(argument, argument);
+            }
+        }
+        PointerList* globals = callee.write_globals;
+        if (globals == null) {
+            return;
+        }
+        for (mut i32 g = 0; g < globals.length; g = g + 1) {
+            this.through = true;
+            this.root_global = true;
+            this.note((ptr<i8>)globals.get(g), node);
+        }
+    }
+
+    unsafe void indirect(Node* node) {
+        FunctionInfo* info = this.function;
+        if (!this.auditing) {
+            info.write_untraced = true;
+            return;
+        }
+        this.error(node, DiagnosticErrors.WRITES_UNKNOWN_PLACE, "this call may write memory the compiler cannot trace (a function value, an interface or code without declared effects), so writes cannot vouch for it");
+    }
+
+    unsafe void walk(Node* node) {
+        if (node == null) {
+            return;
+        }
+        NodeKind kind = node.kind();
+        if (kind == NodeKind::LAMBDA || kind == NodeKind::FUNCTION) {
+            return;
+        }
+        if (kind == NodeKind::ASSIGN) {
+            this.write_to(node.first(), node);
+        }
+        if (kind == NodeKind::UNARY && (node.op_kind() == TokenKind::PLUS_PLUS || node.op_kind() == TokenKind::MINUS_MINUS)) {
+            this.write_to(node.first(), node);
+        }
+        if (kind == NodeKind::INTRINSIC && Intrinsic.is_atomic(node.op()) && node.op() != Intrinsic.ATOMIC_LOAD && node.op() != Intrinsic.ATOMIC_FENCE
+            && node.first() != null) {
+            this.hand(node.first(), node);
+        }
+        if (kind == NodeKind::CALL) {
+            this.call(node);
+        }
+        for (mut i32 field = NodeField.FIRST; field <= NodeField.FOURTH; field = field + 1) {
+            u32 stored = node.get_field(field);
+            if (stored != 0) {
+                this.walk(Ast.at((i32)stored));
+            }
+        }
+        if (node.has_items()) {
+            for (mut i32 i = 0; i < node.count(); i = i + 1) {
+                this.walk(node.child(i));
+            }
+        }
+    }
+}

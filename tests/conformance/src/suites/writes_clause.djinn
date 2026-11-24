@@ -1,0 +1,97 @@
+namespace conformance;
+
+import testing;
+import djinnc::testing;
+import djinnc;
+
+struct WritesClauseTests {
+    [Test]
+    void a_function_that_stays_inside_its_writes_compiles_and_runs() {
+        str source = """
+struct Account {
+    i64 id;
+    mut i64 balance;
+}
+
+unsafe void move_money(Account* from, Account* to, i64 amount) writes(*from, *to) {
+    from.balance = from.balance - amount;
+    to.balance = to.balance + amount;
+}
+
+unsafe void forward(Account* from, Account* to, i64 amount) writes(from, to) {
+    move_money(from, to, amount);
+}
+
+unsafe i32 main() {
+    Account a = Account { .id = 1, .balance = 100 };
+    Account b = Account { .id = 2, .balance = 5 };
+    forward(&a, &b, 40);
+    if (a.balance != 60 || b.balance != 45) {
+        return 1;
+    }
+    return 42;
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void writing_a_parameter_the_clause_does_not_list_is_an_error() {
+        str source = """
+struct Account {
+    i64 id;
+    mut i64 balance;
+}
+
+unsafe void move_money(Account* from, Account* to, i64 amount) writes(*from) {
+    from.balance = from.balance - amount;
+    to.balance = to.balance + amount;
+}
+
+i32 main() {
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.WRITES_OUTSIDE).at(8, 16));
+    }
+
+    [Test]
+    void a_callee_that_writes_a_global_breaks_the_clause() {
+        str source = """
+unsafe static mut i64 audit_total = 0;
+
+unsafe void bump(i64 amount) {
+    audit_total = audit_total + amount;
+}
+
+unsafe void relay(i64* out, i64 amount) writes(*out) {
+    *out = amount;
+    bump(amount);
+}
+
+i32 main() {
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.WRITES_OUTSIDE).at(9, 9));
+    }
+
+    [Test]
+    void handing_an_unlisted_pointer_to_a_writing_callee_is_an_error() {
+        str source = """
+unsafe void store(i64* slot, i64 value) {
+    *slot = value;
+}
+
+unsafe void both(i64* first, i64* second) writes(*first) {
+    store(first, 1);
+    store(second, 2);
+}
+
+i32 main() {
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.WRITES_OUTSIDE).at(7, 11));
+    }
+}
