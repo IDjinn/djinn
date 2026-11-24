@@ -2,7 +2,10 @@
 
 ## [Unreleased]
 
+## [0.7.15] - 2026-11-24
+
 ### Changed
+- `djinnc new` and `djinnc init` show a dim placeholder name they fill on Tab, and need the name and `--target` when there is no terminal or with `--no-input`. Web and windows projects get the default theme as `style.css`. Libraries named in `libs:` also resolve from an installed `djinnc` (`lib` and `optional/*/lib`), so `ui` and `ui_macros` no longer need the source tree; a missing library is reported as such.
 - The compiler folds constant text on its own. A literal, a constant interpolation or an immutable local initialised with one, passed to `Reflection.terminated` / `terminated_view` or converted to `i8*`, becomes the static data pointer with no call. A constructor called with constant text (`Error("message")`) is inlined and folded even at O0 (`sroa`, `instcombine`, `simplifycfg` run on modules that have such a call); no attribute is needed. `StringMeta.is_static` is `[ForceInline]`.
 
 ## [0.7.14] - 2026-11-24
