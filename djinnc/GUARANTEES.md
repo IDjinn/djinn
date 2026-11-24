@@ -1644,7 +1644,7 @@ conflito.
 
 | Métrica | Medido |
 |---|---|
-| Obrigações do piloto (`bank_uow`) | 11 linhas: 4 `proved` (writes, isolation, no-suspension, e o conjunto de escrita), 2 `enforced` (uow, atomic), 3 `checked` em execução (require, require, ensure), 2 de efeitos |
+| Obrigações do piloto (`bank_uow`) | 11 linhas: 3 `proved` (writes, isolation, no-suspension), 2 `enforced` (uow, atomic), 3 `checked` em execução (require, require, ensure), 3 de efeitos inferidos |
 | Custo de rollback (100M chamadas que falham) | 6,2 ns/chamada sem região, 9,4 ns com `uow` (≈ +3,2 ns, o desfazer por movimentação de 2 operandos) |
 | Sem a região, o mesmo código deixa `balance` em -400 | o rollback é o que mantém o invariante |
 | Compilar o próprio `djinnc` | ~0,8 s (compilador instalado) contra ~1,05 s (este branch); a diferença inclui outras mudanças desde a release instalada, então é um limite superior, não o custo das passes |
