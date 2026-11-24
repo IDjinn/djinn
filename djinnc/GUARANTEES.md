@@ -1888,3 +1888,8 @@ com exceções reais em MSVC. Tudo isso é **referência de semântica**, não c
 
 **Destino dos documentos antigos:** `VERIFICATION-SPEC.md` e `VERIFICATION-IDEAS.md` ficam no branch como histórico;
 este arquivo é a referência de `master`.
+
+**Através de `.djlib`:** a interface guarda os tokens da assinatura, então `writes(...)`, `requires uow` e as
+declarações `uow Name { }` já chegam ao consumidor. O que o consumidor não via era o resumo de escrita de uma função
+sem cláusula; o manifesto agora marca (bit `OPAQUE_WRITES` na tabela de efeitos) a função que escreve um global ou um
+lugar não rastreável, e o consumidor a trata como `E7014`.
