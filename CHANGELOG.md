@@ -3,7 +3,7 @@
 ## [Unreleased]
 
 ### Changed
-- A string literal passed where overloads take both `str` and `string` now picks `string`: the literal converts at compile time to a `string` tagged STATIC. `Error`, `Overflow` and `DivisionByZero` gained `string` constructors that keep a static NUL-terminated message as it is, so `throw Error("message")` allocates nothing at run time; a `str` value that is not a literal is still copied.
+- `str` now carries the same `StringMeta` tag as `string` in the padding it already had (still 16 bytes): a literal, constexpr text or a static `string` viewed as `str` stays tagged STATIC, and `Reflection.terminated` / `terminated_view` keep the pointer when the tag is STATIC and the byte after the text is NUL. `throw Error("message")` therefore allocates nothing at run time; a `str` built any other way (`str.view`, a slice) is still copied. Layout change: every `.djlib` must be rebuilt.
 
 ## [0.7.13] - 2026-11-24
 
