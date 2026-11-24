@@ -26,6 +26,9 @@ grep -q "library-mode: false" app/djinn.proj || fail "executable project is not 
 grep -q "library-mode: true" lib/djinn.proj || fail "library project sets library-mode"
 "$tool" new site --target=web </dev/null >/dev/null || fail "new web"
 grep -q "targets: \[web\]" site/djinn.proj && [ -f site/index.html ] || fail "web project has targets and index.html"
+[ -f site/style.css ] && grep -q "ui-base" site/style.css && grep -q "style.css" site/index.html || fail "web project writes the default theme as style.css and links it"
+if "$tool" new </dev/null >/dev/null 2>&1; then fail "new without a terminal needs a name"; fi
+if "$tool" new nameless </dev/null >/dev/null 2>&1; then fail "new without a terminal needs --target"; fi
 if "$tool" new app --target=executable </dev/null >/dev/null 2>&1; then fail "new refuses an existing project"; fi
 if "$tool" new x --target=nope </dev/null >/dev/null 2>&1; then fail "new rejects an unknown target"; fi
 

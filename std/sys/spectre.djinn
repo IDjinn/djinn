@@ -699,6 +699,106 @@ struct Spectre {
         return len;
     }
 
+    // A prompt whose placeholder is shown dim where the answer goes; the first typed key replaces it, and an empty
+    // answer takes the placeholder as the value.
+    public static unsafe i32 promptDefault(str question, str placeholder, i8* output) {
+        i8* buf = i8[bufSize];
+        mut i32 pos = 0;
+        pos = Spectre.writeOpenLineBreak(buf, pos);
+        pos = Spectre.writeCursorShow(buf, pos);
+        pos = Spectre.writeCode(buf, pos, Spectre.BOLD);
+        pos = Spectre.writeCode(buf, pos, Spectre.FG_CYAN);
+        buf[pos] = 63;
+        buf[pos + 1] = 32;
+        pos = pos + 2;
+        pos = Spectre.writeReset(buf, pos);
+        pos = Spectre.writeText(buf, pos, question);
+        buf[pos] = 32;
+        pos = pos + 1;
+        write(1, buf, (u64)pos);
+
+        i32 hint = (i32)placeholder.length;
+        mut i32 length = 0;
+        mut bool shown = false;
+        Spectre.rawEnable();
+        while (true) {
+            if (length == 0 && !shown) {
+                mut i32 p = 0;
+                p = Spectre.writeCode(buf, p, Spectre.DIM);
+                p = Spectre.writeText(buf, p, placeholder);
+                p = Spectre.writeReset(buf, p);
+                p = Spectre.escStart(buf, p);
+                p = Spectre.writeNumber(buf, p, hint);
+                buf[p] = 68;
+                write(1, buf, (u64)(p + 1));
+                shown = true;
+            }
+            i32 key = Spectre.readKey();
+            if (key == -3) {
+                break;
+            }
+            if (key == -1 || key == -2 || key == -5) {
+                continue;
+            }
+            if (key == 9) {
+                if (length == 0 && shown) {
+                    mut i32 p = Spectre.escStart(buf, 0);
+                    buf[p] = 75;
+                    write(1, buf, (u64)(p + 1));
+                    write(1, placeholder.data, (u64)hint);
+                    for (mut i32 i = 0; i < hint && i < 1022; i = i + 1) {
+                        output[i] = placeholder[(size)i];
+                    }
+                    length = hint;
+                    shown = false;
+                }
+                continue;
+            }
+            if (key == 8 || key == 127) {
+                if (length > 0) {
+                    length = length - 1;
+                    buf[0] = 8;
+                    buf[1] = 32;
+                    buf[2] = 8;
+                    write(1, buf, 3);
+                }
+                continue;
+            }
+            mut i32 ch = key;
+            if (key == -4) {
+                ch = 32;
+            }
+            if (ch < 32 || ch > 126 || length >= 1022) {
+                continue;
+            }
+            if (length == 0 && shown) {
+                mut i32 p = Spectre.escStart(buf, 0);
+                buf[p] = 75;
+                write(1, buf, (u64)(p + 1));
+                shown = false;
+            }
+            output[length] = (i8)ch;
+            length = length + 1;
+            buf[0] = (i8)ch;
+            write(1, buf, 1);
+        }
+        Spectre.rawDisable();
+        if (length == 0) {
+            for (mut i32 i = 0; i < hint && i < 1022; i = i + 1) {
+                output[i] = placeholder[(size)i];
+            }
+            length = hint;
+            mut i32 p = Spectre.escStart(buf, 0);
+            buf[p] = 75;
+            write(1, buf, (u64)(p + 1));
+            write(1, placeholder.data, (u64)hint);
+        }
+        output[length] = 0;
+        buf[0] = 10;
+        write(1, buf, 1);
+        return length;
+    }
+
     public static unsafe bool confirm(str question) {
         i8* buf = i8[bufSize];
         mut i32 pos = 0;

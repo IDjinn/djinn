@@ -397,6 +397,61 @@ i32 main() {
         return list;
     }
 
+    static unsafe ptr<i8> library_in(ptr<i8> directory, ptr<i8> item) {
+        ByteBuffer* path = ByteBuffer.create();
+        path.append(directory);
+        path.append("/");
+        path.append(item);
+        path.append(".djlib");
+        return path.cstr();
+    }
+
+    // A library named in 'libs:' is looked up in the library directory first, then in the installed toolchain (<root>/lib, or
+    // <root>/optional/<package>/lib), so the standard libraries (ui, ui_macros, vulkan, ...) work
+    // from any project without building them.
+    static unsafe ptr<i8> locate_library(Options* options, ptr<i8> item) {
+        ptr<i8> local = Project.library_in(options.library_dir, item);
+        if (__djinn_path_exists(local) != 0) {
+            return local;
+        }
+        ptr<i8> executable_dir = __djinn_executable_dir();
+        if (executable_dir == null) {
+            return local;
+        }
+        ByteBuffer* installed = ByteBuffer.create();
+        installed.append(executable_dir);
+        installed.append("/../lib");
+        ptr<i8> in_lib = Project.library_in(installed.cstr(), item);
+        if (__djinn_path_exists(in_lib) != 0) {
+            return in_lib;
+        }
+        ByteBuffer* optional = ByteBuffer.create();
+        optional.append(executable_dir);
+        optional.append("/../optional");
+        ptr<i8> in_ui = Project.library_in(Project.optional_lib(optional.cstr(), "ui"), item);
+        if (__djinn_path_exists(in_ui) != 0) {
+            return in_ui;
+        }
+        ptr<i8> in_vulkan = Project.library_in(Project.optional_lib(optional.cstr(), "vulkan"), item);
+        if (__djinn_path_exists(in_vulkan) != 0) {
+            return in_vulkan;
+        }
+        ptr<i8> in_android = Project.library_in(Project.optional_lib(optional.cstr(), "android"), item);
+        if (__djinn_path_exists(in_android) != 0) {
+            return in_android;
+        }
+        return local;
+    }
+
+    static unsafe ptr<i8> optional_lib(ptr<i8> optional, ptr<i8> package) {
+        ByteBuffer* directory = ByteBuffer.create();
+        directory.append(optional);
+        directory.append("/");
+        directory.append(package);
+        directory.append("/lib");
+        return directory.cstr();
+    }
+
     static unsafe void add_item(Options* options, ptr<i8> item, i32 list, ptr<i8> directory) {
         if (list == ProjectList.IGNORED) {
             return;
@@ -417,12 +472,8 @@ i32 main() {
         }
         ByteBuffer* path = ByteBuffer.create();
         if (list == ProjectList.LIBS) {
-            path.append(options.library_dir);
-            path.append("/");
-            path.append(item);
-            path.append(".djlib");
             PointerList* libraries = options.libraries;
-            libraries.push((ptr)path.cstr());
+            libraries.push((ptr)Project.locate_library(options, item));
             return;
         }
         path.append(directory);
