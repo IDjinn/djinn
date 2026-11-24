@@ -44,7 +44,7 @@ struct ObjectWriter {
     // 'sspstrong' on every defined function: a canary guards each frame that has an array or a taken address.
     static unsafe void add_flag(ptr module, ptr<i8> key, i32 value) {
         ptr i32_type = LLVMIntTypeInContext(LLVMGetModuleContext(module), 32);
-        LLVMAddModuleFlag(module, 2, key, (u64)strlen(key), LLVMValueAsMetadata(LLVMConstInt(i32_type, (u64)value, 0)));
+        LLVMAddModuleFlag(module, 3, key, (u64)strlen(key), LLVMValueAsMetadata(LLVMConstInt(i32_type, (u64)value, 0)));
     }
 
     static unsafe void add_function_attribute(ptr module, ptr<i8> name) {
@@ -59,7 +59,7 @@ struct ObjectWriter {
 
     // Module flags LLVM turns into code: hardware control-flow markers (endbr64 / BTI+PAC) at standard, Control Flow
     // Guard tables and checks on Windows and ShadowCallStack on Android arm64 at strict.
-    static unsafe void flow_hardening(ptr module) {
+    static unsafe void flow_hardening(ptr module, bool jit) {
         if (harden_code < HardenLevel.STANDARD || Target.is_wasm()) {
             return;
         }
@@ -72,7 +72,7 @@ struct ObjectWriter {
             ObjectWriter.add_flag(module, "sign-return-address-all", 0);
             ObjectWriter.add_flag(module, "sign-return-address-with-bkey", 0);
         }
-        if (harden_code == HardenLevel.STRICT) {
+        if (harden_code == HardenLevel.STRICT && !jit) {
             if (Linker.is_windows() && !Target.is_android()) {
                 ObjectWriter.add_flag(module, "cfguard", 2);
             }
@@ -82,12 +82,13 @@ struct ObjectWriter {
         }
     }
 
-    static unsafe void hardening_attributes(ptr module) {
-        ObjectWriter.flow_hardening(module);
-        // standard (3): sspstrong; strict (4): sspreq, a canary in every function. Not on Windows (the canary calls
-        // __security_cookie, which the JIT cannot resolve when it runs a library's procedural macros) and not on Android
-        // (bionic's guard needs TLS module flags).
-        if (harden_code < HardenLevel.STANDARD || Target.is_wasm() || Linker.is_windows() || Target.is_android()) {
+    // The JIT gets the same stack protector and branch markers as ahead-of-time code (--no-jit-harden turns it off), but
+    // never Control Flow Guard or ShadowCallStack: JIT functions are not registered as indirect-call targets.
+    public static unsafe void hardening_attributes(ptr module, bool jit) {
+        ObjectWriter.flow_hardening(module, jit);
+        // standard (3): sspstrong; strict (4): sspreq, a canary in every function. Not on Android (bionic's guard needs
+        // TLS module flags). On Windows the canary calls __security_check_cookie, which the JIT defines (Jit.define_security_symbols).
+        if (harden_code < HardenLevel.STANDARD || Target.is_wasm() || Target.is_android()) {
             return;
         }
         mut ptr<i8> name = "sspstrong";
@@ -274,7 +275,7 @@ struct ObjectWriter {
         }
 
         ObjectWriter.size_attributes(module, level);
-        ObjectWriter.hardening_attributes(module);
+        ObjectWriter.hardening_attributes(module, false);
         ptr<i8> pipeline = ObjectWriter.with_sanitizers(module, ObjectWriter.pipeline(level, drop_dependencies, true));
         if (!ObjectWriter.run_passes(module, machine, pipeline)) {
             LLVMDisposeTargetMachine(machine);
