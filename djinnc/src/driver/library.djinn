@@ -166,7 +166,7 @@ struct Library {
     static unsafe u32 get_u32(ptr<i8> data, i32 offset) {
         mut u32 value = 0;
         for (mut i32 i = 3; i >= 0; i = i - 1) {
-            value = (value << 8) | (u32)(u8)data[offset + i];
+            value = (value << 8) | (u32)(u8)*(data + (offset + i));
         }
         return value;
     }
@@ -174,7 +174,7 @@ struct Library {
     static unsafe u64 get_u64(ptr<i8> data, i32 offset) {
         mut u64 value = 0;
         for (mut i32 i = 7; i >= 0; i = i - 1) {
-            value = (value << 8) | (u64)(u8)data[offset + i];
+            value = (value << 8) | (u64)(u8)*(data + (offset + i));
         }
         return value;
     }
@@ -191,7 +191,7 @@ struct Library {
         ptr<i8> copy = (ptr<i8>)Memory.zalloc((u64)end + 1);
         memcpy(copy, data, (u64)end);
         for (mut i32 i = 0; i < 8; i = i + 1) {
-            copy[Library.HEADER_HASH_OFFSET + i] = (i8)0;
+            *(copy + (Library.HEADER_HASH_OFFSET + i)) = (i8)0;
         }
         return TextHash.of(copy, end);
     }
@@ -220,7 +220,7 @@ struct Library {
     static unsafe u64 checksum(ptr<i8> data, i32 length) {
         mut u64w hash = 14695981039346656037;
         for (mut i32 i = 0; i < length; i = i + 1) {
-            hash = (hash ^ (u64)(u8)data[i]) * 1099511628211;
+            hash = (hash ^ (u64)(u8)*(data + (i))) * 1099511628211;
         }
         return hash;
     }
@@ -238,8 +238,8 @@ struct Library {
         mut u32 value = 0;
         mut u32 shift = 0;
         while (true) {
-            u32 byte = (u32)(u8)data[cursor[0]];
-            cursor[0] = cursor[0] + 1;
+            u32 byte = (u32)(u8)*(data + (*(cursor + (0))));
+            *(cursor + (0)) = *(cursor + (0)) + 1;
             value = value | ((byte & 127) << shift);
             if (byte < 128) {
                 break;
@@ -252,12 +252,12 @@ struct Library {
     // A keyword or a symbol is its kind; everything else (names, literals, `var`) carries its text.
     static unsafe bool explicit_atom(TokenKind kind) {
         ptr<i8> text = kind.text;
-        return text[0] == 0 || kind == TokenKind::AUTO;
+        return *(text + (0)) == 0 || kind == TokenKind::AUTO;
     }
 
     static unsafe bool word_kind(TokenKind kind) {
         ptr<i8> text = kind.text;
-        return text[0] != 0 && Strings.is_ident_start(Strings.char_at(text, 0));
+        return *(text + (0)) != 0 && Strings.is_ident_start(Strings.char_at(text, 0));
     }
 
     static unsafe bool literal_kind(TokenKind kind) {
@@ -270,8 +270,8 @@ struct Library {
         if (space) {
             code = code | 128;
         }
-        staged.kinds[staged.count] = (u8)code;
-        staged.atoms[staged.count] = atom;
+        *(staged.kinds + (staged.count)) = (u8)code;
+        *(staged.atoms + (staged.count)) = atom;
         staged.count = staged.count + 1;
     }
 
@@ -322,11 +322,11 @@ struct Library {
     }
 
     static unsafe bool staged_kind(Staged* staged, i32 at, i32 code) {
-        return at < staged.count && ((i32)staged.kinds[at] & 127) == code;
+        return at < staged.count && ((i32)*(staged.kinds + (at)) & 127) == code;
     }
 
     static unsafe bool staged_joined(Staged* staged, i32 at, i32 code) {
-        return Library.staged_kind(staged, at, code) && ((i32)staged.kinds[at] & 128) == 0;
+        return Library.staged_kind(staged, at, code) && ((i32)*(staged.kinds + (at)) & 128) == 0;
     }
 
     static unsafe void append_atom(ByteBuffer* key, u32 atom) {
@@ -351,14 +351,14 @@ struct Library {
                 if (i > 0) {
                     key.append("::");
                 }
-                Library.append_atom(key, staged.atoms[at + i]);
+                Library.append_atom(key, *(staged.atoms + (at + i)));
             }
             return length;
         }
         if (Library.staged_kind(staged, at, TokenKind::LBRACKET.getValue()) && Library.staged_joined(staged, at + 1, name)
             && Library.staged_joined(staged, at + 2, TokenKind::RBRACKET.getValue())) {
             key.append("[");
-            Library.append_atom(key, staged.atoms[at + 1]);
+            Library.append_atom(key, *(staged.atoms + (at + 1)));
             key.append("]");
             return 3;
         }
@@ -371,10 +371,10 @@ struct Library {
             return 0;
         }
         u32 found = stats.table.intern_copy(key.data, (u32)key.length);
-        if ((i32)found >= stats.known || stats.counts[found] < 2) {
+        if ((i32)found >= stats.known || *(stats.counts + (found)) < 2) {
             return 0;
         }
-        id[0] = (i32)found;
+        *(id + (0)) = (i32)found;
         return length;
     }
 
@@ -382,30 +382,30 @@ struct Library {
     static unsafe i32 rank(ptr<u32> counts, i32 total, u32 minimum, ptr<i32> order, ptr<i32> position) {
         mut u32 top = 0;
         for (mut i32 i = 0; i < total; i = i + 1) {
-            if (counts[i] > top) {
-                top = counts[i];
+            if (*(counts + (i)) > top) {
+                top = *(counts + (i));
             }
         }
         ptr<i32> bucket = (ptr<i32>)Memory.zalloc(((u64)top + 2) * 4);
         mut i32 used = 0;
         for (mut i32 i = 0; i < total; i = i + 1) {
-            if (counts[i] >= minimum && counts[i] > 0) {
-                bucket[counts[i]] = bucket[counts[i]] + 1;
+            if (*(counts + (i)) >= minimum && *(counts + (i)) > 0) {
+                *(bucket + (*(counts + (i)))) = *(bucket + (*(counts + (i)))) + 1;
                 used = used + 1;
             }
         }
         mut i32 running = 0;
         for (mut i32 c = (i32)top; c >= 0; c = c - 1) {
-            i32 here = bucket[c];
-            bucket[c] = running;
+            i32 here = *(bucket + (c));
+            *(bucket + (c)) = running;
             running = running + here;
         }
         for (mut i32 i = 0; i < total; i = i + 1) {
-            if (counts[i] >= minimum && counts[i] > 0) {
-                i32 slot = bucket[counts[i]];
-                bucket[counts[i]] = slot + 1;
-                order[slot] = i;
-                position[i] = slot;
+            if (*(counts + (i)) >= minimum && *(counts + (i)) > 0) {
+                i32 slot = *(bucket + (*(counts + (i))));
+                *(bucket + (*(counts + (i)))) = slot + 1;
+                *(order + (slot)) = i;
+                *(position + (i)) = slot;
             }
         }
         return used;
@@ -417,14 +417,14 @@ struct Library {
         for (mut i32 f = 1; f < files.length; f = f + 1) {
             SourceFile* other = (SourceFile*)files.get(f);
             mut i32 same = 0;
-            while (same < shared && other.path[same] != 0 && other.path[same] == first.path[same]) {
+            while (same < shared && *(other.path + (same)) != 0 && *(other.path + (same)) == *(first.path + (same))) {
                 same = same + 1;
             }
             shared = same;
         }
         mut i32 cut = 0;
         for (mut i32 i = 0; i < shared; i = i + 1) {
-            if (first.path[i] == 47 || first.path[i] == 92) {
+            if (*(first.path + (i)) == 47 || *(first.path + (i)) == 92) {
                 cut = i + 1;
             }
         }
@@ -472,7 +472,7 @@ struct Library {
                 i32 length = Library.phrase_at(staged, i, key);
                 if (length > 0) {
                     u32 found = stats.table.intern_copy(key.data, (u32)key.length);
-                    stats.counts[found] = stats.counts[found] + 1;
+                    *(stats.counts + (found)) = *(stats.counts + (found)) + 1;
                     i = i + length;
                 } else {
                     i = i + 1;
@@ -489,8 +489,8 @@ struct Library {
                     i = i + length;
                     continue;
                 }
-                if (staged.atoms[i] != 4294967295) {
-                    atom_counts[staged.atoms[i]] = atom_counts[staged.atoms[i]] + 1;
+                if (*(staged.atoms + (i)) != 4294967295) {
+                    *(atom_counts + (*(staged.atoms + (i)))) = *(atom_counts + (*(staged.atoms + (i)))) + 1;
                 }
                 i = i + 1;
             }
@@ -506,13 +506,13 @@ struct Library {
 
         Library.put_varint(out, (u32)atom_used);
         for (mut i32 k = 0; k < atom_used; k = k + 1) {
-            u32 atom = (u32)atom_order[k];
+            u32 atom = (u32)*(atom_order + (k));
             Library.put_varint(out, table.length(atom));
             out.append_slice(table.text(atom), (i32)table.length(atom));
         }
         Library.put_varint(out, (u32)phrase_used);
         for (mut i32 k = 0; k < phrase_used; k = k + 1) {
-            u32 phrase = (u32)phrase_order[k];
+            u32 phrase = (u32)*(phrase_order + (k));
             Library.put_varint(out, stats.table.length(phrase));
             out.append_slice(stats.table.text(phrase), (i32)stats.table.length(phrase));
         }
@@ -528,14 +528,14 @@ struct Library {
             while (i < staged.count) {
                 i32 length = Library.phrase_use(staged, i, key, stats, id);
                 if (length > 0) {
-                    stream.append_byte(((i32)staged.kinds[i] & 128) | Library.PHRASE_CODE);
-                    Library.put_varint(stream, (u32)phrase_rank[id[0]]);
+                    stream.append_byte(((i32)*(staged.kinds + (i)) & 128) | Library.PHRASE_CODE);
+                    Library.put_varint(stream, (u32)*(phrase_rank + (*(id + (0)))));
                     i = i + length;
                     continue;
                 }
-                stream.append_byte((i32)staged.kinds[i]);
-                if (staged.atoms[i] != 4294967295) {
-                    Library.put_varint(stream, (u32)atom_rank[staged.atoms[i]]);
+                stream.append_byte((i32)*(staged.kinds + (i)));
+                if (*(staged.atoms + (i)) != 4294967295) {
+                    Library.put_varint(stream, (u32)*(atom_rank + (*(staged.atoms + (i)))));
                 }
                 i = i + 1;
             }
@@ -556,27 +556,27 @@ struct Library {
             return false;
         }
         ptr<i32> cursor = (ptr<i32>)Memory.zalloc(8);
-        cursor[0] = offset + 4;
+        *(cursor + (0)) = offset + 4;
         AtomTable* table = Atoms.get();
         context.atom_count = (i32)Library.get_varint(data, cursor);
         context.atoms = (ptr<u32>)Memory.zalloc(((u64)context.atom_count + 1) * 4);
         for (mut i32 k = 0; k < context.atom_count; k = k + 1) {
             i32 length = (i32)Library.get_varint(data, cursor);
-            if (cursor[0] + length > end) {
+            if (*(cursor + (0)) + length > end) {
                 return false;
             }
-            context.atoms[k] = table.intern_copy(data + cursor[0], (u32)length);
-            cursor[0] = cursor[0] + length;
+            *(context.atoms + (k)) = table.intern_copy(data + *(cursor + (0)), (u32)length);
+            *(cursor + (0)) = *(cursor + (0)) + length;
         }
         context.phrase_count = (i32)Library.get_varint(data, cursor);
         context.phrases = (ptr<ptr<i8>>)Memory.zalloc(((u64)context.phrase_count + 1) * 8);
         for (mut i32 k = 0; k < context.phrase_count; k = k + 1) {
             i32 length = (i32)Library.get_varint(data, cursor);
-            if (cursor[0] + length > end) {
+            if (*(cursor + (0)) + length > end) {
                 return false;
             }
-            context.phrases[k] = Strings.duplicate(data + cursor[0], length);
-            cursor[0] = cursor[0] + length;
+            *(context.phrases + (k)) = Strings.duplicate(data + *(cursor + (0)), length);
+            *(cursor + (0)) = *(cursor + (0)) + length;
         }
         i32 count = (i32)Library.get_varint(data, cursor);
         context.files = PointerList.create();
@@ -584,19 +584,19 @@ struct Library {
         for (mut i32 f = 0; f < count; f = f + 1) {
             PackedFile* packed = (PackedFile*)Memory.zalloc(sizeof(PackedFile));
             i32 path_length = (i32)Library.get_varint(data, cursor);
-            if (cursor[0] + path_length > end) {
+            if (*(cursor + (0)) + path_length > end) {
                 return false;
             }
-            packed.path = Strings.duplicate(data + cursor[0], path_length);
-            cursor[0] = cursor[0] + path_length;
+            packed.path = Strings.duplicate(data + *(cursor + (0)), path_length);
+            *(cursor + (0)) = *(cursor + (0)) + path_length;
             packed.token_count = (i32)Library.get_varint(data, cursor);
             i32 stream = (i32)Library.get_varint(data, cursor);
-            packed.start = cursor[0];
-            packed.end = cursor[0] + stream;
+            packed.start = *(cursor + (0));
+            packed.end = *(cursor + (0)) + stream;
             if (packed.end > end) {
                 return false;
             }
-            cursor[0] = packed.end;
+            *(cursor + (0)) = packed.end;
             files.push((ptr)packed);
         }
         return true;
@@ -614,27 +614,27 @@ struct Library {
         AtomTable* table = Atoms.get();
         ptr<i8> data = file.packed;
         ptr<i32> cursor = (ptr<i32>)Memory.zalloc(8);
-        cursor[0] = file.packed_start;
+        *(cursor + (0)) = file.packed_start;
         file.first_token = tokens.length;
         mut u32 position = 0;
-        while (cursor[0] < file.packed_end) {
-            i32 byte = (i32)(u8)data[cursor[0]];
-            cursor[0] = cursor[0] + 1;
+        while (*(cursor + (0)) < file.packed_end) {
+            i32 byte = (i32)(u8)*(data + (*(cursor + (0))));
+            *(cursor + (0)) = *(cursor + (0)) + 1;
             i32 code = byte & 127;
             if (byte >= 128) {
                 position = position + 1;
             }
             if (code == Library.PHRASE_CODE) {
-                ptr<i8> text = context.phrases[(i32)Library.get_varint(data, cursor)];
+                ptr<i8> text = *(context.phrases + ((i32)Library.get_varint(data, cursor)));
                 i32 length = strlen(text);
-                if (text[0] == 91) {
+                if (*(text + (0)) == 91) {
                     tokens.push(TokenKind::LBRACKET, position, 0);
                     Library.push_word(tokens, position + 1, text + 1, length - 2);
                     tokens.push(TokenKind::RBRACKET, position + (u32)length - 1, 0);
                 } else {
                     mut i32 from = 0;
                     for (mut i32 i = 0; i <= length; i = i + 1) {
-                        if (i == length || (text[i] == 58 && text[i + 1] == 58)) {
+                        if (i == length || (*(text + (i)) == 58 && *(text + (i + 1)) == 58)) {
                             Library.push_word(tokens, position + (u32)from, text + from, i - from);
                             if (i < length) {
                                 tokens.push(TokenKind::COLON_COLON, position + (u32)i, 0);
@@ -649,7 +649,7 @@ struct Library {
             }
             TokenKind kind = (TokenKind)code;
             if (Library.explicit_atom(kind)) {
-                u32 atom = context.atoms[(i32)Library.get_varint(data, cursor)];
+                u32 atom = *(context.atoms + ((i32)Library.get_varint(data, cursor)));
                 tokens.push(kind, position, atom + 1);
                 position = position + table.length(atom);
                 if (Library.literal_kind(kind)) {
@@ -674,16 +674,16 @@ struct Library {
     static unsafe void render(ByteBuffer* out, ptr<i8> data, PackedFile* packed, LibraryInterface* context) {
         AtomTable* table = Atoms.get();
         ptr<i32> cursor = (ptr<i32>)Memory.zalloc(8);
-        cursor[0] = packed.start;
-        while (cursor[0] < packed.end) {
-            i32 byte = (i32)(u8)data[cursor[0]];
-            cursor[0] = cursor[0] + 1;
+        *(cursor + (0)) = packed.start;
+        while (*(cursor + (0)) < packed.end) {
+            i32 byte = (i32)(u8)*(data + (*(cursor + (0))));
+            *(cursor + (0)) = *(cursor + (0)) + 1;
             i32 code = byte & 127;
             if (byte >= 128) {
                 out.append_byte(32);
             }
             if (code == Library.PHRASE_CODE) {
-                out.append(context.phrases[(i32)Library.get_varint(data, cursor)]);
+                out.append(*(context.phrases + ((i32)Library.get_varint(data, cursor))));
                 continue;
             }
             TokenKind kind = (TokenKind)code;
@@ -691,7 +691,7 @@ struct Library {
                 out.append(kind.text);
                 continue;
             }
-            u32 atom = context.atoms[(i32)Library.get_varint(data, cursor)];
+            u32 atom = *(context.atoms + ((i32)Library.get_varint(data, cursor)));
             ptr<i8> text = table.text(atom);
             i32 length = (i32)table.length(atom);
             if (kind == TokenKind::STRING_LITERAL || kind == TokenKind::INTERP_BEGIN) {
@@ -722,7 +722,7 @@ struct Library {
             if (kind == TokenKind::STRING_LITERAL || kind == TokenKind::INTERP_BEGIN || kind == TokenKind::INTERP_MIDDLE
                 || kind == TokenKind::INTERP_END || kind == TokenKind::INTERP_FORMAT) {
                 for (mut i32 i = 0; i < length; i = i + 1) {
-                    i32 c = (i32)(u8)text[i];
+                    i32 c = (i32)(u8)*(text + (i));
                     if (c == 34 || c == 92) {
                         out.append_byte(92);
                     }
@@ -748,12 +748,12 @@ struct Library {
         mut i32 start = 0;
         mut i32 end = length;
         for (mut i32 i = 0; i < length; i = i + 1) {
-            if (path[i] == 47 || path[i] == 92) {
+            if (*(path + (i)) == 47 || *(path + (i)) == 92) {
                 start = i + 1;
             }
         }
         for (mut i32 i = start; i < length; i = i + 1) {
-            if (path[i] == 46) {
+            if (*(path + (i)) == 46) {
                 end = i;
             }
         }
@@ -1108,7 +1108,7 @@ struct Library {
     static unsafe ptr<i8> expand(ptr<i8> data, ptr<i32> length, ptr<i8> path) {
         i32 count = (i32)Library.get_u32(data, 20);
         i32 table = (i32)Library.get_u32(data, 24);
-        if (table < Library.HEADER_SIZE || count < 0 || count > 64 || table + count * Library.ENTRY_SIZE > length[0]) {
+        if (table < Library.HEADER_SIZE || count < 0 || count > 64 || table + count * Library.ENTRY_SIZE > *(length + (0))) {
             return data;
         }
         mut bool any = false;
@@ -1129,7 +1129,7 @@ struct Library {
             u32 kind = Library.get_u32(data, entry);
             u64 start = Library.get_u64(data, entry + 8);
             u64 span = Library.get_u64(data, entry + 16);
-            if (start + span > (u64)length[0]) {
+            if (start + span > (u64)*(length + (0))) {
                 logger_error(Log.get(), "djinnc: '%s' is corrupted", path);
                 return null;
             }
@@ -1170,7 +1170,7 @@ struct Library {
         image.append_slice(data, table);
         image.append_slice(entries.data, entries.length);
         image.append_slice(body.data, body.length);
-        length[0] = image.length;
+        *(length + (0)) = image.length;
         return image.data;
     }
 
@@ -1187,7 +1187,7 @@ struct Library {
         }
         // format, flags, compiler version and label must match, so a new compiler always rewrites the file
         for (mut i32 h = 0; h < 64; h = h + 1) {
-            if (old[h] != data[h]) {
+            if (*(old + (h)) != *(data + (h))) {
                 return false;
             }
         }
@@ -1224,8 +1224,8 @@ struct Library {
             if (start + span > (u64)length) {
                 return false;
             }
-            offset[0] = (i32)start;
-            size[0] = (i32)span;
+            *(offset + (0)) = (i32)start;
+            *(size + (0)) = (i32)span;
             return Library.section_checksum(data, data + (i32)start, (i32)span) == Library.get_u64(data, entry + 24);
         }
         return false;
@@ -1242,8 +1242,8 @@ struct Library {
 
     static unsafe bool known_system_library(ptr<i8> name) {
         ByteBuffer* lower = ByteBuffer.create();
-        for (mut i32 i = 0; name[i] != 0; i = i + 1) {
-            mut i8 c = name[i];
+        for (mut i32 i = 0; *(name + (i)) != 0; i = i + 1) {
+            mut i8 c = *(name + (i));
             if (c >= 65 && c <= 90) {
                 c = (i8)(c + 32);
             }
@@ -1285,7 +1285,7 @@ struct Library {
         ByteBuffer* here = ByteBuffer.create();
         here.append(library_path);
         mut i32 cut = here.length;
-        while (cut > 0 && here.data[cut - 1] != 47 && here.data[cut - 1] != 92) {
+        while (cut > 0 && *(here.data + (cut - 1)) != 47 && *(here.data + (cut - 1)) != 92) {
             cut = cut - 1;
         }
         here.length = cut;
@@ -1312,7 +1312,7 @@ struct Library {
         PointerList* system_libs = options.system_libs;
         for (mut i32 k = 0; k < system_libs.length; k = k + 1) {
             ptr<i8> given = (ptr<i8>)system_libs.get(k);
-            if (given[0] == 45 && given[1] == 76 && Library.probe_import_library(options, given + 2, file.cstr(), false)) {
+            if (*(given + (0)) == 45 && *(given + (1)) == 76 && Library.probe_import_library(options, given + 2, file.cstr(), false)) {
                 return true;
             }
         }
@@ -1321,7 +1321,7 @@ struct Library {
             i32 total = strlen(search);
             mut i32 start = 0;
             for (mut i32 i = 0; i <= total; i = i + 1) {
-                if (i == total || search[i] == 59) {
+                if (i == total || *(search + (i)) == 59) {
                     if (i > start) {
                         ptr<i8> directory = Strings.duplicate(search + start, i - start);
                         if (Library.probe_import_library(options, directory, file.cstr(), false)) {
@@ -1361,15 +1361,15 @@ struct Library {
             if (dependency == null) {
                 continue;
             }
-            if (dependency[0] == 45 && dependency[1] == 108 && Linker.is_windows()) {
+            if (*(dependency + (0)) == 45 && *(dependency + (1)) == 108 && Linker.is_windows()) {
                 ptr<i8> name = dependency + 2;
                 if (!Library.find_import_library(options, path, name) && !Library.known_system_library(name)) {
                     logger_warn(Log.get(), "djinnc: '%s' needs the library '%s', which was not found next to it, in the -L directories or in LIB", path, name);
                 }
-            } else if (dependency[0] != 45) {
+            } else if (*(dependency + (0)) != 45) {
                 mut bool has_directory = false;
-                for (mut i32 i = 0; dependency[i] != 0; i = i + 1) {
-                    if (dependency[i] == 47 || dependency[i] == 92) {
+                for (mut i32 i = 0; *(dependency + (i)) != 0; i = i + 1) {
+                    if (*(dependency + (i)) == 47 || *(dependency + (i)) == 92) {
                         has_directory = true;
                     }
                 }
@@ -1618,7 +1618,7 @@ struct Library {
         out.append_int((i64)(compiler & 255));
         out.append_byte(10);
         Library.field(out, "version:    ", data + Library.LABEL_OFFSET, strlen(data + Library.LABEL_OFFSET));
-        if (data[Library.BUILD_ID_OFFSET] != 0) {
+        if (*(data + (Library.BUILD_ID_OFFSET)) != 0) {
             Library.field(out, "build id:   ", data + Library.BUILD_ID_OFFSET, strlen(data + Library.BUILD_ID_OFFSET));
         }
         if (Library.get_u64(data, Library.INTERFACE_HASH_OFFSET) != 0) {
@@ -1704,12 +1704,12 @@ struct Library {
         mut i32 depth = 0;
         mut bool quoted = false;
         for (mut i32 i = 0; i < length; i = i + 1) {
-            i32 c = (i32)(u8)text[i];
+            i32 c = (i32)(u8)*(text + (i));
             if (quoted) {
                 out.append_byte(c);
                 if (c == 92 && i + 1 < length) {
                     i = i + 1;
-                    out.append_byte((i32)(u8)text[i]);
+                    out.append_byte((i32)(u8)*(text + (i)));
                 } else if (c == 34) {
                     quoted = false;
                 }
@@ -1718,10 +1718,10 @@ struct Library {
             if (c == 34) {
                 quoted = true;
                 out.append_byte(c);
-            } else if (c == 123 && i + 1 < length && text[i + 1] == 125) {
+            } else if (c == 123 && i + 1 < length && *(text + (i + 1)) == 125) {
                 out.append("{}");
                 i = i + 1;
-            } else if (c == 32 && (out.length == 0 || out.data[out.length - 1] == 10 || out.data[out.length - 1] == 32)) {
+            } else if (c == 32 && (out.length == 0 || *(out.data + (out.length - 1)) == 10 || *(out.data + (out.length - 1)) == 32)) {
                 continue;
             } else if (c == 123) {
                 Library.trim_end(out);
@@ -1745,7 +1745,7 @@ struct Library {
     }
 
     static unsafe void trim_end(ByteBuffer* out) {
-        while (out.length > 0 && (out.data[out.length - 1] == 32 || out.data[out.length - 1] == 10)) {
+        while (out.length > 0 && (*(out.data + (out.length - 1)) == 32 || *(out.data + (out.length - 1)) == 10)) {
             out.length = out.length - 1;
         }
     }

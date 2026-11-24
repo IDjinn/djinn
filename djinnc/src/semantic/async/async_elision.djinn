@@ -59,7 +59,7 @@ struct AsyncElision {
             if (AsyncElision.eligible(info, reflect_mode)) {
                 any = true;
             } else {
-                this.excluded[i] = true;
+                *(this.excluded + (i)) = true;
             }
         }
         return any;
@@ -126,18 +126,18 @@ struct AsyncElision {
             Node* node = Ast.at(id);
             if (node.kind() == NodeKind::AWAIT_EXPR && AsyncElision.awaited_call(node) != null) {
                 Node* call = node.first();
-                allowed[Ast.id_of(call)] = true;
-                allowed[Ast.id_of(call.first())] = true;
+                *(allowed + (Ast.id_of(call))) = true;
+                *(allowed + (Ast.id_of(call.first()))) = true;
             }
         }
         for (mut i32 id = 1; id < count; id = id + 1) {
             Node* node = Ast.at(id);
-            if (allowed[id] || node.kind() == NodeKind::FUNCTION) {
+            if (*(allowed + (id)) || node.kind() == NodeKind::FUNCTION) {
                 continue;
             }
             FunctionInfo* target = AsyncElision.referenced(node);
             if (target != null) {
-                this.excluded[target.graph_index - 1] = true;
+                *(this.excluded + (target.graph_index - 1)) = true;
             }
         }
         __djinn_free((ptr)allowed);
@@ -171,7 +171,7 @@ struct AsyncElision {
                 if (parameter.kind() == NodeKind::PARAMETER && parameter.symbol() != null) {
                     LocalVariable* variable = (LocalVariable*)parameter.symbol();
                     if (Ownership.needs_dispose(symbols, variable.type)) {
-                        this.disposes[i] = true;
+                        *(this.disposes + (i)) = true;
                     }
                 }
             }
@@ -185,7 +185,7 @@ struct AsyncElision {
         }
         NodeKind kind = node.kind();
         if (kind == NodeKind::SPAWN_STMT) {
-            this.suspends[owner] = true;
+            *(this.suspends + (owner)) = true;
         }
         if (kind == NodeKind::AWAIT_EXPR) {
             PointerList* awaits = this.awaits;
@@ -197,7 +197,7 @@ struct AsyncElision {
             Node* returned = node.first();
             if (returned != null && returned.kind() == NodeKind::AWAIT_EXPR && AsyncElision.awaited_call(returned) != null) {
                 Node* call = returned.first();
-                this.tail_callee[Ast.id_of(call.first())] = true;
+                *(this.tail_callee + (Ast.id_of(call.first()))) = true;
                 continued = AsyncElision.awaited_call(returned);
             }
             PointerList* exits = this.exits;
@@ -207,7 +207,7 @@ struct AsyncElision {
         if (kind == NodeKind::VAR_DECL && node.symbol() != null) {
             LocalVariable* variable = (LocalVariable*)node.symbol();
             if (Ownership.needs_dispose(this.symbols, variable.type)) {
-                this.disposes[owner] = true;
+                *(this.disposes + (owner)) = true;
             }
         }
         FunctionInfo* target = AsyncElision.referenced(node);
@@ -218,12 +218,12 @@ struct AsyncElision {
             PointerList* tails = this.tails;
             IdList* positions = (IdList*)tails.get(owner);
             mut u32 tail = 0;
-            if (this.tail_callee[Ast.id_of(node)]) {
+            if (*(this.tail_callee + (Ast.id_of(node)))) {
                 tail = 1;
             }
             positions.push(tail);
             if (AsyncElision.suspends_natively(target)) {
-                this.suspends[owner] = true;
+                *(this.suspends + (owner)) = true;
             }
         }
         for (mut i32 field = NodeField.FIRST; field <= NodeField.FOURTH; field = field + 1) {
@@ -264,7 +264,7 @@ struct AsyncElision {
         this.stacked = (ptr<bool>)__djinn_alloc_zeroed(((u64)count + 1) * 1);
         this.stack = IdList.create();
         for (mut i32 i = 0; i < count; i = i + 1) {
-            if (this.order[i] == 0) {
+            if (*(this.order + (i)) == 0) {
                 this.connect(i);
             }
         }
@@ -272,11 +272,11 @@ struct AsyncElision {
 
     unsafe void connect(i32 index) {
         this.counter = this.counter + 1;
-        this.order[index] = this.counter;
-        this.low[index] = this.counter;
+        *(this.order + (index)) = this.counter;
+        *(this.low + (index)) = this.counter;
         IdList* stack = this.stack;
         stack.push((u32)index);
-        this.stacked[index] = true;
+        *(this.stacked + (index)) = true;
         mut bool self_call = false;
         PointerList* calls = this.calls;
         PointerList* edges = (PointerList*)calls.get(index);
@@ -286,16 +286,16 @@ struct AsyncElision {
             if (next == index) {
                 self_call = true;
             }
-            if (this.order[next] == 0) {
+            if (*(this.order + (next)) == 0) {
                 this.connect(next);
-                if (this.low[next] < this.low[index]) {
-                    this.low[index] = this.low[next];
+                if (*(this.low + (next)) < *(this.low + (index))) {
+                    *(this.low + (index)) = *(this.low + (next));
                 }
-            } else if (this.stacked[next] && this.order[next] < this.low[index]) {
-                this.low[index] = this.order[next];
+            } else if (*(this.stacked + (next)) && *(this.order + (next)) < *(this.low + (index))) {
+                *(this.low + (index)) = *(this.order + (next));
             }
         }
-        if (this.low[index] != this.order[index]) {
+        if (*(this.low + (index)) != *(this.order + (index))) {
             return;
         }
         mut i32 start = stack.length - 1;
@@ -310,9 +310,9 @@ struct AsyncElision {
         }
         for (mut i32 s = start; s < stack.length; s = s + 1) {
             i32 member = (i32)stack.get(s);
-            this.stacked[member] = false;
+            *(this.stacked + (member)) = false;
             if (cyclic) {
-                this.group[member] = groups.length;
+                *(this.group + (member)) = groups.length;
                 members.push((u32)member);
             }
         }
@@ -331,7 +331,7 @@ struct AsyncElision {
                 continue;
             }
             for (mut i32 m = 0; m < members.length; m = m + 1) {
-                this.excluded[(i32)members.get(m)] = true;
+                *(this.excluded + ((i32)members.get(m))) = true;
             }
         }
     }
@@ -346,7 +346,7 @@ struct AsyncElision {
             PointerList* returns = (PointerList*)exits.get((i32)members.get(m));
             for (mut i32 r = 0; r < returns.length; r = r + 1) {
                 FunctionInfo* continued = (FunctionInfo*)returns.get(r);
-                if (continued == null || this.group[continued.graph_index - 1] != id) {
+                if (continued == null || *(this.group + (continued.graph_index - 1)) != id) {
                     return true;
                 }
             }
@@ -359,7 +359,7 @@ struct AsyncElision {
     unsafe bool tail_safe(i32 index) {
         PointerList* functions = this.functions;
         FunctionInfo* info = (FunctionInfo*)functions.get(index);
-        if (this.excluded[index] || this.disposes[index] || !AsyncElision.scalar_parameters(info) || !this.register_result(info)) {
+        if (*(this.excluded + (index)) || *(this.disposes + (index)) || !AsyncElision.scalar_parameters(info) || !this.register_result(info)) {
             return false;
         }
         PointerList* calls = this.calls;
@@ -368,7 +368,7 @@ struct AsyncElision {
         IdList* positions = (IdList*)tails.get(index);
         for (mut i32 e = 0; e < edges.length; e = e + 1) {
             FunctionInfo* callee = (FunctionInfo*)edges.get(e);
-            if (this.group[callee.graph_index - 1] != this.group[index]) {
+            if (*(this.group + (callee.graph_index - 1)) != *(this.group + (index))) {
                 continue;
             }
             if (positions.get(e) == 0 || !AsyncElision.same_signature(info, callee)) {
@@ -465,11 +465,11 @@ struct AsyncElision {
             changed = false;
             for (mut i32 i = 0; i < functions.length; i = i + 1) {
                 FunctionInfo* info = (FunctionInfo*)functions.get(i);
-                if (this.excluded[i] || this.suspends[i] || info.runs_sync) {
+                if (*(this.excluded + (i)) || *(this.suspends + (i)) || info.runs_sync) {
                     continue;
                 }
-                if (this.group[i] != 0) {
-                    if (this.settle_group(this.group[i])) {
+                if (*(this.group + (i)) != 0) {
+                    if (this.settle_group(*(this.group + (i)))) {
                         changed = true;
                     }
                 } else if (this.awaits_only_sync(i)) {
@@ -488,7 +488,7 @@ struct AsyncElision {
         IdList* members = (IdList*)groups.get(id - 1);
         for (mut i32 m = 0; m < members.length; m = m + 1) {
             i32 member = (i32)members.get(m);
-            if (this.excluded[member] || this.suspends[member] || !this.awaits_only_sync(member)) {
+            if (*(this.excluded + (member)) || *(this.suspends + (member)) || !this.awaits_only_sync(member)) {
                 return false;
             }
         }
@@ -508,7 +508,7 @@ struct AsyncElision {
             if (target == null) {
                 return false;
             }
-            bool same_cycle = this.group[index] != 0 && this.group[target.graph_index - 1] == this.group[index];
+            bool same_cycle = *(this.group + (index)) != 0 && *(this.group + (target.graph_index - 1)) == *(this.group + (index));
             if (!target.runs_sync && !same_cycle) {
                 return false;
             }

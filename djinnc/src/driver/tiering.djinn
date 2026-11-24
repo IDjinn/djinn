@@ -79,7 +79,7 @@ struct Tiering {
         ptr<ptr> types = CodeGenerator.array_of((i32)count);
         LLVMGetParamTypes(function_type, types);
         for (mut u32 i = 0; i < count; i = i + 1) {
-            i32 kind = LLVMGetTypeKind(types[(i32)i]);
+            i32 kind = LLVMGetTypeKind(*(types + ((i32)i)));
             if (kind == Tiering.TYPE_STRUCT || kind == Tiering.TYPE_ARRAY || kind == Tiering.TYPE_VECTOR || kind == Tiering.TYPE_SCALABLE_VECTOR) {
                 return true;
             }
@@ -182,8 +182,8 @@ struct Tiering {
     static unsafe void bump(ptr builder, ptr context, ptr array, ptr array_type, ptr index) {
         ptr wide = LLVMIntTypeInContext(context, 64);
         ptr<ptr> path = CodeGenerator.array_of(2);
-        path[0] = LLVMConstInt(wide, 0, 0);
-        path[1] = index;
+        *(path + (0)) = LLVMConstInt(wide, 0, 0);
+        *(path + (1)) = index;
         ptr cell = LLVMBuildGEP2(builder, array_type, array, path, 2, "tier.cell");
         ptr before = LLVMBuildLoad2(builder, wide, cell, "tier.count");
         ptr after = LLVMBuildAdd(builder, before, LLVMConstInt(wide, 1, 0), "tier.next");
@@ -222,7 +222,7 @@ struct Tiering {
         ptr<ptr> types = CodeGenerator.array_of((i32)count);
         LLVMGetParamTypes(function_type, types);
         for (mut u32 i = 0; i < count; i = i + 1) {
-            if (!Tiering.in_registers(types[(i32)i])) {
+            if (!Tiering.in_registers(*(types + ((i32)i)))) {
                 return false;
             }
         }
@@ -263,7 +263,7 @@ struct Tiering {
         u32 count = LLVMCountParams(function);
         ptr<ptr> arguments = CodeGenerator.array_of((i32)count);
         for (mut u32 i = 0; i < count; i = i + 1) {
-            arguments[(i32)i] = LLVMGetParam(function, i);
+            *(arguments + ((i32)i)) = LLVMGetParam(function, i);
         }
         ptr return_type = LLVMGetReturnType(function_type);
         if (LLVMGetTypeKind(return_type) == Tiering.TYPE_VOID) {
@@ -324,8 +324,8 @@ struct Tiering {
         mut i32 sites = 0;
         for (mut i32 f = 0; f < count; f = f + 1) {
             PointerList* branches = Tiering.conditional_branches(functions.get(f));
-            bases[f] = sites;
-            sizes[f] = branches.length;
+            *(bases + (f)) = sites;
+            *(sizes + (f)) = branches.length;
             sites = sites + branches.length;
         }
         state.site_total = sites;
@@ -371,7 +371,7 @@ struct Tiering {
 
         ptr<ptr<i8>> message = (ptr<ptr<i8>>)Memory.zalloc(8);
         if (LLVMVerifyModule(module, LlvmConst.VERIFY_RETURN_STATUS, message) != 0) {
-            logger_error(Log.get(), "djinnc: tiering produced invalid IR: %s", message[0]);
+            logger_error(Log.get(), "djinnc: tiering produced invalid IR: %s", *(message + (0)));
             return (TierState*)0;
         }
         logger_info(Log.get(), "djinnc: tiering %d functions, %d branch sites", count, sites);
@@ -406,8 +406,8 @@ struct Tiering {
         ptr<i32> bases = state.site_base;
         ptr<i32> sizes = state.site_count;
         mut i64 total = 0;
-        for (mut i32 i = 0; i < sizes[function] * 2; i = i + 1) {
-            total = total + counters[bases[function] * 2 + i];
+        for (mut i32 i = 0; i < *(sizes + (function)) * 2; i = i + 1) {
+            total = total + *(counters + (*(bases + (function)) * 2 + i));
         }
         return total;
     }
@@ -421,9 +421,9 @@ struct Tiering {
         }
         ptr word = LLVMIntTypeInContext(context, 32);
         ptr<ptr> operands = CodeGenerator.array_of(3);
-        operands[0] = LLVMMDStringInContext2(context, "branch_weights", 14);
-        operands[1] = LLVMValueAsMetadata(LLVMConstInt(word, (u64)(low + 1), 0));
-        operands[2] = LLVMValueAsMetadata(LLVMConstInt(word, (u64)(high + 1), 0));
+        *(operands + (0)) = LLVMMDStringInContext2(context, "branch_weights", 14);
+        *(operands + (1)) = LLVMValueAsMetadata(LLVMConstInt(word, (u64)(low + 1), 0));
+        *(operands + (2)) = LLVMValueAsMetadata(LLVMConstInt(word, (u64)(high + 1), 0));
         return LLVMMDNodeInContext2(context, operands, 3);
     }
 
@@ -434,9 +434,9 @@ struct Tiering {
         u32 kind = LLVMGetMDKindIDInContext(context, "prof", 4);
         PointerList* branches = Tiering.conditional_branches(function);
         for (mut i32 b = 0; b < branches.length; b = b + 1) {
-            i32 site = bases[index] + b;
-            i64 not_taken = counters[site * 2];
-            i64 taken = counters[site * 2 + 1];
+            i32 site = *(bases + (index)) + b;
+            i64 not_taken = *(counters + (site * 2));
+            i64 taken = *(counters + (site * 2 + 1));
             if (not_taken + taken > 0) {
                 ptr node = Tiering.weights_node(context, not_taken, taken);
                 LLVMSetMetadata(branches.get(b), kind, LLVMMetadataAsValue(context, node));
@@ -450,7 +450,7 @@ struct Tiering {
         ptr counters = LLVMGetNamedGlobal(clone, "__djinn_tier_counts");
         PointerList* branches = Tiering.conditional_branches(function);
         for (mut i32 b = 0; b < branches.length; b = b + 1) {
-            Tiering.count_branch(builder, context, branches.get(b), counters, state.counters_type, bases[index] + b);
+            Tiering.count_branch(builder, context, branches.get(b), counters, state.counters_type, *(bases + (index)) + b);
         }
     }
 
@@ -561,8 +561,8 @@ struct Tiering {
                 return false;
             }
             ptr<u64> cell = (ptr<u64>)(ptr)slot;
-            cell[0] = optimized;
-            levels[f] = tier;
+            *(cell + (0)) = optimized;
+            *(levels + (f)) = tier;
         }
         return true;
     }
@@ -594,7 +594,7 @@ struct Tiering {
 
         ptr<ptr<i8>> message = (ptr<ptr<i8>>)Memory.zalloc(8);
         if (LLVMVerifyModule(clone, LlvmConst.VERIFY_RETURN_STATUS, message) != 0) {
-            logger_error(Log.get(), "djinnc: tier-%d module is invalid: %s", tier, message[0]);
+            logger_error(Log.get(), "djinnc: tier-%d module is invalid: %s", tier, *(message + (0)));
             return false;
         }
         LLVMSetDataLayout(clone, LLVMOrcLLJITGetDataLayoutStr(state.jit));
@@ -636,17 +636,17 @@ struct Tiering {
         PointerList* hot_without_sites = PointerList.create();
         PointerList* measured = PointerList.create();
         for (mut i32 f = 0; f < state.count; f = f + 1) {
-            if (hot[f] > 0 && seen[f] == 0) {
-                seen[f] = 1;
+            if (*(hot + (f)) > 0 && *(seen + (f)) == 0) {
+                *(seen + (f)) = 1;
                 state.last_new = state.polls;
             }
-            if (levels[f] == 0 && hot[f] >= state.threshold) {
-                if (sizes[f] == 0) {
+            if (*(levels + (f)) == 0 && *(hot + (f)) >= state.threshold) {
+                if (*(sizes + (f)) == 0) {
                     hot_without_sites.push((ptr)(u64)f);
                 } else {
                     hot_with_sites.push((ptr)(u64)f);
                 }
-            } else if (levels[f] == 1 && Tiering.branch_total(state, f) >= state.branch_threshold) {
+            } else if (*(levels + (f)) == 1 && Tiering.branch_total(state, f) >= state.branch_threshold) {
                 measured.push((ptr)(u64)f);
             }
         }

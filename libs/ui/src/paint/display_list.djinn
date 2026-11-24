@@ -117,7 +117,7 @@ struct mut DisplayList {
 
     public unsafe void push(f32 x, f32 y, f32 u, f32 v, u32 color) {
         this.reserve(1);
-        Vertex* vertex = &this.vertices[this.count];
+        Vertex* vertex = (this.vertices + (this.count));
         vertex.x = x;
         vertex.y = y;
         vertex.u = u;
@@ -143,7 +143,7 @@ struct mut DisplayList {
         }
         mut u32 i = first;
         while (i < this.count) {
-            Vertex* vertex = &this.vertices[i];
+            Vertex* vertex = (this.vertices + (i));
             f32 ox = (vertex.x - center_x) * scale;
             f32 oy = (vertex.y - center_y) * scale;
             vertex.x = center_x + ox * cosine - oy * sine + dx;
@@ -168,12 +168,12 @@ struct mut DisplayList {
         f32 top = y0 + this.shift_y;
         f32 right = x1 + this.shift_x;
         f32 bottom = y1 + this.shift_y;
-        f32* saved = &this.clip_stack[this.clip_depth * 4];
+        f32* saved = (this.clip_stack + (this.clip_depth * 4));
         this.clip_depth = this.clip_depth + 1;
-        saved[0] = this.clip_left;
-        saved[1] = this.clip_top;
-        saved[2] = this.clip_right;
-        saved[3] = this.clip_bottom;
+        *(saved + (0)) = this.clip_left;
+        *(saved + (1)) = this.clip_top;
+        *(saved + (2)) = this.clip_right;
+        *(saved + (3)) = this.clip_bottom;
         if (left > this.clip_left) {
             this.clip_left = left;
         }
@@ -193,11 +193,11 @@ struct mut DisplayList {
             return;
         }
         this.clip_depth = this.clip_depth - 1;
-        f32* saved = &this.clip_stack[this.clip_depth * 4];
-        this.clip_left = saved[0];
-        this.clip_top = saved[1];
-        this.clip_right = saved[2];
-        this.clip_bottom = saved[3];
+        f32* saved = (this.clip_stack + (this.clip_depth * 4));
+        this.clip_left = *(saved + (0));
+        this.clip_top = *(saved + (1));
+        this.clip_right = *(saved + (2));
+        this.clip_bottom = *(saved + (3));
     }
 
     // Two triangles for the rectangle [x0,x1] x [y0,y1] sampling the atlas rectangle [u0,u1] x [v0,v1], cut to the
@@ -326,8 +326,8 @@ struct mut DisplayList {
             across = DisplayList.fuller(across);
             down = DisplayList.fuller(down);
         }
-        out[0] = cx + r * across;
-        out[1] = cy + r * down;
+        *(out + (0)) = cx + r * across;
+        *(out + (1)) = cy + r * down;
     }
 
     const u32 SEGMENTS = 8;
@@ -338,7 +338,7 @@ struct mut DisplayList {
     unsafe void clip_from(u32 first) {
         mut bool inside = true;
         for (mut u32 i = first; i < this.count && inside; i = i + 1) {
-            Vertex* vertex = &this.vertices[i];
+            Vertex* vertex = (this.vertices + (i));
             if (vertex.x < this.clip_left || vertex.x > this.clip_right || vertex.y < this.clip_top || vertex.y > this.clip_bottom) {
                 inside = false;
             }
@@ -353,19 +353,19 @@ struct mut DisplayList {
             this.spare_capacity = needed;
         }
         Vertex* work = this.spare;
-        Vertex* source = &this.spare[16];
-        memcpy((void*)source, (void*)&this.vertices[first], (size_long)(total * sizeof(Vertex)));
+        Vertex* source = (this.spare + (16));
+        memcpy((void*)source, (void*)(this.vertices + (first)), (size_long)(total * sizeof(Vertex)));
         this.count = first;
         for (mut u32 t = 0; t + 2 < total; t = t + 3) {
-            this.clip_triangle(&source[t], work);
+            this.clip_triangle((source + (t)), work);
         }
     }
 
     unsafe void clip_triangle(Vertex* triangle, Vertex* work) {
         Vertex* first = work;
-        Vertex* second = &work[8];
+        Vertex* second = (work + (8));
         for (mut u32 k = 0; k < 3; k = k + 1) {
-            DisplayList.copy_vertex(&first[k], &triangle[k]);
+            DisplayList.copy_vertex((first + (k)), (triangle + (k)));
         }
         mut u32 count = DisplayList.clip_edge(first, 3, second, 0, this.clip_left, true);
         if (count > 0) {
@@ -378,9 +378,9 @@ struct mut DisplayList {
             count = DisplayList.clip_edge(second, count, first, 1, this.clip_bottom, false);
         }
         for (mut u32 i = 1; i + 1 < count; i = i + 1) {
-            this.push(first[0].x, first[0].y, first[0].u, first[0].v, first[0].color);
-            this.push(first[i].x, first[i].y, first[i].u, first[i].v, first[i].color);
-            this.push(first[i + 1].x, first[i + 1].y, first[i + 1].u, first[i + 1].v, first[i + 1].color);
+            this.push((*(first + (0))).x, (*(first + (0))).y, (*(first + (0))).u, (*(first + (0))).v, (*(first + (0))).color);
+            this.push((*(first + (i))).x, (*(first + (i))).y, (*(first + (i))).u, (*(first + (i))).v, (*(first + (i))).color);
+            this.push((*(first + (i + 1))).x, (*(first + (i + 1))).y, (*(first + (i + 1))).u, (*(first + (i + 1))).v, (*(first + (i + 1))).color);
         }
     }
 
@@ -419,17 +419,17 @@ struct mut DisplayList {
     static unsafe u32 clip_edge(Vertex* input, u32 count, Vertex* output, u32 axis, f32 limit, bool keep_above) {
         mut u32 made = 0;
         for (mut u32 i = 0; i < count; i = i + 1) {
-            Vertex* p = &input[i];
-            Vertex* q = &input[(i + 1) % count];
+            Vertex* p = (input + (i));
+            Vertex* q = (input + ((i + 1) % count));
             f32 dp = DisplayList.inside_by(p, axis, limit, keep_above);
             f32 dq = DisplayList.inside_by(q, axis, limit, keep_above);
             if (dp >= (f32)0.0) {
-                DisplayList.copy_vertex(&output[made], p);
+                DisplayList.copy_vertex((output + (made)), p);
                 made = made + 1;
             }
             if ((dp >= (f32)0.0) != (dq >= (f32)0.0)) {
                 f32 t = dp / (dp - dq);
-                Vertex* cut = &output[made];
+                Vertex* cut = (output + (made));
                 cut.x = p.x + (q.x - p.x) * t;
                 cut.y = p.y + (q.y - p.y) * t;
                 cut.u = p.u + (q.u - p.u) * t;
@@ -464,26 +464,26 @@ struct mut DisplayList {
         f32 u = DisplayList.solid_u();
         u32 clear = DisplayList.fade(color, (f32)0.0);
         f32* inner = this.scratch;
-        f32* outer = &this.scratch[points * 2];
+        f32* outer = (this.scratch + (points * 2));
         f32 center_x = x + width / (f32)2.0;
         f32 center_y = y + height / (f32)2.0;
         u32 first = this.count;
         this.reserve(points * 9);
         for (mut u32 i = 0; i < points; i = i + 1) {
-            DisplayList.outline_point(x, y, width, height, r, (f32)-0.5, i, &inner[i * 2]);
-            DisplayList.outline_point(x, y, width, height, r, (f32)0.5, i, &outer[i * 2]);
+            DisplayList.outline_point(x, y, width, height, r, (f32)-0.5, i, (inner + (i * 2)));
+            DisplayList.outline_point(x, y, width, height, r, (f32)0.5, i, (outer + (i * 2)));
         }
         for (mut u32 i = 0; i < points; i = i + 1) {
             u32 next = (i + 1) % points;
             this.push(center_x, center_y, u, u, color);
-            this.push(inner[i * 2], inner[i * 2 + 1], u, u, color);
-            this.push(inner[next * 2], inner[next * 2 + 1], u, u, color);
-            this.push(inner[i * 2], inner[i * 2 + 1], u, u, color);
-            this.push(outer[i * 2], outer[i * 2 + 1], u, u, clear);
-            this.push(outer[next * 2], outer[next * 2 + 1], u, u, clear);
-            this.push(inner[i * 2], inner[i * 2 + 1], u, u, color);
-            this.push(outer[next * 2], outer[next * 2 + 1], u, u, clear);
-            this.push(inner[next * 2], inner[next * 2 + 1], u, u, color);
+            this.push(*(inner + (i * 2)), *(inner + (i * 2 + 1)), u, u, color);
+            this.push(*(inner + (next * 2)), *(inner + (next * 2 + 1)), u, u, color);
+            this.push(*(inner + (i * 2)), *(inner + (i * 2 + 1)), u, u, color);
+            this.push(*(outer + (i * 2)), *(outer + (i * 2 + 1)), u, u, clear);
+            this.push(*(outer + (next * 2)), *(outer + (next * 2 + 1)), u, u, clear);
+            this.push(*(inner + (i * 2)), *(inner + (i * 2 + 1)), u, u, color);
+            this.push(*(outer + (next * 2)), *(outer + (next * 2 + 1)), u, u, clear);
+            this.push(*(inner + (next * 2)), *(inner + (next * 2 + 1)), u, u, color);
         }
         this.clip_from(first);
     }
@@ -516,16 +516,16 @@ struct mut DisplayList {
             hole_radius = (f32)0.0;
         }
         f32* a = this.scratch;                         // outer edge, fading out
-        f32* b = &this.scratch[points * 2];       // outer edge, opaque
-        f32* c = &this.scratch[points * 4];       // hole edge, opaque
-        f32* d = &this.scratch[points * 6];       // hole edge, fading out
+        f32* b = (this.scratch + (points * 2));       // outer edge, opaque
+        f32* c = (this.scratch + (points * 4));       // hole edge, opaque
+        f32* d = (this.scratch + (points * 6));       // hole edge, fading out
         u32 first = this.count;
         this.reserve(points * 18);
         for (mut u32 i = 0; i < points; i = i + 1) {
-            DisplayList.outline_point(x, y, width, height, r, (f32)0.5, i, &a[i * 2]);
-            DisplayList.outline_point(x, y, width, height, r, (f32)-0.5, i, &b[i * 2]);
-            DisplayList.outline_point(hole_x, hole_y, hole_width, hole_height, hole_radius, (f32)0.5, i, &c[i * 2]);
-            DisplayList.outline_point(hole_x, hole_y, hole_width, hole_height, hole_radius, (f32)-0.5, i, &d[i * 2]);
+            DisplayList.outline_point(x, y, width, height, r, (f32)0.5, i, (a + (i * 2)));
+            DisplayList.outline_point(x, y, width, height, r, (f32)-0.5, i, (b + (i * 2)));
+            DisplayList.outline_point(hole_x, hole_y, hole_width, hole_height, hole_radius, (f32)0.5, i, (c + (i * 2)));
+            DisplayList.outline_point(hole_x, hole_y, hole_width, hole_height, hole_radius, (f32)-0.5, i, (d + (i * 2)));
         }
         for (mut u32 i = 0; i < points; i = i + 1) {
             u32 n = (i + 1) % points;
@@ -537,11 +537,11 @@ struct mut DisplayList {
     }
 
     unsafe void strip(f32* from, u32 from_color, f32* to, u32 to_color, u32 i, u32 n, f32 u) {
-        this.push(from[i * 2], from[i * 2 + 1], u, u, from_color);
-        this.push(to[i * 2], to[i * 2 + 1], u, u, to_color);
-        this.push(from[n * 2], from[n * 2 + 1], u, u, from_color);
-        this.push(to[i * 2], to[i * 2 + 1], u, u, to_color);
-        this.push(to[n * 2], to[n * 2 + 1], u, u, to_color);
-        this.push(from[n * 2], from[n * 2 + 1], u, u, from_color);
+        this.push(*(from + (i * 2)), *(from + (i * 2 + 1)), u, u, from_color);
+        this.push(*(to + (i * 2)), *(to + (i * 2 + 1)), u, u, to_color);
+        this.push(*(from + (n * 2)), *(from + (n * 2 + 1)), u, u, from_color);
+        this.push(*(to + (i * 2)), *(to + (i * 2 + 1)), u, u, to_color);
+        this.push(*(to + (n * 2)), *(to + (n * 2 + 1)), u, u, to_color);
+        this.push(*(from + (n * 2)), *(from + (n * 2 + 1)), u, u, from_color);
     }
 }

@@ -11,7 +11,7 @@ struct Lz4 {
     const i32 MAX_OFFSET = 65535;
 
     [ForceInline] static unsafe u32 read32(ptr<i8> data, i32 at) {
-        return (u32)(u8)data[at] | ((u32)(u8)data[at + 1] << 8) | ((u32)(u8)data[at + 2] << 16) | ((u32)(u8)data[at + 3] << 24);
+        return (u32)(u8)*(data + (at)) | ((u32)(u8)*(data + (at + 1)) << 8) | ((u32)(u8)*(data + (at + 2)) << 16) | ((u32)(u8)*(data + (at + 3)) << 24);
     }
 
     [ForceInline] static unsafe void put_length(ByteBuffer* out, i32 extra) {
@@ -63,15 +63,15 @@ struct Lz4 {
             u32 sequence = Lz4.read32(source, at);
             u32w mixed = (u32w)sequence * 2654435761;
             i32 slot = (i32)(mixed >> (u32)(32 - Lz4.HASH_BITS));
-            i32 candidate = table[slot] - 1;
-            table[slot] = at + 1;
+            i32 candidate = *(table + (slot)) - 1;
+            *(table + (slot)) = at + 1;
             if (candidate < 0 || at - candidate > Lz4.MAX_OFFSET || Lz4.read32(source, candidate) != sequence) {
                 at = at + 1;
                 continue;
             }
             i32 longest = length - Lz4.LAST_LITERALS - at;
             mut i32 matched = Lz4.MIN_MATCH;
-            while (matched < longest && source[candidate + matched] == source[at + matched]) {
+            while (matched < longest && *(source + (candidate + matched)) == *(source + (at + matched))) {
                 matched = matched + 1;
             }
             Lz4.emit(out, source + anchor, at - anchor, at - candidate, matched);
@@ -86,7 +86,7 @@ struct Lz4 {
         mut i32 in_at = 0;
         mut i32 out_at = 0;
         while (in_at < length) {
-            i32 token = (i32)(u8)source[in_at];
+            i32 token = (i32)(u8)*(source + (in_at));
             in_at = in_at + 1;
             mut i32 literals = token >> 4;
             if (literals == 15) {
@@ -94,7 +94,7 @@ struct Lz4 {
                     if (in_at >= length) {
                         return false;
                     }
-                    i32 more = (i32)(u8)source[in_at];
+                    i32 more = (i32)(u8)*(source + (in_at));
                     in_at = in_at + 1;
                     literals = literals + more;
                     if (literals > raw_length) {
@@ -117,7 +117,7 @@ struct Lz4 {
             if (in_at + 2 > length) {
                 return false;
             }
-            i32 offset = (i32)(u8)source[in_at] | ((i32)(u8)source[in_at + 1] << 8);
+            i32 offset = (i32)(u8)*(source + (in_at)) | ((i32)(u8)*(source + (in_at + 1)) << 8);
             in_at = in_at + 2;
             if (offset == 0 || offset > out_at) {
                 return false;
@@ -128,7 +128,7 @@ struct Lz4 {
                     if (in_at >= length) {
                         return false;
                     }
-                    i32 more = (i32)(u8)source[in_at];
+                    i32 more = (i32)(u8)*(source + (in_at));
                     in_at = in_at + 1;
                     matched = matched + more;
                     if (matched > raw_length) {
@@ -149,7 +149,7 @@ struct Lz4 {
             } else {
                 // overlapping: bytes written by this copy are read again (a run of the last `offset` bytes)
                 for (mut i32 i = 0; i < matched; i = i + 1) {
-                    target[out_at + i] = target[out_at - offset + i];
+                    *(target + (out_at + i)) = *(target + (out_at - offset + i));
                 }
             }
             out_at = out_at + matched;

@@ -151,7 +151,7 @@ struct JsEmitter {
     static unsafe u32 fingerprint(ByteBuffer* text) {
         mut u64 hash = 2166136261;
         for (mut i32 i = 0; i < text.length; i = i + 1) {
-            hash = ((hash ^ (u64)(u8)text.data[i]) * 16777619) & 4294967295;
+            hash = ((hash ^ (u64)(u8)*(text.data + (i))) * 16777619) & 4294967295;
         }
         return (u32)hash;
     }
@@ -170,8 +170,8 @@ struct JsEmitter {
     // The length of the folder part of a path, with its separator (0 for a bare file name).
     static unsafe i32 directory_length(ptr<i8> path) {
         mut i32 end = 0;
-        for (mut i32 i = 0; path[i] != 0; i = i + 1) {
-            if (path[i] == 47 || path[i] == 92) {
+        for (mut i32 i = 0; *(path + (i)) != 0; i = i + 1) {
+            if (*(path + (i)) == 47 || *(path + (i)) == 92) {
                 end = i + 1;
             }
         }
@@ -206,11 +206,11 @@ struct JsEmitter {
         chunk.text = Strings.duplicate(script + from, to - from);
         mut i32 line = from;
         while (line < to) {
-            i8 c = script[line];
+            i8 c = *(script + (line));
             if ((c >= 97 && c <= 122) || (c >= 65 && c <= 90)) {
                 break;
             }
-            while (line < to && script[line] != 10) {
+            while (line < to && *(script + (line)) != 10) {
                 line = line + 1;
             }
             line = line + 1;
@@ -234,9 +234,9 @@ struct JsEmitter {
             at = line + 4;
             chunk.exportable = false;
         }
-        if (at >= 0 && script[at] == 36) {
+        if (at >= 0 && *(script + (at)) == 36) {
             mut i32 end = at;
-            while (end < to && JsEmitter.is_name_char(script[end])) {
+            while (end < to && JsEmitter.is_name_char(*(script + (end)))) {
                 end = end + 1;
             }
             chunk.name = Strings.duplicate(script + at, end - at);
@@ -253,9 +253,9 @@ struct JsEmitter {
         mut i32 comment = -1;
         mut i32 line = 0;
         while (line < length) {
-            i8 c = script[line];
+            i8 c = *(script + (line));
             mut i32 boundary = -1;
-            if (c == 47 && line + 1 < length && script[line + 1] == 47) {
+            if (c == 47 && line + 1 < length && *(script + (line + 1)) == 47) {
                 if (comment < 0) {
                     comment = line;
                 }
@@ -272,7 +272,7 @@ struct JsEmitter {
                 chunks.push((ptr)JsEmitter.make_chunk(script, start, boundary));
                 start = boundary;
             }
-            while (line < length && script[line] != 10) {
+            while (line < length && *(script + (line)) != 10) {
                 line = line + 1;
             }
             line = line + 1;
@@ -335,9 +335,9 @@ struct JsEmitter {
         i32 length = strlen(code);
         mut i32 i = 0;
         while (i < length) {
-            if (code[i] == 36 && (i == 0 || !JsEmitter.is_name_char(code[i - 1]))) {
+            if (*(code + (i)) == 36 && (i == 0 || !JsEmitter.is_name_char(*(code + (i - 1))))) {
                 mut i32 end = i;
-                while (end < length && JsEmitter.is_name_char(code[end])) {
+                while (end < length && JsEmitter.is_name_char(*(code + (end)))) {
                     end = end + 1;
                 }
                 ptr<i8> name = Strings.duplicate(code + i, end - i);
@@ -403,8 +403,8 @@ struct JsEmitter {
             name.append_int((i64)info.overload_index);
         }
         ptr<i8> text = name.cstr();
-        for (mut i32 i = 0; text[i] != 0; i = i + 1) {
-            if (text[i] == 36) {
+        for (mut i32 i = 0; *(text + (i)) != 0; i = i + 1) {
+            if (*(text + (i)) == 36) {
                 return text;
             }
         }
@@ -417,8 +417,8 @@ struct JsEmitter {
     // Letters, digits and '_' are kept, every run of anything else becomes one '$' ('ui::Node.attr' -> 'ui$Node$attr').
     static unsafe void sanitize(ByteBuffer* out, ptr<i8> text) {
         mut bool joined = false;
-        for (mut i32 i = 0; text[i] != 0; i = i + 1) {
-            i32 c = (i32)text[i];
+        for (mut i32 i = 0; *(text + (i)) != 0; i = i + 1) {
+            i32 c = (i32)*(text + (i));
             bool word = (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c == 95 || c < 0;
             if (word) {
                 out.append_byte(c);
@@ -507,14 +507,14 @@ struct JsEmitter {
     static unsafe ptr<i8> expand(ptr<i8> template, ptr<i8> receiver, PointerList* args) {
         ByteBuffer* out = ByteBuffer.create();
         mut i32 i = 0;
-        while (template[i] != 0) {
-            i32 c = (i32)template[i];
+        while (*(template + (i)) != 0) {
+            i32 c = (i32)*(template + (i));
             if (c == 36 && Strings.starts_with(template, i + 1, i + 5, "this") && receiver != null) {
                 out.append(JsEmitter.grouped(receiver));
                 i = i + 5;
                 continue;
             }
-            i32 next = (i32)template[i + 1];
+            i32 next = (i32)*(template + (i + 1));
             if (c == 36 && next == 42) {
                 for (mut i32 a = 0; a < args.length; a = a + 1) {
                     if (a > 0) {
@@ -544,14 +544,14 @@ struct JsEmitter {
     // The expression as one operand: kept when it is simple or already one parenthesized group.
     static unsafe ptr<i8> enclosed(ptr<i8> code) {
         ptr<i8> simple = JsEmitter.grouped(code);
-        if (simple == code || code[0] != 40) {
+        if (simple == code || *(code + (0)) != 40) {
             return simple;
         }
         mut i32 depth = 0;
         mut bool quoted = false;
         i32 length = strlen(code);
         for (mut i32 i = 0; i < length; i = i + 1) {
-            i32 c = (i32)code[i];
+            i32 c = (i32)*(code + (i));
             if (quoted) {
                 if (c == 92) {
                     i = i + 1;
@@ -579,8 +579,8 @@ struct JsEmitter {
         mut bool simple = true;
         mut i32 depth = 0;
         mut bool quoted = false;
-        for (mut i32 i = 0; code[i] != 0; i = i + 1) {
-            i32 c = (i32)code[i];
+        for (mut i32 i = 0; *(code + (i)) != 0; i = i + 1) {
+            i32 c = (i32)*(code + (i));
             if (quoted) {
                 if (c == 92) {
                     i = i + 1;
@@ -796,8 +796,8 @@ struct JsEmitter {
         ByteBuffer* out = ByteBuffer.create();
         out.append_byte(34);
         if (text != null) {
-            for (mut i32 i = 0; text[i] != 0; i = i + 1) {
-                i32 c = (i32)text[i];
+            for (mut i32 i = 0; *(text + (i)) != 0; i = i + 1) {
+                i32 c = (i32)*(text + (i));
                 if (c == 34 || c == 92) {
                     out.append_byte(92);
                     out.append_byte(c);
