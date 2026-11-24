@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.7.13] - 2026-11-24
+
 ### Added
 - `E7020`: a call whose constant arguments make a callee's `require` clause provably false (`half(3)` against `require(x % 2 == 0)`) is a compile error instead of a run-time panic. Only parameters that receive compile-time constants are evaluated; anything else is left to run time. The clause is not removed or weakened: it still runs in the callee for callers the compiler cannot see (unsafe, extern, other libraries).
 
