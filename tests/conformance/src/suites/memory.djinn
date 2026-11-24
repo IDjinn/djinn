@@ -1720,4 +1720,70 @@ i32 main() {
 """;
         Verify.source(source).with_std().diagnostics(Expected.error(DiagnosticErrors.BORROW_CONFLICT));
     }
+
+    [Test]
+    void PointerUsedAfterAwaitIsRejected() {
+        str source = """
+namespace app;
+async i32 other() { return 1; }
+async i32 main() {
+    mut i32 value = 5;
+    i32* p = &value;
+    i32 got = await other();
+    return got + *p;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.POINTER_ACROSS_SUSPEND).at(7, 19));
+    }
+
+    [Test]
+    void PointerDeclaredAfterAwaitOrReassignedIsAccepted() {
+        str source = """
+namespace app;
+async i32 other() { return 1; }
+async i32 main() {
+    i32 value = 5;
+    i32 other_value = 5;
+    mut i32* p = &value;
+    i32 used = *p;
+    i32 got = await other();
+    p = &other_value;
+    i32* q = &other_value;
+    return got + used + *p + *q;
+}
+""";
+        Verify.source(source).runs(Expected.exit(16));
+    }
+
+    [Test]
+    void PointerUsedBeforeAwaitIsAccepted() {
+        str source = """
+namespace app;
+async i32 other() { return 1; }
+async i32 main() {
+    mut i32 value = 5;
+    i32* p = &value;
+    i32 used = *p;
+    i32 got = await other();
+    return got + used;
+}
+""";
+        Verify.source(source).runs(Expected.exit(6));
+    }
+
+    [Test]
+    void PointerInUnsafeOrVoidPointerAcrossAwaitIsAccepted() {
+        str source = """
+namespace app;
+async i32 other() { return 1; }
+async i32 main() {
+    mut i32 value = 5;
+    i32* p = &value;
+    void* handle = (void*)p;
+    i32 got = await other();
+    unsafe { return got + *p; }
+}
+""";
+        Verify.source(source).runs(Expected.exit(6));
+    }
 }
