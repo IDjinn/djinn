@@ -1,0 +1,128 @@
+namespace djinnc;
+
+// A function marked 'requires uow' can only be called inside an atomic or cooperative region, or from a function that is
+// marked the same way and so passes the requirement on to its own callers.
+struct RegionRequirement {
+    SymbolTable* symbols;
+    Diagnostics* diagnostics;
+    FunctionInfo* function;
+
+    public static unsafe void run(SymbolTable* symbols, Diagnostics* diagnostics) {
+        RegionRequirement* check = (RegionRequirement*)Memory.zalloc(sizeof(RegionRequirement));
+        check.symbols = symbols;
+        check.diagnostics = diagnostics;
+        check.mark();
+        check.verify();
+    }
+
+    unsafe void mark() {
+        SymbolTable* symbols = this.symbols;
+        PointerList* functions = symbols.functions;
+        PointerList* uses = Attributes.all();
+        for (mut i32 i = 0; i < uses.length; i = i + 1) {
+            AttributeUse* use = (AttributeUse*)uses.get(i);
+            if (Strings.same(use.name, "uow_use")) {
+                this.record_use(use);
+                continue;
+            }
+            if (!Strings.same(use.name, "requires_uow")) {
+                continue;
+            }
+            for (mut i32 f = 0; f < functions.length; f = f + 1) {
+                FunctionInfo* info = (FunctionInfo*)functions.get(f);
+                if (info.node == use.target) {
+                    info.requires_region = true;
+                }
+            }
+        }
+    }
+
+    unsafe void record_use(AttributeUse* use) {
+        SymbolTable* symbols = this.symbols;
+        PointerList* functions = symbols.functions;
+        for (mut i32 f = 0; f < functions.length; f = f + 1) {
+            FunctionInfo* info = (FunctionInfo*)functions.get(f);
+            Node* declaration = info.node;
+            if (declaration != use.target || declaration.is_library_interface()) {
+                continue;
+            }
+            ByteBuffer* text = ByteBuffer.create();
+            text.append("uow ");
+            text.append(use.text_arg);
+            text.append(" strategy cooperative");
+            Obligations.record("uow", "enforced", info, text.cstr(), declaration);
+            UowDeclaration* uow = UowDeclaration.find(use.text_arg);
+            if (uow != null && uow.isolation != null) {
+                ByteBuffer* isolation = ByteBuffer.create();
+                isolation.append("isolation(");
+                isolation.append(uow.isolation);
+                isolation.append(") sustained by the cooperative strategy: no other task runs inside the region");
+                Obligations.record("isolation", "proved", info, isolation.cstr(), declaration);
+            }
+        }
+    }
+
+    unsafe void verify() {
+        SymbolTable* symbols = this.symbols;
+        PointerList* functions = symbols.functions;
+        for (mut i32 i = 0; i < functions.length; i = i + 1) {
+            FunctionInfo* info = (FunctionInfo*)functions.get(i);
+            Node* declaration = info.node;
+            if (info.is_extern || info.is_template || info.is_disabled || declaration == null || declaration.kind() != NodeKind::FUNCTION
+                || declaration.first() == null || declaration.is_library_interface()) {
+                continue;
+            }
+            this.function = info;
+            this.walk(declaration.first(), 0);
+        }
+    }
+
+    unsafe void call(Node* node, i32 depth) {
+        FunctionInfo* caller = this.function;
+        Node* callee_node = node.first();
+        if (depth > 0 || caller.requires_region || callee_node == null || !ProgressProof.calls_function(callee_node.symbol_kind())
+            || callee_node.symbol() == null) {
+            return;
+        }
+        FunctionInfo* callee = (FunctionInfo*)callee_node.symbol();
+        if (!callee.requires_region) {
+            return;
+        }
+        ByteBuffer* message = ByteBuffer.create();
+        message.append("'");
+        message.append(CodeGenerator.base_name(callee.name));
+        message.append("' requires uow: call it inside an atomic or cooperative region, or declare 'requires uow' on this function too");
+        Diagnostics* diagnostics = this.diagnostics;
+        diagnostics.error_span(DiagnosticErrors.REGION_REQUIRED, node.file_name(), node.line(), node.column(), node.length(), message.cstr());
+    }
+
+    unsafe void walk(Node* node, i32 depth) {
+        if (node == null) {
+            return;
+        }
+        NodeKind kind = node.kind();
+        if (kind == NodeKind::LAMBDA || kind == NodeKind::FUNCTION) {
+            return;
+        }
+        if (kind == NodeKind::ATOMIC_STMT) {
+            this.walk(node.second(), depth);
+            this.walk(node.first(), depth + 1);
+            this.walk(node.third(), depth);
+            return;
+        }
+        if (kind == NodeKind::CALL) {
+            this.call(node, depth);
+        }
+        for (mut i32 field = NodeField.FIRST; field <= NodeField.FOURTH; field = field + 1) {
+            u32 stored = node.get_field(field);
+            if (stored != 0) {
+                this.walk(Ast.at((i32)stored), depth);
+            }
+        }
+        if (node.has_items()) {
+            for (mut i32 i = 0; i < node.count(); i = i + 1) {
+                this.walk(node.child(i), depth);
+            }
+        }
+    }
+}

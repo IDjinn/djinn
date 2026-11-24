@@ -1,0 +1,173 @@
+namespace djinnc;
+
+impl Parser {
+    // The words of text separated by the separator, trimmed; empty pieces are dropped.
+    static unsafe PointerList* split_text(ptr<i8> text, char separator) {
+        PointerList* pieces = PointerList.create();
+        mut ByteBuffer* piece = ByteBuffer.create();
+        i32 length = strlen(text);
+        for (mut i32 i = 0; i <= length; i = i + 1) {
+            if (i == length || (char)text[i] == separator) {
+                if (piece.length > 0) {
+                    pieces.push((ptr)piece.cstr());
+                }
+                piece = ByteBuffer.create();
+            } else if ((char)text[i] != ' ') {
+                piece.append_char((char)text[i]);
+            } else if (separator == ' ') {
+                if (piece.length > 0) {
+                    pieces.push((ptr)piece.cstr());
+                }
+                piece = ByteBuffer.create();
+            } else if (piece.length > 0) {
+                piece.append_char(' ');
+            }
+        }
+        return pieces;
+    }
+
+    static unsafe bool is_participant(UowDeclaration* uow, ptr<i8> name) {
+        for (mut i32 i = 0; i < uow.participants.length; i = i + 1) {
+            Node* participant = (Node*)uow.participants.get(i);
+            if (Strings.same(participant.text(), name)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static unsafe ptr<i8> first_segment(ptr<i8> place) {
+        ByteBuffer* root = ByteBuffer.create();
+        i32 length = strlen(place);
+        for (mut i32 i = 0; i < length; i = i + 1) {
+            if (place[i] == 46) {
+                break;
+            }
+            root.append_char((char)place[i]);
+        }
+        return root.cstr();
+    }
+
+    // access(exclusive from, shared config): a participant the uow writes has to be exclusive.
+    unsafe void check_access(UowDeclaration* uow, PointerList* diagnostics_list) {
+        if (uow.access == null) {
+            return;
+        }
+        PointerList* exclusive = PointerList.create();
+        PointerList* entries = Parser.split_text(uow.access, ',');
+        for (mut i32 i = 0; i < entries.length; i = i + 1) {
+            PointerList* words = Parser.split_text((ptr<i8>)entries.get(i), ' ');
+            bool well_formed = words.length == 2 && (Strings.same((ptr<i8>)words.get(0), "exclusive") || Strings.same((ptr<i8>)words.get(0), "shared"));
+            if (!well_formed) {
+                this.uow_error(diagnostics_list, uow.token, DiagnosticErrors.UOW_ACCESS_ORDER, "access lists 'exclusive name' or 'shared name' for each participant");
+                continue;
+            }
+            ptr<i8> name = Parser.first_segment((ptr<i8>)words.get(1));
+            if (!Parser.is_participant(uow, name)) {
+                this.uow_error(diagnostics_list, uow.token, DiagnosticErrors.UOW_ACCESS_ORDER, "access names something that is not a participant of the uow");
+                continue;
+            }
+            if (Strings.same((ptr<i8>)words.get(0), "exclusive")) {
+                exclusive.push((ptr)name);
+            }
+        }
+        for (mut i32 i = 0; i < uow.writes.length; i = i + 1) {
+            ptr<i8> root = this.root_name((Node*)uow.writes.get(i));
+            if (root != null && !exclusive.contains_string(root)) {
+                ByteBuffer* message = ByteBuffer.create();
+                message.append("the uow writes '");
+                message.append(root);
+                message.append("' but does not declare exclusive access to it");
+                this.uow_error(diagnostics_list, uow.token, DiagnosticErrors.UOW_ACCESS_ORDER, message.cstr());
+            }
+        }
+    }
+
+    unsafe bool reaches(PointerList* from_keys, PointerList* to_keys, ptr<i8> start, ptr<i8> goal) {
+        PointerList* visited = PointerList.create();
+        PointerList* pending = PointerList.create();
+        pending.push((ptr)start);
+        while (pending.length > 0) {
+            ptr<i8> key = (ptr<i8>)pending.get(pending.length - 1);
+            pending.length = pending.length - 1;
+            if (Strings.same(key, goal)) {
+                return true;
+            }
+            if (visited.contains_string(key)) {
+                continue;
+            }
+            visited.push((ptr)key);
+            for (mut i32 i = 0; i < from_keys.length; i = i + 1) {
+                if (Strings.same((ptr<i8>)from_keys.get(i), key)) {
+                    pending.push(to_keys.get(i));
+                }
+            }
+        }
+        return false;
+    }
+
+    // ordering(Account.id ascending, Order.id ascending): the keys a uow takes in this order. Two declarations that
+    // disagree about the direction of a key, or that close a cycle between keys, could wait on each other.
+    unsafe void check_ordering(PointerList* diagnostics_list) {
+        PointerList* declarations = UowDeclaration.all();
+        PointerList* from_keys = PointerList.create();
+        PointerList* to_keys = PointerList.create();
+        PointerList* directions = PointerList.create();
+        for (mut i32 d = 0; d < declarations.length; d = d + 1) {
+            UowDeclaration* uow = (UowDeclaration*)declarations.get(d);
+            if (uow.ordering == null) {
+                continue;
+            }
+            PointerList* entries = Parser.split_text(uow.ordering, ',');
+            mut ptr<i8> previous = (ptr<i8>)0;
+            for (mut i32 i = 0; i < entries.length; i = i + 1) {
+                PointerList* words = Parser.split_text((ptr<i8>)entries.get(i), ' ');
+                bool well_formed = words.length == 2 && (Strings.same((ptr<i8>)words.get(1), "ascending") || Strings.same((ptr<i8>)words.get(1), "descending"));
+                if (!well_formed) {
+                    this.uow_error(diagnostics_list, uow.token, DiagnosticErrors.UOW_ACCESS_ORDER, "ordering lists 'Type.field ascending' or 'Type.field descending' for each key");
+                    continue;
+                }
+                ptr<i8> key = (ptr<i8>)words.get(0);
+                ptr<i8> direction = (ptr<i8>)words.get(1);
+                for (mut i32 k = 0; k < directions.length; k = k + 2) {
+                    if (Strings.same((ptr<i8>)directions.get(k), key) && !Strings.same((ptr<i8>)directions.get(k + 1), direction)) {
+                        ByteBuffer* message = ByteBuffer.create();
+                        message.append("ordering takes '");
+                        message.append(key);
+                        message.append("' ");
+                        message.append(direction);
+                        message.append(", but another uow takes it ");
+                        message.append((ptr<i8>)directions.get(k + 1));
+                        message.append(": the two could wait on each other");
+                        this.uow_error(diagnostics_list, uow.token, DiagnosticErrors.UOW_ACCESS_ORDER, message.cstr());
+                    }
+                }
+                directions.push((ptr)key);
+                directions.push((ptr)direction);
+                if (previous != null && !Strings.same(previous, key)) {
+                    if (this.reaches(from_keys, to_keys, key, previous)) {
+                        ByteBuffer* message = ByteBuffer.create();
+                        message.append("ordering takes '");
+                        message.append(previous);
+                        message.append("' before '");
+                        message.append(key);
+                        message.append("', but another uow takes them the other way round: the two could wait on each other");
+                        this.uow_error(diagnostics_list, uow.token, DiagnosticErrors.UOW_ACCESS_ORDER, message.cstr());
+                    } else {
+                        from_keys.push((ptr)previous);
+                        to_keys.push((ptr)key);
+                    }
+                }
+                previous = key;
+            }
+        }
+    }
+
+    unsafe void check_uow_declarations(PointerList* diagnostics_list) {
+        PointerList* declarations = UowDeclaration.all();
+        for (mut i32 i = 0; i < declarations.length; i = i + 1) {
+            this.check_access((UowDeclaration*)declarations.get(i), diagnostics_list);
+        }
+        this.check_ordering(diagnostics_list);
+    }
+}

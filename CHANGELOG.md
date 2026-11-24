@@ -3,6 +3,10 @@
 ## [Unreleased]
 
 ### Added
+- `writes(a, b.field)` on a function lists the memory it may change besides its own locals; the body and every callee are audited (`E7013`, and `E7014` for a write the compiler cannot trace). Getters and setters count as calls. The clause and a marker for library functions that write globals travel in the `.djlib`.
+- `requires uow` on a function: it can only be called inside an `atomic` or `cooperative` region or from a function marked the same way (`E7015`).
+- `uow Name { ... }` declarations (participants, `require`, `ensure`, `writes`, `access`, `ordering`, `isolation`) and `uow(Name) strategy cooperative` on a method, which runs its body as an atomic region over the uow's writes with the uow's contracts (`E7016`, `E7017`, `E7018`). `access` and `ordering` are verified without generating code: a written participant must be `exclusive`, and two declarations may not order keys in conflict (`E7019`). See `examples/bank_uow.djinn`.
+- The language server colors `uow`, `writes`, `requires uow`, `strategy`, `access`, `ordering` and `isolation` as keywords where they act as one, with hover and completion.
 - `djinnc new [name] [--target=web|windows|executable|library]` creates a project (`djinn.proj`, a starter source, `index.html` for web); without `--target` it asks with a spectre selection. `djinnc init` writes a `djinn.proj` for the current folder step by step, and `djinnc doctor [dir] [--target=...]` checks the toolchain, `djinn.proj` and the libraries the target needs. They run in `djinn-scaffold` (`tools/scaffold`, installed next to `djinnc`).
 - The language server understands record structs (`struct Name(T a, U b);`): the parameters are listed as fields of the struct.
 - The VS Code extension runs a lone file without a `djinn.proj` when it has `main()` and imports only `std`; otherwise it says that a project is needed.

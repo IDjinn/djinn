@@ -11,10 +11,89 @@ impl Parser {
         this.in_ensure = was_in_ensure;
         PointerList* captures = this.old_captures;
         this.old_captures = saved;
+        this.function_writes = this.parse_writes();
+        this.requires_region = this.parse_requires_uow();
+        this.parse_uow_use();
         if (requires.length == 0 && ensures.length == 0) {
             return (FunctionContracts*)0;
         }
         return FunctionContracts.create(requires, ensures, captures);
+    }
+
+    bool at_writes_clause() {
+        i32 token = this.current();
+        return this.kind_of(token) == TokenKind::IDENTIFIER && Strings.equals(this.text_of(token), this.length_of(token), "writes")
+            && this.kind_of(this.peek_token(1)) == TokenKind::LPAREN;
+    }
+
+    // writes(a, b) names the memory a function may change besides its own locals; null when the clause is absent.
+    unsafe PointerList* parse_writes() {
+        mut PointerList* places = (PointerList*)0;
+        while (this.at_writes_clause() && !this.failed) {
+            this.advance();
+            this.advance();
+            if (places == null) {
+                places = PointerList.create();
+            }
+            while (!this.check(TokenKind::RPAREN) && !this.at_end() && !this.failed) {
+                places.push((ptr)this.parse_expression());
+                if (!this.match(TokenKind::COMMA)) {
+                    break;
+                }
+            }
+            this.expect(TokenKind::RPAREN, "expected ')' after the writes list");
+        }
+        return places;
+    }
+
+    // requires uow: the function may only be called from inside an atomic or cooperative region, or from a function that
+    // says the same.
+    bool parse_requires_uow() {
+        i32 token = this.current();
+        if (this.kind_of(token) != TokenKind::IDENTIFIER || !Strings.equals(this.text_of(token), this.length_of(token), "requires")) {
+            return false;
+        }
+        i32 next = this.peek_token(1);
+        if (this.kind_of(next) != TokenKind::IDENTIFIER || !Strings.equals(this.text_of(next), this.length_of(next), "uow")) {
+            return false;
+        }
+        this.advance();
+        this.advance();
+        return true;
+    }
+
+    unsafe void record_requires_region(Node* function, i32 token) {
+        if (!this.requires_region) {
+            return;
+        }
+        this.requires_region = false;
+        AttributeUse* use = (AttributeUse*)Memory.zalloc(sizeof(AttributeUse));
+        use.target = function;
+        use.name = "requires_uow";
+        use.target_kind = AttributeTarget.FUNCTION;
+        use.line = this.line_of(token);
+        use.column = this.column_of(token);
+        Attributes.record(use);
+    }
+
+    unsafe void record_writes(Node* function, i32 token) {
+        PointerList* places = this.function_writes;
+        this.function_writes = (PointerList*)0;
+        if (places == null) {
+            return;
+        }
+        Node* list = Node.create_list(NodeKind::BLOCK, token);
+        for (mut i32 i = 0; i < places.length; i = i + 1) {
+            list.add((Node*)places.get(i));
+        }
+        AttributeUse* use = (AttributeUse*)Memory.zalloc(sizeof(AttributeUse));
+        use.target = function;
+        use.name = "writes";
+        use.target_kind = AttributeTarget.FUNCTION;
+        use.payload = list;
+        use.line = this.line_of(token);
+        use.column = this.column_of(token);
+        Attributes.record(use);
     }
 
     unsafe Node* contract_check(i32 token, i32 clause, Node* condition, ptr<i8> text) {

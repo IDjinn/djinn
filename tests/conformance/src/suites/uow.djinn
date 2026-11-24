@@ -1,0 +1,257 @@
+namespace conformance;
+
+import testing;
+import djinnc::testing;
+import djinnc;
+
+struct UowTests {
+    [Test]
+    void a_method_bound_to_a_uow_rolls_back_on_error() {
+        str source = """
+struct InsufficientFunds;
+
+struct Account {
+    i64 id;
+    mut i64 balance;
+}
+
+uow Transfer {
+    Account* from;
+    Account* to;
+    i64 amount;
+
+    require(amount > 0)
+    require(from.id != to.id)
+    ensure(from.balance + to.balance == old(from.balance) + old(to.balance))
+    writes(*from, *to)
+    isolation(serializable)
+}
+
+unsafe i32 transfer(Account* from, Account* to, i64 amount) throws(InsufficientFunds)
+    uow(Transfer) strategy cooperative
+{
+    from.balance = from.balance - amount;
+    if (from.balance < 0) {
+        throw InsufficientFunds();
+    }
+    to.balance = to.balance + amount;
+    return 0;
+}
+
+unsafe i32 main() {
+    Account a = Account { .id = 1, .balance = 100 };
+    Account b = Account { .id = 2, .balance = 5 };
+    i32 failed = switch transfer(&a, &b, 500) {
+        Result v -> 0,
+        InsufficientFunds e -> 1
+    };
+    if (failed != 1 || a.balance != 100 || b.balance != 5) {
+        return 1;
+    }
+    i32 moved = switch transfer(&a, &b, 40) {
+        Result v -> 0,
+        InsufficientFunds e -> 1
+    };
+    if (moved != 0 || a.balance != 60 || b.balance != 45) {
+        return 2;
+    }
+    return 42;
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void a_write_outside_the_uow_is_an_error() {
+        str source = """
+struct Account {
+    i64 id;
+    mut i64 balance;
+}
+
+uow Deposit {
+    Account* to;
+    writes(*to)
+}
+
+unsafe void deposit(Account* to, Account* fee, i64 amount) uow(Deposit) strategy cooperative {
+    to.balance = to.balance + amount;
+    fee.balance = fee.balance + 1;
+}
+
+i32 main() {
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.ATOMIC_EXTERNAL_EFFECT).at(13, 17).and_error(DiagnosticErrors.WRITES_OUTSIDE).at(13, 17));
+    }
+
+    [Test]
+    void binding_and_strategy_mistakes_are_reported() {
+        str source = """
+struct Account {
+    mut i64 balance;
+}
+
+uow Pay {
+    Account* from;
+    i64 amount;
+    isolation(snapshot)
+    writes(*from)
+}
+
+unsafe void missing(Account* source, i64 amount) uow(Pay) strategy cooperative {
+}
+
+unsafe void unknown(Account* from, i64 amount) uow(Nothing) strategy cooperative {
+}
+
+i32 main() {
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.UOW_STRATEGY).at(12, 50).and_error(DiagnosticErrors.UOW_BINDING).at(12, 50).and_error(DiagnosticErrors.UOW_DECLARATION).at(15, 48));
+    }
+
+    [Test]
+    void declared_access_and_ordering_are_accepted() {
+        str source = """
+struct Account {
+    mut i64 balance;
+}
+
+uow Move {
+    Account* from;
+    Account* to;
+    access(exclusive from, exclusive to)
+    ordering(Account.id ascending, Order.id ascending)
+    writes(*from, *to)
+}
+
+uow Audit {
+    Account* from;
+    access(shared from)
+    ordering(Account.id ascending)
+}
+
+i32 main() {
+    return 42;
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void a_write_without_exclusive_access_is_an_error() {
+        str source = """
+struct Account {
+    mut i64 balance;
+}
+
+uow Move {
+    Account* from;
+    Account* to;
+    access(exclusive from, shared to)
+    writes(*from, *to)
+}
+
+i32 main() {
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.UOW_ACCESS_ORDER).at(5, 1));
+    }
+
+    [Test]
+    void orderings_that_disagree_are_an_error() {
+        str source = """
+uow First {
+    ordering(Account.id ascending, Order.id ascending)
+}
+
+uow Second {
+    ordering(Order.id ascending, Account.id ascending)
+}
+
+i32 main() {
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.UOW_ACCESS_ORDER).at(5, 1));
+    }
+
+    [Test]
+    void opposite_directions_for_one_key_are_an_error() {
+        str source = """
+uow First {
+    ordering(Account.id ascending)
+}
+
+uow Second {
+    ordering(Account.id descending)
+}
+
+i32 main() {
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.UOW_ACCESS_ORDER).at(5, 1));
+    }
+
+    [Test]
+    void the_bank_pilot_commits_and_rolls_back() {
+        str source = """
+struct InsufficientFunds;
+
+struct Account {
+    i64 id;
+    mut i64 balance;
+}
+
+uow Transfer {
+    Account* from;
+    Account* to;
+    i64 amount;
+
+    require(amount > 0)
+    require(from.id != to.id)
+    ensure(from.balance + to.balance == old(from.balance) + old(to.balance))
+    writes(*from, *to)
+    access(exclusive from, exclusive to)
+    ordering(Account.id ascending)
+    isolation(serializable)
+}
+
+unsafe i32 transfer(Account* from, Account* to, i64 amount) throws(InsufficientFunds)
+    uow(Transfer) strategy cooperative
+{
+    from.balance = from.balance - amount;
+    if (from.balance < 0) {
+        throw InsufficientFunds();
+    }
+    to.balance = to.balance + amount;
+    return 0;
+}
+
+unsafe i32 run(Account* a, Account* b, i64 amount) {
+    return switch transfer(a, b, amount) {
+        Result v -> 0,
+        InsufficientFunds e -> 1
+    };
+}
+
+unsafe i32 main() {
+    Account alice = Account { .id = 1, .balance = 100 };
+    Account bob = Account { .id = 2, .balance = 50 };
+    if (run(&alice, &bob, 500) != 1 || alice.balance != 100 || bob.balance != 50) {
+        return 1;
+    }
+    if (run(&alice, &bob, 30) != 0 || alice.balance != 70 || bob.balance != 80) {
+        return 2;
+    }
+    return 42;
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+}

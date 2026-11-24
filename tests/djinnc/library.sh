@@ -349,4 +349,78 @@ write_proj "$tgt/bad" bad "  targets: [plan9]
 "$compiler" "$tgt/bad" -o "$tgt/bad$exe" "${flags[@]}" > "$tgt/bad.log" 2>&1 && fail "an unknown platform word must be an error"
 grep -q "unknown platform 'plan9'" "$tgt/bad.log" || { cat "$tgt/bad.log"; fail "the message must name the unknown word"; }
 
+# --- writes, requires uow and uow declarations across the boundary
+uowdir="$out/uow"
+mkdir -p "$uowdir"
+cat > "$uowdir/bank.djinn" <<'SOURCE'
+struct Account { i64 id; mut i64 balance; }
+
+uow Move {
+    Account* from;
+    Account* to;
+    i64 amount;
+    writes(*from, *to)
+}
+
+unsafe static mut i64 total = 0;
+
+unsafe void credit(Account* to, i64 amount) writes(*to) {
+    to.balance = to.balance + amount;
+}
+
+unsafe void guarded(Account* to) writes(*to) requires uow {
+    to.balance = to.balance + 1;
+}
+
+unsafe void bump() {
+    total = total + 1;
+}
+SOURCE
+"$compiler" "$uowdir/bank.djinn" --library -o "$uowdir/bank.djlib" "${flags[@]}" > "$uowdir/bank.log" 2>&1 || { cat "$uowdir/bank.log"; fail "the uow library must build"; }
+cat > "$uowdir/good.djinn" <<'SOURCE'
+import bank;
+
+unsafe void shifted(Account* from, Account* to, i64 amount) uow(Move) strategy cooperative {
+    from.balance = from.balance - amount;
+    to.balance = to.balance + amount;
+}
+
+unsafe void inside(Account* a) writes(*a) requires uow {
+    guarded(a);
+    credit(a, 1);
+}
+
+unsafe i32 main() {
+    Account a = Account { .id = 1, .balance = 10 };
+    Account b = Account { .id = 2, .balance = 0 };
+    shifted(&a, &b, 4);
+    return (i32)b.balance;
+}
+SOURCE
+"$compiler" "$uowdir/good.djinn" --lib "$uowdir/bank.djlib" -o "$uowdir/good$exe" "${flags[@]}" > "$uowdir/good.log" 2>&1 || { cat "$uowdir/good.log"; fail "a uow of a library must bind in the consumer"; }
+status=0
+"$uowdir/good$exe" > /dev/null || status=$?
+[ "$status" = "4" ] || fail "the consumer of the uow library must exit with 4, got $status"
+cat > "$uowdir/bad.djinn" <<'SOURCE'
+import bank;
+
+unsafe void outside(Account* a, Account* b) writes(*a) {
+    credit(b, 1);
+}
+
+unsafe void global_write() writes() {
+    bump();
+}
+
+unsafe void bare(Account* a) {
+    guarded(a);
+}
+
+i32 main() { return 0; }
+SOURCE
+"$compiler" "$uowdir/bad.djinn" --lib "$uowdir/bank.djlib" -o "$uowdir/bad$exe" "${flags[@]}" > "$uowdir/bad.log" 2>&1 && fail "the writes audit must cross the library boundary"
+grep -q "E7013" "$uowdir/bad.log" || { cat "$uowdir/bad.log"; fail "a callee's writes clause must be audited"; }
+grep -q "E7014" "$uowdir/bad.log" || { cat "$uowdir/bad.log"; fail "a library function that writes a global must not pass as pure"; }
+grep -q "E7015" "$uowdir/bad.log" || { cat "$uowdir/bad.log"; fail "requires uow must cross the library boundary"; }
+
 echo "library: ok"

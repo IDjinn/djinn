@@ -64,6 +64,9 @@ O update guardado gerado de `require` + `writes` (§6.2) sai do compilador. A pa
 | `--obligations[=json]` | Lista cada obrigação com proveniência (`checked`, `observed`, `ignored`, `proved`, `enforced`) e os effects inferidos de cada função do programa | — |
 | `atomic(operandos) { } after_commit { }` | Salva os operandos; erro que sai da região restaura; saídas normais (fim, `return`, `break`, `continue`) confirmam e rodam `after_commit`; operando de valor que possui memória é desfeito por move | E7005–E7008, E7010, E7011 |
 | `cooperative { }` | Só a regra de não suspender | E7005 |
+| `writes(a, b)` na função (etapa 1 da UOW) | Cláusula contextual depois de `require`/`ensure`. O conjunto escrito pelo corpo tem de estar contido na lista: escrita direta, ponteiro entregue a chamado que escreve, receptor e **globais escritos por chamados** (resumo por ponto fixo no grafo de chamadas). Escrita por ponteiro que o compilador não rastreia até um parâmetro, campo ou global é erro. Um chamado com cláusula é resumido pela cláusula. Granularidade por objeto/campo, sem `reads` | E7013, E7014 |
+| `requires uow` na função (etapa 2 da UOW) | Cláusula contextual depois de `writes`. Chamar a função fora de `atomic`/`cooperative` é erro, salvo se o chamador também declara `requires uow` (a exigência sobe para os chamadores dele). Marcação explícita, sem inferência | E7015 |
+| `uow Name { }` e `uow(Name) strategy cooperative` (etapa 3 da UOW) | Declaração sem corpo: participantes, `require`, `ensure`, `writes`, `isolation`, e `access`/`ordering` guardados como texto (verificados na etapa 4). O método liga por nome e tipo (participante sem parâmetro é erro) e o corpo inteiro vira `atomic(operandos de writes)`; as cláusulas viram contratos e a `writes` da função, auditada pela etapa 1. `isolation(serializable)` só com `strategy cooperative`. Entradas `uow` e `isolation` em `--obligations`. Sem `reads`; sem aninhamento ainda | E7016, E7017, E7018 |
 | `[NativeError(detect, capture)]` | `extern` com `throws(E)`; `capture = errno \| last_error \| return_code`; o erro vira `E { .code }` | E7012 |
 
 Não implementado (continua como proposta): elisão por fatos dos chamadores (item 7), claims `reads`/`writes` (8),
@@ -1632,6 +1635,25 @@ de testes baseados em propriedades a partir das cláusulas; tipos refinados; `in
 3. **Critério de parada:** se as cláusulas não forem usadas voluntariamente nem o rollback automático reduzir bugs em
    código real, não avançar para providers.
 
+#### Resultado do piloto (2026-11-23, etapa 5 do plano UOW)
+
+Os `demos/bank-*` do branch antigo não existem em nenhum branch local; os cenários foram reconstruídos a partir de
+§8.1: `examples/bank_uow.djinn` (válido, com rollback), e em `tests/conformance/src/suites/uow.djinn` o piloto
+completo, escrita fora do conjunto declarado, ligação/estratégia erradas, `access` sem `exclusive` e `ordering` em
+conflito.
+
+| Métrica | Medido |
+|---|---|
+| Obrigações do piloto (`bank_uow`) | 11 linhas: 3 `proved` (writes, isolation, no-suspension), 2 `enforced` (uow, atomic), 3 `checked` em execução (require, require, ensure), 3 de efeitos inferidos |
+| Custo de rollback (100M chamadas que falham) | 6,2 ns/chamada sem região, 9,4 ns com `uow` (≈ +3,2 ns, o desfazer por movimentação de 2 operandos) |
+| Sem a região, o mesmo código deixa `balance` em -400 | o rollback é o que mantém o invariante |
+| Compilar o próprio `djinnc` | ~0,8 s (compilador instalado) contra ~1,05 s (este branch); a diferença inclui outras mudanças desde a release instalada, então é um limite superior, não o custo das passes |
+| Uso voluntário no código real | **zero**: `djinnc` não declara nenhuma cláusula (0 obrigações), então a taxa de falsos positivos de `writes` não foi exercitada |
+
+**Decisão:** o rollback em memória e a auditoria de `writes` funcionam e custam pouco, mas o critério de parada do
+item 3 ainda não pode ser avaliado: nenhum código real adotou as cláusulas. Não avançar para providers (etapa 6) nem
+`strategy lock` (etapa 7) antes de usar `uow` em código real (`std` ou `djinnc`) e medir os falsos positivos.
+
 ---
 
 ## 13. Recomendações finais
@@ -1866,3 +1888,8 @@ com exceções reais em MSVC. Tudo isso é **referência de semântica**, não c
 
 **Destino dos documentos antigos:** `VERIFICATION-SPEC.md` e `VERIFICATION-IDEAS.md` ficam no branch como histórico;
 este arquivo é a referência de `master`.
+
+**Através de `.djlib`:** a interface guarda os tokens da assinatura, então `writes(...)`, `requires uow` e as
+declarações `uow Name { }` já chegam ao consumidor. O que o consumidor não via era o resumo de escrita de uma função
+sem cláusula; o manifesto agora marca (bit `OPAQUE_WRITES` na tabela de efeitos) a função que escreve um global ou um
+lugar não rastreável, e o consumidor a trata como `E7014`.
