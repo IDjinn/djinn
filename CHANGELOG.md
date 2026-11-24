@@ -2,8 +2,6 @@
 
 ## [Unreleased]
 
-## [Unreleased]
-
 ### Changed
 - The compiler folds constant text on its own. A literal, a constant interpolation or an immutable local initialised with one, passed to `Reflection.terminated` / `terminated_view` or converted to `i8*`, becomes the static data pointer with no call. A constructor called with constant text (`Error("message")`) is inlined and folded even at O0 (`sroa`, `instcombine`, `simplifycfg` run on modules that have such a call); no attribute is needed. `StringMeta.is_static` is `[ForceInline]`.
 
