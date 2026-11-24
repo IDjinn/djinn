@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Added
+- `writes(a, b.field)` on a function lists the memory it may change besides its own locals; the body and every callee are audited (`E7013`, and `E7014` for a write the compiler cannot trace). Getters and setters count as calls. The clause and a marker for library functions that write globals travel in the `.djlib`.
+- `requires uow` on a function: it can only be called inside an `atomic` or `cooperative` region or from a function marked the same way (`E7015`).
+- `uow Name { ... }` declarations (participants, `require`, `ensure`, `writes`, `access`, `ordering`, `isolation`) and `uow(Name) strategy cooperative` on a method, which runs its body as an atomic region over the uow's writes with the uow's contracts (`E7016`, `E7017`, `E7018`). `access` and `ordering` are verified without generating code: a written participant must be `exclusive`, and two declarations may not order keys in conflict (`E7019`). See `examples/bank_uow.djinn`.
+- The language server colors `uow`, `writes`, `requires uow`, `strategy`, `access`, `ordering` and `isolation` as keywords where they act as one, with hover and completion.
+
 ## [0.7.11] - 2026-11-23
 
 ### Added
