@@ -1,0 +1,107 @@
+import std::types;
+import std::sys;
+namespace scaffold;
+
+struct DoctorCommand {
+    public static unsafe i32 fail(str message) {
+        SpectreEmoji.printCross(message);
+        return 1;
+    }
+
+    public static unsafe bool runs(i8* program) {
+        i8* command = i8[256];
+        if (Files.is_windows()) {
+            snprintf(command, 256, "%s --version >nul 2>&1", program);
+        } else {
+            snprintf(command, 256, "%s --version >/dev/null 2>&1", program);
+        }
+        return Process.run(command) == 0;
+    }
+
+    public static unsafe i32 require_lib(i8* text, i8* lib, str message) {
+        if (Files.contains(text, lib)) {
+            return 0;
+        }
+        return DoctorCommand.fail(message);
+    }
+
+    public static unsafe i32 finish(i32 problems) {
+        printf("\n");
+        if (problems == 0) {
+            SpectreEmoji.printCheck("no problems found");
+            return 0;
+        }
+        SpectreEmoji.printCross("problems found");
+        return 1;
+    }
+
+    public static unsafe i32 run() {
+        i8* directory = Scaffold.positional(2) ?? ".";
+        i8* given = Scaffold.option(2, "--target");
+        mut i32 target = -1;
+        if (given != null) {
+            target = Targets.parse(given);
+            if (target < 0) {
+                SpectreEmoji.printCross("unknown target, expected web, windows, executable or library");
+                return 2;
+            }
+        }
+        mut i32 problems = 0;
+        Spectre.markupLine("[bold]djinnc doctor[/]");
+        printf("\n");
+        if (DoctorCommand.runs("djinnc")) {
+            SpectreEmoji.printCheck("djinnc is on the PATH");
+        } else {
+            problems = problems + DoctorCommand.fail("djinnc was not found on the PATH");
+        }
+        if (DoctorCommand.runs("clang")) {
+            SpectreEmoji.printCheck("clang is available (linker driver)");
+        } else {
+            problems = problems + DoctorCommand.fail("clang was not found; install LLVM and put it on the PATH");
+        }
+        i8* text = Files.read_all(Files.join(directory, "djinn.proj"));
+        if (text == null) {
+            SpectreEmoji.printWarning("no djinn.proj: fine for a single file that only uses std (djinnc init creates one)");
+            if (target == Targets.WEB || target == Targets.WINDOWS) {
+                problems = problems + DoctorCommand.fail("a ui project needs a djinn.proj that lists its libs");
+            }
+            return DoctorCommand.finish(problems);
+        }
+        SpectreEmoji.printCheck("djinn.proj found");
+        if (!Files.contains(text, "project:")) {
+            problems = problems + DoctorCommand.fail("djinn.proj has no 'project:' line");
+        }
+        if (!Files.contains(text, "compiler:")) {
+            problems = problems + DoctorCommand.fail("djinn.proj has no 'compiler:' section");
+        }
+        if (target == Targets.WEB) {
+            problems = problems + DoctorCommand.require_lib(text, "'ui'", "the web target needs 'ui' in libs");
+            problems = problems + DoctorCommand.require_lib(text, "'ui_macros'", "the web target needs 'ui_macros' in libs");
+            if (Files.exists(Files.join(directory, "index.html"))) {
+                SpectreEmoji.printCheck("index.html found");
+            } else {
+                SpectreEmoji.printWarning("no index.html to host app.js");
+            }
+        } else if (target == Targets.WINDOWS) {
+            if (!Files.is_windows()) {
+                problems = problems + DoctorCommand.fail("the windows target builds on Windows only");
+            }
+            problems = problems + DoctorCommand.require_lib(text, "'win32'", "the windows target needs 'win32' in libs");
+        } else if (target == Targets.LIBRARY) {
+            if (!Files.contains(text, "library-mode: true")) {
+                problems = problems + DoctorCommand.fail("set 'library-mode: true' to build a .djlib");
+            }
+        } else if (target == Targets.EXECUTABLE) {
+            if (Files.contains(text, "library-mode: true")) {
+                problems = problems + DoctorCommand.fail("library-mode is on, so this builds a .djlib, not an executable");
+            }
+        }
+        if (Files.contains(text, "'ui'") && !Files.exists(Files.join(directory, "build/libs/ui.djlib"))) {
+            SpectreEmoji.printWarning("build/libs/ui.djlib is missing; build the library or pass --lib-dir");
+        }
+        if (!Files.exists(Files.join(directory, "src"))) {
+            SpectreEmoji.printWarning("no src/ folder; djinnc reads every .djinn file under the project");
+        }
+        return DoctorCommand.finish(problems);
+    }
+}

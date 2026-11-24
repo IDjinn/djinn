@@ -1,0 +1,127 @@
+import std::types;
+import std::io;
+import std::sys;
+import std::libc;
+namespace scaffold;
+
+extern "C" {
+    i32 __djinn_path_exists(i8* path);
+}
+
+struct Files {
+    public static unsafe bool exists(i8* path) {
+        return __djinn_path_exists(path) != 0;
+    }
+
+    public static unsafe bool is_windows() {
+        i8*? os = Process.env("OS");
+        if (os == null) {
+            return false;
+        }
+        i8* value = os ?? "";
+        return value[0] == 87;
+    }
+
+    public static unsafe void make_dir(i8* path) {
+        i8* command = i8[1024];
+        if (Files.is_windows()) {
+            snprintf(command, 1024, "if not exist \"%s\" mkdir \"%s\" >nul 2>&1", path, path);
+        } else {
+            snprintf(command, 1024, "mkdir -p \"%s\"", path);
+        }
+        Process.run(command);
+    }
+
+    public static unsafe i8* join(i8* directory, i8* name) {
+        i8* path = (i8*)__djinn_alloc_zeroed(1024);
+        if (directory[0] == 0 || (directory[0] == 46 && directory[1] == 0)) {
+            snprintf(path, 1024, "%s", name);
+        } else {
+            snprintf(path, 1024, "%s/%s", directory, name);
+        }
+        return path;
+    }
+
+    public static unsafe i8* read_all(i8* path) {
+        FILE* file = fopen(path, "rb");
+        if (file == null) {
+            return (i8*)0;
+        }
+        fseek(file, 0, 2);
+        i64 size = ftell(file);
+        rewind(file);
+        i8* text = (i8*)__djinn_alloc_zeroed(65536);
+        mut i64 count = size;
+        if (count > 65535) {
+            count = 65535;
+        }
+        i64 read = (i64)fread(text, 1, (u64)count, file);
+        text[read] = 0;
+        fclose(file);
+        return text;
+    }
+
+    public static unsafe bool contains(i8* text, i8* needle) {
+        mut i32 length = 0;
+        while (needle[length] != 0) {
+            length = length + 1;
+        }
+        mut i32 i = 0;
+        while (text[i] != 0) {
+            mut i32 k = 0;
+            while (k < length && text[i + k] == needle[k]) {
+                k = k + 1;
+            }
+            if (k == length) {
+                return true;
+            }
+            i = i + 1;
+        }
+        return false;
+    }
+
+    public static unsafe bool starts_with(i8* text, i8* prefix) {
+        mut i32 i = 0;
+        while (prefix[i] != 0) {
+            if (text[i] != prefix[i]) {
+                return false;
+            }
+            i = i + 1;
+        }
+        return true;
+    }
+
+    public static unsafe bool same(i8* left, i8* right) {
+        mut i32 i = 0;
+        while (left[i] != 0 && left[i] == right[i]) {
+            i = i + 1;
+        }
+        return left[i] == right[i];
+    }
+
+    public static unsafe bool emit(i8* path, str template, i8* name, bool overwrite) {
+        if (!overwrite && Files.exists(path)) {
+            SpectreEmoji.printWarning("exists, skipped");
+            return false;
+        }
+        FILE* file = fopen(path, "wb");
+        if (file == null) {
+            SpectreEmoji.printCross("cannot write the file");
+            return false;
+        }
+        mut i32 i = 0;
+        i32 length = (i32)template.length;
+        while (i < length) {
+            i8 c = template[(size)i];
+            if (c == 64 && i + 6 < length && template[(size)(i + 1)] == 78 && template[(size)(i + 5)] == 64) {
+                fputs(name, file);
+                i = i + 6;
+            } else {
+                fputc((i32)c, file);
+                i = i + 1;
+            }
+        }
+        fclose(file);
+        return true;
+    }
+}
