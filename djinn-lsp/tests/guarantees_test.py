@@ -27,6 +27,20 @@ struct Account {
     }
 }
 
+uow Spend {
+    Account* from;
+    i64 amount;
+    writes(*from)
+    access(exclusive from)
+}
+
+unsafe void spend(Account* from, i64 amount) writes(*from) uow(Spend) strategy cooperative {
+    from.balance = from.balance - amount;
+}
+
+unsafe void inside(Account* from) requires uow {
+}
+
 unsafe i32 move(Account* from, i64 amount) throws(Failed) {
     atomic(*from) {
         from.withdraw(amount);
@@ -71,6 +85,10 @@ for word in ["invariant", "atomic", "cooperative", "after_commit", "old"]:
     hover = client.request("textDocument/hover", {"textDocument": {"uri": uri}, "position": position_of(SOURCE, word + ("(" if word in ("invariant", "atomic", "old") else " "), 1)})
     check("hover documents " + word, hover is not None and word in hover["contents"]["value"], hover)
 
+for word in ["uow", "writes", "strategy"]:
+    hover = client.request("textDocument/hover", {"textDocument": {"uri": uri}, "position": position_of(SOURCE, word + ("(" if word != "strategy" else " "), 1)})
+    check("hover documents " + word, hover is not None and word in hover["contents"]["value"], hover)
+
 completion = client.request("textDocument/completion", {"textDocument": {"uri": uri}, "position": position_of(SOURCE, "cooperative {", 0)})
 labels = [item["label"] for item in completion["items"]] if completion else []
 check("completion offers atomic and invariant", "atomic" in labels and "invariant" in labels, labels[:40])
@@ -98,6 +116,8 @@ for i in range(0, len(data), 5):
     line += dl
     character = ds if dl else character + ds
     found.setdefault(lines[line][character:character + length], []).append(types[kind])
+for word in ["uow", "writes", "access", "strategy", "requires"]:
+    check("semantic tokens color " + word + " as a keyword", "keyword" in found.get(word, []), found.get(word))
 for word in ["invariant", "atomic", "cooperative", "after_commit", "old"]:
     check("semantic tokens color " + word + " as a keyword", "keyword" in found.get(word, []), found.get(word))
 
