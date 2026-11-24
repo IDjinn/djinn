@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.7.14] - 2026-11-24
+
 ### Changed
 - `str` now carries the same `StringMeta` tag as `string` in the padding it already had (still 16 bytes): a literal, constexpr text or a static `string` viewed as `str` stays tagged STATIC, and `Reflection.terminated` / `terminated_view` keep the pointer when the tag is STATIC and the byte after the text is NUL. `throw Error("message")` therefore allocates nothing at run time; a `str` built any other way (`str.view`, a slice) is still copied. Layout change: every `.djlib` must be rebuilt.
 
