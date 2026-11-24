@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [0.7.16] - 2026-11-24
+
+### Fixed
+- Warnings from a library's interface source (`E6007` and the like) are no longer printed when a project compiles against the library.
+- A procedural macro that receives or returns an interpolated string (`$"clicked {n}
+"` inside `html!{ ... }`) no longer fails with "the procedural macro produced '
+', which is not a single token": the pieces of the string keep their own token classes (`INTERP_BEGIN`, `INTERP_MIDDLE`, `INTERP_END`, `INTERP_FORMAT`, 10 to 13) in `std::meta`.
+- The `main` that `[Application]` generates called `App.run`, which a user struct named `App` shadowed; it now calls `ui::App.run`.
+
+### Changed
+- A `main` written in the file replaces the one `[Application]` generates, with warning `E6010`, instead of failing with `E3003`. Mark the hand-written one `[Platform(windows)]` to keep a single source for the native and web builds. Libraries that use `std::meta` or `[Application]` must be rebuilt.
+
 ## [0.7.15] - 2026-11-24
 
 ### Changed
