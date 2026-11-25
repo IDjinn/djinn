@@ -26,8 +26,8 @@ impl ConstEval {
         }
         mut i32 past_end = -1;
         for (mut i32 i = 0; i < this.block_count; i = i + 1) {
-            i64 start = *(this.block_base + i);
-            i64 end = start + *(this.block_size + i);
+            i64 start = this.block_base[i];
+            i64 end = start + this.block_size[i];
             if (address >= start && address < end) {
                 return i;
             }
@@ -53,9 +53,9 @@ impl ConstEval {
         }
         ptr<i8> memory = (ptr<i8>)arena.zalloc((u64)reserved, 16);
         i32 index = this.block_count;
-        *(this.block_base + index) = (i64)memory;
-        *(this.block_size + index) = size;
-        *(this.block_live + index) = 1;
+        this.block_base[index] = (i64)memory;
+        this.block_size[index] = size;
+        this.block_live[index] = 1;
         this.block_count = this.block_count + 1;
         this.heap_bytes = this.heap_bytes + size;
         this.ri = (i64)memory;
@@ -68,14 +68,14 @@ impl ConstEval {
             return true;
         }
         i32 index = this.find_block(address);
-        if (index < 0 || *(this.block_base + index) != address) {
+        if (index < 0 || this.block_base[index] != address) {
             return this.fail(at, "free of a pointer that was not allocated at compile time");
         }
-        if (*(this.block_live + index) == 0) {
+        if (this.block_live[index] == 0) {
             return this.fail(at, "compile-time allocation is freed twice");
         }
-        *(this.block_live + index) = 0;
-        this.heap_bytes = this.heap_bytes - *(this.block_size + index);
+        this.block_live[index] = 0;
+        this.heap_bytes = this.heap_bytes - this.block_size[index];
         return true;
     }
 
@@ -84,10 +84,10 @@ impl ConstEval {
             return this.heap_alloc(at, size);
         }
         i32 index = this.find_block(address);
-        if (index < 0 || *(this.block_base + index) != address || *(this.block_live + index) == 0) {
+        if (index < 0 || this.block_base[index] != address || this.block_live[index] == 0) {
             return this.fail(at, "realloc of a pointer that is not a live compile-time allocation");
         }
-        i64 old_size = *(this.block_size + index);
+        i64 old_size = this.block_size[index];
         if (!this.heap_alloc(at, size)) {
             return false;
         }
@@ -104,7 +104,7 @@ impl ConstEval {
 
     unsafe bool heap_leaks() {
         for (mut i32 i = 0; i < this.block_count; i = i + 1) {
-            if (*(this.block_live + i) != 0) {
+            if (this.block_live[i] != 0) {
                 return true;
             }
         }
@@ -125,10 +125,10 @@ impl ConstEval {
         if (index < 0) {
             return this.fail(at, "pointer does not point into compile-time memory");
         }
-        if (*(this.block_live + index) == 0) {
+        if (this.block_live[index] == 0) {
             return this.fail(at, "use of a compile-time allocation after it was freed");
         }
-        if (address + bytes > *(this.block_base + index) + *(this.block_size + index)) {
+        if (address + bytes > this.block_base[index] + this.block_size[index]) {
             return this.fail(at, "pointer access is out of bounds");
         }
         return true;
@@ -230,8 +230,8 @@ impl ConstEval {
         i64 moved = address + amount * width;
         i32 block = this.find_block(address);
         if (block >= 0) {
-            i64 start = *(this.block_base + block);
-            if (moved < start || moved > start + *(this.block_size + block)) {
+            i64 start = this.block_base[block];
+            if (moved < start || moved > start + this.block_size[block]) {
                 return this.fail(node, "pointer arithmetic leaves its compile-time allocation");
             }
         }
