@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Fixed
+- `--run` loads the libraries the program declares (`-l`, `-L`, library files by path, and the system dependencies recorded in a `.djlib`), so a project that uses `win32` no longer fails with `Symbols not found: [ DispatchMessageA, ... ]`.
+- `--run` on Windows no longer crashes when the app's code writes a global that lives in a `.djlib` (opening a `win32` window segfaulted).
+- A build, `--emit-ir` or `--emit-asm` whose output is in a folder that does not exist creates it instead of failing with `cannot write '....obj'`.
+
+### Changed
+- A JIT error no longer dumps every symbol it touched: at most 10 missing symbols are named and the `Failed to materialize symbols` list becomes one line. The new `-v` / `--verbose` option prints the messages whole.
+
 ## [0.7.16] - 2026-11-24
 
 ### Fixed

@@ -5,9 +5,7 @@ struct Jit {
         if (error == null) {
             return true;
         }
-        ptr<i8> message = LLVMGetErrorMessage(error);
-        logger_error(Log.get(), "djinnc: jit: %s: %s", what, message);
-        LLVMDisposeErrorMessage(message);
+        JitErrors.report(what, error);
         return false;
     }
 
@@ -74,7 +72,9 @@ struct Jit {
 
         __djinn_link_debug_support();
         mut i32 code_model = LlvmConst.CODE_MODEL_DEFAULT;
-        if (tiered) {
+        // On Windows the JIT reaches a symbol of another object through a jump stub, which only works for calls: reading or
+        // writing a global of a library that way hits the code of the stub. The large code model takes the address instead.
+        if (tiered || (objects.length > 0 && Linker.is_windows())) {
             code_model = LlvmConst.CODE_MODEL_LARGE;
         }
         ptr machine = ObjectWriter.jit_machine_model(level, code_model);
@@ -87,6 +87,8 @@ struct Jit {
         if (!Jit.check(LLVMOrcCreateLLJIT(&jit, builder), "cannot create the JIT")) {
             return 1;
         }
+        JitErrors.configure(options);
+        JitErrors.install(jit);
         ptr dylib = LLVMOrcLLJITGetMainJITDylib(jit);
 
         ptr runtime = (ptr)0;
@@ -111,6 +113,7 @@ struct Jit {
         if (!Jit.define_security_symbols(jit, dylib)) {
             return 1;
         }
+        PointerList* unloaded = JitLibraries.load(jit, dylib, options);
 
         if (objects.length > 0 && Linker.is_windows()) {
             u64 target = 0;
@@ -152,6 +155,7 @@ struct Jit {
 
         u64 entry = 0;
         if (!Jit.check(LLVMOrcLLJITLookup(jit, &entry, "main"), "cannot find 'main'")) {
+            JitLibraries.report_missing(unloaded);
             return 1;
         }
         u64 jit_address = 0;
