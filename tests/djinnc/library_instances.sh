@@ -219,8 +219,8 @@ EOF
 libs="$out/libs-O0"
 "$compiler" "$out/mlib" -o "$libs/mlib.djlib" --lib-dir "$libs" "${flags[@]}" > "$out/mlib.log" 2>&1 \
     || { cat "$out/mlib.log"; fail "mlib must build"; }
-"$compiler" "$out/macro_app" -o "$out/macro_app$exe" --lib-dir "$libs" "${flags[@]}" > "$out/macro_app.log" 2>&1 \
+"$compiler" "$out/macro_app" -o "$out/macro_app_bin$exe" --lib-dir "$libs" "${flags[@]}" > "$out/macro_app.log" 2>&1 \
     || { cat "$out/macro_app.log"; fail "a procedural macro must write a global of another library"; }
-"$out/macro_app$exe" || fail "macro_app exited with $?"
+"$out/macro_app_bin$exe" || fail "macro_app exited with $?"
 
 echo "PASS library_instances"
