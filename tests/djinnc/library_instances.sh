@@ -17,8 +17,7 @@ if [ -n "${DJINN_USE_LLD:-}" ]; then
     flags+=(--lld)
 fi
 exe=""
-windows=""
-case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) exe=".exe"; windows=1 ;; esac
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) exe=".exe" ;; esac
 
 project() {
     mkdir -p "$out/$1/src"
@@ -101,6 +100,15 @@ public unsafe i32 foreign_global() {
     return 0;
 }
 
+public unsafe i32 direct_global(u64 value) {
+    state = value;
+    if (state != value) { return 4; }
+    if (Cell.get() != value) { return 5; }
+    return 0;
+}
+
+public unsafe u64* state_address() { return &state; }
+
 public string formatted(f64 value) { return $"{value}"; }
 
 public unsafe i32 c_length(string text) {
@@ -137,7 +145,13 @@ unsafe i32 main() {
     mut i64 value = 0;
     Cell.put<i64>(&value);
     if (Cell.get() != (u64)(ptr)&value) { return 2; }
-    return foreign_global();
+    i32 foreign = foreign_global();
+    if (foreign != 0) { return foreign; }
+    i32 direct = direct_global((u64)41);
+    if (direct != 0) { return direct; }
+    if (state != (u64)41) { return 6; }
+    if (state_address() != &state) { return 7; }
+    return 0;
 }
 EOF
 
@@ -164,13 +178,49 @@ for levels in "-O0 -O0" "-O2 -O2" "-O0 -O2"; do
         "$compiler" "$out/$name" -o "$out/$built$exe" --lib-dir "$libs" "${flags[@]}" "$app_level" > "$out/$built.log" 2>&1 \
             || { cat "$out/$built.log"; fail "$name must link at $app_level against libraries at $lib_level"; }
         "$out/$built$exe" || fail "$built exited with $?"
-        # On Windows the JIT cannot yet reach a global of one library from the compiled code of another.
-        if [ "$name" = state_app ] && [ -n "$windows" ]; then
-            continue
-        fi
         "$compiler" "$out/$name" --run --lib-dir "$libs" "${flags[@]}" "$app_level" > "$out/$built.run.log" 2>&1 \
             || { cat "$out/$built.run.log"; fail "$built must pass under --run"; }
     done
 done
+
+# A procedural macro runs in a JIT too, from the objects of the libraries.
+project mlib true "'std', 'alib'"
+cat > "$out/mlib/src/mlib.djinn" <<'EOF'
+namespace mlib;
+
+import alib;
+import std::meta;
+
+TokenStream expand_stored(TokenStream input) {
+    mut TokenStream out = TokenStream.create();
+    unsafe {
+        state = (u64)7;
+        if (state == (u64)7) {
+            out.push(Token.number("7"));
+        } else {
+            out.push(Token.number("1"));
+        }
+    }
+    return out;
+}
+
+proc macro stored => expand_stored;
+EOF
+
+project macro_app false "'std', 'alib', 'mlib'"
+cat > "$out/macro_app/src/main.djinn" <<'EOF'
+import mlib;
+
+i32 main() {
+    return stored!() - 7;
+}
+EOF
+
+libs="$out/libs-O0"
+"$compiler" "$out/mlib" -o "$libs/mlib.djlib" --lib-dir "$libs" "${flags[@]}" > "$out/mlib.log" 2>&1 \
+    || { cat "$out/mlib.log"; fail "mlib must build"; }
+"$compiler" "$out/macro_app" -o "$out/macro_app$exe" --lib-dir "$libs" "${flags[@]}" > "$out/macro_app.log" 2>&1 \
+    || { cat "$out/macro_app.log"; fail "a procedural macro must write a global of another library"; }
+"$out/macro_app$exe" || fail "macro_app exited with $?"
 
 echo "PASS library_instances"

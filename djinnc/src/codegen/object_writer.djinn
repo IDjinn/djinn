@@ -6,6 +6,7 @@ unsafe static mut ptr<i8> target_features = null;
 unsafe static mut i32 harden_code = 1;
 unsafe static mut i32 sanitize_code = 0;
 unsafe static mut i32 fold_inlined_text = 0;
+unsafe static mut i32 import_data = 0;
 
 struct ObjectWriter {
     public static void set_target(ptr<i8> cpu, ptr<i8> features) {
@@ -180,6 +181,33 @@ struct ObjectWriter {
         fold_inlined_text = 1;
     }
 
+    public static void request_data_imports() {
+        import_data = 1;
+    }
+
+    // Makes the object reach the data of another object through a pointer to it ('__imp_', as for data of a DLL), which
+    // it defines itself. The JIT on Windows reaches a direct reference to another object through a jump stub, so only a
+    // call would arrive: a read would return the code of the stub and a write would crash.
+    static unsafe void import_external_data(ptr module) {
+        for (mut ptr global = LLVMGetFirstGlobal(module); global != null; global = LLVMGetNextGlobal(global)) {
+            if (LLVMIsDeclaration(global) == 0 || LLVMGetFirstUse(global) == null) {
+                continue;
+            }
+            u64 length = 0;
+            ByteBuffer* name = ByteBuffer.create();
+            name.append("__imp_");
+            name.append(LLVMGetValueName2(global, &length));
+            ptr slot = LLVMAddGlobal(module, LLVMTypeOf(global), name.cstr());
+            LLVMSetInitializer(slot, global);
+            LLVMSetGlobalConstant(slot, 1);
+            LLVMSetLinkage(slot, LlvmConst.LINKAGE_WEAK_ODR);
+            ptr comdat = LLVMGetOrInsertComdat(module, name.cstr());
+            LLVMSetComdatSelectionKind(comdat, 0);
+            LLVMSetComdat(slot, comdat);
+            LLVMSetDLLStorageClass(global, LlvmConst.DLL_STORAGE_IMPORT);
+        }
+    }
+
     static ptr<i8> pipeline(ptr<i8> level, bool drop_dependencies, bool lower) {
         ByteBuffer* text = ByteBuffer.create();
         bool optimized = ObjectWriter.is_optimized(level);
@@ -280,6 +308,9 @@ struct ObjectWriter {
         if (!ObjectWriter.run_passes(module, machine, pipeline)) {
             LLVMDisposeTargetMachine(machine);
             return false;
+        }
+        if (import_data != 0) {
+            ObjectWriter.import_external_data(module);
         }
 
         i32 failed = LLVMTargetMachineEmitToFile(machine, module, path, kind, &message);
