@@ -14,8 +14,10 @@ impl CodeGenerator {
             }
             Node* node = info.node;
             i32 name_length = (i32)strlen(info.name);
-            bool shared_instance = LLVMGetLinkage(info.function) == LlvmConst.LINKAGE_LINKONCE_ODR
-                && (Strings.starts_with(info.name, 0, name_length, "std::meta::") || Strings.starts_with(info.name, 0, name_length, "__closure"));
+            i32 linkage = LLVMGetLinkage(info.function);
+            // No dependency is bound to have the instances a library object uses, so it defines them itself.
+            bool shared_instance = linkage == LlvmConst.LINKAGE_LINKONCE_ODR
+                && (this.library_mode || Strings.starts_with(info.name, 0, name_length, "std::meta::") || Strings.starts_with(info.name, 0, name_length, "__closure"));
             if (files.contains_string(node.owner_file()) && !shared_instance) {
                 LLVMSetLinkage(info.function, LlvmConst.LINKAGE_AVAILABLE_EXTERNALLY);
             }
@@ -25,6 +27,10 @@ impl CodeGenerator {
             LocalVariable* variable = (LocalVariable*)globals.get(i);
             Node* declaration = variable.node;
             if (variable.slot == null || declaration == null || !files.contains_string(declaration.owner_file())) {
+                continue;
+            }
+            // A constant is internal to whoever declares it: a library object keeps its own copy.
+            if (this.library_mode && LLVMGetLinkage(variable.slot) == LlvmConst.LINKAGE_INTERNAL) {
                 continue;
             }
             LLVMSetInitializer(variable.slot, (ptr)0);
@@ -42,6 +48,28 @@ impl CodeGenerator {
         if (user_main != null) {
             this.demote_named("main");
         }
+    }
+
+    // Library objects call into the core, which only the program defines: internalizing it before linking would drop
+    // what they refer to.
+    public unsafe void export_core() {
+        PointerList* functions = this.symbols.functions;
+        for (mut i32 i = 0; i < functions.length; i = i + 1) {
+            FunctionInfo* info = (FunctionInfo*)functions.get(i);
+            if (info.function == null || info.node == null) {
+                continue;
+            }
+            Node* node = info.node;
+            if (node.is_core_source()) {
+                this.add_function_attribute(info.function, "djinn-export");
+            }
+        }
+    }
+
+    // A library object carries the instances its code uses and no others: an unused one would make whoever links the
+    // object provide everything it refers to, which the JIT of a procedural macro cannot do.
+    public unsafe bool drop_unused_definitions() {
+        return ObjectWriter.run_passes(this.module, (ptr)0, "globaldce");
     }
 
     void make_linkonce(ptr global, ptr<i8> name) {

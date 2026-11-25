@@ -113,7 +113,11 @@ Modifiers (`private`, `async`, `sync`, `unsafe`) are kept in the text, so a cons
   it from the library object at compile time (ORC JIT, `driver/proc_macros.djinn`). Objects of every loaded library are
   kept for that (`Library.macro_objects`). `std::meta` code is linkonce, so it stays in the macro library object.
 - Dedup across modules: generic instances, constexpr functions and struct-instance methods are `linkonce_odr` in a
-  comdat; typeinfo is `linkonce_odr`; reflection tables are internal.
+  comdat; typeinfo is `linkonce_odr`; reflection tables are internal. A library object defines every such instance its
+  code uses, also when the template comes from std or another library, because no other module is bound to have it. It
+  keeps its own copy of the constants of its dependencies.
+- The core is compiled with each program and library objects call into it, so an optimized program that links a library
+  object keeps every core function external instead of internalizing it.
 
 ## Link dependencies
 
@@ -125,7 +129,8 @@ Every library stores a bitcode section, whatever its optimization level and with
 before optimization, with debug info and the `-g` stack-trace instrumentation removed, where only the small exported functions keep their bodies (at most 60 instructions, no
 coroutines, no `main` or `__djinn_*`, and nothing that touches non constant library-private data or private functions).
 Everything else is a declaration, and what no kept body uses (string constants, prototypes) is dropped, so the section stays
-small and is the same with or without `-g`.
+small and is the same with or without `-g`. The shared instances those bodies refer to are `weak_odr` in the object, so
+it keeps them even when its own optimizer inlined every use.
 
 When a consumer compiles with `-O1` or higher (not `--tiered`; `-g` is fine), it parses each bitcode section into its own
 LLVM context, marks the function bodies `available_externally` and links them into the program module. The
