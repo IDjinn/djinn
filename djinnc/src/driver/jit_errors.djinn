@@ -1,0 +1,73 @@
+namespace djinnc;
+
+unsafe static mut bool jit_verbose = false;
+
+// ORC lists every symbol an error touches: one missing extern fails everything that depends on it, which is most of
+// the program. Without --verbose the lists are cut short.
+struct JitErrors {
+    public static unsafe void configure(Options* options) {
+        jit_verbose = options.verbose;
+    }
+
+    public static unsafe void install(ptr jit) {
+        LLVMOrcExecutionSessionSetErrorReporter(LLVMOrcLLJITGetExecutionSession(jit), (ptr)&__djinn_jit_session_error, null);
+    }
+
+    public static unsafe void report(ptr<i8> what, ptr error) {
+        ptr<i8> message = LLVMGetErrorMessage(error);
+        mut ptr<i8> shown = message;
+        if (!jit_verbose) {
+            shown = JitErrors.summarize(message);
+        }
+        if (what == null) {
+            logger_error(Log.get(), "djinnc: jit: %s", shown);
+        } else {
+            logger_error(Log.get(), "djinnc: jit: %s: %s", what, shown);
+        }
+        LLVMDisposeErrorMessage(message);
+    }
+
+    // Returns 'message' itself when there is nothing to cut.
+    public static unsafe ptr<i8> summarize(ptr<i8> message) {
+        if (strstr(message, "Failed to materialize symbols") != null) {
+            return "some symbols could not be compiled (--verbose lists them)";
+        }
+        i32 length = strlen(message);
+        ptr<i8> open = strstr(message, "[ ");
+        if (open != null) {
+            mut i32 pos = (i32)((u64)open - (u64)message) + 2;
+            mut i32 commas = 0;
+            mut i32 cut = 0;
+            while (pos < length && Strings.char_at(message, pos) != ']') {
+                if (Strings.char_at(message, pos) == ',') {
+                    commas = commas + 1;
+                    if (commas == 10) {
+                        cut = pos;
+                    }
+                }
+                pos = pos + 1;
+            }
+            if (cut > 0 && pos < length) {
+                ByteBuffer* list = ByteBuffer.create();
+                list.append_slice(message, cut);
+                list.append(", ... and ");
+                list.append_int(commas - 9);
+                list.append(" more (--verbose) ]");
+                list.append(message + pos + 1);
+                return list.cstr();
+            }
+        }
+        if (length <= 600) {
+            return message;
+        }
+        ByteBuffer* head = ByteBuffer.create();
+        head.append_slice(message, 600);
+        head.append("... (--verbose shows the rest)");
+        return head.cstr();
+    }
+}
+
+// LLVM calls this for the errors of the JIT session, which it would otherwise print whole.
+unsafe void __djinn_jit_session_error(ptr context, ptr error) {
+    djinnc::JitErrors.report(null, error);
+}

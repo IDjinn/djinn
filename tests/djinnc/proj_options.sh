@@ -22,6 +22,12 @@ none="$("$compiler" tests/opt_project -o "$out/p" --stats "${flags[@]}" 2>&1 | p
 "$compiler" tests/opt_project -o "$out/hardened" --harden=on "${flags[@]}" > "$out/hardened.log" 2>&1 || { cat "$out/hardened.log"; fail "--harden=on must compile"; }
 "$compiler" tests/opt_project -o "$out/o0" -O0 --stats "${flags[@]}" > "$out/o0.log" 2>&1 || { cat "$out/o0.log"; fail "-O0 must compile"; }
 
+# The folder of the output is created, for every kind of file written next to it.
+rm -rf "$out/fresh"
+"$compiler" tests/opt_project -o "$out/fresh/linked/p" "${flags[@]}" > "$out/fresh.log" 2>&1 || { cat "$out/fresh.log"; fail "a build into a missing folder must create it"; }
+"$compiler" tests/opt_project -o "$out/fresh/asm/p" --emit-asm "${flags[@]}" > "$out/fresh.log" 2>&1 || { cat "$out/fresh.log"; fail "--emit-asm into a missing folder must create it"; }
+"$compiler" tests/opt_project -o "$out/fresh/ir/p" --emit-ir "${flags[@]}" > "$out/fresh.log" 2>&1 || { cat "$out/fresh.log"; fail "--emit-ir into a missing folder must create it"; }
+
 for level in off basic standard strict on; do
     "$compiler" tests/opt_project -o "$out/h_$level" --harden=$level "${flags[@]}" > "$out/h_$level.log" 2>&1 || { cat "$out/h_$level.log"; fail "--harden=$level must compile"; }
 done

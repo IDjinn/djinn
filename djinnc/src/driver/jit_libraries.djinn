@@ -1,0 +1,119 @@
+namespace djinnc;
+
+// Gives the code of --run the libraries a linked program would get: the -l and -L of the command line, of djinn.proj and
+// of the imported .djlib files. A shared library is loaded into the process, a static one is read by the JIT.
+struct JitLibraries {
+    // Returns the libraries that could not be loaded. That is only an error if a symbol turns out to be missing.
+    public static unsafe PointerList* load(ptr jit, ptr dylib, Options* options) {
+        PointerList* declared = options.linked;
+        PointerList* directories = PointerList.create();
+        for (mut i32 i = 0; i < declared.length; i = i + 1) {
+            ptr<i8> value = Linker.for_this_platform((ptr<i8>)declared.get(i));
+            if (value != null && Strings.char_at(value, 0) == '-' && Strings.char_at(value, 1) == 'L') {
+                directories.push((ptr)(value + 2));
+            }
+        }
+        PointerList* failed = PointerList.create();
+        for (mut i32 i = 0; i < declared.length; i = i + 1) {
+            ptr<i8> value = Linker.for_this_platform((ptr<i8>)declared.get(i));
+            if (value == null) {
+                continue;
+            }
+            mut bool loaded = true;
+            if (Strings.char_at(value, 0) != '-') {
+                loaded = JitLibraries.load_file(jit, dylib, value);
+            } else if (Strings.char_at(value, 1) == 'l' && !Strings.same(value + 2, "delayimp")) {
+                loaded = JitLibraries.load_named(jit, dylib, directories, value + 2);
+            }
+            if (!loaded) {
+                failed.push((ptr)value);
+            }
+        }
+        return failed;
+    }
+
+    public static unsafe void report_missing(PointerList* failed) {
+        for (mut i32 i = 0; i < failed.length; i = i + 1) {
+            logger_error(Log.get(), "djinnc: jit: could not load the library '%s'", (ptr<i8>)failed.get(i));
+        }
+    }
+
+    public static unsafe ptr<i8> file_name(ptr<i8> directory, ptr<i8> prefix, ptr<i8> name, ptr<i8> suffix) {
+        ByteBuffer* path = ByteBuffer.create();
+        if (directory != null) {
+            path.append(directory);
+            path.append_char('/');
+        }
+        path.append(prefix);
+        path.append(name);
+        path.append(suffix);
+        return path.cstr();
+    }
+
+    static unsafe bool load_named(ptr jit, ptr dylib, PointerList* directories, ptr<i8> name) {
+        bool windows = Linker.is_windows();
+        mut ptr<i8> prefix = "lib";
+        mut ptr<i8> shared = ".so";
+        mut ptr<i8> archive = ".a";
+        if (windows) {
+            prefix = "";
+            shared = ".dll";
+            archive = ".lib";
+        }
+        // the -L directories first, then the places the operating system searches
+        for (mut i32 i = 0; i < directories.length; i = i + 1) {
+            ptr<i8> directory = (ptr<i8>)directories.get(i);
+            if (JitLibraries.load_shared(jit, dylib, JitLibraries.file_name(directory, prefix, name, shared))) {
+                return true;
+            }
+        }
+        if (JitLibraries.load_shared(jit, dylib, JitLibraries.file_name(null, prefix, name, shared))) {
+            return true;
+        }
+        if (!windows && JitLibraries.load_shared(jit, dylib, JitLibraries.file_name(null, prefix, name, ".dylib"))) {
+            return true;
+        }
+        for (mut i32 i = 0; i < directories.length; i = i + 1) {
+            ptr<i8> directory = (ptr<i8>)directories.get(i);
+            if (JitLibraries.load_archive(jit, dylib, JitLibraries.file_name(directory, prefix, name, archive))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // A library named by its path in 'native-libs'.
+    static unsafe bool load_file(ptr jit, ptr dylib, ptr<i8> path) {
+        i32 length = strlen(path);
+        if (JitLibraries.ends_with(path, length, ".lib") || JitLibraries.ends_with(path, length, ".a")) {
+            return JitLibraries.load_archive(jit, dylib, path);
+        }
+        return JitLibraries.load_shared(jit, dylib, path);
+    }
+
+    static unsafe bool ends_with(ptr<i8> text, i32 length, ptr<i8> suffix) {
+        i32 size = strlen(suffix);
+        return length >= size && Strings.same(text + (length - size), suffix);
+    }
+
+    static unsafe bool load_shared(ptr jit, ptr dylib, ptr<i8> path) {
+        ptr generator = (ptr)0;
+        ptr error = LLVMOrcCreateDynamicLibrarySearchGeneratorForPath(&generator, path, LLVMOrcLLJITGetGlobalPrefix(jit), null, null);
+        return JitLibraries.add(dylib, generator, error);
+    }
+
+    static unsafe bool load_archive(ptr jit, ptr dylib, ptr<i8> path) {
+        ptr generator = (ptr)0;
+        ptr error = LLVMOrcCreateStaticLibrarySearchGeneratorForPath(&generator, LLVMOrcLLJITGetObjLinkingLayer(jit), path);
+        return JitLibraries.add(dylib, generator, error);
+    }
+
+    static unsafe bool add(ptr dylib, ptr generator, ptr error) {
+        if (error != null) {
+            LLVMDisposeErrorMessage(LLVMGetErrorMessage(error));
+            return false;
+        }
+        LLVMOrcJITDylibAddGenerator(dylib, generator);
+        return true;
+    }
+}
