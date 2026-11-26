@@ -658,6 +658,38 @@ impl TypeChecker {
             this.require_not_borrowed(source, variable, "move");
             variable.moved = true;
             variable.was_moved = true;
+            this.consume_subject(source, variable, false);
+        }
+    }
+
+    unsafe void bind_payload(LocalVariable* binding, Node* subject) {
+        SymbolTable* symbols = this.symbols;
+        if (Ownership.holds_disposable(symbols, binding.type)) {
+            binding.subject = subject;
+        }
+    }
+
+    unsafe void consume_subject(Node* at, LocalVariable* binding, bool returned) {
+        Node* subject = binding.subject;
+        if (subject == null) {
+            return;
+        }
+        NodeKind kind = subject.kind();
+        if (kind == NodeKind::IDENTIFIER && subject.symbol_kind() == SymbolKind.LOCAL) {
+            LocalVariable* matched = (LocalVariable*)subject.symbol();
+            if (!this.is_copy_type(matched.type)) {
+                if (returned) {
+                    this.move_out(subject);
+                } else {
+                    this.move_from(subject, (Node*)0);
+                }
+                return;
+            }
+        }
+        bool place = kind == NodeKind::IDENTIFIER || kind == NodeKind::FIELD_ACCESS || kind == NodeKind::INDEX
+            || (kind == NodeKind::UNARY && subject.op_kind() == TokenKind::STAR);
+        if (place && !this.in_unsafe()) {
+            this.error_code(at, DiagnosticErrors.MOVE_OUT_OF_PLACE, "cannot move a payload matched in a field, element or pointer: it stays there and could be disposed again");
         }
     }
 
@@ -672,6 +704,7 @@ impl TypeChecker {
         LocalVariable* variable = (LocalVariable*)source.symbol();
         if (!this.is_copy_type(variable.type)) {
             variable.was_moved = true;
+            this.consume_subject(source, variable, true);
         }
     }
 }

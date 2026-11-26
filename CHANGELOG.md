@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Fixed
+- A local put into a union variant (`return optional::Value(value);`, `result::Ok(value)`) or wrapped into an `optional<T>` parameter is moved: it is no longer disposed while the union still holds it.
 - `--run` loads the libraries the program declares (`-l`, `-L`, library files by path, and the system dependencies recorded in a `.djlib`), so a project that uses `win32` no longer fails with `Symbols not found: [ DispatchMessageA, ... ]`.
 - `--run` on Windows no longer crashes when the app's code writes a global that lives in a `.djlib` (opening a `win32` window segfaulted).
 - On Windows, `--run` and procedural macros no longer crash when the compiled code of a `.djlib` reads or writes a global that lives in another one (or takes its address): a library object now reaches such a global through a pointer it carries (`__imp_<name>`). Rebuild the libraries affected.
@@ -11,6 +12,7 @@
 - An optimized program that links a library no longer fails with `undefined symbol: djinn_float_text` (or `Reflection.terminated`): the core functions that library objects call, std built with `-O2` included, are no longer internalized away.
 
 ### Changed
+- A union never disposes its payload, and moving a payload that needs disposal out of one now moves what was matched: reusing that local after passing, storing or returning the bound name is error `E5001`, and moving it out of a field, element or pointer is `E5008`. Code that disposed the same payload twice this way no longer compiles. A local used as a variant payload cannot be used afterwards (`E5001`).
 - An unqualified type or interface name declared by more than one imported namespace is error `E3072`, which names the candidates, instead of silently taking the one imported first. Qualify it (`a::Item`, `a::Item.id()`, `a::Color.Red`, `a::Shape::Dot()`). A type or alias of the current namespace still shadows imports, an alias now beating an imported struct of the same name; an imported type beats a std type the program did not import; and the target of an alias resolves in the namespace that declares the alias, not where it is used. `ui` and `testing` both declare `TextBuffer` and `NodeState` (and `testing` and `std::text` both declare `Text`): a namespace that imports both must write `ui::TextBuffer`.
 - A JIT error no longer dumps every symbol it touched: at most 10 missing symbols are named and the `Failed to materialize symbols` list becomes one line. The new `-v` / `--verbose` option prints the messages whole.
 

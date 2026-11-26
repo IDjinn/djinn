@@ -329,6 +329,29 @@ impl TypeChecker {
         }
     }
 
+    u32 check_result_part(Node* part, u32 expected, bool returned) {
+        Node* saved_returned = this.returned_value;
+        if (returned) {
+            this.returned_value = part;
+        }
+        u32 type = this.check_expression(part, expected);
+        this.returned_value = saved_returned;
+        return type;
+    }
+
+    unsafe void check_payload(Node* argument, u32 wanted, bool returned) {
+        u32 passed = this.check_result_part(argument, wanted, returned);
+        SymbolTable* symbols = this.symbols;
+        if (argument.kind() != NodeKind::IDENTIFIER || !Ownership.moves_into(symbols, wanted, passed)) {
+            return;
+        }
+        if (returned) {
+            this.move_out(argument);
+        } else {
+            this.move_from(argument, (Node*)0);
+        }
+    }
+
     u32 check_null(u32 expected) {
         SymbolTable* symbols = this.symbols;
         if (expected != 0 && (symbols.nullable_payload(expected) != 0 || symbols.nullable_value_payload(expected) != 0)) {
@@ -628,9 +651,10 @@ impl TypeChecker {
                 if (node.count() != variant.payload_count()) {
                     this.error_code(node, DiagnosticErrors.WRONG_ARGUMENT_COUNT, "wrong number of enum variant arguments");
                 }
+                bool returned = this.returned_value == node;
                 for (mut i32 a = 0; a < node.count() && a < variant.payload_count(); a = a + 1) {
                     Node* payload = variant.child(a);
-                    this.check_expression(node.child(a), payload.value_type());
+                    this.check_payload(node.child(a), payload.value_type(), returned);
                 }
                 callee.set_symbol(SymbolKind.CONSTANT, (ptr)variant);
                 return variant.value_type();
