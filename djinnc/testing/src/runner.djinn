@@ -246,6 +246,20 @@ struct Runner {
         return command.cstr();
     }
 
+    public static unsafe void append_extra(TextBuffer* command, TestCase* test) {
+        if (test.extra != null) {
+            ItemList* extra = test.extra;
+            for (mut i32 i = 0; i < extra.length; i = i + 1) {
+                Runner.quote(command, (ptr<i8>)extra.get(i));
+            }
+        }
+    }
+
+    public static unsafe bool expects_consumer_error(TestCase* test) {
+        Expected* expected = test.expected;
+        return expected.wants_error();
+    }
+
     public static unsafe ptr<i8> library_command(TestCase* test, Config* config) {
         TestNode* node = test.node;
         ptr<i8> library = Runner.output_path(config, node.name, ".djlib");
@@ -264,10 +278,14 @@ struct Runner {
             Runner.quote(command, library);
         } else {
             Runner.quote(command, test.source);
+            Runner.append_extra(command, test);
             command.append(" --lib");
             Runner.quote(command, library);
             command.append(" -o");
             Runner.quote(command, test.binary);
+            if (Runner.expects_consumer_error(test)) {
+                command.append(" --diagnostics-format=json");
+            }
         }
         if (test.optimize > 0) {
             command.append(" -O");
@@ -303,12 +321,7 @@ struct Runner {
         command.append(config.compiler);
         command.append("\"");
         Runner.quote(command, test.source);
-        if (test.extra != null) {
-            ItemList* extra = test.extra;
-            for (mut i32 i = 0; i < extra.length; i = i + 1) {
-                Runner.quote(command, (ptr<i8>)extra.get(i));
-            }
-        }
+        Runner.append_extra(command, test);
         if (test.kind == Kind.ERROR || test.kind == Kind.CLEAN) {
             command.append(" --diagnostics-format=json");
         }
@@ -494,6 +507,8 @@ struct Runner {
             }
         } else if (test.kind == Kind.LIBRARY && test.phase == 2) {
             reason = Runner.check_run(test);
+        } else if (test.kind == Kind.LIBRARY && test.phase == 1 && Runner.expects_consumer_error(test)) {
+            reason = Runner.check_diagnostics(test);
         } else if (test.kind == Kind.LIBRARY || (test.phase == 0 && test.path == TestPath.LINK)) {
             if (node.exit_code == 0) {
                 test.phase = test.phase + 1;
