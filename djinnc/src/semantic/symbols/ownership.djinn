@@ -72,8 +72,34 @@ struct Ownership {
         return (Ownership.traits(symbols, type) & Ownership.TRIVIAL) != 0;
     }
 
+    // A union never disposes its payload, but moving a payload out of one still gives that value a second owner.
+    public static unsafe bool holds_disposable(SymbolTable* symbols, u32 type) {
+        if (Ownership.needs_dispose(symbols, type)) {
+            return true;
+        }
+        StructInfo* info = symbols.enum_of_type(type);
+        if (info == null || !info.has_payload) {
+            return false;
+        }
+        PointerList* constants = info.constants;
+        for (mut i32 c = 0; c < constants.length; c = c + 1) {
+            Node* variant = (Node*)constants.get(c);
+            for (mut i32 p = 0; p < variant.payload_count(); p = p + 1) {
+                Node* payload = variant.child(p);
+                if (Ownership.holds_disposable(symbols, payload.value_type())) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    public static unsafe bool moves_into(SymbolTable* symbols, u32 wanted, u32 passed) {
+        return passed != 0 && (passed == wanted || symbols.nullable_value_payload(wanted) == passed) && !Ownership.is_copy(symbols, passed);
+    }
+
     public static unsafe bool moves_argument(SymbolTable* symbols, FunctionInfo* callee, u32 wanted, u32 passed) {
-        return callee != null && !callee.borrows_parameters() && passed == wanted && !Ownership.is_copy(symbols, wanted);
+        return callee != null && !callee.borrows_parameters() && Ownership.moves_into(symbols, wanted, passed);
     }
 
     public static unsafe bool needs_dispose(SymbolTable* symbols, u32 type) {
