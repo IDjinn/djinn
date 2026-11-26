@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Added
+- Typed platform APIs in `std::sys`; failures are `result<T, OsError>`. `ProcessEnvironment` (`EnvironmentVariable` with `value`, `set`, `set_if_absent`, `remove`; `EnvironmentSnapshot`), `Arguments` and `ProcessArguments`, `ProcessId`, `OsHandle` and `Pipe`, `Module` and `ModuleSymbol`, `MemoryRegion` (bounds and protection checked), `Thread`, `SystemInfo` and `Duration`. Handles, modules, memory regions, commands and child processes are released by their owner; a value left inside its `result` or `optional` is not, so move it into a local or pass it by value.
+- `Process` also reports its ids, executable path, current directory, elevation, memory and CPU time, and sets its priority.
+
+### Changed
+- Breaking: the untyped `Process` API is gone. `Process.argc` / `argv` are `Arguments.all()` or `Process.arguments()`; `Process.env` is `ProcessEnvironment.value`; `Process.start` and the functions taking a `void*` process are `ProcessCommand` and `ChildProcess`; `Process.run` takes a `str` and returns `result<ProcessStatus, OsError>`. `getenv` and `system` stay as raw externs in `std::libc`.
+
 ### Fixed
 - `--run` loads the libraries the program declares (`-l`, `-L`, library files by path, and the system dependencies recorded in a `.djlib`), so a project that uses `win32` no longer fails with `Symbols not found: [ DispatchMessageA, ... ]`.
 - `--run` on Windows no longer crashes when the app's code writes a global that lives in a `.djlib` (opening a `win32` window segfaulted).
