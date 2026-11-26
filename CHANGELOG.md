@@ -5,6 +5,7 @@
 ### Fixed
 - `--run` loads the libraries the program declares (`-l`, `-L`, library files by path, and the system dependencies recorded in a `.djlib`), so a project that uses `win32` no longer fails with `Symbols not found: [ DispatchMessageA, ... ]`.
 - `--run` on Windows no longer crashes when the app's code writes a global that lives in a `.djlib` (opening a `win32` window segfaulted).
+- On Windows, `--run` and procedural macros no longer crash when the compiled code of a `.djlib` reads or writes a global that lives in another one (or takes its address): a library object now reaches such a global through a pointer it carries (`__imp_<name>`). Rebuild the libraries affected.
 - A build, `--emit-ir` or `--emit-asm` whose output is in a folder that does not exist creates it instead of failing with `cannot write '....obj'`.
 - A library that uses a generic function or struct declared in another library or in std (`Cell.put<i32>`, `array<u16>`) no longer fails to link with `undefined symbol`: the library object now defines the instances its code uses, and keeps its own copy of the constants of its dependencies. An optimized library also keeps the instances that an optimized app inlines calls to. Rebuild the libraries affected.
 - An optimized program that links a library no longer fails with `undefined symbol: djinn_float_text` (or `Reflection.terminated`): the core functions that library objects call, std built with `-O2` included, are no longer internalized away.

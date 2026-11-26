@@ -118,6 +118,9 @@ Modifiers (`private`, `async`, `sync`, `unsafe`) are kept in the text, so a cons
   keeps its own copy of the constants of its dependencies.
 - The core is compiled with each program and library objects call into it, so an optimized program that links a library
   object keeps every core function external instead of internalizing it.
+- Windows: a library object reaches a global of another module through a pointer it defines itself (`__imp_<name>`,
+  marking the declaration `dllimport`). The JIT of `--run` and of procedural macros (RuntimeDyld on COFF) reaches a direct
+  reference to another object through a jump stub, which only works for calls.
 
 ## Link dependencies
 
