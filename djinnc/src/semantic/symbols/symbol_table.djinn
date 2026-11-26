@@ -16,6 +16,7 @@ struct SymbolTable {
     U32Map* primitive_map;
     U32Map* alias_map;
     PointerList* aliases;
+    U32Map* ambiguity_sites;
     PointerList* primitives;
     U32Map* bindings;
     SemanticAnalyzer* analyzer;
@@ -41,6 +42,7 @@ struct SymbolTable {
         table.primitive_map = U32Map.create(arena, 16);
         table.alias_map = U32Map.create(arena, 16);
         table.aliases = PointerList.create();
+        table.ambiguity_sites = U32Map.create(arena, 8);
         table.primitives = PointerList.create();
         NamespaceInfo* root = (NamespaceInfo*)arena.zalloc(sizeof(NamespaceInfo), 8);
         PointerList* namespaces = table.namespaces;
@@ -115,28 +117,11 @@ struct SymbolTable {
 
     unsafe i64 lookup(U32Map* map, u32 full, u32 base, u32 scope) {
         if (full == base) {
-            mut u32 namespace_id = scope;
-            while (true) {
-                i64 index = map.find(SymbolTable.key(namespace_id, base));
-                if (index >= 0) {
-                    return index;
-                }
-                NamespaceInfo* scope_info = this.namespace_at(namespace_id);
-                if (scope_info.imports != null) {
-                    IdList* imports = scope_info.imports;
-                    for (mut i32 i = 0; i < imports.length; i = i + 1) {
-                        i64 imported = map.find(SymbolTable.key(imports.get(i), base));
-                        if (imported >= 0) {
-                            return imported;
-                        }
-                    }
-                }
-                if (namespace_id == 0) {
-                    return 0 - 1;
-                }
-                NamespaceInfo* info = this.namespace_at(namespace_id);
-                namespace_id = info.parent;
+            i64 declaring = this.declaring_namespace(map, (U32Map*)0, base, scope, (IdList*)0);
+            if (declaring < 0) {
+                return 0 - 1;
             }
+            return map.find(SymbolTable.key((u32)declaring, base));
         }
 
         AtomTable* atoms = Atoms.get();
@@ -164,25 +149,175 @@ struct SymbolTable {
         return 0 - 1;
     }
 
-    public bool add_alias(u32 namespace_id, u32 name_atom, TypeRef* target) {
+    unsafe i64 declaring_namespace(U32Map* map, U32Map* other, u32 base, u32 scope, IdList* rivals) {
+        mut u32 namespace_id = scope;
+        while (true) {
+            u32 own = SymbolTable.key(namespace_id, base);
+            if (map.find(own) >= 0 || (other != null && other.find(own) >= 0)) {
+                return (i64)namespace_id;
+            }
+            NamespaceInfo* info = this.namespace_at(namespace_id);
+            if (info.imports != null) {
+                IdList* imports = info.imports;
+                mut i64 chosen = 0 - 1;
+                mut bool chosen_primary = false;
+                for (mut i32 i = 0; i < imports.length; i = i + 1) {
+                    bool written = i < info.explicit_imports;
+                    if (!written && chosen >= 0) {
+                        break;
+                    }
+                    u32 imported = imports.get(i);
+                    u32 candidate = SymbolTable.key(imported, base);
+                    bool primary = map.find(candidate) >= 0;
+                    if (!primary && (other == null || other.find(candidate) < 0)) {
+                        continue;
+                    }
+                    if (written && rivals != null) {
+                        rivals.push(imported);
+                    }
+                    if (chosen < 0 || (primary && !chosen_primary)) {
+                        chosen = (i64)imported;
+                        chosen_primary = primary;
+                    }
+                }
+                if (chosen >= 0) {
+                    return chosen;
+                }
+            }
+            if (namespace_id == 0) {
+                return 0 - 1;
+            }
+            namespace_id = info.parent;
+        }
+        return 0 - 1;
+    }
+
+    public unsafe bool ambiguous_type(u32 full, u32 base, u32 scope, Node* at) {
+        if (full != base) {
+            return false;
+        }
+        if (this.bindings != null) {
+            U32Map* active = this.bindings;
+            if (active.find(base) >= 0) {
+                return false;
+            }
+        }
+        IdList* rivals = IdList.create();
+        this.declaring_namespace(this.struct_map, this.alias_map, base, scope, rivals);
+        return this.report_ambiguity(rivals, base, at);
+    }
+
+    public unsafe bool ambiguous_interface(u32 full, u32 base, u32 scope, Node* at) {
+        if (full != base) {
+            return false;
+        }
+        IdList* rivals = IdList.create();
+        this.declaring_namespace(this.interface_map, (U32Map*)0, base, scope, rivals);
+        return this.report_ambiguity(rivals, base, at);
+    }
+
+    unsafe bool report_ambiguity(IdList* rivals, u32 base, Node* at) {
+        if (rivals.length < 2 || at == null) {
+            return false;
+        }
+        AtomTable* atoms = Atoms.get();
+        ptr<i8> name = atoms.text(base);
+        ByteBuffer* site = ByteBuffer.create();
+        site.append(at.file_name());
+        site.append_char(':');
+        site.append_int((i64)at.line());
+        site.append_char(':');
+        site.append_int((i64)at.column());
+        site.append_char(':');
+        site.append(name);
+        u32 reported = atoms.intern_copy(site.data, (u32)site.length);
+        U32Map* sites = this.ambiguity_sites;
+        if (sites.contains(reported)) {
+            return true;
+        }
+        sites.put(reported, 0);
+        PointerList* candidates = PointerList.create();
+        for (mut i32 i = 0; i < rivals.length; i = i + 1) {
+            ByteBuffer* candidate = ByteBuffer.create();
+            candidate.append(this.namespace_prefix(rivals.get(i)));
+            candidate.append("::");
+            candidate.append(name);
+            candidates.push((ptr)candidate.cstr());
+        }
+        candidates.sort_strings();
+        ByteBuffer* message = ByteBuffer.create();
+        message.append("'");
+        message.append(name);
+        message.append("' is ambiguous between ");
+        for (mut i32 i = 0; i < candidates.length; i = i + 1) {
+            if (i > 0) {
+                if (i + 1 == candidates.length) {
+                    message.append(" and ");
+                } else {
+                    message.append(", ");
+                }
+            }
+            message.append("'");
+            message.append((ptr<i8>)candidates.get(i));
+            message.append("'");
+        }
+        message.append(": qualify it with its namespace");
+        Diagnostics.add_argument(name);
+        for (mut i32 i = 0; i < candidates.length; i = i + 1) {
+            Diagnostics.add_argument((ptr<i8>)candidates.get(i));
+        }
+        SemanticAnalyzer* analyzer = this.analyzer;
+        Diagnostics* diagnostics = analyzer.diagnostics;
+        diagnostics.error_span(DiagnosticErrors.AMBIGUOUS_TYPE, at.file_name(), at.line(), at.column(), at.length(), message.cstr());
+        return true;
+    }
+
+    unsafe i64 lookup_type(U32Map* map, u32 full, u32 base, u32 scope) {
+        if (full != base) {
+            return this.lookup(map, full, base, scope);
+        }
+        i64 declaring = this.declaring_namespace(this.struct_map, this.alias_map, base, scope, (IdList*)0);
+        if (declaring < 0) {
+            return 0 - 1;
+        }
+        return map.find(SymbolTable.key((u32)declaring, base));
+    }
+
+    public unsafe bool add_alias(u32 namespace_id, u32 name_atom, Node* declaration) {
         U32Map* map = this.alias_map;
         u32 key = SymbolTable.key(namespace_id, name_atom);
         if (map.find(key) >= 0) {
             return false;
         }
+        Arena* arena = this.arena;
+        AliasInfo* info = (AliasInfo*)arena.zalloc(sizeof(AliasInfo), 8);
+        info.target = declaration.type();
+        info.namespace_id = namespace_id;
+        info.node = declaration;
         PointerList* list = this.aliases;
-        list.push((ptr)target);
+        list.push((ptr)info);
         map.put(key, (u32)(list.length - 1));
         return true;
     }
 
-    unsafe TypeRef* find_alias(u32 full, u32 base, u32 scope) {
-        i64 index = this.lookup(this.alias_map, full, base, scope);
+    unsafe AliasInfo* find_alias(u32 full, u32 base, u32 scope) {
+        i64 index = this.lookup_type(this.alias_map, full, base, scope);
         if (index < 0) {
-            return (TypeRef*)0;
+            return (AliasInfo*)0;
         }
         PointerList* list = this.aliases;
-        return (TypeRef*)list.get((i32)index);
+        return (AliasInfo*)list.get((i32)index);
+    }
+
+    unsafe u32 resolve_alias(AliasInfo* alias) {
+        U32Map* saved_bindings = this.bindings;
+        Node* saved_blame = this.blame;
+        this.bindings = (U32Map*)0;
+        this.blame = alias.node;
+        u32 resolved = this.resolve_type(alias.target, alias.namespace_id);
+        this.bindings = saved_bindings;
+        this.blame = saved_blame;
+        return resolved;
     }
 
     public unsafe u32 nullable_of_pointer(u32 pointer_type, u32 scope) {
@@ -269,11 +404,12 @@ struct SymbolTable {
                 return (u32)bound;
             }
         }
+        this.ambiguous_type(ref.full_atom, ref.name_atom, scope, this.blame);
         StructInfo* info = this.find_struct(ref.full_atom, ref.name_atom, scope);
         if (info == null) {
-            TypeRef* alias = this.find_alias(ref.full_atom, ref.name_atom, scope);
+            AliasInfo* alias = this.find_alias(ref.full_atom, ref.name_atom, scope);
             if (alias != null && ref.args == null) {
-                return this.resolve_type(alias, scope);
+                return this.resolve_alias(alias);
             }
             return 0;
         }
@@ -499,7 +635,7 @@ struct SymbolTable {
     }
 
     public unsafe StructInfo* find_struct(u32 full, u32 base, u32 scope) {
-        i64 index = this.lookup(this.struct_map, full, base, scope);
+        i64 index = this.lookup_type(this.struct_map, full, base, scope);
         if (index < 0) {
             return (StructInfo*)0;
         }

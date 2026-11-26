@@ -203,7 +203,7 @@ struct Runner {
     }
 
     public static unsafe ptr<i8> output_path(Config* config, ptr<i8> name, ptr<i8> extension) {
-        TextBuffer* path = TextBuffer.create();
+        TestTextBuffer* path = TestTextBuffer.create();
         path.append(config.work_dir);
         path.append("/");
         i32 length = (i32)strlen(name);
@@ -229,14 +229,14 @@ struct Runner {
         return test;
     }
 
-    public static unsafe void quote(TextBuffer* command, ptr<i8> text) {
+    public static unsafe void quote(TestTextBuffer* command, ptr<i8> text) {
         command.append(" \"");
         command.append(text);
         command.append("\"");
     }
 
     public static unsafe ptr<i8> debug_command(TestCase* test) {
-        TextBuffer* command = TextBuffer.create();
+        TestTextBuffer* command = TestTextBuffer.create();
         command.append("lldb -b -o \"breakpoint set -f ");
         command.append(Runner.base_name(test.source));
         command.append(".djinn -l ");
@@ -246,10 +246,24 @@ struct Runner {
         return command.cstr();
     }
 
+    public static unsafe void append_extra(TestTextBuffer* command, TestCase* test) {
+        if (test.extra != null) {
+            ItemList* extra = test.extra;
+            for (mut i32 i = 0; i < extra.length; i = i + 1) {
+                Runner.quote(command, (ptr<i8>)extra.get(i));
+            }
+        }
+    }
+
+    public static unsafe bool expects_consumer_error(TestCase* test) {
+        Expected* expected = test.expected;
+        return expected.wants_error();
+    }
+
     public static unsafe ptr<i8> library_command(TestCase* test, Config* config) {
         TestNode* node = test.node;
         ptr<i8> library = Runner.output_path(config, node.name, ".djlib");
-        TextBuffer* command = TextBuffer.create();
+        TestTextBuffer* command = TestTextBuffer.create();
         command.append("\"");
         if (test.phase == 2) {
             command.append(test.binary);
@@ -264,10 +278,14 @@ struct Runner {
             Runner.quote(command, library);
         } else {
             Runner.quote(command, test.source);
+            Runner.append_extra(command, test);
             command.append(" --lib");
             Runner.quote(command, library);
             command.append(" -o");
             Runner.quote(command, test.binary);
+            if (Runner.expects_consumer_error(test)) {
+                command.append(" --diagnostics-format=json");
+            }
         }
         if (test.optimize > 0) {
             command.append(" -O");
@@ -290,7 +308,7 @@ struct Runner {
         if (test.kind == Kind.LIBRARY) {
             return Runner.library_command(test, config);
         }
-        TextBuffer* command = TextBuffer.create();
+        TestTextBuffer* command = TestTextBuffer.create();
         command.append("\"");
         if (test.phase == 1 && test.kind == Kind.DEBUG) {
             return Runner.debug_command(test);
@@ -303,12 +321,7 @@ struct Runner {
         command.append(config.compiler);
         command.append("\"");
         Runner.quote(command, test.source);
-        if (test.extra != null) {
-            ItemList* extra = test.extra;
-            for (mut i32 i = 0; i < extra.length; i = i + 1) {
-                Runner.quote(command, (ptr<i8>)extra.get(i));
-            }
-        }
+        Runner.append_extra(command, test);
         if (test.kind == Kind.ERROR || test.kind == Kind.CLEAN) {
             command.append(" --diagnostics-format=json");
         }
@@ -354,7 +367,7 @@ struct Runner {
         return command.cstr();
     }
 
-    public static unsafe void append_std(TextBuffer* command, TestCase* test, Config* config) {
+    public static unsafe void append_std(TestTextBuffer* command, TestCase* test, Config* config) {
         if (test.std) {
             command.append(" --std --std-dir");
             Runner.quote(command, config.std_dir);
@@ -371,7 +384,7 @@ struct Runner {
     }
 
     public static unsafe ptr<i8> with_snippet(ptr<i8> prefix, ptr<i8> output) {
-        TextBuffer* reason = TextBuffer.create();
+        TestTextBuffer* reason = TestTextBuffer.create();
         reason.append(prefix);
         i32 length = (i32)strlen(output);
         mut i32 limit = length;
@@ -386,7 +399,7 @@ struct Runner {
     }
 
     public static unsafe ptr<i8> visible(ptr<i8> text) {
-        TextBuffer* shown = TextBuffer.create();
+        TestTextBuffer* shown = TestTextBuffer.create();
         if (text == null) {
             return shown.cstr();
         }
@@ -406,7 +419,7 @@ struct Runner {
     }
 
     public static unsafe ptr<i8> exit_mismatch(i32 expected, i32 actual) {
-        TextBuffer* reason = TextBuffer.create();
+        TestTextBuffer* reason = TestTextBuffer.create();
         reason.append("expected exit ");
         reason.append_int((i64)expected);
         reason.append(", got ");
@@ -434,7 +447,7 @@ struct Runner {
         for (mut i32 i = 0; i < patterns.length; i = i + 1) {
             ptr<i8> pattern = (ptr<i8>)patterns.get(i);
             if (!Text.contains(node.output, pattern)) {
-                TextBuffer* reason = TextBuffer.create();
+                TestTextBuffer* reason = TestTextBuffer.create();
                 reason.append("missing in the output: ");
                 reason.append(pattern);
                 return reason.cstr();
@@ -494,6 +507,8 @@ struct Runner {
             }
         } else if (test.kind == Kind.LIBRARY && test.phase == 2) {
             reason = Runner.check_run(test);
+        } else if (test.kind == Kind.LIBRARY && test.phase == 1 && Runner.expects_consumer_error(test)) {
+            reason = Runner.check_diagnostics(test);
         } else if (test.kind == Kind.LIBRARY || (test.phase == 0 && test.path == TestPath.LINK)) {
             if (node.exit_code == 0) {
                 test.phase = test.phase + 1;
@@ -521,7 +536,7 @@ struct Runner {
     }
 
     public static unsafe ptr<i8> function_ir(ptr<i8> ir, ptr<i8> name) {
-        TextBuffer* marker = TextBuffer.create();
+        TestTextBuffer* marker = TestTextBuffer.create();
         marker.append("@");
         marker.append(name);
         marker.append("(");
@@ -538,7 +553,7 @@ struct Runner {
                 while (stop < length && !(ir[stop] == 10 && ir[stop + 1] == 125)) {
                     stop = stop + 1;
                 }
-                TextBuffer* body = TextBuffer.create();
+                TestTextBuffer* body = TestTextBuffer.create();
                 body.append(Text.duplicate(ir + start, stop - start));
                 ptr<i8> group = Runner.attribute_group(ir, line);
                 if (group != null) {
@@ -567,7 +582,7 @@ struct Runner {
         while (define_line[digits] >= 48 && define_line[digits] <= 57) {
             digits = digits + 1;
         }
-        TextBuffer* marker = TextBuffer.create();
+        TestTextBuffer* marker = TestTextBuffer.create();
         marker.append("attributes ");
         marker.append(Text.duplicate(define_line + hash, digits - hash));
         marker.append(" = ");
@@ -593,7 +608,7 @@ struct Runner {
         if (node.exit_code != 0) {
             return Runner.with_snippet("compile failed", node.output);
         }
-        TextBuffer* path = TextBuffer.create();
+        TestTextBuffer* path = TestTextBuffer.create();
         path.append(test.binary);
         path.append(".ll");
         mut ptr<i8> ir = TextFiles.read(path.cstr());
@@ -625,14 +640,14 @@ struct Runner {
     }
 
     public static unsafe void remove_ir(TestCase* test) {
-        TextBuffer* path = TextBuffer.create();
+        TestTextBuffer* path = TestTextBuffer.create();
         path.append(test.binary);
         path.append(".ll");
         remove(path.cstr());
     }
 
     public static unsafe ptr<i8> path_names(i32 paths) {
-        TextBuffer* names = TextBuffer.create();
+        TestTextBuffer* names = TestTextBuffer.create();
         if ((paths & TestPath.CHECK) != 0) {
             names.append("Check ");
         }
