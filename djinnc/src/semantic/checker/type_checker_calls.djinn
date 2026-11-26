@@ -572,6 +572,37 @@ impl TypeChecker {
         return owner.type_id;
     }
 
+    unsafe bool ambiguous_path_owner(Node* callee) {
+        if (callee.type() != null) {
+            return false;
+        }
+        ptr<i8> text = callee.text();
+        i32 length = (i32)strlen(text);
+        mut i32 split = -1;
+        for (mut i32 i = 0; i + 1 < length; i = i + 1) {
+            if (text[i] == 58 && text[i + 1] == 58) {
+                split = i;
+            }
+        }
+        if (split < 0) {
+            return false;
+        }
+        SymbolTable* symbols = this.symbols;
+        if (symbols.find_function(callee.text_atom(), callee.name(), this.scope) != null) {
+            return false;
+        }
+        AtomTable* atoms = Ast.atoms();
+        u32 full = atoms.intern_copy(text, (u32)split);
+        return symbols.ambiguous_type(full, Ast.intern_base_name(text, split), this.scope, callee);
+    }
+
+    u32 recovery_type(u32 expected) {
+        if (expected != 0) {
+            return expected;
+        }
+        return Types.i32_type();
+    }
+
     unsafe u32 check_call(Node* node, u32 expected) {
         Node* callee = node.first();
         SymbolTable* symbols = this.symbols;
@@ -585,6 +616,9 @@ impl TypeChecker {
             }
         }
         if (callee.kind() == NodeKind::IDENTIFIER) {
+            if (this.ambiguous_path_owner(callee)) {
+                return this.recovery_type(expected);
+            }
             StructInfo* enum_named_by_call = this.enum_named_by_parse_value_call(callee);
             if (enum_named_by_call != null) {
                 return this.check_enum_variant_from_value_call(node, callee, enum_named_by_call);
@@ -611,6 +645,9 @@ impl TypeChecker {
             }
             info = this.apply_named_arguments(node, info);
             if (info == null) {
+                if (symbols.ambiguous_type(callee.text_atom(), callee.name(), this.scope, callee)) {
+                    return this.recovery_type(expected);
+                }
                 StructInfo* named = symbols.find_struct(callee.text_atom(), callee.name(), this.scope);
                 if (named != null && !named.is_template && !named.is_enum) {
                     return this.check_constructor(node, callee, named.type_id);
@@ -631,6 +668,9 @@ impl TypeChecker {
             callee.set_symbol(SymbolKind.FUNCTION, (ptr)info);
         } else if (callee.kind() == NodeKind::FIELD_ACCESS) {
             Node* base = callee.first();
+            if (this.ambiguous_type_name(base)) {
+                return this.recovery_type(expected);
+            }
             StructInfo* primitive_owner = this.primitive_owner_named_by(base);
             if (primitive_owner != null || this.is_struct_name(base)) {
                 mut StructInfo* owner = primitive_owner;

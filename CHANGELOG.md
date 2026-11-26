@@ -11,6 +11,7 @@
 - An optimized program that links a library no longer fails with `undefined symbol: djinn_float_text` (or `Reflection.terminated`): the core functions that library objects call, std built with `-O2` included, are no longer internalized away.
 
 ### Changed
+- An unqualified type or interface name declared by more than one imported namespace is error `E3072`, which names the candidates, instead of silently taking the one imported first. Qualify it (`a::Item`, `a::Item.id()`, `a::Color.Red`, `a::Shape::Dot()`). A type or alias of the current namespace still shadows imports, an alias now beating an imported struct of the same name; an imported type beats a std type the program did not import; and the target of an alias resolves in the namespace that declares the alias, not where it is used.
 - A JIT error no longer dumps every symbol it touched: at most 10 missing symbols are named and the `Failed to materialize symbols` list becomes one line. The new `-v` / `--verbose` option prints the messages whole.
 
 ## [0.7.16] - 2026-11-24
