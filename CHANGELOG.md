@@ -3,6 +3,8 @@
 ## [Unreleased]
 
 ### Fixed
+- `(bool)p` compares a pointer, nullable ones included, with `null`. It kept the low bit of the address, so a non-null pointer to an even address was `false`; with `std`, and on the web, a nullable pointer gave a meaningless value.
+- A cast from a pointer to a floating-point type is error `E3073` instead of storing the bits of the address in the float. Cast to `u64` first to convert the address.
 - The fallback of `??` is converted to the value type of the left side: a narrower number (`i64?` with an `i32` fallback, `f64?` with `2`), a literal ending a chain (`a ?? b ?? 6` with two `i64?`), a `string?` with a literal and an `i8*?` with a `str` no longer fail with `LLVM module verification failed`, with `??=` too.
 - A `str` or `string` passed to an `i8*` constructor parameter (and a byte pointer passed to a `str` or `string` one) is converted as in a function call, instead of failing with `LLVM module verification failed`.
 - A `str` or `string` given as an `i8*` union variant payload, and a byte pointer given as a `str` or `string` payload, is converted as in a call instead of being stored as it was, which read the wrong bytes.
