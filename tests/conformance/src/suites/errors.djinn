@@ -803,6 +803,44 @@ i32 main() {
     }
 
     [Test]
+    void pointer_to_f64_cast() {
+        str source = """
+unsafe i32 main() {
+    i32 value = 7;
+    i32* typed = &value;
+    f64 bits = (f64)typed;
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.INVALID_CAST).at(4, 16));
+    }
+
+    [Test]
+    void raw_pointer_to_f32_cast() {
+        str source = """
+i32 main() {
+    i32 value = 7;
+    ptr raw = (ptr)&value;
+    return (i32)(f32)raw;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.INVALID_CAST).at(4, 17));
+    }
+
+    [Test]
+    void nullable_pointer_to_float_cast() {
+        str source = """
+i32 main() {
+    i32*? empty = null;
+    f64 bits = (f64)empty;
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.INVALID_CAST).at(3, 16));
+        Verify.source(source).with_std().diagnostics(Expected.error(DiagnosticErrors.INVALID_CAST).at(3, 16));
+    }
+
+    [Test]
     void recursive_enum() {
         str source = """
 union Tree {
@@ -1462,6 +1500,120 @@ i32 main() {
     }
 
     [Test]
+    void narrow_new_constructor_argument() {
+        str source = """
+struct Box {
+    i32 value;
+    Box(i32 value) {
+        this.value = value;
+    }
+}
+
+i32 main() {
+    i64 value = 1;
+    Box* box = new Box(value);
+    return box.value;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.IMPLICIT_CONVERSION).at(10, 24));
+    }
+
+    [Test]
+    void narrow_constructor_argument() {
+        str source = """
+struct Box {
+    i32 value;
+    Box(i32 value) {
+        this.value = value;
+    }
+}
+
+i32 main() {
+    f64 value = 0.5;
+    Box box = Box(value);
+    return box.value;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.IMPLICIT_CONVERSION).at(10, 19)
+            .with_message("parameter 'value' of the 'Box' constructor (argument 1): cannot convert 'f64' to 'i32': only a wider type of the same kind converts implicitly; use an explicit cast"));
+    }
+
+    [Test]
+    void narrow_generic_constructor_argument() {
+        str source = """
+struct Pair<T> {
+    T first;
+    i32 second;
+    Pair(T first, i32 second) {
+        this.first = first;
+        this.second = second;
+    }
+}
+
+i32 main() {
+    i64 value = 1;
+    Pair<i32>* a = new Pair<i32>(value, 1);
+    Pair<i32> b = Pair<i32>(1, value);
+    return a.second + b.second;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.IMPLICIT_CONVERSION).at(12, 34)
+            .and_error(DiagnosticErrors.IMPLICIT_CONVERSION).at(13, 32));
+    }
+
+    [Test]
+    void narrow_overloaded_constructor_argument() {
+        str source = """
+struct Box {
+    i32 value;
+    Box(i32 value) {
+        this.value = value;
+    }
+    Box(i32 left, i32 right) {
+        this.value = left + right;
+    }
+}
+
+i32 main() {
+    i64 value = 1;
+    Box box = Box(1, value);
+    return box.value;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.IMPLICIT_CONVERSION).at(13, 22));
+    }
+
+    [Test]
+    void constructor_argument_conversions() {
+        str source = """
+extern "C" {
+    i32 strlen(i8* text);
+}
+
+struct Box {
+    i64 wide;
+    i32 length;
+    Box(i64 wide, i8* text) {
+        this.wide = wide;
+        unsafe {
+            this.length = strlen(text);
+        }
+    }
+}
+
+i32 main() {
+    i32 narrow = 30;
+    f64 half = 8.5;
+    str word = "abc";
+    Box box = Box(narrow, word);
+    Box* other = new Box((i64)half, word);
+    return (i32)box.wide + box.length + (i32)other.wide + other.length;
+}
+""";
+        Verify.source(source).runs(Expected.exit(44));
+    }
+
+    [Test]
     void narrow_return() {
         str source = """
 i32 main() {
@@ -1695,6 +1847,368 @@ i32 main() {
 }
 """;
         Verify.source(source).runs(Expected.exit(104));
+    }
+
+    [Test]
+    void pointer_as_number_argument() {
+        str source = """
+void take(i32 amount) { }
+
+i32 main() {
+    i32 value = 1;
+    take(&value);
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.IMPLICIT_CONVERSION).at(5, 10)
+            .with_message("parameter 'amount' of 'take' (argument 1): cannot convert 'i32*' to 'i32': a pointer does not convert to a number implicitly; use an explicit cast"));
+    }
+
+    [Test]
+    void pointer_as_number_union_payload() {
+        str source = """
+union Slot<T> { Number(T), Empty, }
+union Plain { Number(i32), Empty, }
+
+i32 main() {
+    i32 value = 1;
+    Plain plain = Plain::Number(&value);
+    Slot<i32> named = Slot<i32>::Number(&value);
+    Slot<i32> inferred = Slot::Number(&value);
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.IMPLICIT_CONVERSION).at(6, 33)
+            .with_message("cannot convert 'i32*' to 'i32': a pointer does not convert to a number implicitly; use an explicit cast")
+            .and_error(DiagnosticErrors.IMPLICIT_CONVERSION).at(7, 41)
+            .and_error(DiagnosticErrors.IMPLICIT_CONVERSION).at(8, 39));
+    }
+
+    [Test]
+    void pointer_as_number_method_argument() {
+        str source = """
+struct Counter {
+    i32 total;
+    Counter() { this.total = 0; }
+    void add(i32 amount) { this.total += amount; }
+    static void check(i32 amount) { }
+}
+
+i32 main() {
+    i32 value = 1;
+    mut Counter counter = Counter();
+    counter.add(&value);
+    Counter.check(&value);
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.IMPLICIT_CONVERSION).at(11, 17)
+            .and_error(DiagnosticErrors.IMPLICIT_CONVERSION).at(12, 19));
+    }
+
+    [Test]
+    void pointer_as_number_constructor_argument() {
+        str source = """
+struct Box {
+    i32 value;
+    Box(i32 value) {
+        this.value = value;
+    }
+}
+
+i32 main() {
+    i32 value = 1;
+    Box* heap = new Box(&value);
+    Box stack = Box(&value);
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.IMPLICIT_CONVERSION).at(10, 25)
+            .and_error(DiagnosticErrors.IMPLICIT_CONVERSION).at(11, 21));
+    }
+
+    [Test]
+    void pointer_as_number_generic_and_variadic_argument() {
+        str source = """
+T first<T>(T value, i32 amount) { return value; }
+void many(i32... values) { }
+
+i32 main() {
+    i32 value = 1;
+    first<i32>(1, &value);
+    many(1, &value);
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.IMPLICIT_CONVERSION).at(6, 19)
+            .and_error(DiagnosticErrors.IMPLICIT_CONVERSION).at(7, 13));
+    }
+
+    [Test]
+    void byte_pointer_and_null_as_number_argument() {
+        str source = """
+void take(i32 amount) { }
+
+unsafe i32 main() {
+    ptr<i8> bytes = (ptr<i8>)0;
+    take(bytes);
+    take(null);
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.IMPLICIT_CONVERSION).at(5, 10)
+            .and_error(DiagnosticErrors.IMPLICIT_CONVERSION).at(6, 10));
+    }
+
+    [Test]
+    void pointer_as_float_argument() {
+        str source = """
+void take(f64 amount) { }
+
+i32 main() {
+    i32 value = 1;
+    take(&value);
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.IMPLICIT_CONVERSION).at(5, 10)
+            .with_message("parameter 'amount' of 'take' (argument 1): cannot convert 'i32*' to 'f64': a pointer does not convert to a float"));
+    }
+
+    [Test]
+    void pointer_as_bool_argument() {
+        str source = """
+void take(bool found) { }
+
+i32 main() {
+    i32 value = 1;
+    take(&value);
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.IMPLICIT_CONVERSION).at(5, 10)
+            .with_message("parameter 'found' of 'take' (argument 1): cannot convert 'i32*' to 'bool': a pointer does not convert to a bool implicitly; compare it with null"));
+    }
+
+    [Test]
+    void pointer_as_enum_argument() {
+        str source = """
+enum Color { Red, Green, }
+void paint(Color color) { }
+
+i32 main() {
+    i32 value = 1;
+    paint(&value);
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.IMPLICIT_CONVERSION).at(6, 11));
+    }
+
+    [Test]
+    void string_literal_as_number_argument() {
+        str source = """
+void take(i32 amount) { }
+
+i32 main() {
+    take("one");
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.IMPLICIT_CONVERSION).at(4, 10)
+            .with_message("parameter 'amount' of 'take' (argument 1): cannot convert 'str' to 'i32': a string literal converts only to str, string, i8* or ptr<i8>"));
+    }
+
+    [Test]
+    void pointer_as_number_error_fallback() {
+        str source = """
+struct Failure;
+
+i32 risky() throws(Failure) {
+    return 1;
+}
+
+i32 main() {
+    i32 value = 1;
+    i32 first = try risky() ?: &value;
+    i32 second = switch (risky()) {
+        Result result -> result,
+        Failure failure -> &value
+    };
+    return first + second;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.IMPLICIT_CONVERSION).at(9, 32)
+            .and_error(DiagnosticErrors.IMPLICIT_CONVERSION).at(12, 28));
+    }
+
+    [Test]
+    void pointer_cast_and_comparison_as_arguments() {
+        str source = """
+i32 address(i64 value) {
+    if (value != 0) { return 1; }
+    return 0;
+}
+i32 found(bool value) {
+    if (value) { return 2; }
+    return 0;
+}
+
+unsafe i32 main() {
+    i32 value = 1;
+    i32* pointer = &value;
+    return address((i64)pointer) + found(pointer != null);
+}
+""";
+        Verify.source(source).runs(Expected.exit(3));
+    }
+
+    [Test]
+    void coalesce_pointer_fallback_for_a_value() {
+        str source = """
+import std;
+
+i32 main() {
+    i32 value = 1;
+    mut i32? missing = null;
+    i32 chosen = missing ?? &value;
+    missing ??= &value;
+    return chosen;
+}
+""";
+        Verify.source(source).with_std().diagnostics(Expected.error(DiagnosticErrors.IMPLICIT_CONVERSION).at(6, 29)
+            .with_message("cannot convert 'i32*' to 'i32': a pointer does not convert to a number implicitly; use an explicit cast")
+            .and_error(DiagnosticErrors.IMPLICIT_CONVERSION).at(7, 17));
+    }
+
+    [Test]
+    void coalesce_narrowing_fallback() {
+        str source = """
+import std;
+
+i32 main() {
+    i32? missing = null;
+    i64 wide = 1;
+    i32 narrowed = missing ?? wide;
+    i32 truncated = missing ?? 2.5;
+    return narrowed + truncated;
+}
+""";
+        Verify.source(source).with_std().diagnostics(Expected.error(DiagnosticErrors.IMPLICIT_CONVERSION).at(6, 31)
+            .and_error(DiagnosticErrors.IMPLICIT_CONVERSION).at(7, 32));
+    }
+
+    [Test]
+    void coalesce_fallback_of_another_pointer_type() {
+        str source = """
+import std;
+
+struct Box { i32 value; }
+struct Other { i64 value; }
+
+i32 main() {
+    Other other = { .value = 1 };
+    Box*? missing = null;
+    optional<Box*> empty = optional::Empty();
+    Box* first = missing ?? &other;
+    Box* second = missing ?? 5;
+    Box* third = empty ?? &other;
+    return 0;
+}
+""";
+        Verify.source(source).with_std().diagnostics(Expected.error(DiagnosticErrors.IMPLICIT_CONVERSION).at(10, 29)
+            .and_error(DiagnosticErrors.IMPLICIT_CONVERSION).at(11, 30)
+            .and_error(DiagnosticErrors.IMPLICIT_CONVERSION).at(12, 27));
+    }
+
+    [Test]
+    void coalesce_fallback_of_another_type() {
+        str source = """
+import std;
+
+struct Box { i32 value; }
+struct Other { i64 value; }
+
+i32 main() {
+    Box? missing = null;
+    Other other = { .value = 1 };
+    Box first = missing ?? other;
+    Box second = missing ?? 5;
+    i32[]? numbers = null;
+    i64[] wide = [1];
+    i32[] third = numbers ?? wide;
+    return 0;
+}
+""";
+        Verify.source(source).with_std().diagnostics(Expected.error(DiagnosticErrors.IMPLICIT_CONVERSION).at(9, 28)
+            .with_message("cannot convert 'Other' to 'Box': there is no implicit conversion between these types")
+            .and_error(DiagnosticErrors.IMPLICIT_CONVERSION).at(10, 29)
+            .and_error(DiagnosticErrors.IMPLICIT_CONVERSION).at(13, 30));
+    }
+
+    [Test]
+    void coalesce_converts_the_fallback() {
+        str source = """
+import std;
+
+i32 main() {
+    i64? missing = null;
+    i64? other = null;
+    i32 narrow = 4;
+    i64 widened = missing ?? narrow;
+    i64 literal = missing ?? 10;
+    i64 chained = missing ?? other ?? 1;
+    i64 chosen = missing ?? (narrow > 0 ? 2 : 3);
+    f64? ratio = null;
+    f64 whole = ratio ?? 2;
+    string? name = null;
+    string text = name ?? "ab";
+    i8*? bytes = null;
+    str view = "abc";
+    i8* pointer = bytes ?? view;
+    i32 total = (i32)(widened + literal + chained + chosen) + (i32)whole;
+    return total + (i32)text.length + (i32)(*pointer == 97);
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(22));
+    }
+
+    [Test]
+    void parse_value_argument_of_another_type() {
+        str source = """
+enum Code { Unknown = 0, One = 1 }
+
+i32 main() {
+    i32 value = 1;
+    u32 unsigned_value = 1;
+    Code first = Code::parseValue(&value);
+    Code second = Code::parseValue(1.5);
+    Code third = Code::parseValue(unsigned_value);
+    Code fourth = Code::parseValue("1");
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.IMPLICIT_CONVERSION).at(6, 35)
+            .with_message("cannot convert 'i32*' to 'i64': a pointer does not convert to a number implicitly; use an explicit cast")
+            .and_error(DiagnosticErrors.IMPLICIT_CONVERSION).at(7, 36)
+            .and_error(DiagnosticErrors.IMPLICIT_CONVERSION).at(8, 35)
+            .and_error(DiagnosticErrors.IMPLICIT_CONVERSION).at(9, 36));
+    }
+
+    [Test]
+    void parse_value_widens_its_argument() {
+        str source = """
+enum Code { Unknown = 0, One = 1, Seven = 7 }
+
+i32 main() {
+    i32 narrow = 7;
+    i16 narrower = 1;
+    Code first = Code::parseValue(narrow);
+    Code second = Code::parseValue(narrower);
+    return (i32)(first == Code::Seven) + (i32)(second == Code::One) * 2;
+}
+""";
+        Verify.source(source).runs(Expected.exit(3));
     }
 
     [Test]
