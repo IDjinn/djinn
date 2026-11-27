@@ -2,7 +2,11 @@
 
 ## [Unreleased]
 
+## [0.7.17] - 2026-11-27
+
 ### Fixed
+- An installed `djinnc` can build a `ui` project with `--target web`: releases now carry the web bindings (`libs/ui/js` and the sources it shares). Without them every use of a `ui` type was `E3001: unknown type`; when a web build fails with an unknown type, the compiler now names the libraries that have no bindings and where it looked.
+- `--target web` declares `Math` in `std::math`, as the native std does, so `import std::math;` finds it (it was in `std::sys`), and `Math.min`, `Math.max` and `Math.abs` take any number type instead of only `f64`.
 - A local put into a union variant (`return optional::Value(value);`, `result::Ok(value)`) or wrapped into an `optional<T>` parameter is moved: it is no longer disposed while the union still holds it.
 - `--run` loads the libraries the program declares (`-l`, `-L`, library files by path, and the system dependencies recorded in a `.djlib`), so a project that uses `win32` no longer fails with `Symbols not found: [ DispatchMessageA, ... ]`.
 - `--run` on Windows no longer crashes when the app's code writes a global that lives in a `.djlib` (opening a `win32` window segfaulted).
