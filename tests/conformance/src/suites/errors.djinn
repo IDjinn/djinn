@@ -1515,6 +1515,189 @@ i32 main() {
     }
 
     [Test]
+    void narrow_union_payload() {
+        str source = """
+union Shape { Circle(i32), Empty, }
+
+f64 half() {
+    return 0.5;
+}
+
+i32 main() {
+    Shape shape = Shape::Circle(half());
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.IMPLICIT_CONVERSION).at(8, 33));
+    }
+
+    [Test]
+    void narrow_returned_union_payload() {
+        str source = """
+union Shape { Rect(i32, i32), Empty, }
+
+Shape wide(i64 height) {
+    return Shape::Rect(1, height);
+}
+
+i32 main() {
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.IMPLICIT_CONVERSION).at(4, 27));
+    }
+
+    [Test]
+    void narrow_explicit_generic_union_payload() {
+        str source = """
+union Holder<T> { Full(T), None, }
+
+i32 main() {
+    i64 wide = 1;
+    auto holder = Holder<i32>::Full(wide);
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.IMPLICIT_CONVERSION).at(5, 37));
+    }
+
+    [Test]
+    void narrow_hinted_generic_union_payload() {
+        str source = """
+union Holder<T> { Full(T), None, }
+
+i32 main() {
+    i64 wide = 1;
+    Holder<i32> holder = Holder::Full(wide);
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.IMPLICIT_CONVERSION).at(5, 39));
+    }
+
+    [Test]
+    void narrow_inferred_generic_union_payload() {
+        str source = """
+union Pair<T> { Both(T, T), None, }
+
+i32 main() {
+    i64 wide = 1;
+    auto pair = Pair::Both(1, wide);
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.IMPLICIT_CONVERSION).at(5, 31));
+    }
+
+    [Test]
+    void narrow_optional_and_result_payload() {
+        str source = """
+import std::types;
+
+optional<i32> hinted(i64 wide) {
+    return optional::Value(wide);
+}
+
+result<i32, i32> succeeded(i64 wide) {
+    return result::Ok(wide);
+}
+
+i32 main() {
+    i64 wide = 1;
+    auto written = optional<i32>::Value(wide);
+    return 0;
+}
+""";
+        Verify.source(source).with_std().diagnostics(Expected.error(DiagnosticErrors.IMPLICIT_CONVERSION).at(4, 28)
+            .and_error(DiagnosticErrors.IMPLICIT_CONVERSION).at(8, 23)
+            .and_error(DiagnosticErrors.IMPLICIT_CONVERSION).at(13, 41));
+    }
+
+    [Test]
+    void number_as_pointer_union_payload() {
+        str source = """
+union Slot { Address(i32*), Empty, }
+
+i32 main() {
+    i32 value = 1;
+    Slot slot = Slot::Address(value);
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.IMPLICIT_CONVERSION).at(5, 31));
+    }
+
+    [Test]
+    void struct_as_number_union_payload() {
+        str source = """
+struct Point { i32 x; }
+union Slot { Number(i32), Empty, }
+
+i32 main() {
+    Point point = { .x = 1 };
+    Slot slot = Slot::Number(point);
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.ARGUMENT_TYPE_MISMATCH).at(6, 30));
+    }
+
+    [Test]
+    void null_as_pointer_union_payload() {
+        str source = """
+union Slot { Address(i32*), Empty, }
+
+i32 main() {
+    Slot slot = Slot::Address(null);
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.VALUE_TYPE_MISMATCH).at(4, 31));
+    }
+
+    [Test]
+    void widened_and_literal_union_payload() {
+        str source = """
+union Number { Whole(i64), Real(f64), Small(u8), Empty, }
+
+i32 main() {
+    i32 whole = 30;
+    f32 real = (f32)2.5;
+    Number first = Number::Whole(whole);
+    Number second = Number::Real(real);
+    Number third = Number::Small(8);
+    mut i32 total = 0;
+    if (first is Whole value) { total += (i32)value; }
+    if (second is Real value) { total += (i32)(value * 2.0); }
+    if (third is Small value) { total += (i32)value; }
+    return total;
+}
+""";
+        Verify.source(source).runs(Expected.exit(43));
+    }
+
+    [Test]
+    void text_union_payload_is_converted() {
+        str source = """
+union Text { View(str), Bytes(i8*), Empty, }
+
+i32 main() {
+    i8* raw = "abc";
+    str view = "hello";
+    Text first = Text::View(raw);
+    Text second = Text::Bytes(view);
+    mut i32 total = 0;
+    if (first is View value) { total += (i32)value.length; }
+    if (second is Bytes value) {
+        unsafe { total += (i32)value[1]; }
+    }
+    return total;
+}
+""";
+        Verify.source(source).runs(Expected.exit(104));
+    }
+
+    [Test]
     void mixed_sign_operands() {
         str source = """
 i32 main() {
