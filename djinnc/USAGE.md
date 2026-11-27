@@ -116,7 +116,8 @@ build of the program does not invalidate it. The program takes from it only the 
 - Libraries become bindings: `std` is `runtime/js/std` and a library `name` with a `libs/<name>/js` folder (`ui`) is
   replaced by the Djinn sources and `.js` files there (`shared.txt` lists sources of the library itself that need
   nothing native, compiled as they are). A library without one still runs its procedural macros on the host
-  (`ui_macros`).
+  (`ui_macros`). The folders are looked up in `<runtime>/../libs`, in a checkout and in an install (releases carry them,
+  staged by `tools/package_web_libs.sh`); a web build that fails with an unknown type names the libraries it found no bindings for.
 - `[Js("template")]` on a function or method makes every call the template, with `$this` for the receiver, `$0`, `$1`,
   ... for the arguments and `$*` for all of them; the function itself is never emitted. That is how a binding reaches
   the browser with no wrapper in between: `[Js("$read($this)")] public T get()` makes `count.get()` the call
