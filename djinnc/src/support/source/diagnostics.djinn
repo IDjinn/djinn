@@ -4,6 +4,12 @@ unsafe static mut i32 diagnostics_json = 0;
 unsafe static mut ptr diagnostics_arguments = null;
 unsafe static mut bool diagnostics_unknown_type = false;
 
+struct DiagnosticSite {
+    ptr<i8> file;
+    i32 line;
+    i32 column;
+}
+
 struct Diagnostics {
     ptr<i8> file;
     i32 errors;
@@ -11,11 +17,35 @@ struct Diagnostics {
     i32 last_code;
     i32 last_line;
     i32 last_column;
+    bool settling;
+    PointerList* settled;
 
     public static unsafe Diagnostics* create(ptr<i8> file) {
         Diagnostics* diagnostics = (Diagnostics*)Memory.zalloc(sizeof(Diagnostics));
         diagnostics.file = file;
+        diagnostics.settled = PointerList.create();
         return diagnostics;
+    }
+
+    unsafe bool is_settled(ptr<i8> file, i32 line, i32 column) {
+        PointerList* sites = this.settled;
+        for (mut i32 i = 0; i < sites.length; i = i + 1) {
+            DiagnosticSite* site = (DiagnosticSite*)sites.get(i);
+            if (site.line == line && site.column == column && site.file == file) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // While settling, an error closes its position: a later pass over the same source reports nothing there.
+    unsafe void settle(ptr<i8> file, i32 line, i32 column) {
+        DiagnosticSite* site = (DiagnosticSite*)Memory.zalloc(sizeof(DiagnosticSite));
+        site.file = file;
+        site.line = line;
+        site.column = column;
+        PointerList* sites = this.settled;
+        sites.push((ptr)site);
     }
 
     public static unsafe void set_json(bool enabled) {
@@ -136,6 +166,12 @@ struct Diagnostics {
         this.last_code = code;
         this.last_line = line;
         this.last_column = column;
+        if (is_error && this.is_settled(file, line, column)) {
+            return;
+        }
+        if (is_error && this.settling) {
+            this.settle(file, line, column);
+        }
         if (code == DiagnosticErrors.UNKNOWN_TYPE) {
             unsafe {
                 diagnostics_unknown_type = true;

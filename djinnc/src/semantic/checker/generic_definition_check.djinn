@@ -1,0 +1,676 @@
+namespace djinnc;
+
+// Checks the member accesses of generic bodies where they are declared, so a generic nobody instantiates is not
+// accepted with them wrong. It reports only what is wrong before any instantiation: a member missing from a type that
+// does not depend on the parameters, or one that neither the 'where' bounds of a parameter nor a type implementing
+// them has. A parameter without bounds, and every type this pass cannot name, is left to the check of each instance.
+struct GenericDefinitionCheck {
+    TypeChecker* checker;
+    SymbolTable* symbols;
+    GenericNames* parameters;
+    GenericNames* locals;
+    GenericShape* self_shape;
+    GenericShape* member_shape;
+
+    public static unsafe GenericDefinitionCheck* create(TypeChecker* checker) {
+        GenericDefinitionCheck* check = (GenericDefinitionCheck*)Memory.zalloc(sizeof(GenericDefinitionCheck));
+        check.checker = checker;
+        check.symbols = checker.symbols;
+        return check;
+    }
+
+    public unsafe void run() {
+        SymbolTable* symbols = this.symbols;
+        PointerList* structs = symbols.structs;
+        for (mut i32 i = 0; i < structs.length; i = i + 1) {
+            StructInfo* info = (StructInfo*)structs.get(i);
+            if (info.is_template) {
+                this.check_template(info);
+            }
+        }
+        PointerList* functions = symbols.functions;
+        for (mut i32 i = 0; i < functions.length; i = i + 1) {
+            FunctionInfo* info = (FunctionInfo*)functions.get(i);
+            if (info.is_template && info.node != null) {
+                this.check_generic_function(info);
+            }
+        }
+    }
+
+    unsafe void check_template(StructInfo* info) {
+        GenericParams* params = info.generics;
+        PointerList* args = PointerList.create();
+        for (mut i32 i = 0; i < params.count(); i = i + 1) {
+            args.push((ptr)GenericShape.parameter(params, i, info.namespace_id));
+        }
+        GenericShape* self_shape = GenericShape.of_struct(info, args);
+        Node* declaration = info.node;
+        for (mut i32 i = 0; i < declaration.count(); i = i + 1) {
+            Node* member = declaration.child(i);
+            if (member.kind() == NodeKind::FUNCTION) {
+                this.check_body(member, this.template_parameters(info, args), self_shape);
+            }
+        }
+        PointerList* impls = info.impls;
+        if (impls == null) {
+            return;
+        }
+        for (mut i32 i = 0; i < impls.length; i = i + 1) {
+            Node* implementation = (Node*)impls.get(i);
+            for (mut i32 m = 0; m < implementation.count(); m = m + 1) {
+                Node* member = implementation.child(m);
+                if (member.kind() != NodeKind::FUNCTION) {
+                    continue;
+                }
+                GenericNames* parameters = this.impl_parameters(info, implementation, args);
+                if (parameters != null) {
+                    this.check_body(member, parameters, self_shape);
+                }
+            }
+        }
+    }
+
+    unsafe void check_generic_function(FunctionInfo* info) {
+        StructInfo* owner = info.owner;
+        mut GenericShape* self_shape = (GenericShape*)0;
+        if (owner != null) {
+            if (owner.is_template || owner.origin != null) {
+                return;
+            }
+            if (owner.is_primitive) {
+                self_shape = GenericShape.primitive(owner.type_id);
+            } else {
+                self_shape = GenericShape.of_struct(owner, (PointerList*)0);
+            }
+        }
+        this.check_body(info.node, GenericNames.create(info.namespace_id), self_shape);
+    }
+
+    unsafe void check_body(Node* method, GenericNames* parameters, GenericShape* self_shape) {
+        if (method.first() == null || method.is_library_interface()) {
+            return;
+        }
+        GenericParams* own = method.generics();
+        if (own != null) {
+            for (mut i32 i = 0; i < own.count(); i = i + 1) {
+                GenericShape* shape = GenericShape.parameter(own, i, parameters.scope);
+                parameters.bind(shape.name_atom, shape);
+            }
+        }
+        this.parameters = parameters;
+        this.locals = GenericNames.create(parameters.scope);
+        this.self_shape = (GenericShape*)0;
+        GenericNames* locals = this.locals;
+        if (self_shape != null && !method.flag()) {
+            this.self_shape = self_shape;
+            mut GenericShape* receiver = self_shape;
+            if (self_shape.kind == GenericShapeKind::STRUCT) {
+                StructInfo* owner = self_shape.info;
+                if (!owner.is_enum) {
+                    receiver = GenericShape.pointer_to(self_shape);
+                }
+            }
+            locals.bind(Atoms.THIS_ATOM, receiver);
+        }
+        for (mut i32 i = 0; i < method.count(); i = i + 1) {
+            Node* parameter = method.child(i);
+            locals.bind(parameter.name(), this.shape_of_reference(parameter.type(), parameters));
+        }
+        this.walk(method.first());
+    }
+
+    unsafe GenericNames* template_parameters(StructInfo* template, PointerList* args) {
+        GenericNames* parameters = GenericNames.create(template.namespace_id);
+        GenericParams* params = template.generics;
+        IdList* names = params.names;
+        for (mut i32 i = 0; i < names.length && i < args.length; i = i + 1) {
+            parameters.bind(names.get(i), (GenericShape*)args.get(i));
+        }
+        return parameters;
+    }
+
+    unsafe GenericNames* impl_parameters(StructInfo* template, Node* implementation, PointerList* args) {
+        TypeRef* target = implementation.type();
+        PointerList* names = target.args;
+        if (names == null || names.length != args.length) {
+            return (GenericNames*)0;
+        }
+        GenericNames* parameters = GenericNames.create(template.namespace_id);
+        for (mut i32 i = 0; i < names.length; i = i + 1) {
+            TypeRef* name = (TypeRef*)names.get(i);
+            parameters.bind(name.name_atom, (GenericShape*)args.get(i));
+        }
+        return parameters;
+    }
+
+    // Never instantiates a template: that would add instances to the program only because a body was looked at.
+    unsafe GenericShape* shape_of_reference(TypeRef* reference, GenericNames* parameters) {
+        if (reference == null || reference.nullable) {
+            return (GenericShape*)0;
+        }
+        SymbolTable* symbols = this.symbols;
+        if (reference.kind == TypeKind.POINTER) {
+            return GenericShape.pointer_to(this.shape_of_reference(reference.element, parameters));
+        }
+        if (reference.kind == TypeKind.INTEGER || reference.kind == TypeKind.FLOAT) {
+            u32 primitive = symbols.resolve_type(reference, parameters.scope);
+            if (primitive == 0) {
+                return (GenericShape*)0;
+            }
+            return GenericShape.primitive(primitive);
+        }
+        if (reference.kind != TypeKind.NAMED) {
+            return (GenericShape*)0;
+        }
+        if (reference.args == null && reference.full_atom == reference.name_atom) {
+            i32 index = parameters.find(reference.name_atom);
+            if (index >= 0) {
+                return parameters.at(index);
+            }
+        }
+        StructInfo* info = symbols.find_struct(reference.full_atom, reference.name_atom, parameters.scope);
+        if (info == null || (info.is_enum && info.has_payload)) {
+            return (GenericShape*)0;
+        }
+        PointerList* given = reference.args;
+        if (!info.is_template) {
+            if (given != null) {
+                return (GenericShape*)0;
+            }
+            return GenericShape.of_struct(info, (PointerList*)0);
+        }
+        GenericParams* params = info.generics;
+        if (given == null || given.length != params.count()) {
+            return (GenericShape*)0;
+        }
+        PointerList* args = PointerList.create();
+        for (mut i32 i = 0; i < given.length; i = i + 1) {
+            args.push((ptr)this.shape_of_reference((TypeRef*)given.get(i), parameters));
+        }
+        return GenericShape.of_struct(info, args);
+    }
+
+    unsafe GenericShape* shape_of_type(u32 type) {
+        if (type == 0 || Types.is_nullable_pointer(type)) {
+            return (GenericShape*)0;
+        }
+        if (Types.is_pointer(type)) {
+            return GenericShape.pointer_to(this.shape_of_type(Types.element(type)));
+        }
+        SymbolTable* symbols = this.symbols;
+        mut StructInfo* info = symbols.enum_of_type(type);
+        if (info != null && (symbols.nullable_payload(type) != 0 || symbols.nullable_value_payload(type) != 0)) {
+            return (GenericShape*)0;
+        }
+        if (info == null && Types.is_struct(type)) {
+            info = symbols.struct_at(Types.struct_index(type));
+        }
+        if (info != null) {
+            return GenericShape.of_struct(info, (PointerList*)0);
+        }
+        if (Types.is_integer(type) || Types.is_float(type) || type == Types.bool_type()) {
+            return GenericShape.primitive(type);
+        }
+        return (GenericShape*)0;
+    }
+
+    unsafe StructInfo* struct_of(GenericShape* shape) {
+        if (shape.kind == GenericShapeKind::PRIMITIVE) {
+            SymbolTable* symbols = this.symbols;
+            return symbols.primitive_owner(shape.type_id);
+        }
+        return shape.info;
+    }
+
+    unsafe bool find_field_member(GenericShape* base, Node* member) {
+        this.member_shape = (GenericShape*)0;
+        StructInfo* info = this.struct_of(base);
+        SymbolTable* symbols = this.symbols;
+        TypeChecker* checker = this.checker;
+        if (info.is_enum && info.header_count > 0) {
+            Node* declaration = info.node;
+            for (mut i32 i = 0; i < info.header_count; i = i + 1) {
+                Node* header = declaration.child(i);
+                if (Strings.same(header.text(), member.text())) {
+                    this.member_shape = this.shape_of_reference(header.type(), GenericNames.create(info.namespace_id));
+                    return true;
+                }
+            }
+        }
+        if (!info.is_template) {
+            FieldInfo* field = symbols.find_field(info, member.name());
+            if (field != null) {
+                this.member_shape = this.shape_of_type(field.type);
+                return true;
+            }
+            FunctionInfo* getter = checker.find_accessor(info, "get:", member.text());
+            if (getter != null) {
+                if (!getter.is_template) {
+                    this.member_shape = this.shape_of_type(getter.return_type);
+                }
+                return true;
+            }
+            return checker.find_accessor(info, "set:", member.text()) != null;
+        }
+        Node* declaration = info.node;
+        for (mut i32 i = 0; i < declaration.count(); i = i + 1) {
+            Node* field = declaration.child(i);
+            if (field.kind() == NodeKind::FIELD_DECL && field.first() == null && field.name() == member.name()) {
+                this.member_shape = this.shape_of_reference(field.type(), this.template_parameters(info, base.args));
+                return true;
+            }
+        }
+        if (this.find_template_method(base, GenericDefinitionCheck.accessor_atom("get:", member.text()))) {
+            return true;
+        }
+        return this.find_template_method(base, GenericDefinitionCheck.accessor_atom("set:", member.text()));
+    }
+
+    static u32 accessor_atom(ptr<i8> prefix, ptr<i8> name) {
+        ByteBuffer* full = ByteBuffer.create();
+        full.append(prefix);
+        full.append(name);
+        return Ast.intern_base_name(full.cstr(), (i32)strlen(full.cstr()));
+    }
+
+    // The return type is known only for a name with a single declaration that is neither generic nor async.
+    unsafe bool find_method_member(GenericShape* base, u32 name) {
+        this.member_shape = (GenericShape*)0;
+        StructInfo* info = this.struct_of(base);
+        if (info.is_template) {
+            return this.find_template_method(base, name);
+        }
+        SymbolTable* symbols = this.symbols;
+        FunctionInfo* method = symbols.find_method(info, name);
+        if (method == null) {
+            return false;
+        }
+        if (!method.is_template && method.overload == null && !method.is_async) {
+            this.member_shape = this.shape_of_type(method.return_type);
+        }
+        return true;
+    }
+
+    unsafe bool find_template_method(GenericShape* base, u32 name) {
+        this.member_shape = (GenericShape*)0;
+        StructInfo* info = base.info;
+        mut i32 matches = 0;
+        mut Node* found = (Node*)0;
+        mut GenericNames* parameters = this.template_parameters(info, base.args);
+        Node* declaration = info.node;
+        for (mut i32 i = 0; i < declaration.count(); i = i + 1) {
+            Node* member = declaration.child(i);
+            if (member.kind() == NodeKind::FUNCTION && member.name() == name) {
+                matches = matches + 1;
+                found = member;
+            }
+        }
+        PointerList* impls = info.impls;
+        if (impls != null) {
+            for (mut i32 i = 0; i < impls.length; i = i + 1) {
+                Node* implementation = (Node*)impls.get(i);
+                for (mut i32 m = 0; m < implementation.count(); m = m + 1) {
+                    Node* member = implementation.child(m);
+                    if (member.kind() == NodeKind::FUNCTION && member.name() == name) {
+                        matches = matches + 1;
+                        found = member;
+                        parameters = this.impl_parameters(info, implementation, base.args);
+                    }
+                }
+            }
+        }
+        if (matches == 1 && parameters != null && found.generics() == null && (found.op() & 1) == 0) {
+            this.member_shape = this.shape_of_reference(found.type(), parameters);
+        }
+        return matches > 0;
+    }
+
+    unsafe bool bounds_declare(GenericShape* parameter, Node* member, bool call) {
+        SymbolTable* symbols = this.symbols;
+        PointerList* bounds = parameter.bounds;
+        u32 getter = GenericDefinitionCheck.accessor_atom("get:", member.text());
+        u32 setter = GenericDefinitionCheck.accessor_atom("set:", member.text());
+        for (mut i32 b = 0; b < bounds.length; b = b + 1) {
+            TypeRef* bound = (TypeRef*)bounds.get(b);
+            InterfaceInfo* contract = symbols.find_interface(bound.full_atom, bound.name_atom, parameter.scope);
+            if (contract == null) {
+                return true;
+            }
+            Node* declaration = contract.node;
+            for (mut i32 i = 0; i < declaration.count(); i = i + 1) {
+                Node* required = declaration.child(i);
+                if (required.name() == member.name() && (call || required.kind() == NodeKind::FIELD_DECL)) {
+                    return true;
+                }
+                if (!call && (required.name() == getter || required.name() == setter)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    // An instance may use what its argument has beyond the bounds (INumber declares no 'min'). A type of this program
+    // or of its libraries that implements every bound proves that some instantiation can have the member.
+    unsafe bool implementor_has(GenericShape* parameter, Node* member, bool call, i32 arguments) {
+        SymbolTable* symbols = this.symbols;
+        PointerList* bounds = parameter.bounds;
+        PointerList* contracts = PointerList.create();
+        for (mut i32 b = 0; b < bounds.length; b = b + 1) {
+            TypeRef* bound = (TypeRef*)bounds.get(b);
+            contracts.push((ptr)symbols.find_interface(bound.full_atom, bound.name_atom, parameter.scope));
+        }
+        if (this.any_implementor_has(symbols.primitives, contracts, member, call, arguments)) {
+            return true;
+        }
+        return this.any_implementor_has(symbols.structs, contracts, member, call, arguments);
+    }
+
+    unsafe bool any_implementor_has(PointerList* owners, PointerList* contracts, Node* member, bool call, i32 arguments) {
+        for (mut i32 i = 0; i < owners.length; i = i + 1) {
+            StructInfo* owner = (StructInfo*)owners.get(i);
+            if (owner.is_template || !this.has_member(GenericShape.of_struct(owner, (PointerList*)0), member, call, arguments)) {
+                continue;
+            }
+            mut bool all = true;
+            for (mut i32 c = 0; c < contracts.length && all; c = c + 1) {
+                all = this.implements(owner, (InterfaceInfo*)contracts.get(c));
+            }
+            if (all) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Declared ('impl'), or by having a member of every name the interface requires.
+    unsafe bool implements(StructInfo* owner, InterfaceInfo* contract) {
+        PointerList* declared = owner.contracts;
+        if (declared != null && declared.contains((ptr)contract)) {
+            return true;
+        }
+        SymbolTable* symbols = this.symbols;
+        Node* declaration = contract.node;
+        for (mut i32 i = 0; i < declaration.count(); i = i + 1) {
+            Node* required = declaration.child(i);
+            if (required.kind() == NodeKind::FIELD_DECL && symbols.find_field(owner, required.name()) == null) {
+                return false;
+            }
+            if (required.kind() == NodeKind::FUNCTION && symbols.find_method(owner, required.name()) == null) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // The same lookups, in the same order, as the member access and method call of an instance.
+    unsafe bool has_member(GenericShape* target, Node* member, bool call, i32 arguments) {
+        if (!call) {
+            return this.find_field_member(target, member);
+        }
+        if (this.find_method_member(target, member.name())) {
+            return true;
+        }
+        if (this.find_field_member(target, member)) {
+            this.member_shape = (GenericShape*)0;
+            return true;
+        }
+        StructInfo* info = this.struct_of(target);
+        if (info.is_enum && !info.has_payload && arguments == 0 && member.name() == Ast.intern_base_name("getValue", 8)) {
+            this.member_shape = GenericShape.primitive(Types.i32_type());
+            return true;
+        }
+        return info.is_primitive && Types.is_float(info.type_id) && FloatBuiltin.lookup(member.text()) != FloatBuiltin.NONE;
+    }
+
+    unsafe void report_unbound(GenericShape* parameter, Node* member, bool call) {
+        AtomTable* atoms = Atoms.get();
+        ptr<i8> name = atoms.text(parameter.name_atom);
+        ByteBuffer* message = ByteBuffer.create();
+        if (call) {
+            message.append("method '");
+        } else {
+            message.append("field or property '");
+        }
+        message.append(member.text());
+        message.append("' is not declared by the 'where' bounds of '");
+        message.append(name);
+        message.append("' (");
+        PointerList* bounds = parameter.bounds;
+        for (mut i32 b = 0; b < bounds.length; b = b + 1) {
+            TypeRef* bound = (TypeRef*)bounds.get(b);
+            if (b > 0) {
+                message.append(", ");
+            }
+            message.append(atoms.text(bound.name_atom));
+        }
+        message.append("), and no type implementing them has it");
+        Diagnostics.add_argument(member.text());
+        Diagnostics.add_argument(name);
+        TypeChecker* checker = this.checker;
+        checker.error_code(member, DiagnosticErrors.GENERIC_MEMBER_NOT_BOUND, message.cstr());
+    }
+
+    unsafe GenericShape* access(GenericShape* base, Node* member, bool call, i32 arguments) {
+        mut GenericShape* target = base;
+        if (target != null && target.kind == GenericShapeKind::POINTER) {
+            target = target.element;
+        }
+        if (target == null || target.kind == GenericShapeKind::POINTER) {
+            return (GenericShape*)0;
+        }
+        if (target.kind == GenericShapeKind::PARAMETER) {
+            PointerList* bounds = target.bounds;
+            if (bounds.length > 0 && !this.bounds_declare(target, member, call) && !this.implementor_has(target, member, call, arguments)) {
+                this.report_unbound(target, member, call);
+            }
+            return (GenericShape*)0;
+        }
+        if (this.has_member(target, member, call, arguments)) {
+            return this.member_shape;
+        }
+        StructInfo* info = this.struct_of(target);
+        TypeChecker* checker = this.checker;
+        Diagnostics.add_argument(member.text());
+        if (call) {
+            checker.error_code(member, DiagnosticErrors.UNDECLARED_FUNCTION, TypeChecker.named_message("function '", member.text(), "' is not declared; check the spelling, the import or the namespace"));
+        } else {
+            checker.error_code(member, DiagnosticErrors.UNKNOWN_FIELD, TypeChecker.named_message("'", info.name, TypeChecker.named_message("' has no field or property '", member.text(), "'")));
+        }
+        return (GenericShape*)0;
+    }
+
+    unsafe bool names_type(Node* node) {
+        if (node.kind() != NodeKind::IDENTIFIER) {
+            return false;
+        }
+        GenericNames* locals = this.locals;
+        if (locals.find(node.name()) >= 0) {
+            return false;
+        }
+        GenericNames* parameters = this.parameters;
+        if (parameters.find(node.name()) >= 0) {
+            return true;
+        }
+        SymbolTable* symbols = this.symbols;
+        if (symbols.find_struct(node.text_atom(), node.name(), parameters.scope) != null) {
+            return true;
+        }
+        ptr<i8> text = node.text();
+        return TypeRef.from_primitive_name(text, (i32)strlen(text)) != null;
+    }
+
+    unsafe GenericShape* identifier(Node* node) {
+        GenericNames* locals = this.locals;
+        i32 local = locals.find(node.name());
+        if (local >= 0) {
+            return locals.at(local);
+        }
+        SymbolTable* symbols = this.symbols;
+        GenericNames* parameters = this.parameters;
+        if (this.self_shape == null || symbols.find_global(node.text_atom(), node.name(), parameters.scope) != null) {
+            return (GenericShape*)0;
+        }
+        if (this.find_field_member(this.self_shape, node)) {
+            return this.member_shape;
+        }
+        return (GenericShape*)0;
+    }
+
+    unsafe void walk_parts(Node* node) {
+        this.walk(node.first());
+        this.walk(node.second());
+        this.walk(node.third());
+        this.walk(node.fourth());
+        if (node.has_items()) {
+            for (mut i32 i = 0; i < node.count(); i = i + 1) {
+                this.walk(node.child(i));
+            }
+        }
+    }
+
+    unsafe void walk_scoped(Node* node) {
+        GenericNames* locals = this.locals;
+        i32 mark = locals.mark();
+        this.walk(node);
+        locals.reset_to(mark);
+    }
+
+    unsafe GenericShape* walk_call(Node* node) {
+        Node* callee = node.first();
+        mut GenericShape* result = (GenericShape*)0;
+        if (callee.kind() == NodeKind::FIELD_ACCESS) {
+            Node* base = callee.first();
+            if (!this.names_type(base)) {
+                result = this.access(this.walk(base), callee, true, node.count());
+            }
+        } else if (callee.kind() != NodeKind::IDENTIFIER) {
+            this.walk(callee);
+        } else if (callee.flag() && callee.type() != null) {
+            result = this.shape_of_reference(callee.type(), this.parameters);
+        }
+        for (mut i32 i = 0; i < node.count(); i = i + 1) {
+            this.walk(node.child(i));
+        }
+        return result;
+    }
+
+    unsafe void walk_variable(Node* node) {
+        GenericShape* initial = this.walk(node.first());
+        TypeRef* reference = node.type();
+        mut GenericShape* declared = initial;
+        if (reference != null && reference.kind != TypeKind.AUTO) {
+            declared = this.shape_of_reference(reference, this.parameters);
+        }
+        GenericNames* locals = this.locals;
+        locals.bind(node.name(), declared);
+    }
+
+    unsafe void bind_pattern_names(Node* test) {
+        ptr<i8> text = test.text();
+        i32 length = (i32)strlen(text);
+        GenericNames* locals = this.locals;
+        mut i32 start = 0;
+        for (mut i32 i = 0; i <= length; i = i + 1) {
+            if (i == length || text[i] == 32) {
+                locals.bind(Ast.intern_base_name(text + start, i - start), (GenericShape*)0);
+                start = i + 1;
+            }
+        }
+    }
+
+    unsafe GenericShape* walk(Node* node) {
+        if (node == null) {
+            return (GenericShape*)0;
+        }
+        NodeKind kind = node.kind();
+        GenericNames* locals = this.locals;
+        if (kind == NodeKind::IDENTIFIER) {
+            return this.identifier(node);
+        }
+        if (kind == NodeKind::FIELD_ACCESS) {
+            Node* base = node.first();
+            if (this.names_type(base)) {
+                return (GenericShape*)0;
+            }
+            return this.access(this.walk(base), node, false, 0);
+        }
+        if (kind == NodeKind::CALL) {
+            return this.walk_call(node);
+        }
+        if (kind == NodeKind::VAR_DECL) {
+            this.walk_variable(node);
+            return (GenericShape*)0;
+        }
+        if (kind == NodeKind::BLOCK || kind == NodeKind::FOR || kind == NodeKind::SWITCH) {
+            i32 mark = locals.mark();
+            this.walk_parts(node);
+            locals.reset_to(mark);
+            return (GenericShape*)0;
+        }
+        // A compile-time 'if' checks only the branch an instance takes.
+        if (kind == NodeKind::IF) {
+            if (node.op() == 0) {
+                this.walk(node.first());
+                this.walk_scoped(node.second());
+                this.walk_scoped(node.third());
+            }
+            return (GenericShape*)0;
+        }
+        if (kind == NodeKind::UNARY) {
+            GenericShape* operand = this.walk(node.first());
+            if (node.op_kind() == TokenKind::STAR && operand != null && operand.kind == GenericShapeKind::POINTER) {
+                return operand.element;
+            }
+            if (node.op_kind() == TokenKind::AMPERSAND && operand != null) {
+                return GenericShape.pointer_to(operand);
+            }
+            return (GenericShape*)0;
+        }
+        if (kind == NodeKind::INDEX) {
+            if (this.names_type(node.first())) {
+                this.walk(node.second());
+                return (GenericShape*)0;
+            }
+            GenericShape* indexed = this.walk(node.first());
+            this.walk(node.second());
+            if (indexed != null && indexed.kind == GenericShapeKind::POINTER) {
+                return indexed.element;
+            }
+            return (GenericShape*)0;
+        }
+        if (kind == NodeKind::CAST || kind == NodeKind::STRUCT_INIT) {
+            this.walk_parts(node);
+            return this.shape_of_reference(node.type(), this.parameters);
+        }
+        if (kind == NodeKind::IS_EXPR) {
+            this.walk(node.first());
+            if (node.flag()) {
+                this.bind_pattern_names(node);
+            }
+            return (GenericShape*)0;
+        }
+        if (kind == NodeKind::LET_EXPR) {
+            i32 mark = locals.mark();
+            for (mut i32 i = 0; i < node.count(); i = i + 1) {
+                Node* temporary = node.child(i);
+                locals.bind(temporary.name(), this.walk(temporary.first()));
+            }
+            GenericShape* result = this.walk(node.first());
+            locals.reset_to(mark);
+            return result;
+        }
+        if (kind == NodeKind::MATCH_ARM || kind == NodeKind::LAMBDA) {
+            i32 mark = locals.mark();
+            for (mut i32 i = 0; i < node.count(); i = i + 1) {
+                Node* binding = node.child(i);
+                locals.bind(binding.name(), this.shape_of_reference(binding.type(), this.parameters));
+            }
+            this.walk(node.first());
+            locals.reset_to(mark);
+            return (GenericShape*)0;
+        }
+        this.walk_parts(node);
+        return (GenericShape*)0;
+    }
+}

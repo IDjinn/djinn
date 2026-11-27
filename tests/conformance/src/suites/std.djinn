@@ -243,19 +243,20 @@ async task<i32> check_delay() {
 }
 
 async task<i32> check_process() {
-    void*? started = Process.start("clang --version", "", 0);
-    return switch started {
-        Value child -> await wait_child(child),
-        Empty -> 20
-    };
+    ProcessCommand command = ProcessCommand.create("clang");
+    command.arg("--version");
+    if (command.start() is Ok started) { return await wait_child(started); }
+    return 20;
 }
 
-async task<i32> wait_child(void* child) {
-    bool done = await Process.wait_async(child, 20000);
-    if (!done) { return 21; }
-    if (Process.exit_code(child) != 0) { return 22; }
-    if (Process.stdout_length(child) == 0) { return 23; }
-    return 0;
+async task<i32> wait_child(ChildProcess child) {
+    optional<ProcessStatus> ended = await child.wait_timeout_async(Duration.from_seconds(20));
+    if (ended is Value status) {
+        if (!process_succeeded(status)) { return 22; }
+        if (child.output() is Value text && text.length > 0u) { return 0; }
+        return 23;
+    }
+    return 21;
 }
 
 async task<i32> main() {
@@ -1144,15 +1145,17 @@ i32 main() {
         str source = """
 import std::sys;
 import std::types;
-import std::libc;
 namespace app;
 
 i32 main() {
-    if (Process.argc() < 1) { return 1; }
-    i32 found = switch Process.env("PATH") { Value path -> (i32)strlen(path), Empty -> 0 };
-    if (found == 0) { return 2; }
-    i32 missing = switch Process.env("DJINN_NO_SUCH_VARIABLE") { Value path -> 1, Empty -> 0 };
-    if (missing != 0) { return 3; }
+    if (Arguments.all().is_empty()) { return 1; }
+    mut size found = 0u;
+    if (ProcessEnvironment.value("PATH") is Value path) {
+        string owned = path;
+        found = owned.length;
+    }
+    if (found == 0u) { return 2; }
+    if (ProcessEnvironment.contains("DJINN_NO_SUCH_VARIABLE")) { return 3; }
     return 0;
 }
 """;
@@ -1164,34 +1167,33 @@ i32 main() {
         str source = """
 import std::sys;
 import std::types;
-import std::libc;
 namespace app;
 
-i32 expect_success(void* child) {
-    if (!Process.wait(child, 20000)) { return 10; }
-    if (Process.exit_code(child) != 0) { return 11; }
-    if (Process.stdout_length(child) == 0) { return 12; }
-    return 0;
+i32 printed(optional<str> text) {
+    if (text is Value found && found.length > 0u) { return 0; }
+    return 12;
 }
 
-i32 expect_failure(void* child) {
-    if (!Process.wait(child, 20000)) { return 20; }
-    if (Process.exit_code(child) == 0) { return 21; }
-    if (Process.stderr_length(child) == 0) { return 22; }
-    return 0;
+i32 finished(ChildProcess child, bool succeeds) {
+    if (child.wait_timeout(Duration.from_seconds(20)) is Value status) {
+        if (process_succeeded(status) != succeeds) { return 11; }
+        if (succeeds) { return printed(child.output()); }
+        return printed(child.error_output());
+    }
+    return 10;
+}
+
+i32 clang(str flag, bool succeeds) {
+    ProcessCommand command = ProcessCommand.create("clang");
+    command.arg(flag);
+    if (command.start() is Ok started) { return finished(started, succeeds); }
+    return 30;
 }
 
 i32 main() {
-    i32 first = switch Process.start("clang --version", "", 0) {
-        Value child -> expect_success(child),
-        Empty -> 30
-    };
+    i32 first = clang("--version", true);
     if (first != 0) { return first; }
-    i32 second = switch Process.start("clang --no-such-flag-xyz", "", 0) {
-        Value child -> expect_failure(child),
-        Empty -> 31
-    };
-    return second;
+    return clang("--no-such-flag-xyz", false);
 }
 """;
         Verify.source(source).with_std().runs(Expected.exit(0));

@@ -1,91 +1,398 @@
 import std::types;
+import std::filesystem;
 
 namespace std::sys;
 
 extern "C" {
-    i32 __djinn_argc();
-    i8*? __djinn_argv(i32 index);
-    c_result system(i8* command);
-    i8*? getenv(i8* name);
+    i64 __djinn_process_id();
+    i64 __djinn_parent_process_id();
+    i64 __djinn_process_terminate_id(i64 id, i32 force);
+    i32 __djinn_process_id_exists(i64 id);
+    i64 __djinn_current_directory(i64* out);
+    i64 __djinn_set_current_directory(i8* path, i64 length);
+    i32 __djinn_process_is_elevated();
+    i64 __djinn_process_memory(i64* out);
+    i64 __djinn_process_cpu_time(i64* out);
+    i64 __djinn_process_set_priority(i32 level);
+    void __djinn_exit(i32 code);
+    void __djinn_abort();
 
-    void*? __djinn_process_start(i8* command, i8* input, i32 input_length);
-    i32 __djinn_process_wait(void* process, i32 timeout_ms);
-    i32 __djinn_process_poll(void* process);
-    void __djinn_process_kill(void* process);
-    i32 __djinn_process_exit_code(void* process);
-    i32 __djinn_process_killed(void* process);
-    i8* __djinn_process_stdout_data(void* process);
-    i32 __djinn_process_stdout_length(void* process);
-    i8* __djinn_process_stderr_data(void* process);
-    i32 __djinn_process_stderr_length(void* process);
-    void __djinn_process_free(void* process);
+    ptr __djinn_command_create(i8* program, i64 length, i32 shell);
+    i64 __djinn_command_arg(ptr command, i8* text, i64 length);
+    i64 __djinn_command_env(ptr command, i8* name, i64 name_length, i8* value, i64 value_length, i32 remove);
+    void __djinn_command_clear_env(ptr command);
+    i64 __djinn_command_directory(ptr command, i8* path, i64 length);
+    i64 __djinn_command_input(ptr command, i8* data, i64 length);
+    i64 __djinn_command_stream(ptr command, i32 stream, i32 mode);
+    ptr __djinn_command_start(ptr command, i64* failure);
+    void __djinn_command_free(ptr command);
+
+    i64 __djinn_process_child_id(ptr process);
+    i32 __djinn_process_signal_number(ptr process);
+    i64 __djinn_process_send_signal(ptr process, i32 which);
+    i32 __djinn_process_wait(ptr process, i32 timeout_ms);
+    i32 __djinn_process_poll(ptr process);
+    void __djinn_process_kill(ptr process);
+    i32 __djinn_process_exit_code(ptr process);
+    i32 __djinn_process_killed(ptr process);
+    i8* __djinn_process_stdout_data(ptr process);
+    i32 __djinn_process_stdout_length(ptr process);
+    i8* __djinn_process_stderr_data(ptr process);
+    i32 __djinn_process_stderr_length(ptr process);
+    void __djinn_process_free(ptr process);
 }
 
+// The number the operating system gave a process. It may be reused once that process ended: to control a process this
+// program started, keep its ChildProcess.
+[Platform(native)]
+struct ProcessId {
+    i64 value;
+
+    public bool exists() {
+        unsafe { return __djinn_process_id_exists(this.value) != 0; }
+    }
+
+    // Asks the process to end (SIGTERM). Windows has no such request and ends it at once.
+    public result<bool, OsError> terminate() {
+        unsafe { return OsStatus.done(__djinn_process_terminate_id(this.value, 0)); }
+    }
+
+    public result<bool, OsError> kill() {
+        unsafe { return OsStatus.done(__djinn_process_terminate_id(this.value, 1)); }
+    }
+
+    operator ==(ProcessId left, ProcessId right) -> bool {
+        return left.value == right.value;
+    }
+}
+
+union ProcessStatus {
+    Running(),
+    Exited(i32),
+    // Ended by a signal (never on Windows).
+    Signaled(i32)
+}
+
+bool process_succeeded(ProcessStatus status) {
+    return switch status {
+        Exited code -> code == 0,
+        Running -> false,
+        Signaled signal -> false
+    };
+}
+
+struct ProcessMemoryUsage {
+    u64 resident_bytes;
+    u64 peak_resident_bytes;
+}
+
+struct ProcessCpuTime {
+    Duration user;
+    Duration kernel;
+}
+
+enum ProcessPriority {
+    Idle = 0,
+    BelowNormal = 1,
+    Normal = 2,
+    AboveNormal = 3,
+    High = 4
+}
+
+// Where a standard stream of a child goes.
+enum ProcessStream {
+    // To this program: input() feeds stdin, output() and error_output() collect the others.
+    Piped = 0,
+    // The stream this process has.
+    Inherit = 1,
+    // Nowhere.
+    Discard = 2
+}
+
+// The current process.
+[Platform(native)]
 struct Process {
-    public static i32 argc() {
-        return __djinn_argc();
+    public static ProcessId id() {
+        unsafe { return { .value = __djinn_process_id() }; }
     }
 
-    public static i8*? argv(i32 index) {
-        return __djinn_argv(index);
+    public static optional<ProcessId> parent_id() {
+        unsafe {
+            i64 parent = __djinn_parent_process_id();
+            if (parent <= 0) { return optional::Empty(); }
+            return optional::Value({ .value = parent });
+        }
     }
 
-    public static i32 run(i8* command) {
-        return system(command);
+    public static ProcessArguments arguments() {
+        return ProcessArguments.current();
     }
 
-    public static i8*? env(i8* name) {
-        return getenv(name);
+    // The program file as the operating system reports it ('/' separators), valid Path or not.
+    public static optional<str> executable_path() {
+        unsafe {
+            ptr<i8> text = __djinn_executable_path();
+            if (text == null) { return optional::Empty(); }
+            return optional::Value(OsStatus.borrowed((i8*)text));
+        }
     }
 
-    public static void*? start(i8* command, i8* input, i32 input_length) {
-        return __djinn_process_start(command, input, input_length);
+    public static result<string, OsError> current_directory() {
+        unsafe {
+            mut i64 address = 0;
+            i64 status = __djinn_current_directory(&address);
+            return OsStatus.text(status, address);
+        }
     }
 
-    public static bool wait(void* process, i32 timeout_ms) {
-        return __djinn_process_wait(process, timeout_ms) == 1;
+    // The current directory is one per process: every thread sees the change.
+    public static result<bool, OsError> set_current_directory(str path) {
+        unsafe { return OsStatus.done(__djinn_set_current_directory(path.data, (i64)path.length)); }
     }
 
-    public static async task<bool> wait_async(void* process, i32 timeout_ms) {
-        i64 deadline = __djinn_unix_timestamp_ms() + (i64)timeout_ms;
-        while (__djinn_process_poll(process) == 0) {
-            if (timeout_ms >= 0 && __djinn_unix_timestamp_ms() >= deadline) {
-                return false;
-            }
+    // Ends the process after flushing C streams. Nothing else runs: no disposal, no pending task.
+    public static void exit(i32 code) {
+        unsafe { __djinn_exit(code); }
+    }
+
+    public static void abort() {
+        unsafe { __djinn_abort(); }
+    }
+
+    // Administrator on Windows, root elsewhere.
+    public static bool is_elevated() {
+        unsafe { return __djinn_process_is_elevated() != 0; }
+    }
+
+    public static result<ProcessMemoryUsage, OsError> memory_usage() {
+        unsafe {
+            i64* values = i64[2];
+            i64 status = __djinn_process_memory(values);
+            if (status < 0) { return result::Error(os_error_from_status(status)); }
+            return result::Ok({ .resident_bytes = (u64)values[0], .peak_resident_bytes = (u64)values[1] });
+        }
+    }
+
+    public static result<ProcessCpuTime, OsError> cpu_time() {
+        unsafe {
+            i64* values = i64[2];
+            i64 status = __djinn_process_cpu_time(values);
+            if (status < 0) { return result::Error(os_error_from_status(status)); }
+            Duration user = Duration.from_micros(values[0]);
+            Duration kernel = Duration.from_micros(values[1]);
+            return result::Ok({ .user = user, .kernel = kernel });
+        }
+    }
+
+    // Raising the priority needs privileges on POSIX systems.
+    public static result<bool, OsError> set_priority(ProcessPriority priority) {
+        unsafe { return OsStatus.done(__djinn_process_set_priority((i32)priority)); }
+    }
+
+    // Runs a command line through the system shell with the streams of this process and waits for it. The shell reads
+    // the whole text: build it only from trusted input, or use ProcessCommand.create with separate arguments.
+    public static result<ProcessStatus, OsError> run(str command_line) {
+        ProcessCommand command = ProcessCommand.shell(command_line);
+        command.inherit_streams();
+        return command.run();
+    }
+}
+
+// A child process to start. The program receives its arguments exactly as given: no shell reads them.
+// A piece that cannot be used (a NUL byte, a bad variable name) makes start() fail with InvalidArgument.
+[Platform(native)]
+struct ProcessCommand : Disposable {
+    mut ptr handle;
+
+    // A bare name is looked up in PATH (never in the current directory on Windows); a name with a separator is a file.
+    // Windows batch files are refused (Unsupported): their arguments cannot be quoted safely.
+    public static ProcessCommand create(str program) {
+        unsafe { return { .handle = __djinn_command_create(program.data, (i64)program.length, 0) }; }
+    }
+
+    // A command line for cmd.exe or /bin/sh. It takes no arguments of its own.
+    public static ProcessCommand shell(str command_line) {
+        unsafe { return { .handle = __djinn_command_create(command_line.data, (i64)command_line.length, 1) }; }
+    }
+
+    public void disposable() {
+        unsafe { __djinn_command_free(this.handle); }
+        this.handle = null;
+    }
+
+    public void arg(str value) {
+        unsafe { __djinn_command_arg(this.handle, value.data, (i64)value.length); }
+    }
+
+    public void env(str name, str value) {
+        unsafe { __djinn_command_env(this.handle, name.data, (i64)name.length, value.data, (i64)value.length, 0); }
+    }
+
+    public void remove_env(str name) {
+        unsafe { __djinn_command_env(this.handle, name.data, (i64)name.length, name.data, (i64)0, 1); }
+    }
+
+    // The child starts with only the variables set on this command.
+    public void clear_env() {
+        unsafe { __djinn_command_clear_env(this.handle); }
+    }
+
+    public void current_directory(str path) {
+        unsafe { __djinn_command_directory(this.handle, path.data, (i64)path.length); }
+    }
+
+    // The text written to the child's input, which is then closed. The bytes are copied.
+    public void input(str data) {
+        unsafe { __djinn_command_input(this.handle, data.data, (i64)data.length); }
+    }
+
+    public void stdin_mode(ProcessStream mode) {
+        unsafe { __djinn_command_stream(this.handle, 0, (i32)mode); }
+    }
+
+    public void stdout_mode(ProcessStream mode) {
+        unsafe { __djinn_command_stream(this.handle, 1, (i32)mode); }
+    }
+
+    public void stderr_mode(ProcessStream mode) {
+        unsafe { __djinn_command_stream(this.handle, 2, (i32)mode); }
+    }
+
+    public void inherit_streams() {
+        this.stdin_mode(ProcessStream::Inherit);
+        this.stdout_mode(ProcessStream::Inherit);
+        this.stderr_mode(ProcessStream::Inherit);
+    }
+
+    // Starts a child. The command can start more of them.
+    public result<ChildProcess, OsError> start() {
+        if (this.handle == null) { return result::Error(OsError::OutOfMemory()); }
+        unsafe {
+            mut i64 failure = 0;
+            ptr child = __djinn_command_start(this.handle, &failure);
+            if (child == null) { return result::Error(os_error_from_status(failure)); }
+            return result::Ok({ .handle = child });
+        }
+    }
+
+    // Starts a child and waits for it to end.
+    public result<ProcessStatus, OsError> run() {
+        if (this.handle == null) { return result::Error(OsError::OutOfMemory()); }
+        unsafe {
+            mut i64 failure = 0;
+            ptr started = __djinn_command_start(this.handle, &failure);
+            if (started == null) { return result::Error(os_error_from_status(failure)); }
+            ChildProcess child = { .handle = started };
+            ProcessStatus status = child.wait();
+            return result::Ok(status);
+        }
+    }
+}
+
+// A process this program started. Disposing it kills a child that is still running.
+[Platform(native)]
+struct ChildProcess : Disposable {
+    mut ptr handle;
+
+    public void disposable() {
+        unsafe { __djinn_process_free(this.handle); }
+        this.handle = null;
+    }
+
+    public ProcessId id() {
+        unsafe { return { .value = __djinn_process_child_id(this.handle) }; }
+    }
+
+    public ProcessStatus status() {
+        unsafe {
+            if (__djinn_process_poll(this.handle) == 0) { return ProcessStatus::Running(); }
+            i32 signal = __djinn_process_signal_number(this.handle);
+            if (signal != 0) { return ProcessStatus::Signaled(signal); }
+            return ProcessStatus::Exited(__djinn_process_exit_code(this.handle));
+        }
+    }
+
+    public bool is_running() {
+        unsafe { return __djinn_process_poll(this.handle) == 0; }
+    }
+
+    public ProcessStatus wait() {
+        unsafe { __djinn_process_wait(this.handle, -1); }
+        return this.status();
+    }
+
+    // Empty when the child is still running after the timeout.
+    public optional<ProcessStatus> wait_timeout(Duration timeout) {
+        mut i64 millis = timeout.whole_millis();
+        if (millis > (i64)2147483647) { millis = (i64)2147483647; }
+        unsafe {
+            if (__djinn_process_wait(this.handle, (i32)millis) == 0) { return optional::Empty(); }
+        }
+        return optional::Value(this.status());
+    }
+
+    public async task<ProcessStatus> wait_async() {
+        while (this.is_running()) {
             std::builtin::coro.suspend();
         }
-        return true;
+        return this.status();
     }
 
-    public static void kill(void* process) {
-        __djinn_process_kill(process);
+    public async task<optional<ProcessStatus>> wait_timeout_async(Duration timeout) {
+        mut i64 deadline = (i64)0;
+        unsafe { deadline = __djinn_unix_timestamp_ms() + timeout.whole_millis(); }
+        while (this.is_running()) {
+            mut bool expired = false;
+            unsafe { expired = __djinn_unix_timestamp_ms() >= deadline; }
+            if (expired) { return optional::Empty(); }
+            std::builtin::coro.suspend();
+        }
+        return optional::Value(this.status());
     }
 
-    public static i32 exit_code(void* process) {
-        return __djinn_process_exit_code(process);
+    // Ends the child at once and waits for it.
+    public void kill() {
+        unsafe { __djinn_process_kill(this.handle); }
     }
 
-    public static bool was_killed(void* process) {
-        return __djinn_process_killed(process) == 1;
+    public bool was_killed() {
+        unsafe { return __djinn_process_killed(this.handle) != 0; }
     }
 
-    public static i8* stdout_text(void* process) {
-        return __djinn_process_stdout_data(process);
+    // What the child wrote to a piped stdout: available once it ended, and valid while this value lives.
+    public optional<str> output() {
+        if (this.is_running()) { return optional::Empty(); }
+        unsafe {
+            str text = { .data = __djinn_process_stdout_data(this.handle), .length = (size)__djinn_process_stdout_length(this.handle),
+                .meta = StringMeta.literal() };
+            return optional::Value(text);
+        }
     }
 
-    public static i32 stdout_length(void* process) {
-        return __djinn_process_stdout_length(process);
+    public optional<str> error_output() {
+        if (this.is_running()) { return optional::Empty(); }
+        unsafe {
+            str text = { .data = __djinn_process_stderr_data(this.handle), .length = (size)__djinn_process_stderr_length(this.handle),
+                .meta = StringMeta.literal() };
+            return optional::Value(text);
+        }
     }
 
-    public static i8* stderr_text(void* process) {
-        return __djinn_process_stderr_data(process);
+    [Platform(linux, macos, android, ios)]
+    public result<bool, OsError> signal(PosixSignal which) {
+        unsafe { return OsStatus.done(__djinn_process_send_signal(this.handle, (i32)which)); }
     }
+}
 
-    public static i32 stderr_length(void* process) {
-        return __djinn_process_stderr_length(process);
-    }
-
-    public static void release(void* process) {
-        __djinn_process_free(process);
-    }
+[Platform(linux, macos, android, ios)]
+enum PosixSignal {
+    Hangup = 0,
+    Interrupt = 1,
+    Quit = 2,
+    Kill = 3,
+    Terminate = 4,
+    User1 = 5,
+    User2 = 6,
+    Stop = 7,
+    Continue = 8
 }

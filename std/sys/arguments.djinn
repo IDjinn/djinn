@@ -1,0 +1,94 @@
+import std::types;
+import std::filesystem;
+
+namespace std::sys;
+
+extern "C" {
+    i32 __djinn_args_count();
+    ptr<i8> __djinn_args_item(i32 index);
+    ptr<i8> __djinn_executable_path();
+}
+
+// A view of command line arguments: UTF-8 text that lives as long as the process. Under `--run` the process is the
+// compiler, so these are its arguments.
+[Platform(native)]
+struct Arguments {
+    i32 first;
+    i32 count;
+
+    // Every argument, the name the program was started with included.
+    public static Arguments all() {
+        unsafe { return { .first = 0, .count = __djinn_args_count() }; }
+    }
+
+    public i32 length() {
+        return this.count;
+    }
+
+    public bool is_empty() {
+        return this.count == 0;
+    }
+
+    public optional<str> get(i32 index) {
+        if (index < 0 || index >= this.count) { return optional::Empty(); }
+        unsafe {
+            ptr<i8> text = __djinn_args_item(this.first + index);
+            if (text == null) { return optional::Empty(); }
+            return optional::Value(OsStatus.borrowed((i8*)text));
+        }
+    }
+
+    // The view without its first `amount` arguments.
+    public Arguments skip(i32 amount) {
+        mut i32 skipped = amount;
+        if (skipped < 0) { skipped = 0; }
+        if (skipped > this.count) { skipped = this.count; }
+        return { .first = this.first + skipped, .count = this.count - skipped };
+    }
+
+    public bool has(str flag) {
+        for (mut i32 i = 0; i < this.count; i = i + 1) {
+            if (this.get(i) is Value text && text == flag) { return true; }
+        }
+        return false;
+    }
+
+    // The value of "--flag value" or "--flag=value"; the first occurrence wins.
+    public optional<str> value_of(str flag) {
+        for (mut i32 i = 0; i < this.count; i = i + 1) {
+            if (this.get(i) is Value text) {
+                if (text == flag) { return this.get(i + 1); }
+                if (text.length > flag.length && text.matchesAt(0u, flag) && text.matchesAt(flag.length, "=")) {
+                    size from = flag.length + 1u;
+                    return optional::Value(text.slice(from, text.length - from));
+                }
+            }
+        }
+        return optional::Empty();
+    }
+}
+
+[Platform(native)]
+struct ProcessArguments {
+    // The program file, resolved by the operating system: absent when it cannot be told or is not a valid Path.
+    optional<Path> executable_path;
+    // The name the program was started with (argv[0]), which the caller chooses freely.
+    optional<str> invocation_name;
+    // What follows the invocation name.
+    Arguments arguments;
+
+    public static ProcessArguments current() {
+        Arguments all = Arguments.all();
+        return { .executable_path = ProcessArguments.executable(), .invocation_name = all.get(0), .arguments = all.skip(1) };
+    }
+
+    static optional<Path> executable() {
+        unsafe {
+            ptr<i8> text = __djinn_executable_path();
+            if (text == null) { return optional::Empty(); }
+            result<Path, FsError> parsed = Path.parse(OsStatus.borrowed((i8*)text));
+            if (parsed is Ok path) { return optional::Value(path); }
+            return optional::Empty();
+        }
+    }
+}

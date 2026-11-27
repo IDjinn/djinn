@@ -1,0 +1,345 @@
+namespace conformance;
+
+import testing;
+import djinnc::testing;
+import djinnc;
+
+struct SystemTests {
+    [Test]
+    void environment_variables_are_values() {
+        str source = """
+import std::sys;
+import std::types;
+namespace app;
+
+i32 exercise(EnvironmentVariable variable) {
+    if (variable.exists()) { return 2; }
+    if (variable.set("first") is Error e) { return 3; }
+    if (variable.set_if_absent("second") is Error e && e == OsError::AlreadyExists) {} else { return 4; }
+    string current = variable.value_or("none");
+    if (current != "first") { return 5; }
+    if (variable.set("") is Error e) { return 6; }
+    if (!variable.exists()) { return 7; }
+    if (variable.remove() is Ok removed && removed) {} else { return 8; }
+    if (variable.remove() is Ok again && !again) {} else { return 9; }
+    string fallback = variable.value_or("none");
+    if (fallback != "none") { return 10; }
+    return 0;
+}
+
+bool listed(str name, str value) {
+    if (ProcessEnvironment.snapshot() is Ok taken) {
+        EnvironmentSnapshot snapshot = taken;
+        for (mut i32 i = 0; i < snapshot.length(); i = i + 1) {
+            if (snapshot.get(i) is Value entry && entry.name == name) { return entry.value == value; }
+        }
+    }
+    return false;
+}
+
+i32 main() {
+    if (ProcessEnvironment.variable("A=B") is Error e && e == OsError::InvalidArgument) {} else { return 20; }
+    if (ProcessEnvironment.variable("") is Ok blank) { return 21; }
+    if (ProcessEnvironment.get("DJINN_CONFORMANCE_MISSING") is Value found) { return 22; }
+    if (ProcessEnvironment.set("DJINN_CONFORMANCE_LISTED", "yes") is Error e) { return 23; }
+    if (!listed("DJINN_CONFORMANCE_LISTED", "yes")) { return 24; }
+    if (ProcessEnvironment.get("DJINN_CONFORMANCE_LISTED") is Value found) {
+        if (found.name() != "DJINN_CONFORMANCE_LISTED") { return 25; }
+    } else {
+        return 26;
+    }
+    if (ProcessEnvironment.variable("DJINN_CONFORMANCE_VARIABLE") is Ok variable) { return exercise(variable); }
+    return 1;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(0));
+    }
+
+    [Test]
+    void process_arguments_and_identity() {
+        str source = """
+import std::sys;
+import std::types;
+import std::filesystem;
+namespace app;
+
+i32 main() {
+    ProcessArguments current = Process.arguments();
+    if (current.invocation_name is Value name) {} else { return 1; }
+    if (current.executable_path is Value path && path.is_absolute()) {} else { return 2; }
+    Arguments all = Arguments.all();
+    if (all.length() != current.arguments.length() + 1) { return 3; }
+    if (all.get(all.length()) is Value past) { return 4; }
+    if (all.get(-1) is Value before) { return 5; }
+    if (all.skip(100).length() != 0) { return 6; }
+    if (all.value_of("--djinn-missing") is Value missing) { return 7; }
+    if (Process.id().value <= 0 || !Process.id().exists()) { return 8; }
+    if (Process.set_current_directory("djinn/no/such/directory") is Error e && e == OsError::NotFound) {} else { return 9; }
+    if (Process.current_directory() is Ok directory) {
+        string owned = directory;
+        if (owned.length == 0u) { return 10; }
+    } else {
+        return 11;
+    }
+    if (Process.memory_usage() is Ok usage && usage.resident_bytes > (u64)0) {} else { return 12; }
+    if (Process.cpu_time() is Error e) { return 13; }
+    return 0;
+}
+""";
+        Verify.source(source).with_std().runs_linked(Expected.exit(0));
+    }
+
+    [Test]
+    void process_command_reports_each_outcome() {
+        str source = """
+import std::sys;
+import std::types;
+namespace app;
+
+bool exited(ProcessStatus status, i32 expected) {
+    return switch status { Exited code -> code == expected, Running -> false, Signaled signal -> false };
+}
+
+ProcessCommand sleeper() {
+    if (Platform.Windows) {
+        ProcessCommand command = ProcessCommand.create("ping");
+        command.arg("-n");
+        command.arg("30");
+        command.arg("127.0.0.1");
+        return command;
+    }
+    ProcessCommand command = ProcessCommand.create("sleep");
+    command.arg("30");
+    return command;
+}
+
+i32 stopped(ChildProcess child) {
+    if (child.wait_timeout(Duration.from_millis(20)) is Value early) { return 30; }
+    if (!child.is_running()) { return 31; }
+    if (child.output() is Value text) { return 32; }
+    child.kill();
+    if (child.is_running()) { return 33; }
+    if (!child.was_killed()) { return 34; }
+    return 0;
+}
+
+i32 printed(ChildProcess child, str expected) {
+    if (!exited(child.wait(), 0)) { return 40; }
+    if (child.output() is Value text && text.length >= expected.length && text.matchesAt(0u, expected)) { return 0; }
+    return 41;
+}
+
+i32 shell_output(str command_line, str expected) {
+    ProcessCommand command = ProcessCommand.shell(command_line);
+    command.env("DJINN_CHILD", "yes");
+    if (command.start() is Ok started) { return printed(started, expected); }
+    return 42;
+}
+
+i32 sorted_input() {
+    ProcessCommand command = ProcessCommand.create("sort");
+    command.input("b\nc\na\n");
+    if (command.start() is Ok started) { return printed(started, "a"); }
+    return 50;
+}
+
+i32 main() {
+    if (Process.run("exit 7") is Ok status && exited(status, 7)) {} else { return 1; }
+
+    ProcessCommand missing = ProcessCommand.create("djinn-no-such-program");
+    if (missing.start() is Error e && e == OsError::NotFound) {} else { return 2; }
+
+    ProcessCommand bad_name = sleeper();
+    bad_name.env("A=B", "1");
+    if (bad_name.start() is Error e && e == OsError::InvalidArgument) {} else { return 3; }
+
+    ProcessCommand lost = sleeper();
+    lost.current_directory("djinn/no/such/directory");
+    if (lost.start() is Error e) {} else { return 4; }
+
+    i32 echoed = shell_output(Platform.Windows ? "echo %DJINN_CHILD%" : "echo $DJINN_CHILD", "yes");
+    if (echoed != 0) { return echoed; }
+
+    i32 sorted = sorted_input();
+    if (sorted != 0) { return sorted; }
+
+    ProcessCommand waiting = sleeper();
+    if (waiting.start() is Ok started) { return stopped(started); }
+    return 5;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(0));
+    }
+
+    [Test]
+    void process_command_waits_without_blocking() {
+        str source = """
+import std::sys;
+import std::types;
+namespace app;
+
+async task<i32> finished(ChildProcess child) {
+    ProcessStatus status = await child.wait_async();
+    return switch status { Exited code -> code, Running -> 100, Signaled signal -> 101 };
+}
+
+async task<i32> expired(ChildProcess child) {
+    optional<ProcessStatus> status = await child.wait_timeout_async(Duration.from_millis(20));
+    if (status is Value early) { return 102; }
+    return 0;
+}
+
+async task<i32> main() {
+    await Task.sleep(Duration.from_millis(5));
+    ProcessCommand slow = ProcessCommand.shell(Platform.Windows ? "ping -n 30 127.0.0.1 >nul" : "sleep 30");
+    if (slow.start() is Ok started) {
+        i32 timed = await expired(started);
+        if (timed != 0) { return timed; }
+    } else {
+        return 103;
+    }
+    ProcessCommand quick = ProcessCommand.shell("exit 2");
+    if (quick.start() is Ok started) { return await finished(started); }
+    return 104;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(2));
+    }
+
+    [Test]
+    void handles_close_with_their_owner() {
+        str source = """
+import std::sys;
+import std::types;
+namespace app;
+
+extern "C" {
+    i32 __djinn_handle_kind(i64 handle);
+}
+
+bool open(i64 raw) {
+    unsafe { return __djinn_handle_kind(raw) != 0; }
+}
+
+i32 exchange(Pipe pipe) {
+    if (pipe.writer.kind() != HandleKind::Pipe) { return 2; }
+    if (pipe.writer.write_text("ping") is Error e) { return 3; }
+    unsafe {
+        i8* buffer = i8[16];
+        if (pipe.reader.read((void*)buffer, 16u) is Ok count && count == 4u) {} else { return 4; }
+    }
+    if (pipe.writer.close() is Error e) { return 5; }
+    unsafe {
+        i8* buffer = i8[16];
+        if (pipe.reader.read((void*)buffer, 16u) is Ok end && end == 0u) {} else { return 6; }
+    }
+    if (pipe.writer.write_text("x") is Error e && e == OsError::BadHandle) {} else { return 7; }
+    return 0;
+}
+
+i64 scoped() {
+    if (Pipe.create() is Ok made) {
+        Pipe pipe = made;
+        unsafe { return pipe.reader.raw(); }
+    }
+    return -1;
+}
+
+i32 main() {
+    i64 left = scoped();
+    if (left < 0 || open(left)) { return 8; }
+    if (Pipe.create() is Ok pipe) { return exchange(pipe); }
+    return 1;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(0));
+    }
+
+    [Test]
+    void memory_regions_check_bounds_and_protection() {
+        str source = """
+import std::sys;
+import std::types;
+namespace app;
+
+i32 exercise(MemoryRegion region) {
+    if (region.length() < 100u || region.length() % SystemInfo.page_size() != 0u) { return 2; }
+    if (region.write(0u, "abc") is Error e) { return 3; }
+    if (region.write(region.length() - 1u, "ab") is Error e && e == OsError::InvalidArgument) {} else { return 4; }
+    if (region.read_byte(0u) is Ok first && first == (u8)97) {} else { return 5; }
+    if (region.read_text(0u, 3u) is Ok copied) {
+        string owned = copied;
+        if (owned != "abc") { return 6; }
+    } else {
+        return 7;
+    }
+    if (region.protect(MemoryProtection::ReadOnly) is Error e) { return 8; }
+    if (region.write_byte(0u, (u8)1) is Error e && e == OsError::PermissionDenied) {} else { return 9; }
+    if (region.protect(MemoryProtection::NoAccess) is Error e) { return 10; }
+    if (region.read_byte(0u) is Ok hidden) { return 11; }
+    return 0;
+}
+
+i32 main() {
+    if (MemoryRegion.allocate(0u, MemoryProtection::ReadWrite) is Ok empty) { return 20; }
+    if (MemoryRegion.allocate(100u, MemoryProtection::ReadWrite) is Ok region) { return exercise(region); }
+    return 1;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(0));
+    }
+
+    [Test]
+    void modules_threads_and_system_information() {
+        str source = """
+import std::sys;
+import std::types;
+namespace app;
+
+str system_library() {
+    if (Platform.Windows) { return "kernel32.dll"; }
+    if (Platform.MacOs) { return "libSystem.B.dylib"; }
+    return "libc.so.6";
+}
+
+i32 lookup(Module module) {
+    str symbol = Platform.Windows ? "GetTickCount64" : "strlen";
+    if (!module.contains(symbol)) { return 2; }
+    if (module.contains("djinn_no_such_symbol")) { return 3; }
+    return 0;
+}
+
+bool filled(result<string, OsError> found) {
+    if (found is Ok value) {
+        string owned = value;
+        return owned.length > 0u;
+    }
+    return false;
+}
+
+i32 main() {
+    unsafe {
+        if (Module.load("djinn-no-such-library") is Error e && e == OsError::NotFound) {} else { return 10; }
+        if (Module.load(system_library()) is Ok loaded) {
+            i32 looked = lookup(loaded);
+            if (looked != 0) { return looked; }
+        } else {
+            return 1;
+        }
+    }
+    if (Thread.current_id().value <= 0) { return 11; }
+    if (Thread.set_name("djinn") is Error e) { return 12; }
+    Thread.sleep(Duration.from_millis(1));
+    Thread.yield_now();
+    if (Duration.from_micros(1).whole_millis() != (i64)1) { return 13; }
+    if (SystemInfo.operating_system() == OperatingSystem::Unknown) { return 14; }
+    if (SystemInfo.architecture() == CpuArchitecture::Unknown) { return 15; }
+    if (SystemInfo.cpu_count() < 1) { return 16; }
+    if (SystemInfo.total_memory() is Value total && total > (u64)0) {} else { return 17; }
+    if (!filled(SystemInfo.host_name()) || !filled(SystemInfo.temp_directory()) || !filled(SystemInfo.os_version())) { return 18; }
+    return 0;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(0));
+    }
+}

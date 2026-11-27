@@ -109,6 +109,10 @@ Modifiers (`private`, `async`, `sync`, `unsafe`) are kept in the text, so a cons
   call site, so declarations it produces in the consumer are not treated as header declarations. Header
   functions become `extern`, header globals become declarations; the object is extracted next to the output and
   linked, then removed.
+- Generic templates: building a library checks the generic bodies it declares against their `where` bounds, so a library
+  with a template that no instantiation can satisfy is not written. A consumer does not check those bodies again at the
+  declaration, only the instances it makes; the bounds travel in the interface and are enforced on its type arguments.
+  The generics and `impl` blocks that the consumer writes, over library templates too, are checked as its own.
 - Procedural macros: a library that declares `proc macro` / `proc attribute` exports one entry per macro; a consumer runs
   it from the library object at compile time (ORC JIT, `driver/proc_macros.djinn`). Objects of every loaded library are
   kept for that (`Library.macro_objects`). `std::meta` code is linkonce, so it stays in the macro library object.
