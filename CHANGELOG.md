@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Changed
+- `djinnc` prints the source line under each diagnostic, with the reported span underlined (`^~~~`). The JSON format is unchanged.
+- `E3054` says what could not be converted: the parameter, the function, the argument number and both types, and it underlines the whole expression, closing parenthesis included.
+- The error for operands of different types names both types and points at the start of the expression instead of the operator.
+- `djinn-lsp` also checks a project with a web entry (`*.web.djinn` or `index.html`) with `--target web`, so an error that only the web build reports appears in the editor, marked `(web build)`.
+
 ## [0.7.17] - 2026-11-27
 
 ### Fixed

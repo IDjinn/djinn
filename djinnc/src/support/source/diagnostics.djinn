@@ -55,6 +55,78 @@ struct Diagnostics {
         return text.cstr();
     }
 
+    static unsafe SourceFile* source_of(ptr<i8> path) {
+        for (mut i32 i = 0; i < Sources.count(); i = i + 1) {
+            SourceFile* source = Sources.get(i);
+            if (source.path == path || Strings.same(source.path, path)) {
+                return source;
+            }
+        }
+        return (SourceFile*)0;
+    }
+
+    static unsafe void append_snippet(ByteBuffer* out, ptr<i8> path, i32 line, i32 column, i32 length) {
+        SourceFile* source = Diagnostics.source_of(path);
+        if (source == null || line < 1 || column < 1 || (u32)line > source.line_count) {
+            return;
+        }
+        u32 start = source.line_starts[line - 1];
+        mut u32 end = start;
+        while (end < source.length && source.text[end] != 10 && source.text[end] != 13) {
+            end = end + 1;
+        }
+        i32 size = (i32)(end - start);
+        i32 at = column - 1;
+        if (at > size) {
+            return;
+        }
+        mut i32 first = 0;
+        if (at > 120) {
+            first = at - 120;
+        }
+        mut i32 last = size;
+        if (last - first > 200) {
+            last = first + 200;
+        }
+        ByteBuffer* number = ByteBuffer.create();
+        number.append_int((i64)line);
+        i32 width = (i32)strlen(number.cstr());
+        out.append("
+");
+        for (mut i32 i = width; i < 5; i = i + 1) {
+            out.append_char(' ');
+        }
+        out.append(number.cstr());
+        out.append(" | ");
+        if (first > 0) {
+            out.append("...");
+        }
+        out.append_slice(source.text + start + first, last - first);
+        if (last < size) {
+            out.append("...");
+        }
+        out.append("
+      | ");
+        if (first > 0) {
+            out.append("   ");
+        }
+        for (mut i32 i = first; i < at; i = i + 1) {
+            u8 unit = (u8)source.text[start + (u32)i];
+            if (unit == 9) {
+                out.append_char('	');
+            } else if (unit < 128 || unit >= 192) {
+                out.append_char(' ');
+            }
+        }
+        out.append_char('^');
+        for (mut i32 i = at + 1; i < at + length && i < last; i = i + 1) {
+            u8 unit = (u8)source.text[start + (u32)i];
+            if (unit < 128 || unit >= 192) {
+                out.append_char('~');
+            }
+        }
+    }
+
     void emit(bool is_error, ptr<i8> file, i32 code, i32 line, i32 column, i32 length, ptr<i8> message, ptr<i8> found) {
         PointerList* arguments = Diagnostics.take_arguments();
         if (code == this.last_code && line == this.last_line && column == this.last_column && file == this.last_file) {
@@ -125,6 +197,7 @@ struct Diagnostics {
                 out.append(found);
                 out.append("')");
             }
+            Diagnostics.append_snippet(out, file, line, column, length);
         }
         logger_error(Log.get(), "%s", out.cstr());
         if (is_error) {

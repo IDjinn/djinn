@@ -18,6 +18,8 @@ Full documentation: `docs/content/docs/advanced/language-server.mdx`. The VS Cod
 
 ## Diagnostics
 
+The compiler diagnostics come from `djinnc --check`. A project that has a web entry (a `*.web.djinn` file or an `index.html` next to `djinn.proj`, and `library-mode: false`) is checked twice, for the host and with `--target web`: an error that only the web build reports is shown with the suffix `(web build)`, and one that both report is shown once.
+
 `src/ast/ast.djinn` builds a light syntax tree per file (declarations, bodies as nested blocks, locals, and lexical errors as nodes) from the tokens and the Scanner, once per edit. Rules in `src/diagnostics/rules/` walk it through a `DiagContext` and report findings; the `lint-disable` handling, the severity and the LSP output are not the rule's concern.
 
 To add a diagnostic: create `src/diagnostics/rules/<name>.djinn` (copy `unclosed_bracket.djinn`: a struct with `static unsafe void check(DiagContext* context)`) and add its call to `Diagnostics.run` in `src/diagnostics/registry.djinn`.

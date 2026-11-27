@@ -140,6 +140,15 @@ impl TypeChecker {
             for (mut i32 i = 0; i < node.count(); i = i + 1) {
                 this.extend_span(node.child(i), line);
             }
+            if (node.arguments_line() == line) {
+                i32 closing = node.first_argument_token() < 0 ? node.column() + 2 : node.arguments_column() + node.arguments_length() + 1;
+                if (closing > this.span_end) {
+                    this.span_end = closing;
+                }
+            }
+        }
+        if (node.kind() == NodeKind::INDEX && node.line() == line) {
+            this.span_end = this.span_end + 1;
         }
     }
 
@@ -379,21 +388,67 @@ impl TypeChecker {
         }
     }
 
-    void require_explicit_cast(Node* value, u32 passed, u32 wanted) {
+    unsafe void error_conversion(Node* value, u32 passed, u32 wanted, FunctionInfo* callee, i32 argument, ptr<i8> reason) {
+        SymbolTable* symbols = this.symbols;
+        ByteBuffer* message = ByteBuffer.create();
+        if (callee != null) {
+            this.describe_parameter(callee, argument, message);
+        }
+        message.append("cannot convert '");
+        if (value.kind() == NodeKind::STRING_LITERAL) {
+            message.append("str");
+        } else {
+            symbols.describe_type(passed, message);
+        }
+        message.append("' to '");
+        symbols.describe_type(wanted, message);
+        message.append("': ");
+        message.append(reason);
+        this.error_over_expression(value, DiagnosticErrors.IMPLICIT_CONVERSION, message.cstr());
+    }
+
+    unsafe void describe_parameter(FunctionInfo* callee, i32 argument, ByteBuffer* message) {
+        Node* declaration = callee.node;
+        mut ptr<i8> name = (ptr<i8>)0;
+        if (declaration != null && (declaration.kind() == NodeKind::FUNCTION || declaration.kind() == NodeKind::EXTERN_FUNCTION) && declaration.count() > 0) {
+            i32 last = declaration.count() - 1;
+            Node* parameter = declaration.child(argument < last ? argument : last);
+            if (parameter.kind() == NodeKind::PARAMETER) {
+                name = parameter.text();
+            }
+        }
+        if (name != null && name[0] != 0) {
+            message.append("parameter '");
+            message.append(name);
+            message.append("' of '");
+        } else {
+            message.append("parameter of '");
+        }
+        mut i32 length = 0;
+        while (callee.name[length] != 0 && callee.name[length] != 36) {
+            length = length + 1;
+        }
+        message.append_slice(callee.name, length);
+        message.append("' (argument ");
+        message.append_int((i64)(argument + 1));
+        message.append("): ");
+    }
+
+    void require_explicit_cast(Node* value, u32 passed, u32 wanted, FunctionInfo* callee, i32 argument) {
         bool passed_number = Types.is_integer(passed) || Types.is_float(passed);
         bool wanted_number = Types.is_integer(wanted) || Types.is_float(wanted);
         if (passed_number && wanted_number && !Types.widens(passed, wanted)) {
-            this.error_code(value, DiagnosticErrors.IMPLICIT_CONVERSION, "only a wider type of the same kind converts implicitly; use an explicit cast");
+            this.error_conversion(value, passed, wanted, callee, argument, "only a wider type of the same kind converts implicitly; use an explicit cast");
         }
         if (passed_number && Types.is_pointer(wanted) && value.kind() != NodeKind::NULL_LITERAL) {
-            this.error_code(value, DiagnosticErrors.IMPLICIT_CONVERSION, "a number does not convert to a pointer implicitly; use an explicit cast");
+            this.error_conversion(value, passed, wanted, callee, argument, "a number does not convert to a pointer implicitly; use an explicit cast");
         }
         if (Types.is_pointer(passed) && Types.is_pointer(wanted) && Types.element(passed) != Types.element(wanted)
             && !Types.is_void(Types.element(passed)) && !Types.is_void(Types.element(wanted))) {
             if (value.kind() == NodeKind::STRING_LITERAL) {
-                this.error_code(value, DiagnosticErrors.IMPLICIT_CONVERSION, "a string literal converts only to str, string, i8* or ptr<i8>");
+                this.error_conversion(value, passed, wanted, callee, argument, "a string literal converts only to str, string, i8* or ptr<i8>");
             } else {
-                this.error_code(value, DiagnosticErrors.IMPLICIT_CONVERSION, "a pointer does not convert to a pointer of another type implicitly; use an explicit cast");
+                this.error_conversion(value, passed, wanted, callee, argument, "a pointer does not convert to a pointer of another type implicitly; use an explicit cast");
             }
         }
     }
@@ -433,9 +488,9 @@ impl TypeChecker {
         return false;
     }
 
-    void require_argument_shape(Node* argument, u32 passed, u32 wanted) {
+    void require_argument_shape(Node* argument, u32 passed, u32 wanted, FunctionInfo* callee, i32 position) {
         this.require_safe_pointer(argument, passed, wanted);
-        this.require_explicit_cast(argument, passed, wanted);
+        this.require_explicit_cast(argument, passed, wanted, callee, position);
         if (this.mark_text_conversion(argument, passed, wanted)) {
             return;
         }
@@ -456,9 +511,9 @@ impl TypeChecker {
         }
     }
 
-    void require_value_type(Node* value, u32 passed, u32 wanted) {
+    unsafe void require_value_type(Node* value, u32 passed, u32 wanted) {
         this.require_safe_pointer(value, passed, wanted);
-        this.require_explicit_cast(value, passed, wanted);
+        this.require_explicit_cast(value, passed, wanted, (FunctionInfo*)0, 0);
         if (this.mark_text_conversion(value, passed, wanted)) {
             return;
         }
@@ -810,14 +865,14 @@ impl TypeChecker {
             if (i < normal) {
                 u32 wanted = param_types.get(i);
                 u32 passed = this.check_expression(argument, wanted);
-                this.require_argument_shape(argument, passed, wanted);
+                this.require_argument_shape(argument, passed, wanted, info, i - offset);
                 this.move_argument(argument, passed, wanted, info);
             } else if (info.packs_variadic) {
                 SymbolTable* pack_symbols = this.symbols;
                 u32 element = pack_symbols.pack_element(param_types.get(fixed - 1));
                 u32 passed = this.check_expression(argument, element);
                 if (element != this.core_type("object")) {
-                    this.require_argument_shape(argument, passed, element);
+                    this.require_argument_shape(argument, passed, element, info, i - offset);
                 }
             } else {
                 this.check_expression(argument, 0);
