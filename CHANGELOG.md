@@ -4,9 +4,11 @@
 
 ### Fixed
 - A `str` or `string` passed to an `i8*` constructor parameter (and a byte pointer passed to a `str` or `string` one) is converted as in a function call, instead of failing with `LLVM module verification failed`.
+- A `str` or `string` given as an `i8*` union variant payload, and a byte pointer given as a `str` or `string` payload, is converted as in a call instead of being stored as it was, which read the wrong bytes.
 
 ### Changed
 - Constructor arguments (`new Box(x)`, `Box(x)`, generic and overloaded constructors) are checked like function call arguments: a narrowing or otherwise lossy conversion is error `E3054`, which names the parameter and the struct (add an explicit cast), so is a number or a pointer of another type used as a pointer, passing `null` or a nullable pointer as `T*` is `E3053`, and a struct where a number or pointer is expected (or the reverse) is `E3024`, as in a call. Before, the type checker accepted these.
+- A union variant payload is checked like a call argument, in generic unions, `optional::Value` and `result::Ok` too: a narrowing or lossy conversion, a number given as a pointer and a pointer of another type are `E3054` (`Shape::Circle(half())` with an `i32` payload and an `f64 half()` compiled), `null` or a nullable pointer given as `T*` is `E3053`, and a struct given as a number or pointer, or the reverse, is `E3024`. A union inferred from its arguments takes the type of the first one, so `Pair::Both(1, wide)` with an `i64 wide` is now an error: name the type (`Pair<i64>::Both(1, wide)`) or cast.
 - `djinnc` prints the source line under each diagnostic, with the reported span underlined (`^~~~`). The JSON format is unchanged.
 - `E3054` says what could not be converted: the parameter, the function, the argument number and both types, and it underlines the whole expression, closing parenthesis included.
 - The error for operands of different types names both types and points at the start of the expression instead of the operator.
