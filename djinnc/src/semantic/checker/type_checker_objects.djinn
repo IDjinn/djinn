@@ -31,12 +31,13 @@ impl TypeChecker {
         Node* else_branch = node.third();
         mut u32 then_type = 0;
         mut u32 else_type = 0;
+        bool returned = this.returned_value == node;
         if (this.needs_type_hint(then_branch) && !this.needs_type_hint(else_branch)) {
-            else_type = this.check_expression(else_branch, expected);
-            then_type = this.check_expression(then_branch, else_type);
+            else_type = this.check_result_part(else_branch, expected, returned);
+            then_type = this.check_result_part(then_branch, else_type, returned);
         } else {
-            then_type = this.check_expression(then_branch, expected);
-            else_type = this.check_expression(else_branch, then_type);
+            then_type = this.check_result_part(then_branch, expected, returned);
+            else_type = this.check_result_part(else_branch, then_type, returned);
         }
         if (then_type == else_type) {
             return then_type;
@@ -147,6 +148,10 @@ impl TypeChecker {
             this.error_code(node, DiagnosticErrors.AWAIT_NEEDS_TASK, "'await' needs the task returned by an async function");
             return Types.i32_type();
         }
+        if (!node.flag()) {
+            LocalScopes* suspending = this.scopes;
+            suspending.suspends = suspending.suspends + 1;
+        }
         u32 error = this.task_error(operand);
         if (!Types.is_void(error)) {
             FunctionInfo* source = this.async_view(held - 1, error);
@@ -198,6 +203,7 @@ impl TypeChecker {
             variable.name_atom = Ast.intern_base_name(variable.name, i - start);
             variable.type = payload.value_type();
             variable.node = node;
+            this.bind_payload(variable, node.first());
             scopes.define(variable.name_atom, variable);
             pattern.bindings.push((ptr)variable);
             index = index + 1;
@@ -384,6 +390,7 @@ impl TypeChecker {
         mut i32 covered = 0;
         mut bool wildcard = false;
         mut u32 result = expected;
+        bool returned = this.returned_value == node;
         LocalScopes* scopes = this.scopes;
         for (mut i32 i = 0; i < node.count(); i = i + 1) {
             Node* arm = node.child(i);
@@ -395,7 +402,7 @@ impl TypeChecker {
                 if (arm.count() != 0) {
                     this.error_code(arm, DiagnosticErrors.INVALID_SWITCH, "the wildcard arm cannot bind a value");
                 }
-                u32 wildcard_type = this.check_expression(arm.first(), result);
+                u32 wildcard_type = this.check_result_part(arm.first(), result, returned);
                 if (result == 0) {
                     result = wildcard_type;
                 }
@@ -428,9 +435,10 @@ impl TypeChecker {
                 variable.node = binding;
                 binding.set_symbol(SymbolKind.LOCAL, (ptr)variable);
                 binding.set_value_type(variable.type);
+                this.bind_payload(variable, node.first());
                 scopes.define(variable.name_atom, variable);
             }
-            u32 arm_type = this.check_expression(arm.first(), result);
+            u32 arm_type = this.check_result_part(arm.first(), result, returned);
             if (result == 0) {
                 result = arm_type;
             }

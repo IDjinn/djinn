@@ -1,0 +1,160 @@
+import std::types;
+
+namespace std::sys;
+
+extern "C" {
+    ptr<i8> __djinn_env_intern(i8* name, i64 length);
+    i64 __djinn_env_get(i8* name, i64 length, i64* out);
+    i64 __djinn_env_set(i8* name, i64 name_length, i8* value, i64 value_length, i32 overwrite);
+    i64 __djinn_env_remove(i8* name, i64 length);
+    ptr __djinn_env_snapshot();
+    i32 __djinn_env_snapshot_count(ptr snapshot);
+    ptr<i8> __djinn_env_snapshot_name(ptr snapshot, i32 index);
+    ptr<i8> __djinn_env_snapshot_value(ptr snapshot, i32 index);
+    void __djinn_env_snapshot_free(ptr snapshot);
+}
+
+// The environment of this process. Values are UTF-8 copies and every access is serialized by the runtime.
+// A name is not empty and holds no '=' or NUL; on Windows names ignore case.
+[Platform(native)]
+struct ProcessEnvironment {
+    // A handle to a name, whether or not the variable exists yet.
+    public static result<EnvironmentVariable, OsError> variable(str name) {
+        unsafe {
+            ptr<i8> interned = __djinn_env_intern(name.data, (i64)name.length);
+            if (interned == null) { return result::Error(OsError::InvalidArgument()); }
+            return result::Ok({ .key = OsStatus.borrowed((i8*)interned) });
+        }
+    }
+
+    // Empty when the variable does not exist (or the name cannot name one).
+    public static optional<EnvironmentVariable> get(str name) {
+        if (!ProcessEnvironment.contains(name)) { return optional::Empty(); }
+        unsafe {
+            ptr<i8> interned = __djinn_env_intern(name.data, (i64)name.length);
+            if (interned == null) { return optional::Empty(); }
+            return optional::Value({ .key = OsStatus.borrowed((i8*)interned) });
+        }
+    }
+
+    public static optional<string> value(str name) {
+        unsafe {
+            mut i64 address = 0;
+            i64 status = __djinn_env_get(name.data, (i64)name.length, &address);
+            if (status < 0) { return optional::Empty(); }
+            return optional::Value({ .data = (i8*)address, .length = (size)status, .meta = StringMeta.heap() });
+        }
+    }
+
+    public static bool contains(str name) {
+        unsafe {
+            mut i64 address = 0;
+            i64 status = __djinn_env_get(name.data, (i64)name.length, &address);
+            if (status < 0) { return false; }
+            __djinn_free((i8*)address);
+            return true;
+        }
+    }
+
+    public static result<bool, OsError> set(str name, str value) {
+        unsafe {
+            return OsStatus.done(__djinn_env_set(name.data, (i64)name.length, value.data, (i64)value.length, 1));
+        }
+    }
+
+    // Ok(false) when the variable did not exist.
+    public static result<bool, OsError> remove(str name) {
+        unsafe {
+            i64 status = __djinn_env_remove(name.data, (i64)name.length);
+            if (status < 0) { return result::Error(os_error_from_status(status)); }
+            return result::Ok(status == 1);
+        }
+    }
+
+    public static result<EnvironmentSnapshot, OsError> snapshot() {
+        unsafe {
+            ptr handle = __djinn_env_snapshot();
+            if (handle == null) { return result::Error(OsError::OutOfMemory()); }
+            return result::Ok({ .handle = handle });
+        }
+    }
+}
+
+// One variable by name. It holds no value: every call reads or writes the live environment.
+[Platform(native)]
+struct EnvironmentVariable {
+    str key;
+
+    public str name() {
+        return this.key;
+    }
+
+    public bool exists() {
+        return ProcessEnvironment.contains(this.key);
+    }
+
+    public optional<string> value() {
+        return ProcessEnvironment.value(this.key);
+    }
+
+    // A copy of the value, or of the fallback when the variable does not exist.
+    public string value_or(str fallback) {
+        unsafe {
+            mut i64 address = 0;
+            i64 status = __djinn_env_get(this.key.data, (i64)this.key.length, &address);
+            if (status >= 0) {
+                return { .data = (i8*)address, .length = (size)status, .meta = StringMeta.heap() };
+            }
+            if (fallback.length == 0u) { return string.EMPTY(); }
+            i8* copy = __djinn_alloc((u64)fallback.length + 1);
+            memcpy((void*)copy, (void*)fallback.data, (u64)fallback.length);
+            *(copy + (fallback.length)) = 0;
+            return { .data = copy, .length = fallback.length, .meta = StringMeta.heap() };
+        }
+    }
+
+    public result<bool, OsError> set(str value) {
+        return ProcessEnvironment.set(this.key, value);
+    }
+
+    // Error(AlreadyExists) when the variable has a value already.
+    public result<bool, OsError> set_if_absent(str value) {
+        unsafe {
+            return OsStatus.done(__djinn_env_set(this.key.data, (i64)this.key.length, value.data, (i64)value.length, 0));
+        }
+    }
+
+    public result<bool, OsError> remove() {
+        return ProcessEnvironment.remove(this.key);
+    }
+}
+
+[Platform(native)]
+struct EnvironmentEntry {
+    str name;
+    str value;
+}
+
+// A copy of every variable at one moment. Its entries are views that live as long as the snapshot.
+[Platform(native)]
+struct EnvironmentSnapshot : Disposable {
+    mut ptr handle;
+
+    public void disposable() {
+        unsafe { __djinn_env_snapshot_free(this.handle); }
+        this.handle = null;
+    }
+
+    public i32 length() {
+        unsafe { return __djinn_env_snapshot_count(this.handle); }
+    }
+
+    public optional<EnvironmentEntry> get(i32 index) {
+        unsafe {
+            ptr<i8> name = __djinn_env_snapshot_name(this.handle, index);
+            ptr<i8> value = __djinn_env_snapshot_value(this.handle, index);
+            if (name == null || value == null) { return optional::Empty(); }
+            return optional::Value({ .name = OsStatus.borrowed((i8*)name), .value = OsStatus.borrowed((i8*)value) });
+        }
+    }
+}

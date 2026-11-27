@@ -46,6 +46,8 @@ Implemented in `djinnc/src/semantic/` (`symbols/ownership.djinn`, `symbols/borro
 - Move semantics: a local moves when returned, assigned to a field/index, used in a struct initializer or passed by value;
   using a moved variable is an error, assigning re-initializes it. A Value parameter is owned (and disposed) by the callee.
   Extern functions, operators and property accessors borrow their parameters.
+- Unions never dispose their payload. A local moves when used as a variant payload. Moving a name bound by `is` or a
+  `switch` arm also moves the matched local (`E5001` on reuse); from a field, element or pointer it is `E5008`.
 - `Disposable` (`void disposable()`) runs at end of scope in reverse order, before `return`/`throw`/propagation, on
   `break`/`continue` and on reassignment; drop flags exist only for variables that are moved or uninitialized. Temporaries,
   values moved into containers and coroutines cancelled while suspended are not disposed. `Cloneable<T>` is the explicit copy.
@@ -54,6 +56,7 @@ Implemented in `djinnc/src/semantic/` (`symbols/ownership.djinn`, `symbols/borro
   are shared. Diagnostic `BORROW_CONFLICT`. Limits: only a declaration initialized directly with `&x` is tracked (not
   borrows passed to calls or stored in fields), reads are not checked, there is no flow analysis (the borrow lasts the
   whole scope), and `return &local;` is an error.
+- **Pointers across a suspend** (`POINTER_ACROSS_SUSPEND`, E5010): a local or parameter of type `T*`/`ptr<T>` declared before an `await` cannot be used after it (a resume may happen on another thread; atomic pointer access is not implemented, issue #54). Assigning it again re-arms it. Exempt: `void*` handles, `this`, and uses inside `unsafe`. Not tracked: `.sync`, loops that carry the pointer into the next iteration, `str`/`arr`/`slice` views.
 - Heap ownership types live in `std/memory`: `owner<T>` (single owner, frees on dispose), `shared<T>` (atomic refcount),
   plus `arena`, `pool` and `allocator`.
 
@@ -206,7 +209,8 @@ Files in `std/` (namespaces `std::<folder>`; consumed as `std.djlib`, built by `
   layer (see `std/filesystem/README.md`)
 - `sys/` — `console`, `io`, `debug` (assertions), `libc` (FFI: malloc, free, printf, memcpy, ...), `atomic`, `intrinsics`,
   `math`/`math_native` (`Math.sqrt`, ... foldable at compile time), `process`, `system` (panic hooks), `task`, `logger`,
-  `spectre` (terminal UI: tables, trees, spinners)
+  `spectre` (terminal UI: tables, trees, spinners), and the typed platform APIs over `runtime/os.c` (`environment`,
+  `arguments`, `handle`, `module`, `memory_region`, `thread`, `system_info`, `duration`, `os_error`)
 - `meta/tokens.djinn` — `Token`, `TokenStream`, `TokenClass` for procedural macros (`proc macro` / `proc attribute`)
 - `net/socket.djinn` — async sockets; `util/` — `json` (document reader over the runtime parser), `version`
 - `builtin/coro.djinn` — coroutine utilities

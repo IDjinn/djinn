@@ -453,6 +453,49 @@ impl TypeChecker {
         return left_is_null && symbols.nullable_value_payload(right) != 0;
     }
 
+    unsafe u32 check_coalesce(Node* node, u32 expected) {
+        u32 left = this.check_expression(node.first(), expected);
+        u32 payload = this.payload_inside_nullable_type(left);
+        if (!Types.is_pointer(left) && payload == 0) {
+            this.error_code(node, DiagnosticErrors.INVALID_OPERATOR_OPERAND, "the left operand of ?? must be a nullable type");
+            return left;
+        }
+
+        Node* second = node.second();
+        bool wrapped = !Types.is_pointer(left);
+        // 'null' and a variant such as 'optional::Empty()' take the nullable type, any other fallback the value inside it.
+        mut u32 hint = left;
+        if (wrapped && second.kind() != NodeKind::NULL_LITERAL && second.kind() != NodeKind::CALL) {
+            hint = payload;
+        }
+        u32 fallback = this.check_expression(second, hint);
+
+        if (wrapped) {
+            if (fallback == left) {
+                return left;
+            }
+            this.require_converted_value(second, fallback, payload);
+            return payload;
+        }
+
+        // A nullable fallback stays allowed: only the pointed type has to match.
+        if (Types.is_pointer(fallback)) {
+            if (second.kind() != NodeKind::NULL_LITERAL) {
+                this.require_explicit_cast(second, fallback, left, (FunctionInfo*)0, 0);
+            }
+        } else {
+            mut u32 wanted = left;
+            if (payload != 0) {
+                wanted = payload;
+            }
+            this.require_converted_value(second, fallback, wanted);
+        }
+        if (Types.is_nullable_pointer(left) && Types.is_safe_pointer(fallback)) {
+            return fallback;
+        }
+        return left;
+    }
+
     u32 check_binary(Node* node, u32 expected) {
         TokenKind op = node.op_kind();
         if (op == TokenKind::AND_AND || op == TokenKind::OR_OR) {
@@ -468,21 +511,7 @@ impl TypeChecker {
         }
 
         if (op == TokenKind::QUESTION_QUESTION) {
-            u32 pointer = this.check_expression(node.first(), expected);
-            u32 pointer_inside_nullable = this.payload_inside_nullable_type(pointer);
-            if (!Types.is_pointer(pointer) && pointer_inside_nullable == 0) {
-                this.error_code(node, DiagnosticErrors.INVALID_OPERATOR_OPERAND, "the left operand of ?? must be a nullable type");
-                return pointer;
-            }
-            u32 fallback = this.check_expression(node.second(), pointer);
-            bool left_is_wrapped_nullable = !Types.is_pointer(pointer);
-            if (left_is_wrapped_nullable && fallback == pointer_inside_nullable) {
-                return pointer_inside_nullable;
-            }
-            if (Types.is_nullable_pointer(pointer) && Types.is_safe_pointer(fallback)) {
-                return fallback;
-            }
-            return pointer;
+            return this.check_coalesce(node, expected);
         }
 
         mut u32 hint = expected;
@@ -551,7 +580,14 @@ impl TypeChecker {
 
         bool numbers = (Types.is_integer(left) || Types.is_float(left)) && (Types.is_integer(right) || Types.is_float(right));
         if (numbers && !Types.widens(left, right) && !Types.widens(right, left)) {
-            this.error_code(node, DiagnosticErrors.IMPLICIT_CONVERSION, "operands of different types need an explicit cast");
+            ByteBuffer* message = ByteBuffer.create();
+            SymbolTable* named = this.symbols;
+            message.append("operands of different types need an explicit cast: '");
+            named.describe_type(left, message);
+            message.append("' and '");
+            named.describe_type(right, message);
+            message.append("'");
+            this.error_over_expression(node, DiagnosticErrors.IMPLICIT_CONVERSION, message.cstr());
         }
         u32 common = Types.common(left, right);
         this.check_constant_operands(node, op, common);
@@ -658,6 +694,38 @@ impl TypeChecker {
             this.require_not_borrowed(source, variable, "move");
             variable.moved = true;
             variable.was_moved = true;
+            this.consume_subject(source, variable, false);
+        }
+    }
+
+    unsafe void bind_payload(LocalVariable* binding, Node* subject) {
+        SymbolTable* symbols = this.symbols;
+        if (Ownership.holds_disposable(symbols, binding.type)) {
+            binding.subject = subject;
+        }
+    }
+
+    unsafe void consume_subject(Node* at, LocalVariable* binding, bool returned) {
+        Node* subject = binding.subject;
+        if (subject == null) {
+            return;
+        }
+        NodeKind kind = subject.kind();
+        if (kind == NodeKind::IDENTIFIER && subject.symbol_kind() == SymbolKind.LOCAL) {
+            LocalVariable* matched = (LocalVariable*)subject.symbol();
+            if (!this.is_copy_type(matched.type)) {
+                if (returned) {
+                    this.move_out(subject);
+                } else {
+                    this.move_from(subject, (Node*)0);
+                }
+                return;
+            }
+        }
+        bool place = kind == NodeKind::IDENTIFIER || kind == NodeKind::FIELD_ACCESS || kind == NodeKind::INDEX
+            || (kind == NodeKind::UNARY && subject.op_kind() == TokenKind::STAR);
+        if (place && !this.in_unsafe()) {
+            this.error_code(at, DiagnosticErrors.MOVE_OUT_OF_PLACE, "cannot move a payload matched in a field, element or pointer: it stays there and could be disposed again");
         }
     }
 
@@ -672,6 +740,7 @@ impl TypeChecker {
         LocalVariable* variable = (LocalVariable*)source.symbol();
         if (!this.is_copy_type(variable.type)) {
             variable.was_moved = true;
+            this.consume_subject(source, variable, true);
         }
     }
 }

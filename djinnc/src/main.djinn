@@ -219,6 +219,7 @@ unsafe i32 run_compiler() {
     }
     if (Target.is_js() && !options.check_only) {
         if (!gen.check(program)) {
+            WebLibraries.report_unbound(options);
             return 1;
         }
         monitor.lap("check");
@@ -229,6 +230,7 @@ unsafe i32 run_compiler() {
     }
     if (options.check_only) {
         if (!gen.check(program)) {
+            WebLibraries.report_unbound(options);
             return 1;
         }
         if (options.obligations != 0) {
@@ -254,6 +256,11 @@ unsafe i32 run_compiler() {
         Bitcode.merge(gen, options);
     }
 
+    // every file written from here on (object, IR, assembly, natvis, executable) sits next to the output
+    if (!options.run) {
+        __djinn_make_parent_directories(options.output);
+    }
+
     if (options.library) {
         gen.exclude_dependencies(options.dependencies, true);
         u64 bitcode_size = 0;
@@ -262,7 +269,10 @@ unsafe i32 run_compiler() {
         ByteBuffer* library_object = ByteBuffer.create();
         library_object.append(options.output);
         library_object.append(".obj");
-        if (!gen.write_object(library_object.cstr(), options.opt_level)) {
+        if (Target.is_windows()) {
+            ObjectWriter.request_data_imports();
+        }
+        if (!gen.drop_unused_definitions() || !gen.write_object(library_object.cstr(), options.opt_level)) {
             return 1;
         }
         ptr<i8> library_path = options.output;
@@ -324,6 +334,10 @@ unsafe i32 run_compiler() {
     }
 
     if (options.opt_level != null && !Strings.same(options.opt_level, "O0")) {
+        PointerList* library_objects = Library.objects();
+        if (library_objects.length > 0) {
+            gen.export_core();
+        }
         Internalize.run(gen.module);
     }
     if (options.debug && gen.debug != null) {

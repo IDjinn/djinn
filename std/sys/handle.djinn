@@ -1,0 +1,143 @@
+import std::types;
+
+namespace std::sys;
+
+extern "C" {
+    i64 __djinn_handle_duplicate(i64 handle);
+    i64 __djinn_handle_standard(i32 stream);
+    i32 __djinn_standard_kind(i32 stream);
+    i32 __djinn_handle_kind(i64 handle);
+    i64 __djinn_handle_close(i64 handle);
+    i64 __djinn_handle_set_inheritable(i64 handle, i32 inheritable);
+    i64 __djinn_handle_read(i64 handle, void* buffer, i64 capacity);
+    i64 __djinn_handle_write(i64 handle, void* data, i64 length);
+    i64 __djinn_handle_pipe(i64* out);
+}
+
+enum HandleKind {
+    File = 1,
+    Terminal = 2,
+    Pipe = 3,
+    Socket = 4,
+    Directory = 5,
+    Device = 6,
+    Unknown = 0
+}
+
+enum StandardStream {
+    Input = 0,
+    Output = 1,
+    ErrorOutput = 2
+}
+
+// An operating system handle (a HANDLE on Windows, a file descriptor elsewhere) with one owner: disposing closes it.
+// New handles are not inherited by child processes.
+[Platform(native)]
+struct OsHandle : Disposable {
+    mut i64 value;
+
+    // A duplicate of a standard stream: closing it leaves the stream of the process open.
+    public static result<OsHandle, OsError> standard(StandardStream stream) {
+        unsafe {
+            i64 status = __djinn_handle_standard((i32)stream);
+            if (status < 0) { return result::Error(os_error_from_status(status)); }
+            return result::Ok({ .value = status });
+        }
+    }
+
+    public static HandleKind standard_kind(StandardStream stream) {
+        unsafe { return HandleKind::parseValue(__djinn_standard_kind((i32)stream)); }
+    }
+
+    public static bool is_terminal(StandardStream stream) {
+        unsafe { return __djinn_standard_kind((i32)stream) == 2; }
+    }
+
+    // Takes ownership of a raw handle: nothing else may close it.
+    public static unsafe OsHandle from_raw(i64 value) {
+        return { .value = value };
+    }
+
+    public void disposable() {
+        if (this.value >= 0) {
+            unsafe { __djinn_handle_close(this.value); }
+            this.value = -1;
+        }
+    }
+
+    public bool is_open() {
+        return this.value >= 0;
+    }
+
+    public HandleKind kind() {
+        unsafe { return HandleKind::parseValue(__djinn_handle_kind(this.value)); }
+    }
+
+    // The raw handle, still owned by this value.
+    public unsafe i64 raw() {
+        return this.value;
+    }
+
+    // Gives the raw handle away: the caller closes it.
+    public unsafe i64 into_raw() {
+        i64 taken = this.value;
+        this.value = -1;
+        return taken;
+    }
+
+    public result<OsHandle, OsError> duplicate() {
+        unsafe {
+            i64 status = __djinn_handle_duplicate(this.value);
+            if (status < 0) { return result::Error(os_error_from_status(status)); }
+            return result::Ok({ .value = status });
+        }
+    }
+
+    public result<bool, OsError> close() {
+        unsafe {
+            i64 status = __djinn_handle_close(this.value);
+            this.value = -1;
+            return OsStatus.done(status);
+        }
+    }
+
+    public result<bool, OsError> set_inheritable(bool inheritable) {
+        mut i32 flag = 0;
+        if (inheritable) { flag = 1; }
+        unsafe { return OsStatus.done(__djinn_handle_set_inheritable(this.value, flag)); }
+    }
+
+    // The number of bytes read; 0 at the end of the stream. Blocks until there is something to read.
+    public unsafe result<size, OsError> read(void* buffer, size capacity) {
+        i64 status = __djinn_handle_read(this.value, buffer, (i64)capacity);
+        if (status < 0) { return result::Error(os_error_from_status(status)); }
+        return result::Ok((size)status);
+    }
+
+    // Writes every byte or fails.
+    public unsafe result<bool, OsError> write(void* data, size length) {
+        return OsStatus.done(__djinn_handle_write(this.value, data, (i64)length));
+    }
+
+    public result<bool, OsError> write_text(str text) {
+        unsafe { return OsStatus.done(__djinn_handle_write(this.value, (void*)text.data, (i64)text.length)); }
+    }
+}
+
+// A one-way channel: what the writer sends, the reader receives.
+[Platform(native)]
+struct Pipe {
+    OsHandle reader;
+    OsHandle writer;
+
+    public static result<Pipe, OsError> create() {
+        unsafe {
+            i64* ends = i64[2];
+            i64 status = __djinn_handle_pipe(ends);
+            if (status < 0) { return result::Error(os_error_from_status(status)); }
+            OsHandle reader = OsHandle.from_raw(*(ends + 0));
+            OsHandle writer = OsHandle.from_raw(*(ends + 1));
+            return result::Ok({ .reader = reader, .writer = writer });
+        }
+    }
+}

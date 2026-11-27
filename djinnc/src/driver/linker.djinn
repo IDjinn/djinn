@@ -45,6 +45,72 @@ struct Linker {
         return mask;
     }
 
+    // The AddressSanitizer of Windows is dynamic (clang_rt.asan_dynamic-x86_64.dll in the clang resource directory): its
+    // import library and thunk are linked explicitly and the DLL is copied next to the program.
+    static unsafe bool append_windows_address_sanitizer(ByteBuffer* command, ptr<i8> clang, ptr<i8> output) {
+        ByteBuffer* query = ByteBuffer.create();
+        query.append("\"\"");
+        query.append(clang);
+        query.append("\" -print-resource-dir > \"");
+        query.append(output);
+        query.append(".resource-dir\"\"");
+        ByteBuffer* file = ByteBuffer.create();
+        file.append(output);
+        file.append(".resource-dir");
+        if (Process.run(query.cstr()) != 0) {
+            logger_error(Log.get(), "djinnc: cannot ask '%s' for its resource directory", clang);
+            return false;
+        }
+        ptr<i8> text = Files.read_all(file.cstr());
+        remove(file.cstr());
+        if (text == null || strlen(text) == 0) {
+            logger_error(Log.get(), "djinnc: cannot read the resource directory of '%s'", clang);
+            return false;
+        }
+        mut i32 length = strlen(text);
+        while (length > 0 && (text[length - 1] == 10 || text[length - 1] == 13)) {
+            length = length - 1;
+        }
+        ptr<i8> directory = Strings.duplicate(text, length);
+        command.append(" -Wl,/include:__asan_seh_interceptor \"");
+        command.append(directory);
+        command.append("/lib/windows/clang_rt.asan_dynamic-x86_64.lib\" \"-Wl,/wholearchive:");
+        command.append(directory);
+        command.append("/lib/windows/clang_rt.asan_dynamic_runtime_thunk-x86_64.lib\"");
+        ByteBuffer* source = ByteBuffer.create();
+        source.append(directory);
+        source.append("/lib/windows/clang_rt.asan_dynamic-x86_64.dll");
+        mut i32 slash = strlen(output);
+        while (slash > 0 && output[slash - 1] != 47 && output[slash - 1] != 92) {
+            slash = slash - 1;
+        }
+        ByteBuffer* target = ByteBuffer.create();
+        if (slash == 0) {
+            target.append("./");
+        }
+        target.append_slice(output, slash);
+        ptr<i8> from = source.cstr();
+        ptr<i8> to = target.cstr();
+        for (mut i32 i = 0; i < strlen(from); i = i + 1) {
+            if (from[i] == 47) {
+                from[i] = 92;
+            }
+        }
+        for (mut i32 i = 0; i < strlen(to); i = i + 1) {
+            if (to[i] == 47) {
+                to[i] = 92;
+            }
+        }
+        ByteBuffer* copy = ByteBuffer.create();
+        copy.append("copy /Y \"");
+        copy.append(from);
+        copy.append("\" \"");
+        copy.append(to);
+        copy.append("\" > nul");
+        Process.run(copy.cstr());
+        return true;
+    }
+
     // The -fsanitize= list for a mask.
     public static unsafe ptr<i8> sanitize_list(i32 mask) {
         ByteBuffer* list = ByteBuffer.create();
@@ -471,9 +537,12 @@ struct Linker {
             logger_error(Log.get(), "djinnc: --sanitize needs the clang driver to link: it is not available for wasm, Android or --lld");
             return 1;
         }
-        if ((options.sanitize & (Sanitizer.ADDRESS | Sanitizer.THREAD)) != 0 && Linker.is_windows()) {
-            // the sanitizer's malloc thunks clash with the dynamic UCRT the runtime links against
-            logger_error(Log.get(), "djinnc: the address and thread sanitizers are not available when linking on Windows (undefined is)");
+        if ((options.sanitize & Sanitizer.THREAD) != 0 && Linker.is_windows()) {
+            logger_error(Log.get(), "djinnc: the thread sanitizer is not available on Windows (LLVM ships no runtime for it)");
+            return 1;
+        }
+        if ((options.sanitize & Sanitizer.ADDRESS) != 0 && Linker.is_windows() && !Target.is_x64()) {
+            logger_error(Log.get(), "djinnc: the address sanitizer is available on Windows x64 only");
             return 1;
         }
         if (Target.is_android()) {
@@ -520,8 +589,20 @@ struct Linker {
             }
         }
         if (options.sanitize != 0) {
-            command.append(" -fno-omit-frame-pointer -fsanitize=");
-            command.append(Linker.sanitize_list(options.sanitize));
+            command.append(" -fno-omit-frame-pointer");
+            mut i32 driver_sanitizers = options.sanitize;
+            if (Linker.is_windows() && (options.sanitize & Sanitizer.ADDRESS) != 0) {
+                // the driver would link the static runtime thunk, whose malloc functions clash with the dynamic UCRT
+                // the runtime uses; the dynamic runtime and its thunk go in by hand
+                driver_sanitizers = options.sanitize & (Sanitizer.UNDEFINED | Sanitizer.THREAD);
+                if (!Linker.append_windows_address_sanitizer(command, clang, options.output)) {
+                    return 1;
+                }
+            }
+            if (driver_sanitizers != 0) {
+                command.append(" -fsanitize=");
+                command.append(Linker.sanitize_list(driver_sanitizers));
+            }
             if (options.runtime_lib != null) {
                 logger_warn(Log.get(), "djinnc: --runtime-lib is not instrumented: build it with DJINN_SANITIZE=%s tools/build_runtime.sh to see errors inside the runtime", Linker.sanitize_list(options.sanitize));
             }

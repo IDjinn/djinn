@@ -144,10 +144,37 @@ struct Bitcode {
         ObjectWriter.run_passes(module, (ptr)0, "globaldce,strip-dead-prototypes");
     }
 
+    static unsafe void pin(ptr definition) {
+        if (definition != null && LLVMIsDeclaration(definition) == 0 && LLVMGetLinkage(definition) == LlvmConst.LINKAGE_LINKONCE_ODR) {
+            LLVMSetLinkage(definition, LlvmConst.LINKAGE_WEAK_ODR);
+        }
+    }
+
+    // A consumer that inlines a kept body links what it refers to against the library object, so the object must not
+    // drop a shared definition (linkonce_odr) after its own optimizer inlined every use.
+    static unsafe void pin_references(ptr stripped, ptr module) {
+        u64 length = 0;
+        mut ptr function = LLVMGetFirstFunction(stripped);
+        while (function != null) {
+            if (LLVMIsDeclaration(function) != 0 && LLVMGetFirstUse(function) != null) {
+                Bitcode.pin(LLVMGetNamedFunction(module, LLVMGetValueName2(function, &length)));
+            }
+            function = LLVMGetNextFunction(function);
+        }
+        mut ptr global = LLVMGetFirstGlobal(stripped);
+        while (global != null) {
+            if (LLVMIsDeclaration(global) != 0 && LLVMGetFirstUse(global) != null) {
+                Bitcode.pin(LLVMGetNamedGlobal(module, LLVMGetValueName2(global, &length)));
+            }
+            global = LLVMGetNextGlobal(global);
+        }
+    }
+
     public static unsafe ptr<i8> capture(ptr module, u64* size) {
         ptr clone = LLVMCloneModule(module);
         LLVMStripModuleDebugInfo(clone);
         Bitcode.strip(clone);
+        Bitcode.pin_references(clone, module);
         ptr buffer = LLVMWriteBitcodeToMemoryBuffer(clone);
         u64 length = LLVMGetBufferSize(buffer);
         ptr<i8> copy = Strings.duplicate(LLVMGetBufferStart(buffer), (i32)length);

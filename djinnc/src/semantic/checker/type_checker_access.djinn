@@ -12,6 +12,14 @@ impl TypeChecker {
         return symbols.find_struct(node.text_atom(), node.name(), this.scope) != null;
     }
 
+    unsafe bool ambiguous_type_name(Node* node) {
+        if (node.kind() != NodeKind::IDENTIFIER || this.find_variable(node.name()) != null) {
+            return false;
+        }
+        SymbolTable* symbols = this.symbols;
+        return symbols.ambiguous_type(node.text_atom(), node.name(), this.scope, node);
+    }
+
     unsafe u32 type_name_operand(Node* node, u32 expected) {
         if (expected == 0 || expected != Types.pointer_to(this.core_type("TypeInfo"))) {
             return 0;
@@ -24,6 +32,7 @@ impl TypeChecker {
             reference = TypeRef.named(node.text());
         }
         SymbolTable* known = this.symbols;
+        known.blame = node;
         u32 measured = known.resolve_type(reference, this.scope);
         if (measured == 0 || Types.is_void(measured) || measured == Types.auto_type()) {
             return 0;
@@ -80,6 +89,7 @@ impl TypeChecker {
                 this.error_code(node, DiagnosticErrors.USE_AFTER_MOVE, "use of moved value");
             }
             if (scopes.find(node.name()) != null) {
+                this.check_pointer_across_suspend(node, variable);
                 node.set_symbol(SymbolKind.LOCAL, (ptr)variable);
             } else {
                 node.set_symbol(SymbolKind.GLOBAL, (ptr)variable);
@@ -199,6 +209,9 @@ impl TypeChecker {
 
     unsafe u32 check_field(Node* node) {
         Node* base = node.first();
+        if (this.ambiguous_type_name(base)) {
+            return Types.i32_type();
+        }
         if (this.is_struct_name(base)) {
             this.error_code(node, DiagnosticErrors.INVALID_MEMBER_ACCESS, "a struct constant cannot be used as a variable");
             return Types.i32_type();
@@ -297,6 +310,9 @@ impl TypeChecker {
 
     unsafe u32 check_member(Node* node) {
         Node* base = node.first();
+        if (this.ambiguous_type_name(base)) {
+            return Types.i32_type();
+        }
         if (base.kind() == NodeKind::IDENTIFIER && !this.is_struct_name(base) && this.find_variable(base.name()) == null) {
             Node* provided = this.intrinsic_constant(base, node);
             if (provided != null) {
@@ -335,6 +351,9 @@ impl TypeChecker {
     unsafe u32 check_typeof_method(Node* node, TypeRef* reference) {
         SymbolTable* known = this.symbols;
         u32 method_info = Types.pointer_to(this.core_type("MethodInfo"));
+        if (known.ambiguous_type(reference.full_atom, reference.name_atom, this.scope, node)) {
+            return method_info;
+        }
         StructInfo* owner = known.find_struct(reference.full_atom, reference.name_atom, this.scope);
         if (owner == null) {
             this.error_code(node, DiagnosticErrors.UNKNOWN_TYPE, "unknown type");
@@ -440,6 +459,9 @@ impl TypeChecker {
             }
             mut u32 measured = known.resolve_type(reference, this.scope);
             if (measured == 0 && reference.kind == TypeKind.NAMED && reference.args == null) {
+                if (known.ambiguous_interface(reference.full_atom, reference.name_atom, this.scope, node)) {
+                    return Types.pointer_to(this.core_type("TypeInfo"));
+                }
                 InterfaceInfo* contract = known.find_interface(reference.full_atom, reference.name_atom, this.scope);
                 if (contract != null) {
                     node.set_symbol(SymbolKind.INTERFACE_NAME, (ptr)contract);

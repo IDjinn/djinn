@@ -1,0 +1,142 @@
+import std::types;
+import std::libc;
+
+namespace std::sys;
+
+extern "C" {
+    i64 __djinn_memory_page_size();
+    i64 __djinn_memory_granularity();
+    i64 __djinn_memory_map(i64 size, i32 protection, i64* out);
+    i64 __djinn_memory_protect(ptr base, i64 length, i32 protection);
+    i64 __djinn_memory_unmap(ptr base, i64 length);
+    i64 __djinn_memory_set_locked(ptr base, i64 length, i32 locked);
+}
+
+// There is no protection that is writable and executable at once.
+enum MemoryProtection {
+    NoAccess = 0,
+    ReadOnly = 1,
+    ReadWrite = 2,
+    ReadExecute = 3
+}
+
+// Whole pages taken from the operating system, zeroed, with one owner: disposing returns them. Every access through
+// the methods is checked against the bounds and the protection, so a mistake is an error value and not a fault.
+[Platform(native)]
+struct MemoryRegion : Disposable {
+    mut ptr base;
+    mut size bytes;
+    mut MemoryProtection access;
+
+    // At least `length` bytes, rounded up to whole pages.
+    public static result<MemoryRegion, OsError> allocate(size length, MemoryProtection protection) {
+        unsafe {
+            mut i64 address = 0;
+            i64 status = __djinn_memory_map((i64)length, (i32)protection, &address);
+            if (status < 0) { return result::Error(os_error_from_status(status)); }
+            return result::Ok({ .base = (ptr)address, .bytes = (size)status, .access = protection });
+        }
+    }
+
+    public void disposable() {
+        if (this.base != null) {
+            unsafe { __djinn_memory_unmap(this.base, (i64)this.bytes); }
+            this.base = null;
+            this.bytes = 0;
+        }
+    }
+
+    public size length() {
+        return this.bytes;
+    }
+
+    public MemoryProtection protection() {
+        return this.access;
+    }
+
+    public result<bool, OsError> protect(MemoryProtection protection) {
+        unsafe {
+            i64 status = __djinn_memory_protect(this.base, (i64)this.bytes, (i32)protection);
+            if (status < 0) { return result::Error(os_error_from_status(status)); }
+            this.access = protection;
+            return result::Ok(true);
+        }
+    }
+
+    // Error(InvalidArgument) outside the region, Error(PermissionDenied) when the protection forbids the access.
+    public result<bool, OsError> write(size offset, str data) {
+        if (!this.covers(offset, data.length)) { return result::Error(OsError::InvalidArgument()); }
+        if (!this.writable()) { return result::Error(OsError::PermissionDenied()); }
+        unsafe { memcpy((void*)((i8*)this.base + offset), (void*)data.data, (u64)data.length); }
+        return result::Ok(true);
+    }
+
+    public result<bool, OsError> write_byte(size offset, u8 value) {
+        if (!this.covers(offset, 1u)) { return result::Error(OsError::InvalidArgument()); }
+        if (!this.writable()) { return result::Error(OsError::PermissionDenied()); }
+        unsafe {
+            i8* bytes = (i8*)this.base;
+            *(bytes + offset) = (i8)value;
+        }
+        return result::Ok(true);
+    }
+
+    public result<bool, OsError> fill(size offset, size count, u8 value) {
+        if (!this.covers(offset, count)) { return result::Error(OsError::InvalidArgument()); }
+        if (!this.writable()) { return result::Error(OsError::PermissionDenied()); }
+        unsafe {
+            i8* bytes = (i8*)this.base;
+            for (mut size i = 0u; i < count; i = i + 1u) {
+                *(bytes + (offset + i)) = (i8)value;
+            }
+        }
+        return result::Ok(true);
+    }
+
+    public result<u8, OsError> read_byte(size offset) {
+        if (!this.covers(offset, 1u)) { return result::Error(OsError::InvalidArgument()); }
+        if (!this.readable()) { return result::Error(OsError::PermissionDenied()); }
+        unsafe {
+            i8* bytes = (i8*)this.base;
+            return result::Ok((u8)*(bytes + offset));
+        }
+    }
+
+    // A copy of `count` bytes as text.
+    public result<string, OsError> read_text(size offset, size count) {
+        if (!this.covers(offset, count)) { return result::Error(OsError::InvalidArgument()); }
+        if (!this.readable()) { return result::Error(OsError::PermissionDenied()); }
+        unsafe {
+            i8* copy = __djinn_alloc((u64)count + 1);
+            memcpy((void*)copy, (void*)((i8*)this.base + offset), (u64)count);
+            *(copy + count) = 0;
+            return result::Ok({ .data = copy, .length = count, .meta = StringMeta.heap() });
+        }
+    }
+
+    // Raw access: valid while the region lives, and the protection is the only check.
+    public unsafe void* address() {
+        return (void*)this.base;
+    }
+
+    // Keeps the pages out of the swap file. The system limits how much a process may lock.
+    public result<bool, OsError> lock() {
+        unsafe { return OsStatus.done(__djinn_memory_set_locked(this.base, (i64)this.bytes, 1)); }
+    }
+
+    public result<bool, OsError> unlock() {
+        unsafe { return OsStatus.done(__djinn_memory_set_locked(this.base, (i64)this.bytes, 0)); }
+    }
+
+    bool covers(size offset, size count) {
+        return offset <= this.bytes && count <= this.bytes - offset;
+    }
+
+    bool readable() {
+        return this.access != MemoryProtection::NoAccess;
+    }
+
+    bool writable() {
+        return this.access == MemoryProtection::ReadWrite;
+    }
+}

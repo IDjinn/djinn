@@ -1720,4 +1720,483 @@ i32 main() {
 """;
         Verify.source(source).with_std().diagnostics(Expected.error(DiagnosticErrors.BORROW_CONFLICT));
     }
+
+    [Test]
+    void PointerUsedAfterAwaitIsRejected() {
+        str source = """
+namespace app;
+async i32 other() { return 1; }
+async i32 main() {
+    mut i32 value = 5;
+    i32* p = &value;
+    i32 got = await other();
+    return got + *p;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.POINTER_ACROSS_SUSPEND).at(7, 19));
+    }
+
+    [Test]
+    void PointerDeclaredAfterAwaitOrReassignedIsAccepted() {
+        str source = """
+namespace app;
+async i32 other() { return 1; }
+async i32 main() {
+    i32 value = 5;
+    i32 other_value = 5;
+    mut i32* p = &value;
+    i32 used = *p;
+    i32 got = await other();
+    p = &other_value;
+    i32* q = &other_value;
+    return got + used + *p + *q;
+}
+""";
+        Verify.source(source).runs(Expected.exit(16));
+    }
+
+    [Test]
+    void PointerUsedBeforeAwaitIsAccepted() {
+        str source = """
+namespace app;
+async i32 other() { return 1; }
+async i32 main() {
+    mut i32 value = 5;
+    i32* p = &value;
+    i32 used = *p;
+    i32 got = await other();
+    return got + used;
+}
+""";
+        Verify.source(source).runs(Expected.exit(6));
+    }
+
+    [Test]
+    void PointerInUnsafeOrVoidPointerAcrossAwaitIsAccepted() {
+        str source = """
+namespace app;
+async i32 other() { return 1; }
+async i32 main() {
+    mut i32 value = 5;
+    i32* p = &value;
+    void* handle = (void*)p;
+    i32 got = await other();
+    unsafe { return got + *p; }
+}
+""";
+        Verify.source(source).runs(Expected.exit(6));
+    }
+
+    [Test]
+    void PointerInUnsafeFunctionAcrossAwaitIsAccepted() {
+        str source = """
+namespace app;
+async i32 other() { return 1; }
+async unsafe i32 run(i32* p) {
+    i32 got = await other();
+    return got + *p;
+}
+async i32 main() {
+    mut i32 value = 5;
+    return await run(&value);
+}
+""";
+        Verify.source(source).runs(Expected.exit(6));
+    }
+}
+
+struct UnionOwnershipTests {
+    [Test]
+    void ReturningALocalInsideAVariantDoesNotDisposeIt() {
+        str source = """
+import std::types;
+
+unsafe static mut i32 log = 0;
+
+struct Handle : Disposable {
+    i32 id;
+
+    public unsafe void disposable() {
+        log = log * 4 + this.id;
+    }
+}
+
+void consume(Handle taken) {
+}
+
+optional<Handle> wrapped() {
+    Handle value = { .id = 1 };
+    return optional::Value(value);
+}
+
+result<Handle, i32> succeeded() {
+    Handle value = { .id = 3 };
+    return result::Ok(value);
+}
+
+result<optional<Handle>, i32> nested() {
+    Handle value = { .id = 3 };
+    return result::Ok(optional::Value(value));
+}
+
+optional<Handle> picked(bool first) {
+    Handle left = { .id = 1 };
+    Handle right = { .id = 2 };
+    return first ? optional::Value(left) : optional::Value(right);
+}
+
+i32 main() {
+    optional<Handle> a = wrapped();
+    result<Handle, i32> b = succeeded();
+    result<optional<Handle>, i32> c = nested();
+    optional<Handle> d = picked(true);
+    if (a is Value found) { consume(found); }
+    unsafe { return log; }
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(9));
+    }
+
+    [Test]
+    void ALocalKeptOnAnotherPathIsStillDisposed() {
+        str source = """
+import std::types;
+
+unsafe static mut i32 log = 0;
+
+struct Handle : Disposable {
+    i32 id;
+
+    public unsafe void disposable() {
+        log = log * 4 + this.id;
+    }
+}
+
+void consume(Handle taken) {
+}
+
+optional<Handle> early(bool stop) {
+    Handle value = { .id = 3 };
+    if (stop) {
+        return optional::Value(value);
+    }
+    return null;
+}
+
+i32 main() {
+    optional<Handle> kept = early(true);
+    mut i32 before = 0;
+    unsafe { before = log; }
+    optional<Handle> none = early(false);
+    unsafe { return before * 10 + log; }
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(3));
+    }
+
+    [Test]
+    void ALocalWrappedIntoAnOptionalParameterIsMoved() {
+        str source = """
+import std::types;
+
+unsafe static mut i32 log = 0;
+
+struct Handle : Disposable {
+    i32 id;
+
+    public unsafe void disposable() {
+        log = log * 4 + this.id;
+    }
+}
+
+void consume(Handle taken) {
+}
+
+optional<Handle> keep(optional<Handle> value) {
+    return value;
+}
+
+optional<Handle> passed_through() {
+    Handle value = { .id = 1 };
+    return keep(value);
+}
+
+i32 main() {
+    optional<Handle> a = passed_through();
+    unsafe { return log; }
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(0));
+    }
+
+    [Test]
+    void UseAfterMoveIntoAVariantIsError() {
+        str source = """
+import std::types;
+
+unsafe static mut i32 log = 0;
+
+struct Handle : Disposable {
+    i32 id;
+
+    public unsafe void disposable() {
+        log = log * 4 + this.id;
+    }
+}
+
+void consume(Handle taken) {
+}
+
+i32 main() {
+    Handle value = { .id = 1 };
+    optional<Handle> boxed = optional::Value(value);
+    return value.id;
+}
+""";
+        Verify.source(source).with_std().diagnostics(Expected.error(DiagnosticErrors.USE_AFTER_MOVE));
+    }
+
+    [Test]
+    void AUnionNeverDisposesItsPayload() {
+        str source = """
+import std::types;
+
+unsafe static mut i32 log = 0;
+
+struct Handle : Disposable {
+    i32 id;
+
+    public unsafe void disposable() {
+        log = log * 4 + this.id;
+    }
+}
+
+void consume(Handle taken) {
+}
+
+optional<Handle> make(i32 id) {
+    return optional::Value({ .id = id });
+}
+
+void hold() {
+    optional<Handle> stored = make(1);
+    make(2);
+    if (make(3) is Value found) {
+        i32 seen = found.id;
+    }
+}
+
+i32 main() {
+    hold();
+    unsafe { return log; }
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(0));
+    }
+
+    [Test]
+    void ReadingAPayloadKeepsTheMatchedValue() {
+        str source = """
+import std::types;
+
+unsafe static mut i32 log = 0;
+
+struct Handle : Disposable {
+    i32 id;
+
+    public unsafe void disposable() {
+        log = log * 4 + this.id;
+    }
+}
+
+void consume(Handle taken) {
+}
+
+Handle taken_out(optional<Handle> boxed, bool give) {
+    if (boxed is Value found) {
+        if (give) {
+            return found;
+        }
+    }
+    if (boxed is Value again) {
+        return { .id = again.id + 1 };
+    }
+    return { .id = 0 };
+}
+
+i32 twice(i32 value) {
+    return value * 2;
+}
+
+i32 main() {
+    mut i32 sum = 0;
+    mut optional<Handle> boxed = optional::Value({ .id = 1 });
+    if (boxed is Value first) { sum = sum + first.id; }
+    if (boxed is Value second) { sum = sum + second.id; consume(second); }
+    boxed = optional::Value({ .id = 2 });
+    if (boxed is Value third) { sum = sum + third.id; consume(third); }
+    optional<i32> number = optional::Value(5);
+    if (number is Value x) { sum = sum + twice(x); }
+    if (number is Value y) { sum = sum + y; }
+    Handle kept = taken_out(optional::Value({ .id = 3 }), true);
+    return sum + kept.id;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(22));
+    }
+
+    [Test]
+    void PassingAPayloadByValueConsumesTheMatchedLocal() {
+        str source = """
+import std::types;
+
+unsafe static mut i32 log = 0;
+
+struct Handle : Disposable {
+    i32 id;
+
+    public unsafe void disposable() {
+        log = log * 4 + this.id;
+    }
+}
+
+void consume(Handle taken) {
+}
+
+i32 main() {
+    optional<Handle> boxed = optional::Value({ .id = 1 });
+    if (boxed is Value first) { consume(first); }
+    if (boxed is Value second) { consume(second); }
+    return 0;
+}
+""";
+        Verify.source(source).with_std().diagnostics(Expected.error(DiagnosticErrors.USE_AFTER_MOVE));
+    }
+
+    [Test]
+    void StoringAPayloadInALocalConsumesTheMatchedLocal() {
+        str source = """
+import std::types;
+
+unsafe static mut i32 log = 0;
+
+struct Handle : Disposable {
+    i32 id;
+
+    public unsafe void disposable() {
+        log = log * 4 + this.id;
+    }
+}
+
+void consume(Handle taken) {
+}
+
+i32 main() {
+    optional<Handle> boxed = optional::Value({ .id = 1 });
+    if (boxed is Value first) { Handle owned = first; }
+    if (boxed is Value second) { return second.id; }
+    return 0;
+}
+""";
+        Verify.source(source).with_std().diagnostics(Expected.error(DiagnosticErrors.USE_AFTER_MOVE));
+    }
+
+    [Test]
+    void ASwitchArmThatMovesItsPayloadConsumesTheMatchedLocal() {
+        str source = """
+import std::types;
+
+unsafe static mut i32 log = 0;
+
+struct Handle : Disposable {
+    i32 id;
+
+    public unsafe void disposable() {
+        log = log * 4 + this.id;
+    }
+}
+
+void consume(Handle taken) {
+}
+
+i32 take(Handle taken) {
+    return taken.id;
+}
+
+i32 main() {
+    result<Handle, i32> outcome = result::Ok({ .id = 1 });
+    i32 first = switch (outcome) {
+        Ok handle -> take(handle),
+        Error code -> code
+    };
+    i32 second = switch (outcome) {
+        Ok handle -> handle.id,
+        Error code -> code
+    };
+    return first + second;
+}
+""";
+        Verify.source(source).with_std().diagnostics(Expected.error(DiagnosticErrors.USE_AFTER_MOVE));
+    }
+
+    [Test]
+    void MovingANestedPayloadConsumesTheOuterLocal() {
+        str source = """
+import std::types;
+
+unsafe static mut i32 log = 0;
+
+struct Handle : Disposable {
+    i32 id;
+
+    public unsafe void disposable() {
+        log = log * 4 + this.id;
+    }
+}
+
+void consume(Handle taken) {
+}
+
+i32 main() {
+    result<optional<Handle>, i32> outcome = result::Ok(optional::Value({ .id = 1 }));
+    if (outcome is Ok inner) {
+        if (inner is Value found) { consume(found); }
+    }
+    if (outcome is Ok again) { return 1; }
+    return 0;
+}
+""";
+        Verify.source(source).with_std().diagnostics(Expected.error(DiagnosticErrors.USE_AFTER_MOVE));
+    }
+
+    [Test]
+    void MovingAPayloadMatchedInAFieldIsError() {
+        str source = """
+import std::types;
+
+unsafe static mut i32 log = 0;
+
+struct Handle : Disposable {
+    i32 id;
+
+    public unsafe void disposable() {
+        log = log * 4 + this.id;
+    }
+}
+
+void consume(Handle taken) {
+}
+
+struct Holder {
+    optional<Handle> item;
+}
+
+i32 main() {
+    Holder holder = { .item = optional::Value({ .id = 1 }) };
+    if (holder.item is Value found) { consume(found); }
+    return 0;
+}
+""";
+        Verify.source(source).with_std().diagnostics(Expected.error(DiagnosticErrors.MOVE_OUT_OF_PLACE));
+    }
 }

@@ -2,6 +2,59 @@
 
 ## [Unreleased]
 
+### Added
+- The body of a generic struct, `impl` block, function or method is checked where it is declared, instantiated or not, in programs and in libraries (a `--library` build with such an error writes no `.djlib`). A member missing from a type that does not depend on the parameters is `E3017` or `E3027`; on a parameter with `where` bounds, a member that neither the bounds nor any type implementing all of them has is the new `E3074`. A parameter without bounds is still checked only in each instance. A program that compiled with a broken body that nothing instantiated is now rejected.
+- Typed platform APIs in `std::sys`; failures are `result<T, OsError>`. `ProcessEnvironment` (`EnvironmentVariable` with `value`, `set`, `set_if_absent`, `remove`; `EnvironmentSnapshot`), `Arguments` and `ProcessArguments`, `ProcessId`, `OsHandle` and `Pipe`, `Module` and `ModuleSymbol`, `MemoryRegion` (bounds and protection checked), `Thread`, `SystemInfo` and `Duration`. Handles, modules, memory regions, commands and child processes are released by their owner; a value left inside its `result` or `optional` is not, so move it into a local or pass it by value.
+- `Process` also reports its ids, executable path, current directory, elevation, memory and CPU time, and sets its priority.
+
+### Fixed
+- `(bool)p` compares a pointer, nullable ones included, with `null`. It kept the low bit of the address, so a non-null pointer to an even address was `false`; with `std`, and on the web, a nullable pointer gave a meaningless value.
+- A cast from a pointer to a floating-point type is error `E3073` instead of storing the bits of the address in the float. Cast to `u64` first to convert the address.
+- The fallback of `??` is converted to the value type of the left side: a narrower number (`i64?` with an `i32` fallback, `f64?` with `2`), a literal ending a chain (`a ?? b ?? 6` with two `i64?`), a `string?` with a literal and an `i8*?` with a `str` no longer fail with `LLVM module verification failed`, with `??=` too.
+- A `str` or `string` passed to an `i8*` constructor parameter (and a byte pointer passed to a `str` or `string` one) is converted as in a function call, instead of failing with `LLVM module verification failed`.
+- A `str` or `string` given as an `i8*` union variant payload, and a byte pointer given as a `str` or `string` payload, is converted as in a call instead of being stored as it was, which read the wrong bytes.
+
+### Changed
+- Breaking: the untyped `Process` API is gone. `Process.argc` / `argv` are `Arguments.all()` or `Process.arguments()`; `Process.env` is `ProcessEnvironment.value`; `Process.start` and the functions taking a `void*` process are `ProcessCommand` and `ChildProcess`; `Process.run` takes a `str` and returns `result<ProcessStatus, OsError>`. `getenv` and `system` stay as raw externs in `std::libc`.
+- The fallback of `??` and the argument of `Enum.parseValue` are type checked. A value without an implicit conversion is error `E3054`: a pointer, a float or a narrowing number as the fallback of an `i32?`, a pointer of another type as the fallback of a pointer, and a pointer, float, string, struct, unsigned integer or `bool` given to `parseValue`, which takes an `i64` (cast an unsigned value with `(i64)`). Before, the type checker accepted these; they then failed with `LLVM module verification failed` or compiled.
+- Constructor arguments (`new Box(x)`, `Box(x)`, generic and overloaded constructors) are checked like function call arguments: a narrowing or otherwise lossy conversion is error `E3054`, which names the parameter and the struct (add an explicit cast), so is a number or a pointer of another type used as a pointer, passing `null` or a nullable pointer as `T*` is `E3053`, and a struct where a number or pointer is expected (or the reverse) is `E3024`, as in a call. Before, the type checker accepted these.
+- A union variant payload is checked like a call argument, in generic unions, `optional::Value` and `result::Ok` too: a narrowing or lossy conversion, a number given as a pointer and a pointer of another type are `E3054` (`Shape::Circle(half())` with an `i32` payload and an `f64 half()` compiled), `null` or a nullable pointer given as `T*` is `E3053`, and a struct given as a number or pointer, or the reverse, is `E3024`. A union inferred from its arguments takes the type of the first one, so `Pair::Both(1, wide)` with an `i64 wide` is now an error: name the type (`Pair<i64>::Both(1, wide)`) or cast.
+- A pointer (including `null` and a string literal) given as a number, `bool` or enum argument is error `E3054`, in function, method and constructor calls, variadic packs, union variant payloads, `try ... ?:` fallbacks and the arms of a `switch` over a throwing call. `take(&x)` with an `i32` parameter compiled and passed the address, and with an `f64` parameter failed with `LLVM module verification failed`. Cast to an integer type (`(i64)p`) or compare with `null`; a variable, field, assignment or `return` already rejected it with `E3053`.
+- `djinnc` prints the source line under each diagnostic, with the reported span underlined (`^~~~`). The JSON format is unchanged.
+- `E3054` says what could not be converted: the parameter, the function, the argument number and both types, and it underlines the whole expression, closing parenthesis included.
+- The error for operands of different types names both types and points at the start of the expression instead of the operator.
+- `djinn-lsp` also checks a project with a web entry (`*.web.djinn` or `index.html`) with `--target web`, so an error that only the web build reports appears in the editor, marked `(web build)`.
+
+## [0.7.17] - 2026-11-27
+
+### Fixed
+- An installed `djinnc` can build a `ui` project with `--target web`: releases now carry the web bindings (`libs/ui/js` and the sources it shares). Without them every use of a `ui` type was `E3001: unknown type`; when a web build fails with an unknown type, the compiler now names the libraries that have no bindings and where it looked.
+- `--target web` declares `Math` in `std::math`, as the native std does, so `import std::math;` finds it (it was in `std::sys`), and `Math.min`, `Math.max` and `Math.abs` take any number type instead of only `f64`.
+- A local put into a union variant (`return optional::Value(value);`, `result::Ok(value)`) or wrapped into an `optional<T>` parameter is moved: it is no longer disposed while the union still holds it.
+- `--run` loads the libraries the program declares (`-l`, `-L`, library files by path, and the system dependencies recorded in a `.djlib`), so a project that uses `win32` no longer fails with `Symbols not found: [ DispatchMessageA, ... ]`.
+- `--run` on Windows no longer crashes when the app's code writes a global that lives in a `.djlib` (opening a `win32` window segfaulted).
+- On Windows, `--run` and procedural macros no longer crash when the compiled code of a `.djlib` reads or writes a global that lives in another one (or takes its address): a library object now reaches such a global through a pointer it carries (`__imp_<name>`). Rebuild the libraries affected.
+- A build, `--emit-ir` or `--emit-asm` whose output is in a folder that does not exist creates it instead of failing with `cannot write '....obj'`.
+- A library that uses a generic function or struct declared in another library or in std (`Cell.put<i32>`, `array<u16>`) no longer fails to link with `undefined symbol`: the library object now defines the instances its code uses, and keeps its own copy of the constants of its dependencies. An optimized library also keeps the instances that an optimized app inlines calls to. Rebuild the libraries affected.
+- An optimized program that links a library no longer fails with `undefined symbol: djinn_float_text` (or `Reflection.terminated`): the core functions that library objects call, std built with `-O2` included, are no longer internalized away.
+
+### Changed
+- A union never disposes its payload, and moving a payload that needs disposal out of one now moves what was matched: reusing that local after passing, storing or returning the bound name is error `E5001`, and moving it out of a field, element or pointer is `E5008`. Code that disposed the same payload twice this way no longer compiles. A local used as a variant payload cannot be used afterwards (`E5001`).
+- An unqualified type or interface name declared by more than one imported namespace is error `E3072`, which names the candidates, instead of silently taking the one imported first. Qualify it (`a::Item`, `a::Item.id()`, `a::Color.Red`, `a::Shape::Dot()`). A type or alias of the current namespace still shadows imports, an alias now beating an imported struct of the same name; an imported type beats a std type the program did not import; and the target of an alias resolves in the namespace that declares the alias, not where it is used. The `testing` types `TextBuffer` and `NodeState` are now `TestTextBuffer` and `TestNodeState`, so a namespace that imports `ui` and `testing` can keep naming the `ui` ones; code that used the old `testing` names must rename them. `testing` and `std::text` both declare `Text`: a namespace that imports both must qualify it (`testing::Text`).
+- A JIT error no longer dumps every symbol it touched: at most 10 missing symbols are named and the `Failed to materialize symbols` list becomes one line. The new `-v` / `--verbose` option prints the messages whole.
+
+## [0.7.16] - 2026-11-24
+
+### Fixed
+- Warnings from a library's interface source (`E6007` and the like) are no longer printed when a project compiles against the library.
+- A procedural macro that receives or returns an interpolated string (`$"clicked {n}
+"` inside `html!{ ... }`) no longer fails with "the procedural macro produced '
+', which is not a single token": the pieces of the string keep their own token classes (`INTERP_BEGIN`, `INTERP_MIDDLE`, `INTERP_END`, `INTERP_FORMAT`, 10 to 13) in `std::meta`.
+- The `main` that `[Application]` generates called `App.run`, which a user struct named `App` shadowed; it now calls `ui::App.run`.
+
+### Changed
+- A `main` written in the file replaces the one `[Application]` generates, with warning `E6010`, instead of failing with `E3003`. Mark the hand-written one `[Platform(windows)]` to keep a single source for the native and web builds. Libraries that use `std::meta` or `[Application]` must be rebuilt.
+
 ## [0.7.15] - 2026-11-24
 
 ### Changed

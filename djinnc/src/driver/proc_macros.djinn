@@ -10,6 +10,7 @@ unsafe static mut bool proc_failed = false;
 struct ProcMacros {
     public static unsafe void configure(Options* options) {
         proc_runtime_lib = (ptr)options.runtime_lib;
+        JitErrors.configure(options);
     }
 
     static unsafe ptr<i8> start() {
@@ -37,6 +38,7 @@ struct ProcMacros {
         if (!Jit.check(LLVMOrcCreateLLJIT(&jit, builder), "cannot create the JIT for procedural macros")) {
             return "cannot create the JIT for procedural macros";
         }
+        JitErrors.install(jit);
         ptr dylib = LLVMOrcLLJITGetMainJITDylib(jit);
         ptr runtime = (ptr)0;
         if (!Jit.check(LLVMOrcCreateStaticLibrarySearchGeneratorForPath(&runtime, LLVMOrcLLJITGetObjLinkingLayer(jit), (ptr<i8>)proc_runtime_lib), "cannot load the runtime library")) {
@@ -55,6 +57,9 @@ struct ProcMacros {
             return "cannot expose the process symbols to procedural macros";
         }
         LLVMOrcJITDylibAddGenerator(dylib, process);
+        if (!Jit.define_security_symbols(jit, dylib)) {
+            return "cannot define the stack protector symbols for procedural macros";
+        }
         if (Linker.is_windows()) {
             u64 target = 0;
             if (!Jit.check(LLVMOrcLLJITLookup(jit, &target, "_write"), "cannot find '_write'")) {
