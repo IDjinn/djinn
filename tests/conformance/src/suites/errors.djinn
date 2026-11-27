@@ -1462,6 +1462,120 @@ i32 main() {
     }
 
     [Test]
+    void narrow_new_constructor_argument() {
+        str source = """
+struct Box {
+    i32 value;
+    Box(i32 value) {
+        this.value = value;
+    }
+}
+
+i32 main() {
+    i64 value = 1;
+    Box* box = new Box(value);
+    return box.value;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.IMPLICIT_CONVERSION).at(10, 24));
+    }
+
+    [Test]
+    void narrow_constructor_argument() {
+        str source = """
+struct Box {
+    i32 value;
+    Box(i32 value) {
+        this.value = value;
+    }
+}
+
+i32 main() {
+    f64 value = 0.5;
+    Box box = Box(value);
+    return box.value;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.IMPLICIT_CONVERSION).at(10, 19)
+            .with_message("parameter 'value' of the 'Box' constructor (argument 1): cannot convert 'f64' to 'i32': only a wider type of the same kind converts implicitly; use an explicit cast"));
+    }
+
+    [Test]
+    void narrow_generic_constructor_argument() {
+        str source = """
+struct Pair<T> {
+    T first;
+    i32 second;
+    Pair(T first, i32 second) {
+        this.first = first;
+        this.second = second;
+    }
+}
+
+i32 main() {
+    i64 value = 1;
+    Pair<i32>* a = new Pair<i32>(value, 1);
+    Pair<i32> b = Pair<i32>(1, value);
+    return a.second + b.second;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.IMPLICIT_CONVERSION).at(12, 34)
+            .and_error(DiagnosticErrors.IMPLICIT_CONVERSION).at(13, 32));
+    }
+
+    [Test]
+    void narrow_overloaded_constructor_argument() {
+        str source = """
+struct Box {
+    i32 value;
+    Box(i32 value) {
+        this.value = value;
+    }
+    Box(i32 left, i32 right) {
+        this.value = left + right;
+    }
+}
+
+i32 main() {
+    i64 value = 1;
+    Box box = Box(1, value);
+    return box.value;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.IMPLICIT_CONVERSION).at(13, 22));
+    }
+
+    [Test]
+    void constructor_argument_conversions() {
+        str source = """
+extern "C" {
+    i32 strlen(i8* text);
+}
+
+struct Box {
+    i64 wide;
+    i32 length;
+    Box(i64 wide, i8* text) {
+        this.wide = wide;
+        unsafe {
+            this.length = strlen(text);
+        }
+    }
+}
+
+i32 main() {
+    i32 narrow = 30;
+    f64 half = 8.5;
+    str word = "abc";
+    Box box = Box(narrow, word);
+    Box* other = new Box((i64)half, word);
+    return (i32)box.wide + box.length + (i32)other.wide + other.length;
+}
+""";
+        Verify.source(source).runs(Expected.exit(44));
+    }
+
+    [Test]
     void narrow_return() {
         str source = """
 i32 main() {
