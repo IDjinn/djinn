@@ -538,6 +538,24 @@ impl TypeChecker {
         }
     }
 
+    // For a value that no overload resolution has matched: a type without a conversion to 'wanted' is an error.
+    unsafe void require_converted_value(Node* value, u32 passed, u32 wanted) {
+        if (passed == 0 || wanted == 0 || passed == wanted) {
+            return;
+        }
+        bool passed_scalar = Types.is_integer(passed) || Types.is_float(passed) || Types.is_pointer(passed);
+        bool wanted_scalar = Types.is_integer(wanted) || Types.is_float(wanted) || Types.is_pointer(wanted);
+        if (passed_scalar && wanted_scalar) {
+            this.require_argument_shape(value, passed, wanted, (FunctionInfo*)0, 0);
+            return;
+        }
+        if (this.mark_text_conversion(value, passed, wanted) || wanted == this.core_type("object") || this.wraps_pointer(passed, wanted)
+            || (passed == this.core_type("string") && wanted == this.core_type("str"))) {
+            return;
+        }
+        this.error_conversion(value, passed, wanted, (FunctionInfo*)0, 0, "there is no implicit conversion between these types");
+    }
+
     unsafe void require_value_type(Node* value, u32 passed, u32 wanted) {
         this.require_safe_pointer(value, passed, wanted);
         this.require_explicit_cast(value, passed, wanted, (FunctionInfo*)0, 0);
@@ -669,7 +687,8 @@ impl TypeChecker {
             this.error_code(node, DiagnosticErrors.WRONG_ARGUMENT_COUNT, "parseValue takes the value of the variant to look up");
             return owner.type_id;
         }
-        this.check_expression(node.child(0), Types.i64_type());
+        u32 passed = this.check_expression(node.child(0), Types.i64_type());
+        this.require_converted_value(node.child(0), passed, Types.i64_type());
         if (symbols.find_constant(owner, Ast.intern_base_name("Unknown", 7)) == null) {
             this.error_code(node, DiagnosticErrors.UNKNOWN_VARIANT, "parseValue returns the 'Unknown' variant for a value that matches no variant: declare one");
         }

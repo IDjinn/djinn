@@ -2026,6 +2026,154 @@ unsafe i32 main() {
     }
 
     [Test]
+    void coalesce_pointer_fallback_for_a_value() {
+        str source = """
+import std;
+
+i32 main() {
+    i32 value = 1;
+    mut i32? missing = null;
+    i32 chosen = missing ?? &value;
+    missing ??= &value;
+    return chosen;
+}
+""";
+        Verify.source(source).with_std().diagnostics(Expected.error(DiagnosticErrors.IMPLICIT_CONVERSION).at(6, 29)
+            .with_message("cannot convert 'i32*' to 'i32': a pointer does not convert to a number implicitly; use an explicit cast")
+            .and_error(DiagnosticErrors.IMPLICIT_CONVERSION).at(7, 17));
+    }
+
+    [Test]
+    void coalesce_narrowing_fallback() {
+        str source = """
+import std;
+
+i32 main() {
+    i32? missing = null;
+    i64 wide = 1;
+    i32 narrowed = missing ?? wide;
+    i32 truncated = missing ?? 2.5;
+    return narrowed + truncated;
+}
+""";
+        Verify.source(source).with_std().diagnostics(Expected.error(DiagnosticErrors.IMPLICIT_CONVERSION).at(6, 31)
+            .and_error(DiagnosticErrors.IMPLICIT_CONVERSION).at(7, 32));
+    }
+
+    [Test]
+    void coalesce_fallback_of_another_pointer_type() {
+        str source = """
+import std;
+
+struct Box { i32 value; }
+struct Other { i64 value; }
+
+i32 main() {
+    Other other = { .value = 1 };
+    Box*? missing = null;
+    optional<Box*> empty = optional::Empty();
+    Box* first = missing ?? &other;
+    Box* second = missing ?? 5;
+    Box* third = empty ?? &other;
+    return 0;
+}
+""";
+        Verify.source(source).with_std().diagnostics(Expected.error(DiagnosticErrors.IMPLICIT_CONVERSION).at(10, 29)
+            .and_error(DiagnosticErrors.IMPLICIT_CONVERSION).at(11, 30)
+            .and_error(DiagnosticErrors.IMPLICIT_CONVERSION).at(12, 27));
+    }
+
+    [Test]
+    void coalesce_fallback_of_another_type() {
+        str source = """
+import std;
+
+struct Box { i32 value; }
+struct Other { i64 value; }
+
+i32 main() {
+    Box? missing = null;
+    Other other = { .value = 1 };
+    Box first = missing ?? other;
+    Box second = missing ?? 5;
+    i32[]? numbers = null;
+    i64[] wide = [1];
+    i32[] third = numbers ?? wide;
+    return 0;
+}
+""";
+        Verify.source(source).with_std().diagnostics(Expected.error(DiagnosticErrors.IMPLICIT_CONVERSION).at(9, 28)
+            .with_message("cannot convert 'Other' to 'Box': there is no implicit conversion between these types")
+            .and_error(DiagnosticErrors.IMPLICIT_CONVERSION).at(10, 29)
+            .and_error(DiagnosticErrors.IMPLICIT_CONVERSION).at(13, 30));
+    }
+
+    [Test]
+    void coalesce_converts_the_fallback() {
+        str source = """
+import std;
+
+i32 main() {
+    i64? missing = null;
+    i64? other = null;
+    i32 narrow = 4;
+    i64 widened = missing ?? narrow;
+    i64 literal = missing ?? 10;
+    i64 chained = missing ?? other ?? 1;
+    i64 chosen = missing ?? (narrow > 0 ? 2 : 3);
+    f64? ratio = null;
+    f64 whole = ratio ?? 2;
+    string? name = null;
+    string text = name ?? "ab";
+    i8*? bytes = null;
+    str view = "abc";
+    i8* pointer = bytes ?? view;
+    i32 total = (i32)(widened + literal + chained + chosen) + (i32)whole;
+    return total + (i32)text.length + (i32)(*pointer == 97);
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(22));
+    }
+
+    [Test]
+    void parse_value_argument_of_another_type() {
+        str source = """
+enum Code { Unknown = 0, One = 1 }
+
+i32 main() {
+    i32 value = 1;
+    u64 wide = 1;
+    Code first = Code::parseValue(&value);
+    Code second = Code::parseValue(1.5);
+    Code third = Code::parseValue(wide);
+    Code fourth = Code::parseValue("1");
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.IMPLICIT_CONVERSION).at(6, 35)
+            .with_message("cannot convert 'i32*' to 'i64': a pointer does not convert to a number implicitly; use an explicit cast")
+            .and_error(DiagnosticErrors.IMPLICIT_CONVERSION).at(7, 36)
+            .and_error(DiagnosticErrors.IMPLICIT_CONVERSION).at(8, 35)
+            .and_error(DiagnosticErrors.IMPLICIT_CONVERSION).at(9, 36));
+    }
+
+    [Test]
+    void parse_value_widens_its_argument() {
+        str source = """
+enum Code { Unknown = 0, One = 1, Seven = 7 }
+
+i32 main() {
+    i32 narrow = 7;
+    u32 unsigned = 1;
+    Code first = Code::parseValue(narrow);
+    Code second = Code::parseValue(unsigned);
+    return (i32)(first == Code::Seven) + (i32)(second == Code::One) * 2;
+}
+""";
+        Verify.source(source).runs(Expected.exit(3));
+    }
+
+    [Test]
     void mixed_sign_operands() {
         str source = """
 i32 main() {
