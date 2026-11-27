@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- The body of a generic struct, `impl` block, function or method is checked where it is declared, instantiated or not, in programs and in libraries (a `--library` build with such an error writes no `.djlib`). A member missing from a type that does not depend on the parameters is `E3017` or `E3027`; on a parameter with `where` bounds, a member that neither the bounds nor any type implementing all of them has is the new `E3074`. A parameter without bounds is still checked only in each instance. A program that compiled with a broken body that nothing instantiated is now rejected.
 - Typed platform APIs in `std::sys`; failures are `result<T, OsError>`. `ProcessEnvironment` (`EnvironmentVariable` with `value`, `set`, `set_if_absent`, `remove`; `EnvironmentSnapshot`), `Arguments` and `ProcessArguments`, `ProcessId`, `OsHandle` and `Pipe`, `Module` and `ModuleSymbol`, `MemoryRegion` (bounds and protection checked), `Thread`, `SystemInfo` and `Duration`. Handles, modules, memory regions, commands and child processes are released by their owner; a value left inside its `result` or `optional` is not, so move it into a local or pass it by value.
 - `Process` also reports its ids, executable path, current directory, elevation, memory and CPU time, and sets its priority.
 
