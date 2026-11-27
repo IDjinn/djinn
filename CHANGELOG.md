@@ -3,6 +3,8 @@
 ## [Unreleased]
 
 ### Fixed
+- `(bool)p` compares a pointer, nullable ones included, with `null`. It kept the low bit of the address, so a non-null pointer to an even address was `false`; with `std`, and on the web, a nullable pointer gave a meaningless value.
+- A cast from a pointer to a floating-point type is error `E3073` instead of storing the bits of the address in the float. Cast to `u64` first to convert the address.
 - A `str` or `string` given as an `i8*` union variant payload, and a byte pointer given as a `str` or `string` payload, is converted as in a call instead of being stored as it was, which read the wrong bytes.
 
 ### Changed
