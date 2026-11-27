@@ -67,16 +67,19 @@ struct User {
 Async and parallelism:
 
 ```djinn
-async i32 fetch_count() {
+task<i32> fetch_count() {
     i32 n = await load_from_disk();
     return n;
 }
 
-async i32 main() {
+task<i32> main() {
     i32 result = await fetch_count();
     return result;
 }
 ```
+
+A function that awaits returns `task<T>`, which is what makes it async (the `async` keyword is optional). `.sync` blocks
+on a task from other code, and `sync` marks a function that never suspends.
 
 Macros (hygienic, multi-rule, pattern-matched):
 

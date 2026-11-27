@@ -98,7 +98,7 @@ per file its path (common directory stripped) and the tokens: one kind byte (bit
 followed by an atom or phrase index for the kinds that carry text. The bodies of non generic, non constexpr functions,
 constructors, operators and property accessors are replaced by `{}`. Generics, macros, constexpr and struct layouts stay
 complete, and comments never reach the file. The consumer does not run the lexer on it: it pushes the tokens directly.
-Modifiers (`private`, `async`, `sync`, `unsafe`) are kept in the text, so a consumer enforces `private` (E3062) and sees `sync`/`async` signatures the same way as for source.
+Modifiers (`private`, `async`, `sync`, `unsafe`) are kept in the text, so a consumer enforces `private` (E3062) and sees `sync`/`async` signatures the same way as for source. The body of a function that says `async` or uses `await` stays in the interface, so the consumer reads its `task<T>` signature as async, as the library did, and does not take it for a function that only passes a task on.
 
 ## How it works
 

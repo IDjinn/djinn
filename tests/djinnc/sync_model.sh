@@ -34,7 +34,7 @@ set +e; "$out/plain$exe"; code=$?; set -e
 
 # '.sync' blocks on a task from a sync function; the runtime is kept because an async function remains.
 cat > "$out/block.djinn" <<'SOURCE'
-async i32 leaf(i32 x) {
+async task<i32> leaf(i32 x) {
     return x + 1;
 }
 
@@ -56,7 +56,7 @@ grep -q 'call .*@__djinn_runtime_init' "$out/block$exe.ll" || fail "a program wi
 
 # 'await' is rejected in a 'sync' function; '.sync' inside async code warns.
 cat > "$out/bad.djinn" <<'SOURCE'
-async i32 leaf(i32 x) {
+async task<i32> leaf(i32 x) {
     return x + 1;
 }
 
@@ -64,7 +64,7 @@ sync i32 bad() {
     return await leaf(1);
 }
 
-async i32 blocking() {
+async task<i32> blocking() {
     return leaf(1).sync;
 }
 
@@ -106,14 +106,14 @@ struct Oops {
     }
 }
 
-async i32 leaf(i32 x) throws(Oops) {
+async task<i32> leaf(i32 x) throws(Oops) {
     if (x > 5) {
         throw Oops(x);
     }
     return x;
 }
 
-i32 plain() {
+task<i32> plain() {
     return try await leaf(9) ?: 30;
 }
 
@@ -121,7 +121,7 @@ sync i32 blocked() throws(Oops) {
     return leaf(2).sync;
 }
 
-i32 main() {
+task<i32> main() {
     i32 ok = try blocked() ?: 100;
     return await plain() + ok;
 }
@@ -193,35 +193,40 @@ else
     cat "$out/private_lib.log"; fail "library with a private function must build"
 fi
 
-# A function that uses 'await' is async without the keyword, also through a library interface.
+# A 'task<T>' function that uses 'await' is async without the keyword, also through a library interface, and one
+# without 'await' passes a task on.
 cat > "$out/infer.djinn" <<'SOURCE'
 namespace infer;
 
-async i32 leaf(i32 x) {
+async task<i32> leaf(i32 x) {
     return x + 1;
 }
 
-i32 middle(i32 x) {
+task<i32> middle(i32 x) {
     return await leaf(x) + 1;
 }
 
-i32 main() {
+task<i32> main() {
     return await middle(40);
 }
 SOURCE
-"$compiler" "$out/infer.djinn" --no-async-elision -o "$out/infer$exe" "${flags[@]}" > "$out/infer.log" 2>&1 || { cat "$out/infer.log"; fail "await must make an un-annotated function async"; }
+"$compiler" "$out/infer.djinn" --no-async-elision -o "$out/infer$exe" "${flags[@]}" > "$out/infer.log" 2>&1 || { cat "$out/infer.log"; fail "'await' must make a task function async without the keyword"; }
 set +e; "$out/infer$exe"; code=$?; set -e
-[ "$code" = 42 ] || fail "inferred async program must exit 42, got $code"
+[ "$code" = 42 ] || fail "task program must exit 42, got $code"
 mkdir -p "$out/infer_pkg"
 cat > "$out/infer_pkg/lib.djinn" <<'SOURCE'
 namespace inferlib;
 
-async i32 leaf(i32 x) {
+async task<i32> leaf(i32 x) {
     return x + 1;
 }
 
-i32 middle(i32 x) {
+task<i32> middle(i32 x) {
     return await leaf(x) + 1;
+}
+
+task<i32> forward(i32 x) {
+    return middle(x);
 }
 SOURCE
 cat > "$out/infer_pkg/main.djinn" <<'SOURCE'
@@ -229,18 +234,49 @@ namespace app;
 
 import inferlib;
 
-i32 main() {
-    return await middle(40);
+task<i32> main() {
+    return await forward(40);
 }
 SOURCE
-"$compiler" "$out/infer_pkg/lib.djinn" --library -o "$out/infer_pkg/inferlib.djlib" "${flags[@]}" > "$out/infer_lib.log" 2>&1 || { cat "$out/infer_lib.log"; fail "library with an inferred async function must build"; }
-"$compiler" "$out/infer_pkg/main.djinn" --lib "$out/infer_pkg/inferlib.djlib" -o "$out/infer_lib$exe" "${flags[@]}" > "$out/infer_lib_use.log" 2>&1 || { cat "$out/infer_lib_use.log"; fail "consumer must see the inferred task signature"; }
+"$compiler" "$out/infer_pkg/lib.djinn" --library -o "$out/infer_pkg/inferlib.djlib" "${flags[@]}" > "$out/infer_lib.log" 2>&1 || { cat "$out/infer_lib.log"; fail "library with task functions must build"; }
+"$compiler" "$out/infer_pkg/main.djinn" --lib "$out/infer_pkg/inferlib.djlib" -o "$out/infer_lib$exe" "${flags[@]}" > "$out/infer_lib_use.log" 2>&1 || { cat "$out/infer_lib_use.log"; fail "consumer must see the task signatures"; }
 set +e; "$out/infer_lib$exe"; code=$?; set -e
-[ "$code" = 42 ] || fail "inferred async library program must exit 42, got $code"
+[ "$code" = 42 ] || fail "task library program must exit 42, got $code"
 
-# A public function that blocks on a task must declare 'async' or 'sync' (E3063); declaring it fixes it.
+# 'await' and 'async' need a 'task<T>' return type.
+cat > "$out/signature.djinn" <<'SOURCE'
+task<i32> leaf(i32 x) {
+    return await other(x);
+}
+
+task<i32> other(i32 x) {
+    return await leaf(x);
+}
+
+i32 waits() {
+    return await leaf(1);
+}
+
+i32 main() {
+    return 0;
+}
+SOURCE
+if "$compiler" "$out/signature.djinn" -o "$out/signature$exe" "${flags[@]}" > "$out/signature.log" 2>&1; then fail "'await' without a task return type must fail"; fi
+grep -q 'error\[E3074\]' "$out/signature.log" || { cat "$out/signature.log"; fail "expected E3074"; }
+printf 'async i32 leaf() {
+    return 1;
+}
+
+i32 main() {
+    return 0;
+}
+' > "$out/keyword.djinn"
+if "$compiler" "$out/keyword.djinn" -o "$out/keyword$exe" "${flags[@]}" > "$out/keyword.log" 2>&1; then fail "'async' without a task return type must fail"; fi
+grep -q 'error\[E3073\]' "$out/keyword.log" || { cat "$out/keyword.log"; fail "expected E3073"; }
+
+# A public function that blocks on a task must declare 'sync' or return 'task<T>' (E3063).
 cat > "$out/contract.djinn" <<'SOURCE'
-async i32 leaf(i32 x) {
+async task<i32> leaf(i32 x) {
     return x + 1;
 }
 
@@ -261,7 +297,7 @@ set +e; "$out/contract_ok$exe"; code=$?; set -e
 
 # Async code that main cannot reach does not keep the runtime; reachable async code does.
 cat > "$out/unreached.djinn" <<'SOURCE'
-async i32 never_called(i32 x) {
+async task<i32> never_called(i32 x) {
     return x;
 }
 
@@ -274,7 +310,7 @@ if grep -q 'call .*@__djinn_runtime_init' "$out/unreached$exe.ll"; then fail "an
 set +e; "$out/unreached$exe"; code=$?; set -e
 [ "$code" = 5 ] || fail "unreached async program must exit 5, got $code"
 cat > "$out/reached.djinn" <<'SOURCE'
-async i32 leaf(i32 x) {
+async task<i32> leaf(i32 x) {
     return x + 1;
 }
 

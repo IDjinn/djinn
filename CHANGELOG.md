@@ -2,10 +2,14 @@
 
 ## [Unreleased]
 
+## [0.7.18] - 2026-11-27
+
 ### Fixed
 - A `str` or `string` given as an `i8*` union variant payload, and a byte pointer given as a `str` or `string` payload, is converted as in a call instead of being stored as it was, which read the wrong bytes.
 
 ### Changed
+- Breaking: an async function now writes `task<T>` as its return type (`task<void>` for no value). A function that returns `task<T>` and uses `await`, or is `main`, is async, so the `async` keyword is optional; with the keyword the `task<T>` is still required (`E3073`). `return` takes a `T`, and the error type of the task comes from `throws(E)` (`E3075`). The return type of a function is no longer rewritten because it awaits: `await` in a function that does not return a task is `E3074` (use `.sync` there), including `main`, constructors, properties and operators. A `task<T>` function with neither `await` nor `async` only passes a task on. Change `async i32 f()` to `task<i32> f()`; libraries must be rebuilt.
+- The unused `task<T>` struct of `std::sys`, whose methods were never implemented, was removed: it hid the core `task`. `Task.pause` and `Task.delay` return `task<void>`.
 - A union variant payload is checked like a call argument, in generic unions, `optional::Value` and `result::Ok` too: a narrowing or lossy conversion, a number given as a pointer and a pointer of another type are `E3054` (`Shape::Circle(half())` with an `i32` payload and an `f64 half()` compiled), `null` or a nullable pointer given as `T*` is `E3053`, and a struct given as a number or pointer, or the reverse, is `E3024`. A union inferred from its arguments takes the type of the first one, so `Pair::Both(1, wide)` with an `i64 wide` is now an error: name the type (`Pair<i64>::Both(1, wide)`) or cast.
 - `djinnc` prints the source line under each diagnostic, with the reported span underlined (`^~~~`). The JSON format is unchanged.
 - `E3054` says what could not be converted: the parameter, the function, the argument number and both types, and it underlines the whole expression, closing parenthesis included.

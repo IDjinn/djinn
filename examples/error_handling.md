@@ -46,7 +46,7 @@ i32 main() {
   otherwise.
 - An error that escapes `main` prints a report (type, message, stack in debug builds) and aborts.
 
-Async functions follow the same rules: `async i32 f() throws(E)` yields a `task<i32, E>` whose `await` must be wrapped in
+Async functions follow the same rules: `task<i32> f() throws(E)` yields a `task<i32, E>` whose `await` must be wrapped in
 `try` or a `switch`. `task<T>` is `task<T, void>`, a task that cannot fail. The failure record lives inline in the
 coroutine promise, so there is no allocation. An async function that lists several error types reports them as the core
 `Error`, because a task carries a single error type.
