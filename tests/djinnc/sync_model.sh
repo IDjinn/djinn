@@ -262,7 +262,7 @@ i32 main() {
 }
 SOURCE
 if "$compiler" "$out/signature.djinn" -o "$out/signature$exe" "${flags[@]}" > "$out/signature.log" 2>&1; then fail "'await' without a task return type must fail"; fi
-grep -q 'error\[E3074\]' "$out/signature.log" || { cat "$out/signature.log"; fail "expected E3074"; }
+grep -q 'error\[E3076\]' "$out/signature.log" || { cat "$out/signature.log"; fail "expected E3076"; }
 printf 'async i32 leaf() {
     return 1;
 }
@@ -272,7 +272,7 @@ i32 main() {
 }
 ' > "$out/keyword.djinn"
 if "$compiler" "$out/keyword.djinn" -o "$out/keyword$exe" "${flags[@]}" > "$out/keyword.log" 2>&1; then fail "'async' without a task return type must fail"; fi
-grep -q 'error\[E3073\]' "$out/keyword.log" || { cat "$out/keyword.log"; fail "expected E3073"; }
+grep -q 'error\[E3075\]' "$out/keyword.log" || { cat "$out/keyword.log"; fail "expected E3075"; }
 
 # A public function that blocks on a task must declare 'sync' or return 'task<T>' (E3063).
 cat > "$out/contract.djinn" <<'SOURCE'

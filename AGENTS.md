@@ -97,9 +97,9 @@ constexpr and reflection survive separate compilation; generics dedup across mod
 
 `async`/`await`, `spawn`, `yield` on LLVM coroutines, scheduled by the C runtime (`runtime/scheduler.c`, thread pool, event
 loop, `io_socket.c`). A function is async when its written signature returns `task<T>` and its body awaits (or it is
-`main`), or when it says `async`, which also requires `task<T>` (`E3073`); callers get the task and `return` takes `T`.
-The error type of the task comes from `throws(E)` (`E3075`). Without `await` or `async`, a `task<T>` function only passes
-a task on. `await` in a function that does not return a task is `E3074`, in a `sync` function `E3061`. The postfix `.sync`
+`main`), or when it says `async`, which also requires `task<T>` (`E3075`); callers get the task and `return` takes `T`.
+The error type of the task comes from `throws(E)` (`E3077`). Without `await` or `async`, a `task<T>` function only passes
+a task on. `await` in a function that does not return a task is `E3076`, in a `sync` function `E3061`. The postfix `.sync`
 blocks on a task (warning `E6005` in async code). Coroutine wrappers: `codegen/coro_wrappers.djinn`,
 `codegen/code_generator_coroutines.djinn`.
 

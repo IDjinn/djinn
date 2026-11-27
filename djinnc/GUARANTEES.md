@@ -689,7 +689,7 @@ Todos verificados no código de `master`:
   `semantic/analyzer/semantic_analyzer_functions.djinn`. Coroutines rodam na thread do event loop; o pool de 4 threads existe, mas nada o alimenta (`runtime/scheduler.c`;
   `djinnc/TEST_ROADMAP.md` confirma). Logo, hoje **não há data race entre código Djinn**, mas **há business race em
   todo `await`**, porque o intercalamento é cooperativo.
-- **Espera bloqueante (`.sync`).** `await` só é permitido em função async (`E3074`, `E3061`). `.sync` chama
+- **Espera bloqueante (`.sync`).** `await` só é permitido em função async (`E3076`, `E3061`). `.sync` chama
   `__djinn_event_loop_run`, que executa outras tasks de dentro de quem espera. Qualquer análise de "sem suspensão"
   precisa tratar `.sync` em qualquer chamado transitivo, inclusive síncrono, como ponto de intercalamento.
 - **Sem closures** (`djinnc/SUBSET.md:55`). Blocos não podem ser passados a funções de biblioteca, o que justifica
