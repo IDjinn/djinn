@@ -1,9 +1,33 @@
 namespace djinnc;
 
 impl TypeChecker {
+    // 'vector<u64, 4>' in 'vector<u64, 4>.splat(x)': the parser keeps the instance's type on the name.
+    unsafe bool is_instance_name(Node* node) {
+        if (node.kind() != NodeKind::IDENTIFIER || node.flag() || node.type() == null) {
+            return false;
+        }
+        TypeRef* named = node.type();
+        return named.kind == TypeKind.NAMED && named.args != null && named.name != null && node.text() != null && Strings.same(named.name, node.text());
+    }
+
+    unsafe StructInfo* named_struct(Node* node) {
+        SymbolTable* symbols = this.symbols;
+        if (this.is_instance_name(node)) {
+            u32 instance = this.resolve_type(node.type(), node);
+            if (!Types.is_struct(instance)) {
+                return (StructInfo*)0;
+            }
+            return symbols.struct_at(Types.struct_index(instance));
+        }
+        return symbols.find_struct(node.text_atom(), node.name(), this.scope);
+    }
+
     bool is_struct_name(Node* node) {
         if (node.kind() != NodeKind::IDENTIFIER) {
             return false;
+        }
+        if (this.is_instance_name(node)) {
+            return true;
         }
         if (this.find_variable(node.name()) != null) {
             return false;
@@ -110,6 +134,9 @@ impl TypeChecker {
                 return Types.pointer_to(stacked);
             }
             u32 base = this.check_expression(node.first(), 0);
+            if (Types.is_array(base)) {
+                return this.check_inline_index(node, base);
+            }
             u32 held = this.array_element(base);
             if (held == 0 && Types.is_pointer(base)) {
                 this.require_unsafe(node, "indexing a pointer");
@@ -142,6 +169,58 @@ impl TypeChecker {
 
         this.error_code(node, DiagnosticErrors.NOT_ADDRESSABLE, "expression is not addressable");
         return Types.i32_type();
+    }
+
+    // 'lanes[i]' on a 'T[N]': the length is part of the type, so a constant index is checked here and any other
+    // one at run time (code generation emits the check, which the optimizer drops once the index is proven).
+    unsafe u32 check_inline_index(Node* node, u32 base) {
+        if (this.assign_target == node) {
+            this.require_mutable_holder(node.first());
+        }
+        Node* position = node.second();
+        u32 index_type = this.check_expression(position, Types.i64_type());
+        if (!Types.is_integer(index_type) || Types.bits(index_type) == 1) {
+            this.error_code(position, DiagnosticErrors.INVALID_INDEX_TARGET, "an inline array is indexed with an integer");
+            return Types.element(base);
+        }
+        i64 length = Types.value_of(base);
+        ConstEval* evaluator = this.const_eval;
+        if (evaluator.evaluate(position, index_type, index_type)) {
+            i64 offset = evaluator.ri;
+            bool outside = (u64)offset >= (u64)length;
+            if (outside) {
+                ByteBuffer* message = ByteBuffer.create();
+                message.append(RuntimeErrors.text(RuntimeErrors.INDEX_OUT_OF_RANGE));
+                message.append(": index ");
+                message.append_int(offset);
+                message.append(" of '");
+                SymbolTable* symbols = this.symbols;
+                symbols.describe_type(base, message);
+                message.append("', which holds ");
+                message.append_int(length);
+                message.append(" elements");
+                this.error_code(node, DiagnosticErrors.CONSTANT_INDEX_OUT_OF_RANGE, message.cstr());
+            }
+        }
+        node.set_symbol(SymbolKind.INLINE_INDEX, (ptr)0);
+        return Types.element(base);
+    }
+
+    unsafe void require_mutable_holder(Node* holder) {
+        if (holder.kind() == NodeKind::INDEX && Types.is_array(holder.first().value_type())) {
+            this.require_mutable_holder(holder.first());
+            return;
+        }
+        if (holder.kind() != NodeKind::IDENTIFIER) {
+            return;
+        }
+        if (holder.symbol_kind() != SymbolKind.LOCAL && holder.symbol_kind() != SymbolKind.GLOBAL) {
+            return;
+        }
+        LocalVariable* variable = (LocalVariable*)holder.symbol();
+        if (!variable.is_mutable) {
+            this.error_code(holder, DiagnosticErrors.ASSIGN_TO_IMMUTABLE, "cannot change an element of an immutable array: declare it with 'mut'");
+        }
     }
 
     unsafe u32 pointer_type_inside_nullable_type(u32 type) {
@@ -325,7 +404,10 @@ impl TypeChecker {
         }
         if (this.is_struct_name(base)) {
             SymbolTable* symbols = this.symbols;
-            StructInfo* info = symbols.find_struct(base.text_atom(), base.name(), this.scope);
+            StructInfo* info = this.named_struct(base);
+            if (info == null) {
+                return Types.i32_type();
+            }
             base.set_symbol(SymbolKind.STRUCT_NAME, (ptr)info);
             Node* constant = symbols.find_constant(info, node.name());
             if (constant == null) {

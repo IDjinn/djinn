@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Added
+- Template parameters that take constants, as non-type template parameters in C++: `struct Array<T, N>` takes a type or a constant for `N`, `struct Ring<T, u8 CAPACITY>` only a `u8` constant. An argument is a literal, a `constexpr` global, a struct constant or enum variant, or a parenthesized constant expression (`Matrix<(N * 2)>`, `i32[(cells(N))]` with a `constexpr` function). Inside the instance the name folds to its constant; it is inferred from the arguments of generic functions. New errors: `E3073` (not a constant, or it does not fit the parameter), `E3074` (a constant used as a type), `E3075` (a type given to a constant parameter), `E3077` (a constant parameter that is not an integer, bool, char or enum).
+- Inline arrays `T[N]`: N elements held in the value (fields, locals, parameters), copied with it, built with `{}` or an array literal of exactly N values. Indexing is bounds checked at compile time for a constant index (`E3057`) and at run time otherwise (R10010); an element of an immutable holder cannot be changed (`E3042`); a size that is not a positive constant, a literal of another length and elements that own memory are `E3076`. Works on the web target too.
+- `Name<args>.member(...)` calls a static member of a generic instance (`vector<u64, 4>.splat(1)`).
+- `type_trait(T, integer)` and `same_type(A, B)`: bool constants for `if constexpr` in generic code (`E3078` for an unknown trait), wrapped in `std::types` as `is_integer<T>()`, `is_float<T>()`, `is_same<A, B>()` and the like.
+- `std::simd`: `vector<T, N>` (lanes of an integer or float type, wrapping integer arithmetic, comparisons into `mask<N>`, `select`, shuffles, reductions, saturating and widening operations, `load`/`store` on slices with bounds checks and `unsafe` unaligned pointer forms), `mask<N>` (`any`, `all`, `count`, `bits`), `Vectors` (`concatenate`, `low_half`, `high_half`, `multiply_add_adjacent`, `sum_absolute_differences`) and `Cpu` (the SIMD extensions of the running CPU: `Cpu.has_avx2()`, read with cpuid). On native targets each `[Simd]` operation is generated as LLVM vector code (SSE/AVX, NEON, SIMD128, or scalar code on a CPU without SIMD); the Djinn body is its reference and what the web target runs. `shuffle_bytes` uses `pshufb` (SSSE3/AVX2/AVX-512BW), `tbl` on AArch64 and `swizzle` on WebAssembly when the target has them.
+- `[Target("avx2")]` compiles a function for more CPU features than the program's target; calling it from code without them needs `unsafe` (`E3052`), after checking `Cpu`. Features of another architecture are ignored.
+
+### Changed
+- `str.hash()` and `string.hash()` of a constant fold at compile time (`constexpr u64 KEY = NAME.hash();`), and text literals carry the low 28 bits of their hash in `StringMeta` (above the 4 flag bits), so comparing two literals with different hashes returns without reading the bytes. `literal.meta.bits` is no longer just `1`: read the flags with `bits & 15` (`StringMeta.FLAGS_MASK` in std).
+- The hash of texts over 64 bytes runs on two `vector<u64, 4>`: AVX2 when the CPU has it, SSE2 otherwise on x86-64, scalar elsewhere; the value is unchanged.
+
 ### Fixed
 - A `str` or `string` given as an `i8*` union variant payload, and a byte pointer given as a `str` or `string` payload, is converted as in a call instead of being stored as it was, which read the wrong bytes.
 

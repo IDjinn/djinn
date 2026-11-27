@@ -52,6 +52,33 @@ impl ConstEval {
         return this.fail(node, "operator cannot be applied to strings at compile time");
     }
 
+    // 'text.hash()' of a str or string: a constant text is a C string here, which the std body (word reads through
+    // memory and a 128-bit multiply) cannot run on, so the compiler's copy of the same hash computes it.
+    unsafe bool is_text_hash(Node* call, Node* callee, FunctionInfo* info) {
+        if (!info.is_instance || callee.kind() != NodeKind::FIELD_ACCESS || call.count() != 0 || callee.symbol_kind() != SymbolKind.INSTANCE_METHOD) {
+            return false;
+        }
+        if (callee.name() != Ast.intern_base_name("hash", 4)) {
+            return false;
+        }
+        StructInfo* owner = info.owner;
+        if (owner == null) {
+            return false;
+        }
+        TypeChecker* checker = this.checker;
+        return owner.type_id == checker.core_type("str") || owner.type_id == checker.core_type("string");
+    }
+
+    unsafe bool eval_text_hash(Node* receiver) {
+        if (!this.eval(receiver)) {
+            return false;
+        }
+        ptr<i8> text = (ptr<i8>)this.ri;
+        this.ri = (i64)TextHash.of(text, (i32)strlen(text));
+        this.rf = (f64)this.ri;
+        return true;
+    }
+
     unsafe bool eval_text_length(Node* node) {
         Node* base = node.first();
         if ((this.shape_of(base.value_type()) & ConstEval.STRING) == 0 || node.name() != Ast.intern_base_name("length", 6)) {

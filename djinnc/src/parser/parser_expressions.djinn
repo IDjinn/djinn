@@ -512,6 +512,25 @@ impl Parser {
                         this.expect(TokenKind::RPAREN, "expected ')' after intrinsic argument");
                         return call;
                     }
+                    if (intrinsic == Intrinsic.TYPE_TRAIT || intrinsic == Intrinsic.SAME_TYPE) {
+                        call.set_type(this.parse_type());
+                        this.expect(TokenKind::COMMA, "expected ',' after the type");
+                        if (intrinsic == Intrinsic.TYPE_TRAIT) {
+                            TokenKind named = this.kind_of(this.current());
+                            if (named != TokenKind::IDENTIFIER && named != TokenKind::ENUM && named != TokenKind::STRUCT) {
+                                this.fail("expected a trait name: integer, signed, unsigned, float, number, bool, char, pointer, struct, enum, array or copyable");
+                                return call;
+                            }
+                            i32 trait = this.advance();
+                            call.set_text(this.copy_of(trait));
+                        } else {
+                            Node* other = Node.create(NodeKind::INTRINSIC, token);
+                            other.set_type(this.parse_type());
+                            call.set_first(other);
+                        }
+                        this.expect(TokenKind::RPAREN, "expected ')' after the intrinsic arguments");
+                        return call;
+                    }
                     if (measures_type) {
                         call.set_type(this.parse_type());
                         if (intrinsic == Intrinsic.TYPEOF && this.check(TokenKind::DOT)) {
@@ -554,6 +573,15 @@ impl Parser {
                         constructor_name.set_type(constructed);
                         constructor_name.set_flag(true);
                         return constructor_name;
+                    }
+                    if (end > 0 && this.kind_of(this.peek_token(end)) == TokenKind::DOT
+                        && this.kind_of(this.peek_token(end + 1)) == TokenKind::IDENTIFIER) {
+                        // 'vector<u64, 4>.splat(x)': a static member of a generic instance; the type rides on the name.
+                        TypeRef* instance = this.parse_type();
+                        Node* instance_name = Node.create(NodeKind::IDENTIFIER, token);
+                        instance_name.set_text(instance.name);
+                        instance_name.set_type(instance);
+                        return instance_name;
                     }
                     if (end > 0 && this.kind_of(this.peek_token(end)) == TokenKind::COLON_COLON
                         && this.kind_of(this.peek_token(end + 1)) == TokenKind::IDENTIFIER) {

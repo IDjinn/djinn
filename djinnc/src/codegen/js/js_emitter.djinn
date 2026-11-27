@@ -700,6 +700,80 @@ struct JsEmitter {
         return this.is_mutable_struct(type, 0);
     }
 
+    // An inline array 'T[N]' is a JS array, so a value holding one is copied deep enough to give the copy its own.
+    unsafe bool holds_inline_array(u32 type, i32 level) {
+        if (level > 8) {
+            return false;
+        }
+        if (Types.is_array(type)) {
+            return true;
+        }
+        StructInfo* info = this.struct_info(type);
+        if (info == null || info.is_enum || info.is_primitive || info.fields == null || this.is_sequence(type) || this.is_closure(type)) {
+            return false;
+        }
+        PointerList* fields = info.fields;
+        for (mut i32 i = 0; i < fields.length; i = i + 1) {
+            FieldInfo* field = (FieldInfo*)fields.get(i);
+            if (this.holds_inline_array(field.type, level + 1)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // A copy of 'value' (evaluated once) where every inline array is a fresh JS array.
+    unsafe ptr<i8> copied(ptr<i8> value, u32 type, i32 level) {
+        ByteBuffer* out = ByteBuffer.create();
+        ByteBuffer* name = ByteBuffer.create();
+        name.append("$v");
+        name.append_int((i64)level);
+        if (Types.is_array(type)) {
+            u32 element = Types.element(type);
+            out.append(JsEmitter.grouped(value));
+            if (this.holds_inline_array(element, 0) || this.needs_copy(element)) {
+                out.append(".map((");
+                out.append(name.cstr());
+                out.append(") => ");
+                if (this.holds_inline_array(element, 0)) {
+                    out.append(this.copied(name.cstr(), element, level + 1));
+                } else {
+                    out.append("({...");
+                    out.append(name.cstr());
+                    out.append("})");
+                }
+                out.append(")");
+            } else {
+                out.append(".slice()");
+            }
+            return out.cstr();
+        }
+        StructInfo* info = this.struct_info(type);
+        PointerList* fields = info.fields;
+        out.append("((");
+        out.append(name.cstr());
+        out.append(") => ({...");
+        out.append(name.cstr());
+        for (mut i32 i = 0; i < fields.length; i = i + 1) {
+            FieldInfo* field = (FieldInfo*)fields.get(i);
+            if (!this.holds_inline_array(field.type, 0)) {
+                continue;
+            }
+            ByteBuffer* member = ByteBuffer.create();
+            member.append(name.cstr());
+            member.append(".");
+            member.append(JsEmitter.field_name(field.name));
+            out.append(", ");
+            out.append(JsEmitter.field_name(field.name));
+            out.append(": ");
+            out.append(this.copied(member.cstr(), field.type, level + 1));
+        }
+        out.append("}))(");
+        out.append(value);
+        out.append(")");
+        return out.cstr();
+    }
+
     unsafe bool is_mutable_struct(u32 type, i32 level) {
         if (level > 8 || this.is_text(type)) {
             return false;
@@ -752,6 +826,15 @@ struct JsEmitter {
         }
         if (this.is_sequence(type)) {
             return "[]";
+        }
+        if (Types.is_array(type)) {
+            ByteBuffer* filled = ByteBuffer.create();
+            filled.append("Array.from({length: ");
+            filled.append_int(Types.value_of(type));
+            filled.append("}, () => (");
+            filled.append(this.default_value(Types.element(type)));
+            filled.append("))");
+            return filled.cstr();
         }
         if (this.is_closure(type) || Types.is_pointer(type)) {
             return "null";

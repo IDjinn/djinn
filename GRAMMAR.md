@@ -299,8 +299,10 @@ inspect_decl         = "$" "inspect" qualified_name "{" { "generate" "{" { membe
 
 ```ebnf
 generic_params       = "<" generic_param { "," generic_param } ">" ;
-generic_param        = IDENTIFIER [ "=" type ] ;
-generic_args         = "<" type { "," type } ">" ;
+generic_param        = [ type ] IDENTIFIER [ "=" type ] ;              (* "i32 N": a constant parameter *)
+generic_args         = "<" generic_arg { "," generic_arg } ">" ;
+generic_arg          = type | constant_arg ;
+constant_arg         = INTEGER_LITERAL | "-" INTEGER_LITERAL | CHAR_LITERAL | "true" | "false" | "(" expression ")" ;
 where_clause         = "where" constraint { ";" "where" constraint } ;
 constraint           = IDENTIFIER ":" type { "," type } ;
 ```
@@ -308,10 +310,24 @@ constraint           = IDENTIFIER ":" type { "," type } ;
 Generic structs, unions, interfaces, functions and methods are monomorphized on demand; type arguments are inferred from
 the arguments or the expected type when omitted. `impl Box<T> { ... }` names its own parameters.
 
+A parameter is a template parameter as in C++: an untyped one (`struct S<T, N>`) takes a type or a constant, a typed one
+(`struct S<T, i32 N>`) only a constant of that type (integer, bool, char or enum; `E3075` for a type, `E3073` when the value
+does not fit). A constant argument is a literal, a parenthesized constant expression (`S<i32, (N * 2)>`,
+`S<i32, (cells(N))>` with a `constexpr` function), a `constexpr` global or a struct constant / enum variant
+(`S<Color::Red>`). Inside the instance the parameter is that constant: it folds like a literal, sizes inline arrays and
+can be passed on (`S<T, (N + 1)>`); using it as a type is `E3074`. Integer constants of untyped parameters are compared by
+value, so `S<4>` is one instance however the 4 was written. `Name<args>.member(...)` calls a static member of an instance.
+
+`type_trait(T, integer)` and `same_type(A, B)` are bool constants answered while checking (traits: integer, signed,
+unsigned, float, number, bool, char, pointer, struct, enum, array, copyable; `E3078` for another name); `std::types`
+wraps them as `is_integer<T>()`, `is_same<A, B>()` and so on. With `if constexpr` only the taken branch is checked, so
+generic code can have one branch per kind of type.
+
 ### Types
 
 ```ebnf
-type                 = [ "mut" ] base_type { "*" | "?" | "[" [ expression ] "]" } ;
+type                 = [ "mut" ] base_type { "*" | "?" | "[" [ array_size ] "]" } ;
+array_size           = constant_arg | qualified_name ;    (* T[N]: an inline array; T[] is arr<T> *)
 base_type            = primitive_type | anonymous_struct | qualified_name [ generic_args ] | "void" | "auto" | "var" | "ptr" [ "<" type ">" ] | fn_type ;
 anonymous_struct     = "{" type IDENTIFIER { "," type IDENTIFIER } [ "," ] "}" ;  (* a struct declared in place; equal field lists are the same type *)
 fn_type              = "fn" "(" [ type { "," type } ] ")" [ "->" type ] ;    (* "fn" is a type only before "(" *)
@@ -327,6 +343,11 @@ overflow_suffix      = "w" | "t" | "c" | "s" ;
 
 - `T*` is a safe pointer, `ptr` / `ptr<T>` are raw pointers (dereference, indexing, arithmetic and int-to-pointer casts need
   `unsafe`), `T?` is `optional<T>` (`T*?` uses the pointer niche), `T[]` is `arr<T>`, `i8[n]` is a stack array (any primitive or struct type: `Point[n]` gives a `Point*`).
+- `T[N]` in a declaration (field, local, parameter, template argument) is an inline array: N elements held in the value
+  itself, copied with it, sized by a positive constant (`E3076` otherwise). Indexing is bounds checked: at compile time
+  for a constant index (`E3057`), at run time otherwise (R10010); writing an element needs a `mut` holder. It is built
+  with `{}` (zeros) or an array literal of exactly N elements, `.length` is not needed (N is known), and its elements must
+  be trivially copyable (`E3076` for `string[4]`).
 - Overflow suffix: `w` wrapped (default, C-style), `t` trapped (panic), `c` checked (throws `Overflow`), `s` saturating.
   On a cast the suffix picks the conversion: `(i16w)x` truncates like C, `(i16s)x` clamps to the range of `i16`, and a plain
   `(i16)x` panics when the value does not fit (R10005).
@@ -395,7 +416,7 @@ unary                = ( "!" | "-" | "~" | "*" | "&" | "++" | "--" ) unary | cas
 cast                 = "(" type ")" unary ;
 await_expr           = "await" unary ;
 blocking_wait        = postfix "." "sync" ;   (* not followed by "(" or "<"; same node as await_expr, blocking *)
-postfix              = primary { "." IDENTIFIER [ generic_args ] | "?." IDENTIFIER | "!." IDENTIFIER | "[" expression "]"
+postfix              = primary { "." IDENTIFIER [ generic_args ] | "?." IDENTIFIER | "!." IDENTIFIER | "[" expression "]"   (* primary may be Name<args> before "." *)
                      | "(" [ arg_list ] ")" | "++" | "--" | value_switch } ;
 
 primary              = INTEGER_LITERAL | FLOAT_LITERAL | STRING_LITERAL | INTERP_STRING | CHAR_LITERAL | "true" | "false" | "null"
@@ -407,7 +428,8 @@ brace_initializer    = [ type ] "{" [ init_element { "," init_element } ] "}" ;
 init_element         = [ "." IDENTIFIER "=" ] expression ;
 new_expression       = "new" type [ "(" [ arg_list ] ")" | brace_initializer ] ;
 type_expression      = IDENTIFIER [ generic_args ] "::" IDENTIFIER [ "(" [ arg_list ] ")" ] ;
-intrinsic_call       = ( "sizeof" | "alignof" | "typeof" | "likely" | "unlikely" | "expect" | "prefetch" | "bounds_check" ) "(" arg_list ")" ;
+intrinsic_call       = ( "sizeof" | "alignof" | "typeof" | "likely" | "unlikely" | "expect" | "prefetch" | "bounds_check" ) "(" arg_list ")"
+                     | "type_trait" "(" type "," IDENTIFIER ")" | "same_type" "(" type "," type ")" ;
 arg_list             = argument { "," argument } ;
 lambda               = "(" [ lambda_param { "," lambda_param } ] ")" "=>" ( expression | block ) ;
 lambda_param         = [ "mut" ] [ type ] IDENTIFIER ;

@@ -33,6 +33,9 @@ struct TypeChecker {
 
     LambdaScope* lambda;
 
+    i64 template_value;
+    u32 folded_type;
+
     public static unsafe TypeChecker* create(Diagnostics* diagnostics, SymbolTable* symbols) {
         TypeChecker* checker = (TypeChecker*)Memory.zalloc(sizeof(TypeChecker));
         checker.borrows = PointerList.create();
@@ -41,6 +44,7 @@ struct TypeChecker {
         checker.symbols = symbols;
         checker.scopes = LocalScopes.create();
         checker.const_eval = ConstEval.create(checker);
+        symbols.checker = checker;
         return checker;
     }
 
@@ -71,16 +75,41 @@ struct TypeChecker {
     public u32 resolve_type(TypeRef* ref, Node* at) {
         SymbolTable* symbols = this.symbols;
         symbols.blame = at;
+        symbols.template_failed = false;
         u32 resolved = symbols.resolve_type(ref, this.scope);
         if (resolved == 0 && ref.is_brain_float()) {
             this.error_code(at, DiagnosticErrors.BRAIN_FLOAT_UNAVAILABLE, "bf16 is not available on this target (x86, ARM, AArch64 and RISC-V only)");
+            return Types.i32_type();
+        }
+        if (resolved == 0 && symbols.template_failed) {
             return Types.i32_type();
         }
         if (resolved == 0) {
             this.error_code(at, DiagnosticErrors.UNKNOWN_TYPE, "unknown type");
             return Types.i32_type();
         }
+        this.reject_owning_array(resolved, at);
         return resolved;
+    }
+
+    // An inline array is copied bit for bit and never disposed, so its elements must be trivially copyable.
+    unsafe void reject_owning_array(u32 type, Node* at) {
+        if (!Types.is_array(type)) {
+            return;
+        }
+        mut u32 element = Types.element(type);
+        while (Types.is_array(element)) {
+            element = Types.element(element);
+        }
+        SymbolTable* symbols = this.symbols;
+        if (Ownership.is_copy(symbols, element)) {
+            return;
+        }
+        ByteBuffer* message = ByteBuffer.create();
+        message.append("an inline array holds trivially copyable elements, and '");
+        symbols.describe_type(element, message);
+        message.append("' owns resources: use an arr<T> or a List instead");
+        this.error_code(at, DiagnosticErrors.INVALID_ARRAY_SIZE, message.cstr());
     }
 
     public unsafe bool run() {
@@ -92,6 +121,17 @@ struct TypeChecker {
                 continue;
             }
             symbols.bindings = info.bindings;
+            PointerList* held_fields = info.fields;
+            if (held_fields != null && info.node != null) {
+                for (mut i32 f = 0; f < held_fields.length; f = f + 1) {
+                    FieldInfo* field = (FieldInfo*)held_fields.get(f);
+                    mut Node* at = field.node;
+                    if (at == null) {
+                        at = info.node;
+                    }
+                    this.reject_owning_array(field.type, at);
+                }
+            }
             PointerList* constants = info.constants;
             for (mut i32 c = 0; c < constants.length; c = c + 1) {
                 Node* constant = (Node*)constants.get(c);
@@ -185,6 +225,12 @@ struct TypeChecker {
             case NULL_LITERAL:
                 return this.check_null(expected);
             case IDENTIFIER:
+                if (this.folds_template_constant(node)) {
+                    if (this.folded_type != 0) {
+                        return this.folded_type;
+                    }
+                    return this.compute_expression(node, expected);
+                }
                 u32 converted = this.check_function_as_closure(node, expected);
                 if (converted != 0) {
                     return converted;
@@ -245,6 +291,39 @@ struct TypeChecker {
         return Types.i32_type();
     }
 
+    // 'N' of 'struct S<T, N>' inside an instance: the name becomes the literal it was given, so it folds,
+    // sizes arrays and adapts to the integer type around it like any literal does.
+    unsafe bool folds_template_constant(Node* node) {
+        SymbolTable* symbols = this.symbols;
+        U32Map* bindings = symbols.bindings;
+        if (bindings == null || node.text_atom() != node.name() || this.find_variable(node.name()) != null) {
+            return false;
+        }
+        i64 bound = bindings.find(node.name());
+        if (bound < 0 || !Types.is_value((u32)bound)) {
+            return false;
+        }
+        u32 type = Types.element((u32)bound);
+        i64 value = Types.value_of((u32)bound);
+        if (Types.bits(type) == 1 || Types.enum_index(type) >= 0) {
+            ConstEval* evaluator = this.const_eval;
+            evaluator.ri = value;
+            evaluator.rf = (f64)value;
+            evaluator.fold(node, type);
+            this.folded_type = type;
+            return true;
+        }
+        this.folded_type = 0;
+        node.flags = (u16)0;
+        node.set_kind(NodeKind::INT_LITERAL);
+        node.set_int_value(value);
+        ByteBuffer* digits = ByteBuffer.create();
+        digits.append_int(value);
+        node.set_text(digits.cstr());
+        node.set_flag(Types.is_char(type));
+        return true;
+    }
+
     unsafe u32 measured_type_of_operand(Node* node) {
         TypeRef* reference = node.type();
         if (reference.kind == TypeKind.NAMED && reference.args == null) {
@@ -257,7 +336,62 @@ struct TypeChecker {
         return this.resolve_type(reference, node);
     }
 
+    // 'type_trait(T, integer)', 'same_type(A, B)': folded to a bool literal here, so 'if constexpr' can branch
+    // on them in generic code and only the taken branch is checked.
+    unsafe u32 check_type_question(Node* node) {
+        u32 subject = this.resolve_type(node.type(), node);
+        mut bool answer = false;
+        if (node.op() == Intrinsic.SAME_TYPE) {
+            Node* other = node.first();
+            answer = subject == this.resolve_type(other.type(), node);
+        } else {
+            SymbolTable* symbols = this.symbols;
+            bool is_enum = symbols.enum_of_type(subject) != null;
+            bool flag = Types.is_integer(subject) && Types.bits(subject) == 1;
+            bool integer = Types.is_integer(subject) && !flag && !Types.is_char(subject) && !is_enum;
+            ptr<i8> trait = node.text();
+            if (Strings.same(trait, "integer")) {
+                answer = integer;
+            } else if (Strings.same(trait, "signed")) {
+                answer = (integer && Types.is_signed(subject)) || Types.is_float(subject);
+            } else if (Strings.same(trait, "unsigned")) {
+                answer = integer && !Types.is_signed(subject);
+            } else if (Strings.same(trait, "float")) {
+                answer = Types.is_float(subject);
+            } else if (Strings.same(trait, "number")) {
+                answer = integer || Types.is_float(subject);
+            } else if (Strings.same(trait, "bool")) {
+                answer = flag;
+            } else if (Strings.same(trait, "char")) {
+                answer = Types.is_char(subject);
+            } else if (Strings.same(trait, "pointer")) {
+                answer = Types.is_pointer(subject);
+            } else if (Strings.same(trait, "enum")) {
+                answer = is_enum;
+            } else if (Strings.same(trait, "struct")) {
+                answer = Types.is_struct(subject) && !is_enum;
+            } else if (Strings.same(trait, "array")) {
+                answer = Types.is_array(subject);
+            } else if (Strings.same(trait, "copyable")) {
+                answer = Ownership.is_copy(symbols, subject);
+            } else {
+                this.error_code(node, DiagnosticErrors.INVALID_TYPE_TRAIT, "unknown trait: expected integer, signed, unsigned, float, number, bool, char, pointer, struct, enum, array or copyable");
+            }
+        }
+        node.flags = (u16)0;
+        node.set_kind(NodeKind::BOOL_LITERAL);
+        if (answer) {
+            node.set_int_value(1);
+        } else {
+            node.set_int_value(0);
+        }
+        return Types.bool_type();
+    }
+
     unsafe u32 check_intrinsic_expression(Node* node) {
+        if (node.op() == Intrinsic.TYPE_TRAIT || node.op() == Intrinsic.SAME_TYPE) {
+            return this.check_type_question(node);
+        }
         if (node.op() != Intrinsic.SIZEOF && node.op() != Intrinsic.ALIGNOF) {
             return this.check_intrinsic(node);
         }

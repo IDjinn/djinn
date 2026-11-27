@@ -1,0 +1,64 @@
+import std::types;
+
+namespace std::simd;
+
+// The operations that give a vector of another length or lane type. They are generic functions, so an instance exists
+// only for the shapes a program uses (a method of vector<T, N> returning vector<T, N * 2> would build every length).
+struct Vectors {
+    // low's lanes, then high's: vector<T, N * 2>.
+    [Simd("concatenate")] public static vector<T, (N * 2)> concatenate<T, N>(vector<T, N> low, vector<T, N> high) {
+        mut vector<T, (N * 2)> out = {};
+        for (mut i32 i = 0; i < N; i = i + 1) {
+            out.lanes[i] = low.lanes[i];
+            out.lanes[N + i] = high.lanes[i];
+        }
+        return out;
+    }
+
+    [Simd("low_half")] public static vector<T, (N / 2)> low_half<T, N>(vector<T, N> values) {
+        mut vector<T, (N / 2)> out = {};
+        for (mut i32 i = 0; i < N / 2; i = i + 1) {
+            out.lanes[i] = values.lanes[i];
+        }
+        return out;
+    }
+
+    [Simd("high_half")] public static vector<T, (N / 2)> high_half<T, N>(vector<T, N> values) {
+        mut vector<T, (N / 2)> out = {};
+        for (mut i32 i = 0; i < N / 2; i = i + 1) {
+            out.lanes[i] = values.lanes[N / 2 + i];
+        }
+        return out;
+    }
+
+    // Lane i of the result is left[2i] * right[2i] + left[2i + 1] * right[2i + 1] in 32 bits (pmaddwd). The one case
+    // that overflows, all four lanes at -32768, wraps as the instruction does.
+    [Simd("multiply_add_adjacent")] public static vector<i32, (N / 2)> multiply_add_adjacent<N>(vector<i16, N> left, vector<i16, N> right) {
+        mut vector<i32, (N / 2)> out = {};
+        for (mut i32 i = 0; i < N / 2; i = i + 1) {
+            i32w first = (i32w)left.lanes[i * 2] * (i32w)right.lanes[i * 2];
+            i32w second = (i32w)left.lanes[i * 2 + 1] * (i32w)right.lanes[i * 2 + 1];
+            out.lanes[i] = (i32)(first + second);
+        }
+        return out;
+    }
+
+    // Lane i of the result is the sum of |left[j] - right[j]| over the eight bytes j = 8i .. 8i + 7 (psadbw).
+    [Simd("sum_absolute_differences")] public static vector<u64, (N / 8)> sum_absolute_differences<N>(vector<u8, N> left, vector<u8, N> right) {
+        mut vector<u64, (N / 8)> out = {};
+        for (mut i32 group = 0; group < N / 8; group = group + 1) {
+            mut u64 total = 0;
+            for (mut i32 j = group * 8; j < group * 8 + 8; j = j + 1) {
+                u8 a = left.lanes[j];
+                u8 b = right.lanes[j];
+                if (a > b) {
+                    total = total + (u64)(a - b);
+                } else {
+                    total = total + (u64)(b - a);
+                }
+            }
+            out.lanes[group] = total;
+        }
+        return out;
+    }
+}

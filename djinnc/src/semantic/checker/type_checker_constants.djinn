@@ -50,6 +50,33 @@ impl TypeChecker {
         this.leave_nested(state);
     }
 
+    // Folds a constant template argument ('(N * 2)', 'LANES', 'square(N)') in the namespace that wrote it.
+    // Returns its type, or 0 when it is not an integer, bool, char or enum constant (reported here).
+    public unsafe u32 evaluate_template_constant(Node* expression, u32 expected, u32 scope) {
+        CheckState* state = this.enter_nested();
+        this.scope = scope;
+        this.function = (FunctionInfo*)0;
+        Diagnostics* diagnostics = this.diagnostics;
+        i32 errors_before = diagnostics.errors;
+        mut u32 type = this.check_expression(expression, expected);
+        if (diagnostics.errors != errors_before) {
+            this.leave_nested(state);
+            return 0;
+        }
+        ConstEval* evaluator = this.const_eval;
+        if (!Types.is_integer(type) || !evaluator.evaluate(expression, type, type)) {
+            mut Node* at = evaluator.failure_node;
+            if (at == null || !Types.is_integer(type)) {
+                at = expression;
+            }
+            this.error_code(at, DiagnosticErrors.INVALID_TEMPLATE_CONSTANT, "a constant template argument must be an integer, bool, char or enum known at compile time");
+            type = 0;
+        }
+        this.template_value = evaluator.ri;
+        this.leave_nested(state);
+        return type;
+    }
+
     public void ensure_global(LocalVariable* variable) {
         if (variable.const_state != 0 || variable.node == null) {
             return;
