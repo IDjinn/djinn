@@ -310,7 +310,7 @@ the arguments or the expected type when omitted. `impl Box<T> { ... }` names its
 
 The body of a generic is also checked where it is declared, instantiated or not. A member missing from a type that does
 not depend on the parameters is an error there (`E3017`, `E3027`). On a parameter with `where` bounds, a member that
-neither the bounds nor any type implementing all of them has is `E3073`. A type implements a bound when it declares the
+neither the bounds nor any type implementing all of them has is `E3074`. A type implements a bound when it declares the
 interface or has a member of every name the interface requires. A parameter without bounds accepts any member until the
 instance is checked.
 
