@@ -46,6 +46,8 @@ Implemented in `djinnc/src/semantic/` (`symbols/ownership.djinn`, `symbols/borro
 - Move semantics: a local moves when returned, assigned to a field/index, used in a struct initializer or passed by value;
   using a moved variable is an error, assigning re-initializes it. A Value parameter is owned (and disposed) by the callee.
   Extern functions, operators and property accessors borrow their parameters.
+- Unions never dispose their payload. A local moves when used as a variant payload. Moving a name bound by `is` or a
+  `switch` arm also moves the matched local (`E5001` on reuse); from a field, element or pointer it is `E5008`.
 - `Disposable` (`void disposable()`) runs at end of scope in reverse order, before `return`/`throw`/propagation, on
   `break`/`continue` and on reassignment; drop flags exist only for variables that are moved or uninitialized. Temporaries,
   values moved into containers and coroutines cancelled while suspended are not disposed. `Cloneable<T>` is the explicit copy.

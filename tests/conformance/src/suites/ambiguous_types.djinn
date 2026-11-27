@@ -1,0 +1,621 @@
+namespace conformance;
+
+import testing;
+import djinnc::testing;
+import djinnc;
+
+struct AmbiguousTypeTests {
+    const str FIRST = """
+namespace a;
+
+struct Item {
+    i32 value;
+    const i32 LIMIT = 10;
+
+    public static i32 id() {
+        return 1;
+    }
+
+    public i32 get() {
+        return this.value;
+    }
+}
+
+enum Color {
+    Red = 1,
+    Unknown = 0
+}
+
+union Shape {
+    Dot,
+    Line(i32)
+}
+
+interface Named {
+    i32 tag();
+}
+""";
+
+    const str SECOND = """
+namespace b;
+
+struct Item {
+    i32 value;
+    const i32 LIMIT = 20;
+
+    public static i32 id() {
+        return 2;
+    }
+
+    public i32 get() {
+        return this.value * 2;
+    }
+}
+
+enum Color {
+    Red = 3,
+    Unknown = 0
+}
+
+union Shape {
+    Dot,
+    Line(i32)
+}
+
+interface Named {
+    i32 tag();
+}
+""";
+
+    [Test]
+    void static_call_names_both_candidates() {
+        str source = """
+import a;
+import b;
+
+i32 main() {
+    return Item.id();
+}
+""";
+        Verify.source(source).and_file(AmbiguousTypeTests.FIRST).and_file(AmbiguousTypeTests.SECOND).diagnostics(
+            Expected.error(DiagnosticErrors.AMBIGUOUS_TYPE).at(5, 12)
+                .with_message("'Item' is ambiguous between 'a::Item' and 'b::Item'")
+                .with_arguments("Item").with_arguments("a::Item").with_arguments("b::Item"));
+    }
+
+    [Test]
+    void import_order_does_not_change_the_diagnostic() {
+        str source = """
+import b;
+import a;
+
+i32 main() {
+    return Item.id();
+}
+""";
+        Verify.source(source).and_file(AmbiguousTypeTests.SECOND).and_file(AmbiguousTypeTests.FIRST).diagnostics(
+            Expected.error(DiagnosticErrors.AMBIGUOUS_TYPE).at(5, 12)
+                .with_arguments("Item").with_arguments("a::Item").with_arguments("b::Item"));
+    }
+
+    [Test]
+    void three_candidates_are_listed_in_order() {
+        str third = """
+namespace c;
+
+struct Item {
+    i32 value;
+}
+""";
+        str source = """
+import c;
+import b;
+import a;
+
+i32 main() {
+    Item item = { .value = 1 };
+    return 0;
+}
+""";
+        Verify.source(source).and_file(third).and_file(AmbiguousTypeTests.SECOND).and_file(AmbiguousTypeTests.FIRST).diagnostics(
+            Expected.error(DiagnosticErrors.AMBIGUOUS_TYPE).at(6, 5)
+                .with_message("'Item' is ambiguous between 'a::Item', 'b::Item' and 'c::Item'"));
+    }
+
+    [Test]
+    void imports_of_every_file_of_a_namespace_count() {
+        str other = """
+namespace app;
+import b;
+""";
+        str source = """
+namespace app;
+import a;
+
+i32 main() {
+    return Item.id();
+}
+""";
+        Verify.source(source).and_file(other).and_file(AmbiguousTypeTests.FIRST).and_file(AmbiguousTypeTests.SECOND)
+            .diagnostics(Expected.error(DiagnosticErrors.AMBIGUOUS_TYPE).at(5, 12));
+    }
+
+    [Test]
+    void declarations_report_ambiguous_types() {
+        str source = """
+import a;
+import b;
+
+struct Holder {
+    Item first;
+    Box<Color> boxed;
+}
+
+struct Box<T> {
+    T item;
+}
+
+i32 take(Item item) {
+    return 0;
+}
+
+Shape give() {
+    return a::Shape::Dot();
+}
+
+impl Item {
+    public i32 doubled() {
+        return 0;
+    }
+}
+
+i32 main() {
+    return 0;
+}
+""";
+        Verify.source(source).and_file(AmbiguousTypeTests.FIRST).and_file(AmbiguousTypeTests.SECOND).diagnostics(
+            Expected.error(DiagnosticErrors.AMBIGUOUS_TYPE).at(5, 5).with_arguments("Item")
+                    .with_arguments("a::Item").with_arguments("b::Item")
+                .and_error(DiagnosticErrors.AMBIGUOUS_TYPE).at(6, 5)
+                .and_error(DiagnosticErrors.AMBIGUOUS_TYPE).at(13, 10)
+                .and_error(DiagnosticErrors.AMBIGUOUS_TYPE).at(17, 1)
+                .and_error(DiagnosticErrors.AMBIGUOUS_TYPE).at(21, 1));
+    }
+
+    [Test]
+    void alias_of_an_ambiguous_target_reports_at_the_alias() {
+        str source = """
+import a;
+import b;
+
+struct Handle : Item;
+
+i32 main() {
+    Handle handle = { .value = 1 };
+    return 0;
+}
+""";
+        Verify.source(source).and_file(AmbiguousTypeTests.FIRST).and_file(AmbiguousTypeTests.SECOND)
+            .diagnostics(Expected.error(DiagnosticErrors.AMBIGUOUS_TYPE).at(4, 1));
+    }
+
+    [Test]
+    void expressions_report_ambiguous_types() {
+        str source = """
+import a;
+import b;
+
+struct Box<T> {
+    T item;
+}
+
+i32 main() {
+    i32 limit = Item.LIMIT;
+    Item item = { .value = 3 };
+    Box<Item> boxed = {};
+    auto color = Color::Red;
+    auto parsed = Color.parseValue(1);
+    auto shape = Shape::Line(4);
+    auto made = Item(1);
+    auto heap = new Item();
+    auto size = sizeof(Item);
+    auto address = (i64)(Item*)null;
+    auto info = typeof(Item);
+    return 0;
+}
+""";
+        Verify.source(source).and_file(AmbiguousTypeTests.FIRST).and_file(AmbiguousTypeTests.SECOND).diagnostics(
+            Expected.error(DiagnosticErrors.AMBIGUOUS_TYPE).at(9, 17)
+                .and_error(DiagnosticErrors.AMBIGUOUS_TYPE).at(10, 5)
+                .and_error(DiagnosticErrors.AMBIGUOUS_TYPE).at(11, 5)
+                .and_error(DiagnosticErrors.AMBIGUOUS_TYPE).at(12, 18)
+                .and_error(DiagnosticErrors.AMBIGUOUS_TYPE).at(13, 19)
+                .and_error(DiagnosticErrors.AMBIGUOUS_TYPE).at(14, 18)
+                .and_error(DiagnosticErrors.AMBIGUOUS_TYPE).at(15, 17)
+                .and_error(DiagnosticErrors.AMBIGUOUS_TYPE).at(16, 17)
+                .and_error(DiagnosticErrors.AMBIGUOUS_TYPE).at(17, 17)
+                .and_error(DiagnosticErrors.AMBIGUOUS_TYPE).at(18, 25)
+                .and_error(DiagnosticErrors.AMBIGUOUS_TYPE).at(19, 17));
+    }
+
+    [Test]
+    void generic_body_reports_once() {
+        str source = """
+import a;
+import b;
+
+i32 probe<T>(T value) {
+    return Item.id();
+}
+
+i32 main() {
+    return probe(1) + probe(true);
+}
+""";
+        Verify.source(source).and_file(AmbiguousTypeTests.FIRST).and_file(AmbiguousTypeTests.SECOND)
+            .diagnostics(Expected.error(DiagnosticErrors.AMBIGUOUS_TYPE).at(5, 12));
+    }
+
+    [Test]
+    void implemented_interface_is_checked() {
+        str source = """
+import a;
+import b;
+
+struct Plain : Named {
+    public i32 tag() {
+        return 1;
+    }
+}
+
+i32 main() {
+    return 0;
+}
+""";
+        Verify.source(source).and_file(AmbiguousTypeTests.FIRST).and_file(AmbiguousTypeTests.SECOND).diagnostics(
+            Expected.error(DiagnosticErrors.AMBIGUOUS_TYPE).at(4, 1)
+                .with_message("'Named' is ambiguous between 'a::Named' and 'b::Named'"));
+    }
+
+    [Test]
+    void interface_bound_is_checked() {
+        str source = """
+import a;
+import b;
+
+struct Plain : a::Named {
+    public i32 tag() {
+        return 1;
+    }
+}
+
+i32 pick<T>(T value) where T : Named {
+    return value.tag();
+}
+
+i32 main() {
+    Plain plain = {};
+    return pick(plain);
+}
+""";
+        Verify.source(source).and_file(AmbiguousTypeTests.FIRST).and_file(AmbiguousTypeTests.SECOND)
+            .diagnostics(Expected.error(DiagnosticErrors.AMBIGUOUS_TYPE).at(10, 1).with_arguments("Named")
+                .with_arguments("a::Named").with_arguments("b::Named"));
+    }
+
+    [Test]
+    void reflected_interface_is_checked() {
+        str source = """
+import a;
+import b;
+
+i32 main() {
+    auto contract = typeof(Named);
+    return 0;
+}
+""";
+        Verify.source(source).and_file(AmbiguousTypeTests.FIRST).and_file(AmbiguousTypeTests.SECOND)
+            .diagnostics(Expected.error(DiagnosticErrors.AMBIGUOUS_TYPE).at(5, 21));
+    }
+
+    [Test]
+    void macro_expansion_resolves_names_where_it_is_used() {
+        str tools = """
+namespace tools;
+import a;
+
+macro current! {
+    () => { Item.id() }
+}
+""";
+        str source = """
+import tools;
+import a;
+import b;
+
+i32 main() {
+    return current!();
+}
+""";
+        Verify.source(source).and_file(tools).and_file(AmbiguousTypeTests.FIRST).and_file(AmbiguousTypeTests.SECOND)
+            .diagnostics(Expected.error(DiagnosticErrors.AMBIGUOUS_TYPE)
+                .with_message("'Item' is ambiguous between 'a::Item' and 'b::Item'"));
+    }
+
+    [Test]
+    void qualified_name_inside_a_macro_compiles() {
+        str tools = """
+namespace tools;
+
+macro current! {
+    () => { b::Item.id() }
+}
+""";
+        str source = """
+import tools;
+import a;
+import b;
+
+i32 main() {
+    return current!();
+}
+""";
+        Verify.source(source).and_file(tools).and_file(AmbiguousTypeTests.FIRST).and_file(AmbiguousTypeTests.SECOND)
+            .runs(Expected.exit(2));
+    }
+
+    [Test]
+    void qualified_names_choose_a_type() {
+        str source = """
+import a;
+import b;
+
+struct Plain : a::Named {
+    b::Item held;
+
+    public i32 tag() {
+        return this.held.get();
+    }
+}
+
+i32 pick<T>(T value) where T : a::Named {
+    return value.tag();
+}
+
+i32 main() {
+    a::Item first = { .value = 3 };
+    b::Item second = { .value = 4 };
+    Plain plain = { .held = second };
+    i32 ids = a::Item.id() * 10 + b::Item.id();
+    i32 limits = b::Item.LIMIT - a::Item.LIMIT;
+    i32 colors = (i32)a::Color.Red + (i32)b::Color::parseValue(3);
+    a::Shape shape = a::Shape::Dot();
+    return ids + limits + colors + first.get() + pick(plain);
+}
+""";
+        Verify.source(source).and_file(AmbiguousTypeTests.FIRST).and_file(AmbiguousTypeTests.SECOND).runs(Expected.exit(37));
+    }
+
+    [Test]
+    void own_namespace_shadows_imports() {
+        str source = """
+import a;
+import b;
+
+struct Item {
+    public static i32 id() {
+        return 9;
+    }
+}
+
+i32 main() {
+    return Item.id();
+}
+""";
+        Verify.source(source).and_file(AmbiguousTypeTests.FIRST).and_file(AmbiguousTypeTests.SECOND).runs(Expected.exit(9));
+    }
+
+    [Test]
+    void own_alias_shadows_imports() {
+        str source = """
+import a;
+import b;
+
+struct Item : b::Item;
+
+i32 main() {
+    Item item = { .value = 4 };
+    return item.get();
+}
+""";
+        Verify.source(source).and_file(AmbiguousTypeTests.FIRST).and_file(AmbiguousTypeTests.SECOND).runs(Expected.exit(8));
+    }
+
+    [Test]
+    void alias_target_resolves_where_it_is_declared() {
+        str tools = """
+namespace tools;
+import a;
+
+struct Handle : Item;
+""";
+        str source = """
+import tools;
+import b;
+
+i32 main() {
+    Handle handle = { .value = 5 };
+    return handle.get();
+}
+""";
+        Verify.source(source).and_file(tools).and_file(AmbiguousTypeTests.FIRST).and_file(AmbiguousTypeTests.SECOND)
+            .runs(Expected.exit(5));
+    }
+
+    [Test]
+    void nearer_import_beats_an_outer_one() {
+        str outer = """
+import a;
+""";
+        str source = """
+namespace app;
+import b;
+
+i32 main() {
+    return Item.id();
+}
+""";
+        Verify.source(source).and_file(outer).and_file(AmbiguousTypeTests.FIRST).and_file(AmbiguousTypeTests.SECOND)
+            .runs(Expected.exit(2));
+    }
+
+    [Test]
+    void importing_one_namespace_twice_is_not_ambiguous() {
+        str source = """
+import a;
+import a;
+
+i32 main() {
+    return Item.id();
+}
+""";
+        Verify.source(source).and_file(AmbiguousTypeTests.FIRST).and_file(AmbiguousTypeTests.SECOND).runs(Expected.exit(1));
+    }
+
+    [Test]
+    void own_type_shadows_an_imported_std_type() {
+        str source = """
+import std::text;
+
+struct Text {
+    public static i32 id() {
+        return 6;
+    }
+}
+
+i32 main() {
+    return Text.id();
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(6));
+    }
+
+    [Test]
+    void imported_type_beats_an_implicit_std_type() {
+        str units = """
+namespace units;
+
+struct size {
+    public static i32 id() {
+        return 3;
+    }
+}
+""";
+        str source = """
+import units;
+
+i32 main() {
+    return size.id();
+}
+""";
+        Verify.source(source).and_file(units).with_std().runs(Expected.exit(3));
+    }
+
+    [Test]
+    void imported_std_type_competes_like_any_import() {
+        str words = """
+namespace words;
+
+struct Text {
+    i32 value;
+}
+""";
+        str source = """
+import words;
+import std::text;
+
+i32 main() {
+    Text text = { .value = 1 };
+    return 0;
+}
+""";
+        Verify.source(source).and_file(words).with_std().diagnostics(
+            Expected.error(DiagnosticErrors.AMBIGUOUS_TYPE).at(5, 5)
+                .with_message("'Text' is ambiguous between 'std::text::Text' and 'words::Text'"));
+    }
+
+    [Test]
+    void library_type_competes_with_a_consumer_namespace() {
+        str library = """
+namespace shapes;
+
+struct Item {
+    public static i32 id() {
+        return 7;
+    }
+}
+""";
+        str source = """
+namespace app;
+import shapes;
+import b;
+
+i32 main() {
+    return Item.id();
+}
+""";
+        Verify.source(source).and_file(AmbiguousTypeTests.SECOND).links_library(library,
+            Expected.error(DiagnosticErrors.AMBIGUOUS_TYPE).at(6, 12)
+                .with_message("'Item' is ambiguous between 'b::Item' and 'shapes::Item'"));
+    }
+
+    [Test]
+    void library_type_is_chosen_by_its_qualified_name() {
+        str library = """
+namespace shapes;
+
+struct Item {
+    public static i32 id() {
+        return 7;
+    }
+}
+""";
+        str source = """
+namespace app;
+import shapes;
+import b;
+
+i32 main() {
+    return shapes::Item.id() * 10 + b::Item.id();
+}
+""";
+        Verify.source(source).and_file(AmbiguousTypeTests.SECOND).links_library(library, Expected.exit(72));
+    }
+
+    [Test]
+    void library_generic_keeps_its_own_type() {
+        str library = """
+namespace shapes;
+
+struct Item {
+    public static i32 id() {
+        return 7;
+    }
+}
+
+public i32 probe<T>(T value) {
+    return Item.id();
+}
+""";
+        str source = """
+namespace app;
+import shapes;
+import b;
+
+i32 main() {
+    return probe(0) * 10 + b::Item.id();
+}
+""";
+        Verify.source(source).and_file(AmbiguousTypeTests.SECOND).links_library(library, Expected.exit(72));
+    }
+}

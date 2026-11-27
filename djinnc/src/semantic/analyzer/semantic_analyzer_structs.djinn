@@ -43,7 +43,7 @@ impl SemanticAnalyzer {
             return;
         }
         SymbolTable* symbols = this.symbols;
-        if (!symbols.add_alias(this.scope, declaration.name(), base)) {
+        if (!symbols.add_alias(this.scope, declaration.name(), declaration)) {
             this.error_code(declaration, DiagnosticErrors.DUPLICATE_DEFINITION, "type is already defined");
         }
     }
@@ -292,6 +292,7 @@ impl SemanticAnalyzer {
         }
         symbols.bindings = saved_bindings;
         this.scope = saved_scope;
+        symbols.blame = blame;
         return info.type_id;
     }
 
@@ -313,7 +314,7 @@ impl SemanticAnalyzer {
 
     unsafe void check_instance(StructInfo* info, Node* blame) {
         StructInfo* template = info.origin;
-        this.check_bounds(template.generics, info.type_args, blame);
+        this.check_bounds(template.generics, info.type_args, blame, template.node);
         Node* declaration = info.node;
         if (declaration.type() != null && this.is_nominal(declaration)) {
             this.check_conformance(info, declaration.type(), declaration);
@@ -358,13 +359,16 @@ impl SemanticAnalyzer {
         return declaration.count() > 0;
     }
 
-    unsafe void check_bounds(GenericParams* params, IdList* args, Node* blame) {
+    unsafe void check_bounds(GenericParams* params, IdList* args, Node* blame, Node* declared) {
         SymbolTable* symbols = this.symbols;
         PointerList* bounds = params.bounds;
         IdList* owners = params.bound_owner;
         for (mut i32 b = 0; b < bounds.length; b = b + 1) {
             u32 argument = args.get((i32)owners.get(b));
             TypeRef* bound = (TypeRef*)bounds.get(b);
+            if (symbols.ambiguous_interface(bound.full_atom, bound.name_atom, this.scope, declared)) {
+                continue;
+            }
             mut StructInfo* argument_info = (StructInfo*)0;
             if (Types.is_struct(argument)) {
                 argument_info = symbols.struct_at(Types.struct_index(argument));

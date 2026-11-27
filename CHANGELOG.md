@@ -8,8 +8,17 @@
 
 ### Changed
 - Breaking: the untyped `Process` API is gone. `Process.argc` / `argv` are `Arguments.all()` or `Process.arguments()`; `Process.env` is `ProcessEnvironment.value`; `Process.start` and the functions taking a `void*` process are `ProcessCommand` and `ChildProcess`; `Process.run` takes a `str` and returns `result<ProcessStatus, OsError>`. `getenv` and `system` stay as raw externs in `std::libc`.
+- `djinnc` prints the source line under each diagnostic, with the reported span underlined (`^~~~`). The JSON format is unchanged.
+- `E3054` says what could not be converted: the parameter, the function, the argument number and both types, and it underlines the whole expression, closing parenthesis included.
+- The error for operands of different types names both types and points at the start of the expression instead of the operator.
+- `djinn-lsp` also checks a project with a web entry (`*.web.djinn` or `index.html`) with `--target web`, so an error that only the web build reports appears in the editor, marked `(web build)`.
+
+## [0.7.17] - 2026-11-27
 
 ### Fixed
+- An installed `djinnc` can build a `ui` project with `--target web`: releases now carry the web bindings (`libs/ui/js` and the sources it shares). Without them every use of a `ui` type was `E3001: unknown type`; when a web build fails with an unknown type, the compiler now names the libraries that have no bindings and where it looked.
+- `--target web` declares `Math` in `std::math`, as the native std does, so `import std::math;` finds it (it was in `std::sys`), and `Math.min`, `Math.max` and `Math.abs` take any number type instead of only `f64`.
+- A local put into a union variant (`return optional::Value(value);`, `result::Ok(value)`) or wrapped into an `optional<T>` parameter is moved: it is no longer disposed while the union still holds it.
 - `--run` loads the libraries the program declares (`-l`, `-L`, library files by path, and the system dependencies recorded in a `.djlib`), so a project that uses `win32` no longer fails with `Symbols not found: [ DispatchMessageA, ... ]`.
 - `--run` on Windows no longer crashes when the app's code writes a global that lives in a `.djlib` (opening a `win32` window segfaulted).
 - On Windows, `--run` and procedural macros no longer crash when the compiled code of a `.djlib` reads or writes a global that lives in another one (or takes its address): a library object now reaches such a global through a pointer it carries (`__imp_<name>`). Rebuild the libraries affected.
@@ -18,6 +27,8 @@
 - An optimized program that links a library no longer fails with `undefined symbol: djinn_float_text` (or `Reflection.terminated`): the core functions that library objects call, std built with `-O2` included, are no longer internalized away.
 
 ### Changed
+- A union never disposes its payload, and moving a payload that needs disposal out of one now moves what was matched: reusing that local after passing, storing or returning the bound name is error `E5001`, and moving it out of a field, element or pointer is `E5008`. Code that disposed the same payload twice this way no longer compiles. A local used as a variant payload cannot be used afterwards (`E5001`).
+- An unqualified type or interface name declared by more than one imported namespace is error `E3072`, which names the candidates, instead of silently taking the one imported first. Qualify it (`a::Item`, `a::Item.id()`, `a::Color.Red`, `a::Shape::Dot()`). A type or alias of the current namespace still shadows imports, an alias now beating an imported struct of the same name; an imported type beats a std type the program did not import; and the target of an alias resolves in the namespace that declares the alias, not where it is used. The `testing` types `TextBuffer` and `NodeState` are now `TestTextBuffer` and `TestNodeState`, so a namespace that imports `ui` and `testing` can keep naming the `ui` ones; code that used the old `testing` names must rename them. `testing` and `std::text` both declare `Text`: a namespace that imports both must qualify it (`testing::Text`).
 - A JIT error no longer dumps every symbol it touched: at most 10 missing symbols are named and the `Failed to materialize symbols` list becomes one line. The new `-v` / `--verbose` option prints the messages whole.
 
 ## [0.7.16] - 2026-11-24
