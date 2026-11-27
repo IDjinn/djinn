@@ -41,6 +41,9 @@ struct djinn_process
     int32_t exit_code;
     int32_t finished;
     int32_t killed;
+    int32_t signal;
+    int64_t id;
+    char* owned_input;
 };
 
 typedef struct djinn_pipe_reader
@@ -99,6 +102,13 @@ static void djinn_pipe_feed(void* argument)
     djinn_pipe_reader_t* reader = (djinn_pipe_reader_t*)argument;
     struct djinn_process* process = reader->process;
     int32_t written = 0;
+#ifndef _WIN32
+    // a child that exits without reading its input must not end this process with SIGPIPE
+    sigset_t blocked;
+    sigemptyset(&blocked);
+    sigaddset(&blocked, SIGPIPE);
+    pthread_sigmask(SIG_BLOCK, &blocked, NULL);
+#endif
     while (written < process->stdin_length)
     {
 #ifdef _WIN32
@@ -185,6 +195,7 @@ djinn_process_t* __djinn_process_start(const char* command_line, const char* std
     }
     CloseHandle(info.hThread);
     process->process = info.hProcess;
+    process->id = (int64_t)info.dwProcessId;
 #else
     int in_pipe[2], out_pipe[2], err_pipe[2];
     if (pipe(in_pipe) != 0 || pipe(out_pipe) != 0 || pipe(err_pipe) != 0)
@@ -232,6 +243,7 @@ djinn_process_t* __djinn_process_start(const char* command_line, const char* std
     process->stdin_write = in_pipe[1];
     process->stdout_read = out_pipe[0];
     process->stderr_read = err_pipe[0];
+    process->id = (int64_t)process->pid;
 #endif
 
     process->stdout_thread = djinn_process_pump(process, djinn_pipe_drain, &process->out, &process->stdout_read);
@@ -242,7 +254,7 @@ djinn_process_t* __djinn_process_start(const char* command_line, const char* std
 
 int32_t __djinn_process_poll(djinn_process_t* process)
 {
-    if (process->finished) return 1;
+    if (process == NULL || process->finished) return 1;
 #ifdef _WIN32
     if (WaitForSingleObject(process->process, 0) != WAIT_OBJECT_0) return 0;
     DWORD code = 0;
@@ -256,11 +268,15 @@ int32_t __djinn_process_poll(djinn_process_t* process)
     if (done == 0) return 0;
     if (done < 0) process->exit_code = -1;
     else if (WIFEXITED(status)) process->exit_code = WEXITSTATUS(status);
-    else if (WIFSIGNALED(status)) process->exit_code = 128 + WTERMSIG(status);
+    else if (WIFSIGNALED(status))
+    {
+        process->signal = WTERMSIG(status);
+        process->exit_code = 128 + WTERMSIG(status);
+    }
 #endif
-    __djinn_thread_join(process->stdout_thread);
-    __djinn_thread_join(process->stderr_thread);
-    __djinn_thread_join(process->stdin_thread);
+    if (process->stdout_thread != NULL) __djinn_thread_join(process->stdout_thread);
+    if (process->stderr_thread != NULL) __djinn_thread_join(process->stderr_thread);
+    if (process->stdin_thread != NULL) __djinn_thread_join(process->stdin_thread);
     process->finished = 1;
     return 1;
 }
@@ -290,7 +306,7 @@ int32_t __djinn_process_wait_any(djinn_process_t** processes, int32_t count, int
 
 void __djinn_process_kill(djinn_process_t* process)
 {
-    if (process->finished) return;
+    if (process == NULL || process->finished) return;
     process->killed = 1;
 #ifdef _WIN32
     TerminateProcess(process->process, 1);
@@ -300,12 +316,12 @@ void __djinn_process_kill(djinn_process_t* process)
     __djinn_process_wait(process, -1);
 }
 
-int32_t __djinn_process_exit_code(djinn_process_t* process) { return process->exit_code; }
-int32_t __djinn_process_killed(djinn_process_t* process) { return process->killed; }
-const char* __djinn_process_stdout_data(djinn_process_t* process) { return process->out.data != NULL ? process->out.data : ""; }
-int32_t __djinn_process_stdout_length(djinn_process_t* process) { return process->out.length; }
-const char* __djinn_process_stderr_data(djinn_process_t* process) { return process->err.data != NULL ? process->err.data : ""; }
-int32_t __djinn_process_stderr_length(djinn_process_t* process) { return process->err.length; }
+int32_t __djinn_process_exit_code(djinn_process_t* process) { return process != NULL ? process->exit_code : -1; }
+int32_t __djinn_process_killed(djinn_process_t* process) { return process != NULL ? process->killed : 0; }
+const char* __djinn_process_stdout_data(djinn_process_t* process) { return process != NULL && process->out.data != NULL ? process->out.data : ""; }
+int32_t __djinn_process_stdout_length(djinn_process_t* process) { return process != NULL ? process->out.length : 0; }
+const char* __djinn_process_stderr_data(djinn_process_t* process) { return process != NULL && process->err.data != NULL ? process->err.data : ""; }
+int32_t __djinn_process_stderr_length(djinn_process_t* process) { return process != NULL ? process->err.length : 0; }
 
 void __djinn_process_free(djinn_process_t* process)
 {
@@ -313,6 +329,7 @@ void __djinn_process_free(djinn_process_t* process)
     if (!process->finished) __djinn_process_kill(process);
     free(process->out.data);
     free(process->err.data);
+    free(process->owned_input);
     free(process);
 }
 
@@ -403,3 +420,5 @@ int32_t __djinn_host_call_f64(const char* name, int32_t arity, double a, double 
         return 0;
     return 1;
 }
+
+#include "os.c"

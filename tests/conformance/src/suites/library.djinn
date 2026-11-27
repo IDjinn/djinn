@@ -786,4 +786,138 @@ i32 main() {
 """;
         Verify.source(source).with_std().links_library(library, Expected.exit(22));
     }
+
+    [Test]
+    void building_a_library_checks_its_generic_bodies() {
+        str source = """
+namespace shapes;
+
+interface Shape {
+    i32 area();
+}
+
+struct Holder<T> where T : Shape {
+    T item;
+
+    public i32 volume() {
+        return this.item.volume_of();
+    }
+
+    public i32 missing() {
+        return this.nothing;
+    }
+}
+
+public i32 draw<T>(T shape) where T : Shape {
+    return shape.perimeter();
+}
+""";
+        Verify.source(source).with_flag("--library").diagnostics(
+            Expected.error(DiagnosticErrors.GENERIC_MEMBER_NOT_BOUND).at(11, 25)
+                .and_error(DiagnosticErrors.UNKNOWN_FIELD).at(15, 20)
+                .and_error(DiagnosticErrors.GENERIC_MEMBER_NOT_BOUND).at(20, 17));
+    }
+
+    [Test]
+    void library_generics_use_members_of_its_implementors() {
+        str library = """
+namespace shapes;
+
+interface Shape {
+    i32 area();
+}
+
+struct Square {
+    i32 side;
+
+    public i32 area() {
+        return this.side * this.side;
+    }
+
+    public i32 diagonal() {
+        return this.side + 1;
+    }
+}
+
+struct Holder<T> where T : Shape {
+    T item;
+
+    public i32 size() {
+        return this.item.area();
+    }
+}
+
+public i32 slant<T>(T shape) where T : Shape {
+    return shape.diagonal() + shape.area();
+}
+
+public Square make(i32 side) {
+    Square square = { .side = side };
+    return square;
+}
+""";
+        str source = """
+namespace app;
+import shapes;
+
+struct Dot {
+    i32 weight;
+
+    public i32 area() {
+        return this.weight;
+    }
+}
+
+i32 main() {
+    Square square = make(5);
+    Holder<Square> holder = { .item = square };
+    Dot dot = { .weight = 4 };
+    Holder<Dot> other = { .item = dot };
+    return holder.size() + other.size() + slant(square) - 18;
+}
+""";
+        Verify.source(source).links_library(library, Expected.exit(42));
+    }
+
+    [Test]
+    void consumer_generics_are_checked_against_library_templates() {
+        str library = """
+namespace shapes;
+
+interface Shape {
+    i32 area();
+}
+
+struct Holder<T> where T : Shape {
+    T item;
+
+    public i32 size() {
+        return this.item.area();
+    }
+}
+""";
+        str source = """
+namespace app;
+import shapes;
+
+public i32 never<T>(Holder<T>* holder) where T : Shape {
+    holder.reset();
+    return holder.item.weight() + holder.size();
+}
+
+impl Holder<T> {
+    public i32 doubled() {
+        return this.item.area() * this.count;
+    }
+}
+
+i32 main() {
+    return 0;
+}
+""";
+        Verify.source(source).links_library(library,
+            Expected.error(DiagnosticErrors.UNDECLARED_FUNCTION).at(5, 11)
+                .and_error(DiagnosticErrors.GENERIC_MEMBER_NOT_BOUND).at(6, 23)
+                .and_error(DiagnosticErrors.UNKNOWN_FIELD).at(11, 39));
+    }
 }

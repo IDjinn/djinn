@@ -1,0 +1,257 @@
+namespace conformance;
+
+import testing;
+import djinnc::testing;
+import djinnc;
+
+struct GenericDefinitionTests {
+    [Test]
+    void unknown_method_of_a_concrete_field_without_instances() {
+        str source = """
+struct Inner {
+    i32 value;
+}
+
+struct Outer<T> {
+    Inner inner;
+    T item;
+
+    void broken() {
+        this.inner.nope();
+    }
+}
+
+i32 main() {
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.UNDECLARED_FUNCTION).at(10, 19)
+            .with_arguments("nope"));
+    }
+
+    [Test]
+    void unknown_field_through_implicit_fields_locals_and_parameters() {
+        str source = """
+struct Inner {
+    i32 value;
+}
+
+struct Outer<T> {
+    Inner inner;
+    T item;
+
+    i32 implicit_field() {
+        return inner.first;
+    }
+
+    i32 through_local() {
+        Inner copy = this.inner;
+        return copy.second;
+    }
+}
+
+i32 through_parameter<T>(T other, Inner* inner) {
+    return inner.third;
+}
+""";
+        Verify.source(source).diagnostics(
+            Expected.error(DiagnosticErrors.UNKNOWN_FIELD).at(10, 21)
+                .and_error(DiagnosticErrors.UNKNOWN_FIELD).at(15, 20)
+                .and_error(DiagnosticErrors.UNKNOWN_FIELD).at(20, 17));
+    }
+
+    [Test]
+    void members_of_a_parameter_without_bounds_wait_for_the_instance() {
+        str source = """
+struct Holder<T> {
+    T item;
+
+    i32 anything() {
+        return this.item.whatever() + this.item.other;
+    }
+}
+
+i32 touch<T>(T value) {
+    return value.missing();
+}
+
+i32 main() {
+    return 0;
+}
+""";
+        Verify.source(source).runs(Expected.exit(0));
+    }
+
+    [Test]
+    void members_outside_the_bounds_without_instances() {
+        str source = """
+interface Named {
+    i32 name_length();
+}
+
+struct Holder<T> where T : Named {
+    T item;
+
+    i32 declared() {
+        return this.item.name_length();
+    }
+
+    i32 undeclared() {
+        return this.item.weigh();
+    }
+}
+
+i32 touch<T>(T value) where T : Named {
+    return value.size;
+}
+""";
+        Verify.source(source).diagnostics(
+            Expected.error(DiagnosticErrors.GENERIC_MEMBER_NOT_BOUND).at(13, 25)
+                .with_arguments("weigh").with_arguments("T")
+                .and_error(DiagnosticErrors.GENERIC_MEMBER_NOT_BOUND).at(18, 17));
+    }
+
+    [Test]
+    void an_instantiated_body_reports_each_error_once() {
+        str source = """
+struct Inner {
+    i32 value;
+}
+
+struct Outer<T> {
+    Inner inner;
+    T item;
+
+    i32 broken() {
+        return this.inner.nope;
+    }
+}
+
+i32 main() {
+    Inner inner = { .value = 1 };
+    Outer<i32> first = { .inner = inner, .item = 1 };
+    Outer<i64> second = { .inner = inner, .item = 2 };
+    return first.broken() + second.broken();
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.UNKNOWN_FIELD).at(10, 26));
+    }
+
+    [Test]
+    void members_an_implementor_has_beyond_the_bounds() {
+        str source = """
+interface Ranked {
+    i32 rank();
+}
+
+struct Card : Ranked {
+    i32 value;
+
+    i32 rank() {
+        return this.value;
+    }
+
+    i32 suit() {
+        return 40;
+    }
+}
+
+i32 score<T>(T item) where T : Ranked {
+    return item.rank() + item.suit();
+}
+
+i32 main() {
+    Card card = { .value = 2 };
+    return score(card);
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void bodies_of_impl_blocks_and_generic_methods() {
+        str source = """
+struct Box<T> {
+    T item;
+}
+
+impl Box<T> {
+    void broken() {
+        this.nothing = 1;
+    }
+}
+
+struct Plain {
+    i32 value;
+
+    void broken<U>(U other) {
+        this.value.nope();
+    }
+}
+""";
+        Verify.source(source).diagnostics(
+            Expected.error(DiagnosticErrors.UNKNOWN_FIELD).at(7, 13)
+                .and_error(DiagnosticErrors.UNDECLARED_FUNCTION).at(15, 19));
+    }
+
+    [Test]
+    void valid_generic_bodies_are_accepted() {
+        str source = """
+import std::types;
+
+union Shape {
+    Circle(Point),
+    Nothing
+}
+
+struct Point {
+    i32 x;
+
+    i32 doubled => x * 2;
+}
+
+enum Level(i32 weight) {
+    Low(1),
+    High(9)
+}
+
+enum Flag {
+    Off,
+    On
+}
+
+struct Holder<T> {
+    Point point;
+    fn(i32) -> i32 op;
+    f64 ratio;
+    T item;
+
+    Point origin => this.point;
+
+    i32 total(Shape shape, Level level, Flag flag) {
+        Point copy = origin;
+        mut i32 sum = this.point.doubled + copy.x + point.x;
+        sum += this.op(1) + level.weight + flag.getValue();
+        sum += (i32)ratio.floor();
+        if (shape is Circle point) {
+            sum += point.x;
+        }
+        fn(Point) -> i32 read = (Point op) => op.x;
+        sum += read(this.point);
+        if constexpr sizeof(T) == 16 {
+            sum += this.point.missing;
+        }
+        Holder<T>* self = this;
+        return sum + self.point.x;
+    }
+}
+
+i32 main() {
+    Point point = { .x = 3 };
+    mut Holder<i32> holder = { .point = point, .op = (i32 v) => v + 1, .ratio = 2.5, .item = 0 };
+    return holder.total(Shape::Circle(point), Level::High, Flag::On);
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(35));
+    }
+}

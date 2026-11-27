@@ -1,0 +1,110 @@
+import std::types;
+
+namespace std::sys;
+
+extern "C" {
+    i32 __djinn_os_kind();
+    i32 __djinn_cpu_architecture();
+    i32 __djinn_cpu_count();
+    i64 __djinn_system_memory(i32 available);
+    i64 __djinn_system_uptime_ms();
+    i64 __djinn_system_text(i32 which, i64* out);
+}
+
+enum OperatingSystem {
+    Windows = 1,
+    Linux = 2,
+    MacOs = 3,
+    Android = 4,
+    Ios = 5,
+    Unknown = 0
+}
+
+enum CpuArchitecture {
+    X64 = 1,
+    Arm64 = 2,
+    X86 = 3,
+    Arm = 4,
+    RiscV64 = 5,
+    Unknown = 0
+}
+
+// The machine and the user the program runs on, read at run time. For choices the compiler can make, use Platform.
+[Platform(native)]
+struct SystemInfo {
+    public static OperatingSystem operating_system() {
+        unsafe { return OperatingSystem::parseValue(__djinn_os_kind()); }
+    }
+
+    public static CpuArchitecture architecture() {
+        unsafe { return CpuArchitecture::parseValue(__djinn_cpu_architecture()); }
+    }
+
+    // Logical processors online.
+    public static i32 cpu_count() {
+        unsafe { return __djinn_cpu_count(); }
+    }
+
+    public static size page_size() {
+        unsafe { return (size)__djinn_memory_page_size(); }
+    }
+
+    // The alignment of the addresses the system hands out for new mappings.
+    public static size allocation_granularity() {
+        unsafe { return (size)__djinn_memory_granularity(); }
+    }
+
+    // Physical memory in bytes.
+    public static optional<u64> total_memory() {
+        return SystemInfo.memory(0);
+    }
+
+    public static optional<u64> available_memory() {
+        return SystemInfo.memory(1);
+    }
+
+    public static optional<Duration> uptime() {
+        unsafe {
+            i64 millis = __djinn_system_uptime_ms();
+            if (millis <= 0) { return optional::Empty(); }
+            return optional::Value(Duration.from_millis(millis));
+        }
+    }
+
+    public static result<string, OsError> host_name() {
+        return SystemInfo.text(0);
+    }
+
+    public static result<string, OsError> user_name() {
+        return SystemInfo.text(1);
+    }
+
+    public static result<string, OsError> home_directory() {
+        return SystemInfo.text(2);
+    }
+
+    public static result<string, OsError> temp_directory() {
+        return SystemInfo.text(3);
+    }
+
+    // "10.0.26100" on Windows, the kernel release elsewhere.
+    public static result<string, OsError> os_version() {
+        return SystemInfo.text(4);
+    }
+
+    static optional<u64> memory(i32 available) {
+        unsafe {
+            i64 bytes = __djinn_system_memory(available);
+            if (bytes <= 0) { return optional::Empty(); }
+            return optional::Value((u64)bytes);
+        }
+    }
+
+    static result<string, OsError> text(i32 which) {
+        unsafe {
+            mut i64 address = 0;
+            i64 status = __djinn_system_text(which, &address);
+            return OsStatus.text(status, address);
+        }
+    }
+}

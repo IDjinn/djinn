@@ -326,6 +326,7 @@ impl TypeChecker {
         }
         for (mut i32 i = 0; i < node.count(); i = i + 1) {
             u32 passed = this.check_expression(node.child(i), params.get(i + 1));
+            this.require_argument_shape(node.child(i), passed, params.get(i + 1), constructor, i);
             this.move_argument(node.child(i), passed, params.get(i + 1), constructor);
         }
         return constructor;
@@ -421,16 +422,25 @@ impl TypeChecker {
         if (name != null && name[0] != 0) {
             message.append("parameter '");
             message.append(name);
-            message.append("' of '");
+            message.append("' of ");
         } else {
-            message.append("parameter of '");
+            message.append("parameter of ");
         }
-        mut i32 length = 0;
-        while (callee.name[length] != 0 && callee.name[length] != 36) {
-            length = length + 1;
+        if (callee.owner != null && callee.name_atom == Ast.intern_base_name(".ctor", 5)) {
+            StructInfo* owner = callee.owner;
+            message.append("the '");
+            message.append(owner.name);
+            message.append("' constructor");
+        } else {
+            mut i32 length = 0;
+            while (callee.name[length] != 0 && callee.name[length] != 36) {
+                length = length + 1;
+            }
+            message.append_char('\'');
+            message.append_slice(callee.name, length);
+            message.append_char('\'');
         }
-        message.append_slice(callee.name, length);
-        message.append("' (argument ");
+        message.append(" (argument ");
         message.append_int((i64)(argument + 1));
         message.append("): ");
     }
@@ -489,10 +499,26 @@ impl TypeChecker {
         return false;
     }
 
+    void error_pointer_to_number(Node* value, u32 passed, u32 wanted, FunctionInfo* callee, i32 argument) {
+        if (value.kind() == NodeKind::STRING_LITERAL) {
+            this.error_conversion(value, passed, wanted, callee, argument, "a string literal converts only to str, string, i8* or ptr<i8>");
+        } else if (wanted == Types.bool_type()) {
+            this.error_conversion(value, passed, wanted, callee, argument, "a pointer does not convert to a bool implicitly; compare it with null");
+        } else if (Types.is_float(wanted)) {
+            this.error_conversion(value, passed, wanted, callee, argument, "a pointer does not convert to a float");
+        } else {
+            this.error_conversion(value, passed, wanted, callee, argument, "a pointer does not convert to a number implicitly; use an explicit cast");
+        }
+    }
+
     void require_argument_shape(Node* argument, u32 passed, u32 wanted, FunctionInfo* callee, i32 position) {
         this.require_safe_pointer(argument, passed, wanted);
         this.require_explicit_cast(argument, passed, wanted, callee, position);
         if (this.mark_text_conversion(argument, passed, wanted)) {
+            return;
+        }
+        if (Types.is_pointer(passed) && (Types.is_integer(wanted) || Types.is_float(wanted))) {
+            this.error_pointer_to_number(argument, passed, wanted, callee, position);
             return;
         }
         if (wanted == 0 || passed == wanted || wanted == this.core_type("object") || this.wraps_pointer(passed, wanted)) {
@@ -510,6 +536,24 @@ impl TypeChecker {
         if ((passed_struct && wanted_scalar) || (passed_scalar && wanted_struct)) {
             this.error_code(argument, DiagnosticErrors.ARGUMENT_TYPE_MISMATCH, "argument type does not match the parameter; a struct and a scalar or pointer are not convertible (use .toCString() to get a null-terminated text pointer of a str or string)");
         }
+    }
+
+    // For a value that no overload resolution has matched: a type without a conversion to 'wanted' is an error.
+    unsafe void require_converted_value(Node* value, u32 passed, u32 wanted) {
+        if (passed == 0 || wanted == 0 || passed == wanted) {
+            return;
+        }
+        bool passed_scalar = Types.is_integer(passed) || Types.is_float(passed) || Types.is_pointer(passed);
+        bool wanted_scalar = Types.is_integer(wanted) || Types.is_float(wanted) || Types.is_pointer(wanted);
+        if (passed_scalar && wanted_scalar) {
+            this.require_argument_shape(value, passed, wanted, (FunctionInfo*)0, 0);
+            return;
+        }
+        if (this.mark_text_conversion(value, passed, wanted) || wanted == this.core_type("object") || this.wraps_pointer(passed, wanted)
+            || (passed == this.core_type("string") && wanted == this.core_type("str"))) {
+            return;
+        }
+        this.error_conversion(value, passed, wanted, (FunctionInfo*)0, 0, "there is no implicit conversion between these types");
     }
 
     unsafe void require_value_type(Node* value, u32 passed, u32 wanted) {
@@ -643,7 +687,8 @@ impl TypeChecker {
             this.error_code(node, DiagnosticErrors.WRONG_ARGUMENT_COUNT, "parseValue takes the value of the variant to look up");
             return owner.type_id;
         }
-        this.check_expression(node.child(0), Types.i64_type());
+        u32 passed = this.check_expression(node.child(0), Types.i64_type());
+        this.require_converted_value(node.child(0), passed, Types.i64_type());
         if (symbols.find_constant(owner, Ast.intern_base_name("Unknown", 7)) == null) {
             this.error_code(node, DiagnosticErrors.UNKNOWN_VARIANT, "parseValue returns the 'Unknown' variant for a value that matches no variant: declare one");
         }

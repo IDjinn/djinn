@@ -1,0 +1,68 @@
+import std::types;
+
+namespace std::sys;
+
+extern "C" {
+    i64 __djinn_module_open(i8* path, i64 length, i64* out);
+    ptr __djinn_module_self();
+    ptr __djinn_module_symbol(ptr module, i8* name, i64 length);
+    void __djinn_module_close(ptr module);
+}
+
+// The address of a function or variable of a module, valid while the module is loaded.
+[Platform(native)]
+struct ModuleSymbol {
+    ptr location;
+
+    public unsafe void* address() {
+        return (void*)this.location;
+    }
+}
+
+// A loaded shared library (.dll, .so, .dylib). Disposing it releases the reference.
+[Platform(native)]
+struct Module : Disposable {
+    mut ptr handle;
+
+    // Loading runs the initialization code of the library, hence unsafe. A name without a separator is searched in the
+    // directories of the system and of the program, never in the current directory of Windows.
+    public static unsafe result<Module, OsError> load(str path) {
+        mut i64 handle = 0;
+        i64 status = __djinn_module_open(path.data, (i64)path.length, &handle);
+        if (status < 0) { return result::Error(os_error_from_status(status)); }
+        return result::Ok({ .handle = (ptr)handle });
+    }
+
+    // The program itself.
+    public static result<Module, OsError> current() {
+        unsafe {
+            ptr handle = __djinn_module_self();
+            if (handle == null) { return result::Error(OsError::Unknown()); }
+            return result::Ok({ .handle = handle });
+        }
+    }
+
+    // "ssl" names ssl.dll, libssl.so or libssl.dylib.
+    public static string file_name(str stem) {
+        if (Platform.Windows) { return $"{stem}.dll"; }
+        if (Platform.MacOs || Platform.Ios) { return $"lib{stem}.dylib"; }
+        return $"lib{stem}.so";
+    }
+
+    public void disposable() {
+        unsafe { __djinn_module_close(this.handle); }
+        this.handle = null;
+    }
+
+    public optional<ModuleSymbol> symbol(str name) {
+        unsafe {
+            ptr location = __djinn_module_symbol(this.handle, name.data, (i64)name.length);
+            if (location == null) { return optional::Empty(); }
+            return optional::Value({ .location = location });
+        }
+    }
+
+    public bool contains(str name) {
+        unsafe { return __djinn_module_symbol(this.handle, name.data, (i64)name.length) != null; }
+    }
+}
