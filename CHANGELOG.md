@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+- The body of a generic struct, `impl` block, function or method is checked where it is declared, instantiated or not, in programs and in libraries (a `--library` build with such an error writes no `.djlib`). A member missing from a type that does not depend on the parameters is `E3017` or `E3027`; on a parameter with `where` bounds, a member that neither the bounds nor any type implementing all of them has is the new `E3073`. A parameter without bounds is still checked only in each instance. A program that compiled with a broken body that nothing instantiated is now rejected.
+
 ### Fixed
 - A `str` or `string` given as an `i8*` union variant payload, and a byte pointer given as a `str` or `string` payload, is converted as in a call instead of being stored as it was, which read the wrong bytes.
 

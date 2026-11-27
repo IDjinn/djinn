@@ -1,0 +1,111 @@
+namespace djinnc;
+
+enum GenericShapeKind {
+    PARAMETER,
+    STRUCT,
+    POINTER,
+    PRIMITIVE
+}
+
+// What is known about a type inside a generic body before it is instantiated. A null shape is an unknown type.
+struct GenericShape {
+    GenericShapeKind kind;
+    u32 name_atom;
+    u32 scope;
+    u32 type_id;
+    PointerList* bounds;
+    StructInfo* info;
+    PointerList* args;
+    GenericShape* element;
+
+    public static unsafe GenericShape* create(GenericShapeKind kind) {
+        GenericShape* shape = (GenericShape*)Memory.zalloc(sizeof(GenericShape));
+        shape.kind = kind;
+        return shape;
+    }
+
+    public static GenericShape* pointer_to(GenericShape* element) {
+        GenericShape* shape = GenericShape.create(GenericShapeKind::POINTER);
+        shape.element = element;
+        return shape;
+    }
+
+    public static GenericShape* primitive(u32 type_id) {
+        GenericShape* shape = GenericShape.create(GenericShapeKind::PRIMITIVE);
+        shape.type_id = type_id;
+        return shape;
+    }
+
+    public static GenericShape* of_struct(StructInfo* info, PointerList* args) {
+        GenericShape* shape = GenericShape.create(GenericShapeKind::STRUCT);
+        shape.info = info;
+        shape.args = args;
+        return shape;
+    }
+
+    public static GenericShape* parameter(GenericParams* params, i32 index, u32 scope) {
+        GenericShape* shape = GenericShape.create(GenericShapeKind::PARAMETER);
+        IdList* names = params.names;
+        shape.name_atom = names.get(index);
+        shape.scope = scope;
+        shape.bounds = PointerList.create();
+        PointerList* all = params.bounds;
+        IdList* owners = params.bound_owner;
+        PointerList* own = shape.bounds;
+        for (mut i32 b = 0; b < all.length; b = b + 1) {
+            if ((i32)owners.get(b) == index) {
+                own.push(all.get(b));
+            }
+        }
+        return shape;
+    }
+}
+
+// Names bound to shapes: the generic parameters a type reference can use, or the locals of a body.
+struct GenericNames {
+    u32 scope;
+    IdList* names;
+    PointerList* shapes;
+
+    public static unsafe GenericNames* create(u32 scope) {
+        GenericNames* names = (GenericNames*)Memory.zalloc(sizeof(GenericNames));
+        names.scope = scope;
+        names.names = IdList.create();
+        names.shapes = PointerList.create();
+        return names;
+    }
+
+    public void bind(u32 atom, GenericShape* shape) {
+        IdList* names = this.names;
+        PointerList* shapes = this.shapes;
+        names.push(atom);
+        shapes.push((ptr)shape);
+    }
+
+    public i32 find(u32 atom) {
+        IdList* names = this.names;
+        for (mut i32 i = names.length - 1; i >= 0; i = i - 1) {
+            if (names.get(i) == atom) {
+                return i;
+            }
+        }
+        return 0 - 1;
+    }
+
+    public unsafe GenericShape* at(i32 index) {
+        PointerList* shapes = this.shapes;
+        return (GenericShape*)shapes.get(index);
+    }
+
+    public i32 mark() {
+        IdList* names = this.names;
+        return names.length;
+    }
+
+    public void reset_to(i32 mark) {
+        IdList* names = this.names;
+        PointerList* shapes = this.shapes;
+        names.length = mark;
+        shapes.length = mark;
+    }
+}
