@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+- Typed platform APIs in `std::sys`; failures are `result<T, OsError>`. `ProcessEnvironment` (`EnvironmentVariable` with `value`, `set`, `set_if_absent`, `remove`; `EnvironmentSnapshot`), `Arguments` and `ProcessArguments`, `ProcessId`, `OsHandle` and `Pipe`, `Module` and `ModuleSymbol`, `MemoryRegion` (bounds and protection checked), `Thread`, `SystemInfo` and `Duration`. Handles, modules, memory regions, commands and child processes are released by their owner; a value left inside its `result` or `optional` is not, so move it into a local or pass it by value.
+- `Process` also reports its ids, executable path, current directory, elevation, memory and CPU time, and sets its priority.
+
 ### Fixed
 - `(bool)p` compares a pointer, nullable ones included, with `null`. It kept the low bit of the address, so a non-null pointer to an even address was `false`; with `std`, and on the web, a nullable pointer gave a meaningless value.
 - A cast from a pointer to a floating-point type is error `E3073` instead of storing the bits of the address in the float. Cast to `u64` first to convert the address.
@@ -10,6 +14,7 @@
 - A `str` or `string` given as an `i8*` union variant payload, and a byte pointer given as a `str` or `string` payload, is converted as in a call instead of being stored as it was, which read the wrong bytes.
 
 ### Changed
+- Breaking: the untyped `Process` API is gone. `Process.argc` / `argv` are `Arguments.all()` or `Process.arguments()`; `Process.env` is `ProcessEnvironment.value`; `Process.start` and the functions taking a `void*` process are `ProcessCommand` and `ChildProcess`; `Process.run` takes a `str` and returns `result<ProcessStatus, OsError>`. `getenv` and `system` stay as raw externs in `std::libc`.
 - The fallback of `??` and the argument of `Enum.parseValue` are type checked. A value without an implicit conversion is error `E3054`: a pointer, a float or a narrowing number as the fallback of an `i32?`, a pointer of another type as the fallback of a pointer, and a pointer, float, string, struct, unsigned integer or `bool` given to `parseValue`, which takes an `i64` (cast an unsigned value with `(i64)`). Before, the type checker accepted these; they then failed with `LLVM module verification failed` or compiled.
 - Constructor arguments (`new Box(x)`, `Box(x)`, generic and overloaded constructors) are checked like function call arguments: a narrowing or otherwise lossy conversion is error `E3054`, which names the parameter and the struct (add an explicit cast), so is a number or a pointer of another type used as a pointer, passing `null` or a nullable pointer as `T*` is `E3053`, and a struct where a number or pointer is expected (or the reverse) is `E3024`, as in a call. Before, the type checker accepted these.
 - A union variant payload is checked like a call argument, in generic unions, `optional::Value` and `result::Ok` too: a narrowing or lossy conversion, a number given as a pointer and a pointer of another type are `E3054` (`Shape::Circle(half())` with an `i32` payload and an `f64 half()` compiled), `null` or a nullable pointer given as `T*` is `E3053`, and a struct given as a number or pointer, or the reverse, is `E3024`. A union inferred from its arguments takes the type of the first one, so `Pair::Both(1, wide)` with an `i64 wide` is now an error: name the type (`Pair<i64>::Both(1, wide)`) or cast.
