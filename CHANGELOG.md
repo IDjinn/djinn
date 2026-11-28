@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## [0.7.19] - 2026-11-28
+
+0.7.17 and 0.7.18 were not published: this release also carries their changes, listed in their own sections of the changelog, breaking ones included.
+
 ### Added
 - Template parameters that take constants, as non-type template parameters in C++: `struct Array<T, N>` takes a type or a constant for `N`, `struct Ring<T, u8 CAPACITY>` only a `u8` constant. An argument is a literal, a `constexpr` global, a struct constant or enum variant, or a parenthesized constant expression (`Matrix<(N * 2)>`, `i32[(cells(N))]` with a `constexpr` function). In a call to a generic function a plain constant name goes after a type argument (`count<i32, LANES>()`) or in parentheses (`shade<(LANES)>()`). Inside the instance the name folds to its constant; it is inferred from the arguments of generic functions. New errors: `E3078` (not a constant, or it does not fit the parameter), `E3079` (a constant used as a type), `E3080` (a type given to a constant parameter), `E3082` (a constant parameter that is not an integer, bool, char or enum).
 - Inline arrays `T[N]`: N elements held in the value (fields, locals, parameters), copied with it, built with `{}` or an array literal of exactly N values. Indexing is bounds checked at compile time for a constant index (`E3057`) and at run time otherwise (R10010); an element of an immutable holder cannot be changed (`E3042`); a size that is not a positive constant, a literal of another length and elements that own memory are `E3081`. They are copied as a whole, so one type holds at most 4096 values in inline arrays (`E3081`): keep larger buffers in an `arr<T>` or a `List`. Works on the web target too.
