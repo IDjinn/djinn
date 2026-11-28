@@ -1,0 +1,61 @@
+namespace djinnc;
+
+impl SymbolTable {
+    unsafe u32 resolve_refinement(AliasInfo* alias) {
+        if (alias.refined != 0) {
+            return alias.refined;
+        }
+        if (alias.resolving) {
+            return 0;
+        }
+        alias.resolving = true;
+        mut u32 base = this.resolve_alias_target(alias);
+        alias.resolving = false;
+        if (alias.refined != 0) {
+            return alias.refined;
+        }
+        Node* declaration = alias.node;
+        if (!Types.can_be_refined(base)) {
+            SemanticAnalyzer* analyzer = this.analyzer;
+            Diagnostics* diagnostics = analyzer.diagnostics;
+            ByteBuffer* message = ByteBuffer.create();
+            message.append("'");
+            message.append(declaration.text());
+            message.append("' refines a type that is not a plain integer or float");
+            if (base != 0) {
+                message.append(": '");
+                this.describe_type(base, message);
+                message.append("'");
+            }
+            diagnostics.error_span(DiagnosticErrors.INVALID_REFINEMENT_BASE, declaration.file_name(), declaration.line(), declaration.column(), declaration.length(), message.cstr());
+            base = Types.i32_type();
+        }
+        TypeTable* table = TypeTable.get();
+        alias.refined = table.refinement(base, this.join_atom(alias.namespace_id, declaration.name()));
+        U32Map* refinements = this.refinement_map;
+        refinements.put(alias.refined, alias.index);
+        return alias.refined;
+    }
+
+    // One of the functions synthesized next to a refinement type; null when it does not exist.
+    public unsafe FunctionInfo* refinement_function(AliasInfo* alias, u32 name_atom) {
+        U32Map* map = this.function_map;
+        i64 index = map.find(SymbolTable.key(alias.namespace_id, name_atom));
+        if (index < 0) {
+            return (FunctionInfo*)0;
+        }
+        PointerList* list = this.functions;
+        return (FunctionInfo*)list.get((i32)index);
+    }
+
+    // The declaration of a refinement type; null for every other type.
+    public unsafe AliasInfo* refinement_of(u32 type) {
+        U32Map* refinements = this.refinement_map;
+        i64 index = refinements.find(type);
+        if (index < 0) {
+            return (AliasInfo*)0;
+        }
+        PointerList* aliases = this.aliases;
+        return (AliasInfo*)aliases.get((i32)index);
+    }
+}

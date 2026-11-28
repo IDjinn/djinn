@@ -120,6 +120,7 @@ operator_signature   = type "operator" operator_symbol "(" [ param_list ] ")" ";
 
 ```ebnf
 struct               = [ attributes ] [ "constexpr" | "abstract" ] "struct" [ "mut" ] IDENTIFIER [ generic_params ] [ primary_ctor ] [ where_clause ] [ struct_base ] ( ";" | struct_body ) ;
+refinement           = [ attributes ] "struct" IDENTIFIER ":" type "where" expression ";" ;   (* see Refinement types *)
 primary_ctor         = "(" [ param_list ] ")" ;   (* record form: each parameter becomes a field plus a constructor that assigns it *)
 struct_base          = ":" [ "interface" ] type { "," type } ;
 struct_body          = "{" { member } "}" ;
@@ -163,7 +164,7 @@ methods, constructors and operators can be overloaded by parameter types.
 ```ebnf
 throws_clause        = "throws" [ "(" type { "," type } ")" ] ;
 throw_statement      = "throw" expression ";" ;
-try_expression       = "try" expression [ "?:" expression ] ;
+try_expression       = "try" expression [ "?:" expression ] ;   (* a call to a throwing function, or a std::types "result" *)
 ```
 
 (* Errors are values, not exceptions: a throwing function returns a `{ tag, payload }` record by value.
@@ -171,6 +172,8 @@ try_expression       = "try" expression [ "?:" expression ] ;
 - `throws(T...)` lists what a function may raise; bare `throws` converts every error to the core `Error`.
 - `throw value;` sets the error state and returns.
 - `try expr ?: fallback` yields the fallback on failure; a bare `try expr` propagates (inside a `throws` caller).
+- The operand of `try` may also be a `result<T, E>` value of `std::types`: `Ok` yields the value, `Error` takes the
+  fallback or is thrown (`E` must then be an error type the caller declares). Anything else is an error.
 - `switch call() { Result v -> ..., ErrorType e -> ..., Error e -> ... }` matches the outcome of a throwing call.
 - Runtime panics (bounds, null, overflow in `t` mode, ...) are `R<code>` errors from `runtime_errors.djinn`, reported with
   a source snippet and shadow-stack in debug builds and with message and `file:line` in release builds. *)
@@ -200,6 +203,57 @@ i32 clamp(i32 value, i32 lo, i32 hi)
     return value < lo ? lo : (value > hi ? hi : value);
 }
 ```
+
+### Refinement types
+
+```djinn
+import std::types;
+
+struct Positive : u32 where value > 0;
+
+Positive checked(u32 raw) throws(ContractViolation) {
+    return try (Positive)raw;
+}
+
+i32 main() {
+    Positive one = 1;                           // a constant, checked while compiling
+    Positive other = try (Positive)0u ?: one;   // result<Positive, ContractViolation>
+    Positive trusted = (Positive!)other;        // the value; traps with R10013 if the predicate fails
+    return (i32)(one + other + trusted);
+}
+```
+
+`struct Name : base where predicate;` declares a type of its own with the representation of `base`, an integer or a float
+(not `bool`, `char`, an enum, `bf16` or another refinement, `E3086`). The predicate is a `bool` expression over `value`,
+of type `base`; it is compiled as a function of that file. The declaration has no body and no type parameters: a struct
+with members states its conditions with `invariant`.
+
+A refinement converts to its base (and to what the base widens to) implicitly, and its operators yield the base:
+`Positive + Positive` is a `u32`. Methods of the base are available on it. The other direction needs a construction:
+
+| Form | `check` (default) | `observe` | `ignore` |
+|---|---|---|---|
+| `(Name)x`, a `result<Name, ContractViolation>` | `Error` when it fails | reports, `Ok` | `Ok`, nothing evaluated |
+| `(Name!)x`, a `Name` | traps with `R10013` | reports, goes on | nothing evaluated |
+| a constant: `Name n = 5;`, `(Name!)5` | error `E3087` | warning `W6011` | warning `W6011` |
+
+- The mode is that of the file that declares the type, so a library keeps the mode it was built with. The predicate is
+  never turned into an optimizer assumption, and under `observe` or `ignore` nothing guarantees it holds.
+- Only a constant converts without a cast; any other value is `E3088`. The operand of a construction must widen to the
+  base (`E3091`): narrow it explicitly first. `!` is only valid on a cast to a refinement (`E3090`).
+- `(Name)x` needs `std::types` visible where the type is declared (`E3089`). The web target has no `result` yet, so there
+  only `(Name!)x` and constants are available.
+- A refined value is not changed in place: `++`, `--` and atomic arithmetic are `E3093`, and a compound assignment is
+  `E3088` because its operation yields the base. Assign a checked value.
+- Storage that starts at zero (a local or field without a value, `{}`, `new Name()`) is `E3092` when the predicate
+  rejects zero.
+- A foreign function cannot return a refinement or write one through a pointer (`E3094`). Reading memory as or from a
+  refinement through a pointer cast needs `unsafe`. Arrays do not convert into or from arrays, slices or pointers of a
+  refinement: convert element by element. Raw memory typed by a generic parameter is not checked inside the instance.
+- A union that holds a refinement is built from one of its payloads or variants, and no union converts implicitly into
+  anything that holds one (`E3054`).
+- A constant template parameter and a SIMD lane cannot be a refinement. As a type argument, `Positive` is an instance of
+  its own, and `T a + b` returned as `T` is `E3088`.
 
 ### Effects and regions (atomic / cooperative)
 
@@ -423,7 +477,7 @@ shift                = term { ( "<<" | ">>" ) term } ;
 term                 = factor { ( "+" | "-" ) factor } ;
 factor               = unary { ( "*" | "/" | "%" ) unary } ;
 unary                = ( "!" | "-" | "~" | "*" | "&" | "++" | "--" ) unary | cast | await_expr | try_expression | postfix ;
-cast                 = "(" type ")" unary ;
+cast                 = "(" type [ "!" ] ")" unary ;                  (* "!": the checked value of a refinement type *)
 await_expr           = "await" unary ;
 blocking_wait        = postfix "." "sync" ;   (* not followed by "(" or "<"; same node as await_expr, blocking *)
 postfix              = primary { "." IDENTIFIER [ generic_args ] | "?." IDENTIFIER | "!." IDENTIFIER | "[" expression "]"   (* primary may be Name<args> before "." *)

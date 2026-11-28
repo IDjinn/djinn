@@ -246,6 +246,8 @@ impl TypeChecker {
                         }
                     } else if (actual == expected) {
                         score = score + 4;
+                    } else if (Types.is_refined(expected)) {
+                        fits = this.is_untyped_literal(call.child(i)) || call.child(i).kind() == NodeKind::FLOAT_LITERAL;
                     } else if ((Types.is_integer(actual) || Types.is_float(actual)) && (Types.is_integer(expected) || Types.is_float(expected))) {
                         score = score + 1;
                     } else if (Types.is_pointer(actual) && Types.is_pointer(expected)) {
@@ -315,6 +317,8 @@ impl TypeChecker {
         if (constructor == null) {
             if (node.count() > 0) {
                 this.error_arguments(node, DiagnosticErrors.INVALID_CONSTRUCTOR_CALL, "struct has no constructor");
+            } else {
+                this.require_zero(node, owner.type_id);
             }
             for (mut i32 i = 0; i < node.count(); i = i + 1) {
                 this.check_expression(node.child(i), 0);
@@ -450,11 +454,27 @@ impl TypeChecker {
     void require_explicit_cast(Node* value, u32 passed, u32 wanted, FunctionInfo* callee, i32 argument) {
         bool passed_number = Types.is_integer(passed) || Types.is_float(passed);
         bool wanted_number = Types.is_integer(wanted) || Types.is_float(wanted);
+        if (this.forges_through_union(value, passed, wanted)) {
+            this.error_conversion(value, passed, wanted, callee, argument, "a refinement passes through a union only as its payload: match the union, or build one of its variants");
+            return;
+        }
+        if (passed_number && passed != wanted && Types.is_refined(wanted)) {
+            this.require_refined(value, passed, wanted, callee, argument);
+            return;
+        }
+        if (this.forges_from_array(passed, wanted)) {
+            this.error_conversion(value, passed, wanted, callee, argument, "an array does not convert into or from a refinement type; convert it element by element");
+            return;
+        }
         if (passed_number && wanted_number && !Types.widens(passed, wanted)) {
             this.error_conversion(value, passed, wanted, callee, argument, "only a wider type of the same kind converts implicitly; use an explicit cast");
         }
         if (passed_number && Types.is_pointer(wanted) && value.kind() != NodeKind::NULL_LITERAL) {
             this.error_conversion(value, passed, wanted, callee, argument, "a number does not convert to a pointer implicitly; use an explicit cast");
+        }
+        if (Types.is_pointer(passed) && Types.is_pointer(wanted) && Types.is_void(Types.element(passed))
+            && value.kind() != NodeKind::NULL_LITERAL && this.reaches_refinement(wanted)) {
+            this.require_unsafe(value, "converting 'void*' to a pointer to a refinement type");
         }
         if (Types.is_pointer(passed) && Types.is_pointer(wanted) && Types.element(passed) != Types.element(wanted)
             && !Types.is_void(Types.element(passed)) && !Types.is_void(Types.element(wanted))) {
@@ -874,7 +894,7 @@ impl TypeChecker {
                 if (info == null && owner.is_primitive && Types.is_float(owner.type_id)) {
                     i32 builtin = FloatBuiltin.lookup(callee.text());
                     if (builtin != FloatBuiltin.NONE) {
-                        return this.check_float_builtin(node, callee, owner.type_id, builtin);
+                        return this.check_float_builtin(node, callee, Types.base_of(owner.type_id), builtin);
                     }
                 }
                 info = this.apply_named_arguments(node, info);

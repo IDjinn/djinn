@@ -104,7 +104,11 @@ impl TypeChecker {
         this.try_target = saved;
         FunctionInfo* source = this.thrower_of(operand);
         if (source == null) {
-            this.error_code(node, DiagnosticErrors.TRY_ON_NON_THROWING, "'try' needs a call to a function that declares 'throws'");
+            StructInfo* outcome = this.result_union(type);
+            if (outcome != null) {
+                return this.check_try_result(node, outcome);
+            }
+            this.error_code(node, DiagnosticErrors.TRY_ON_NON_THROWING, "'try' needs a 'result' value or a call to a function that declares 'throws'");
             return type;
         }
         Node* fallback = node.second();
@@ -119,6 +123,63 @@ impl TypeChecker {
         u32 fallback_type = this.check_expression(fallback, type);
         this.require_argument_shape(fallback, fallback_type, type, (FunctionInfo*)0, 0);
         return type;
+    }
+
+    unsafe StructInfo* result_union(u32 type) {
+        SymbolTable* symbols = this.symbols;
+        StructInfo* owner = symbols.enum_of_type(type);
+        if (owner == null || owner.origin == null || owner.type_args == null) {
+            return (StructInfo*)0;
+        }
+        StructInfo* origin = owner.origin;
+        ptr<i8> prefix = symbols.namespace_prefix(origin.namespace_id);
+        if (origin.name_atom != Ast.intern_base_name("result", 6) || prefix == null || !Strings.same(prefix, "std::types")) {
+            return (StructInfo*)0;
+        }
+        return owner;
+    }
+
+    // 'try r ?: fallback' picks the fallback on an 'Error'; without one the error is thrown.
+    unsafe u32 check_try_result(Node* node, StructInfo* outcome) {
+        IdList* arguments = outcome.type_args;
+        u32 value = arguments.get(0);
+        Node* fallback = node.second();
+        FunctionInfo* current = this.function;
+        if (fallback == null && (current == null || !current.has_throws)) {
+            this.error_code(node, DiagnosticErrors.MISSING_TRY, "'try' on a 'result' throws its error: declare 'throws' on the enclosing function or add a '?:' fallback");
+            return value;
+        }
+        Node* success = this.try_arm(node, "Ok", "$ok");
+        success.set_first(this.synthetic_name(node, "$ok"));
+        Node* failure = this.try_arm(node, "Error", "$error");
+        if (fallback != null) {
+            failure.set_first(fallback);
+        } else {
+            Node* thrown = Node.create(NodeKind::THROW_STMT, node.token);
+            thrown.set_first(this.synthetic_name(node, "$error"));
+            failure.set_first(thrown);
+        }
+        node.become_switch(success, failure);
+        this.check_variant_arms(node, value, outcome);
+        if (fallback != null && !Types.is_refined(value)) {
+            this.require_argument_shape(fallback, fallback.value_type(), value, (FunctionInfo*)0, 0);
+        }
+        return value;
+    }
+
+    unsafe Node* try_arm(Node* at, ptr<i8> variant, ptr<i8> bound) {
+        Node* arm = Node.create_list(NodeKind::MATCH_ARM, at.token);
+        arm.set_text(variant);
+        Node* binding = Node.create(NodeKind::PARAMETER, at.token);
+        binding.set_text(bound);
+        arm.add(binding);
+        return arm;
+    }
+
+    Node* synthetic_name(Node* at, ptr<i8> name) {
+        Node* reference = Node.create(NodeKind::IDENTIFIER, at.token);
+        reference.set_text(name);
+        return reference;
     }
 
     unsafe u32 check_error_switch(Node* node, u32 expected, FunctionInfo* source, u32 success_type) {
