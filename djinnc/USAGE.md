@@ -144,10 +144,10 @@ app.wasm`.
 
 - The runtime has the allocator, the libc functions Djinn declares (with 64-bit sizes, as on the desktop), `printf`,
   math (from JavaScript's `Math`), JSON, the logger and a single-threaded event loop that never blocks: `Task.delay`
-  sets a browser timer, and an `async main` returns at once and reports its exit code when it finishes. Files,
+  sets a browser timer, and an async `main` returns at once and reports its exit code when it finishes. Files,
   processes, sockets and threads fail as error values.
-- A synchronous wait (`.sync`, or a sync function that awaits) works only while nothing waits for a timer; otherwise it
-  fails with a runtime error. Make the caller async.
+- A synchronous wait (`.sync`) works only while nothing waits for a timer; otherwise it fails with a runtime error.
+  Make the caller async.
 - `extern "JS" { struct ... }` and `extern "C" { struct ... }` declare interop structs (see GRAMMAR.md); `"JS"` and `"C"` are languages, any other string is a module.
 - `extern "mod" { ... }` imports its functions from the WebAssembly module `mod` (`extern "C"` and plain `extern` stay
   C functions); `[Export("name")]` exports a function under that name. Both mean nothing on other targets.

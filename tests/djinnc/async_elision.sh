@@ -17,17 +17,17 @@ fail() { echo "FAIL async_elision: $1"; exit 1; }
 exe=""
 case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) exe=".exe" ;; esac
 cat > "$out/app.djinn" <<'SOURCE'
-async i32 leaf(i32 x) {
+async task<i32> leaf(i32 x) {
     return x + 1;
 }
 
-async i32 middle(i32 x) {
+async task<i32> middle(i32 x) {
     i32 value = await leaf(x);
     return value * 2;
 }
 
 i32 main() {
-    return await middle(20);
+    return middle(20).sync;
 }
 SOURCE
 
@@ -69,14 +69,14 @@ set -e
 grep -q 'E6004' "$out/jit.log" || fail "--run must report E6004"
 
 cat > "$out/tail.djinn" <<'SOURCE'
-async bool is_even(i32 n) {
+async task<bool> is_even(i32 n) {
     if (n == 0) {
         return true;
     }
     return await is_odd(n - 1);
 }
 
-async bool is_odd(i32 n) {
+async task<bool> is_odd(i32 n) {
     if (n == 0) {
         return false;
     }
@@ -86,7 +86,7 @@ async bool is_odd(i32 n) {
 i32 main() {
     mut i32 hits = 0;
     for (mut i32 round = 0; round < 200; round = round + 1) {
-        if (await is_even(3000000 + round)) {
+        if (is_even(3000000 + round).sync) {
             hits = hits + 1;
         }
     }

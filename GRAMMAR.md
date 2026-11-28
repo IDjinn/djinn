@@ -433,7 +433,10 @@ argument             = [ IDENTIFIER ":" ] expression ;
   supported yet. A value of a `fn` type is called like a function: `f(x)`, `this.on_click(id)`.
 - `expr is T` / `expr is T name` tests a boxed `object` and optionally binds the unboxed value; `expr is Enum::Variant a b`
   tests a union value and binds the payload.
-- `sync` is a contextual modifier (a method may still be called `sync`); `await` is an error inside a `sync` function. `task.sync` blocks the calling thread until the task completes (C# `GetAwaiter().GetResult()`) and warns (E6005) inside async functions. `await task` suspends in async functions and runs the event loop in the others; `spawn task;` schedules a task.
+- A function is async when its return type is written `task<T>` and its body awaits (or it is `main`), or when it says `async`. An async function must return `task<T>` (`task<void>` for no value, `E3075`); inside it `return` takes a `T`, and the error type of the task comes from `throws(E)` (`E3077`). A `task<T>` function with no `await` and no `async` returns a task it got from elsewhere. A generic function counts as awaiting only when its written return type is `task`.
+- `await task` is allowed only in async functions: it suspends the caller. Elsewhere it is `E3076`, and inside a `sync` function `E3061` (constructors, properties and operators cannot await).
+- `sync` is a contextual modifier (a method may still be called `sync`). `task.sync` blocks the calling thread until the task completes (C# `GetAwaiter().GetResult()`) and warns (E6005) inside async functions. `spawn task;` schedules a task.
+- A `public` function that blocks on or holds async work must declare `sync` or return `task<T>` (`E3063`).
 
 #### Switch expression
 
