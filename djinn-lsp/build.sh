@@ -9,7 +9,7 @@ out="$here/build/djinn-lsp"
 lib="$here/build/runtime/libdjinn_runtime.a"
 extra=()
 case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) out="$out.exe"; lib="$here/build/runtime/djinn_runtime.lib";; *) extra=(--link-arg -lm);; esac
-sources="djinn_runtime scheduler io_file io_socket diagnostics threads console filesystem process int128 logger third_party/yyjson/yyjson json/djinn_json"
+sources="runtime_all logger third_party/yyjson/yyjson json/djinn_json"
 objects=()
 for source in $sources; do
     object="$here/build/runtime/$(basename "$source").o"
