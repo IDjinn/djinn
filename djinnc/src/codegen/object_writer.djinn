@@ -269,11 +269,43 @@ struct ObjectWriter {
             cpu = LLVMGetHostCPUName();
             features = LLVMGetHostCPUFeatures();
         }
-        ptr machine = LLVMCreateTargetMachine(target, triple, cpu, features, ObjectWriter.codegen_level(level), LlvmConst.RELOC_DEFAULT, model);
+        ptr machine = ObjectWriter.create_machine(target, triple, cpu, features, ObjectWriter.codegen_level(level), LlvmConst.RELOC_DEFAULT, model);
         if (machine == null) {
             logger_error(Log.get(), "djinnc: cannot create a target machine for '%s'", triple);
         }
         return machine;
+    }
+
+    // LLVM does not enumerate CPUs through its C API and does not validate the name when the target machine is created:
+    // an unknown one is only noticed when code generation first needs the subtarget, and on x86_64 LLVM then stops the
+    // process with a fatal error. An explicit CPU is therefore probed by generating a trivial function with our own
+    // fatal-error handler installed, which turns that abort into a diagnostic.
+    static unsafe ptr create_machine(ptr target, ptr<i8> triple, ptr<i8> cpu, ptr<i8> features, i32 level, i32 reloc, i32 model) {
+        ptr machine = LLVMCreateTargetMachine(target, triple, cpu, features, level, reloc, model);
+        if (machine != null && target_cpu != null) {
+            ObjectWriter.probe_cpu(machine);
+        }
+        return machine;
+    }
+
+    static unsafe void probe_cpu(ptr machine) {
+        ptr context = LLVMContextCreate();
+        ptr module = LLVMModuleCreateWithNameInContext("cpu_probe", context);
+        ptr function = LLVMAddFunction(module, "probe", LLVMFunctionType(LLVMVoidTypeInContext(context), (ptr<ptr>)0, 0, 0));
+        ptr builder = LLVMCreateBuilderInContext(context);
+        LLVMPositionBuilderAtEnd(builder, LLVMAppendBasicBlockInContext(context, function, "entry"));
+        LLVMBuildRetVoid(builder);
+        ptr<i8> message = (ptr<i8>)0;
+        ptr buffer = (ptr)0;
+        LLVMInstallFatalErrorHandler(&llvm_fatal_during_probe);
+        LLVMTargetMachineEmitToMemoryBuffer(machine, module, 0, &message, &buffer);
+        LLVMResetFatalErrorHandler();
+        if (buffer != null) {
+            LLVMDisposeMemoryBuffer(buffer);
+        }
+        LLVMDisposeBuilder(builder);
+        LLVMDisposeModule(module);
+        LLVMContextDispose(context);
     }
 
     public static unsafe bool emit(ptr module, ptr<i8> path, ptr<i8> level, i32 kind, bool drop_dependencies) {
@@ -296,7 +328,7 @@ struct ObjectWriter {
         } else if (!Linker.is_windows() || Target.is_android()) {
             relocation = LlvmConst.RELOC_PIC;
         }
-        ptr machine = LLVMCreateTargetMachine(target, triple, ObjectWriter.cpu_name(), ObjectWriter.feature_list(), codegen, relocation, LlvmConst.CODE_MODEL_DEFAULT);
+        ptr machine = ObjectWriter.create_machine(target, triple, ObjectWriter.cpu_name(), ObjectWriter.feature_list(), codegen, relocation, LlvmConst.CODE_MODEL_DEFAULT);
         if (machine == null) {
             logger_error(Log.get(), "djinnc: cannot create a target machine for '%s'", triple);
             return false;
@@ -321,4 +353,11 @@ struct ObjectWriter {
         }
         return true;
     }
+}
+
+// LLVM calls this when code generation cannot continue and exits the process afterwards.
+unsafe void llvm_fatal_during_probe(ptr<i8> reason) {
+    logger_error(Log.get(), "djinnc: unknown CPU '%s' for '%s': LLVM reports: %s", target_cpu, Target.triple(), reason);
+    logger_error(Log.get(), "djinnc: list the CPUs of this target with: llc -mtriple=%s -mcpu=help", Target.triple());
+    exit(1);
 }

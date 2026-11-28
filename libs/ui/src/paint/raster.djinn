@@ -30,7 +30,7 @@ struct Canvas {
         u32* words = (u32*)this.pixels;
         u32 total = this.width * this.height;
         for (mut u32 i = 0; i < total; i = i + 1) {
-            words[i] = packed;
+            *(words + i) = packed;
         }
     }
 
@@ -40,7 +40,7 @@ struct Canvas {
             return 0;
         }
         u8* p = this.pixels + (size_long)((y * this.width + x) * 4);
-        return ((u32)p[0] << 24) | ((u32)p[1] << 16) | ((u32)p[2] << 8) | (u32)p[3];
+        return ((u32)*(p + 0) << 24) | ((u32)*(p + 1) << 16) | ((u32)*(p + 2) << 8) | (u32)*(p + 3);
     }
 
     // A binary PPM (P6), which every image tool opens.
@@ -54,9 +54,9 @@ struct Canvas {
         for (mut u32 y = 0; y < this.height; y = y + 1) {
             for (mut u32 x = 0; x < this.width; x = x + 1) {
                 u8* p = this.pixels + (size_long)((y * this.width + x) * 4);
-                row[x * 3] = p[0];
-                row[x * 3 + 1] = p[1];
-                row[x * 3 + 2] = p[2];
+                *(row + (x * 3)) = *(p + 0);
+                *(row + (x * 3 + 1)) = *(p + 1);
+                *(row + (x * 3 + 2)) = *(p + 2);
             }
             fwrite((void*)row, 1, (size_long)(this.width * 3), file);
         }
@@ -90,11 +90,11 @@ struct SoftRaster {
         Atlas* atlas = Fonts.atlas();
         mut u32 i = 0;
         while (i + 2 < list.count) {
-            if (i + 5 < list.count && SoftRaster.quad(canvas, atlas, &list.vertices[i])) {
+            if (i + 5 < list.count && SoftRaster.quad(canvas, atlas, (list.vertices + (i)))) {
                 i = i + 6;
                 continue;
             }
-            SoftRaster.triangle(canvas, atlas, &list.vertices[i], &list.vertices[i + 1], &list.vertices[i + 2]);
+            SoftRaster.triangle(canvas, atlas, (list.vertices + (i)), (list.vertices + (i + 1)), (list.vertices + (i + 2)));
             i = i + 3;
         }
     }
@@ -136,15 +136,15 @@ struct SoftRaster {
     // pixels are visited row by row with the texture coordinates stepped linearly, which gives the same result as the
     // triangle path without the per-pixel edge tests. Returns false when the six vertices are not such a rectangle.
     static unsafe bool quad(Canvas* canvas, Atlas* atlas, Vertex* v) {
-        mut f32 min_x = v[0].x;
-        mut f32 max_x = v[0].x;
-        mut f32 min_y = v[0].y;
-        mut f32 max_y = v[0].y;
+        mut f32 min_x = (*(v + 0)).x;
+        mut f32 max_x = (*(v + 0)).x;
+        mut f32 min_y = (*(v + 0)).y;
+        mut f32 max_y = (*(v + 0)).y;
         for (mut i32 k = 1; k < 6; k = k + 1) {
-            min_x = Px.min(min_x, v[k].x);
-            max_x = Px.max(max_x, v[k].x);
-            min_y = Px.min(min_y, v[k].y);
-            max_y = Px.max(max_y, v[k].y);
+            min_x = Px.min(min_x, (*(v + k)).x);
+            max_x = Px.max(max_x, (*(v + k)).x);
+            min_y = Px.min(min_y, (*(v + k)).y);
+            max_y = Px.max(max_y, (*(v + k)).y);
         }
         if (!(max_x > min_x) || !(max_y > min_y)) {
             return false;
@@ -154,18 +154,18 @@ struct SoftRaster {
         mut Vertex* bl = (Vertex*)0;
         mut i32 seen = 0;
         for (mut i32 k = 0; k < 6; k = k + 1) {
-            i32 cx = SoftRaster.side(v[k].x, min_x, max_x);
-            i32 cy = SoftRaster.side(v[k].y, min_y, max_y);
-            if (cx < 0 || cy < 0 || v[k].color != v[0].color) {
+            i32 cx = SoftRaster.side((*(v + k)).x, min_x, max_x);
+            i32 cy = SoftRaster.side((*(v + k)).y, min_y, max_y);
+            if (cx < 0 || cy < 0 || (*(v + k)).color != (*(v + 0)).color) {
                 return false;
             }
             seen = seen | (1 << (cy * 2 + cx));
             if (cx == 0 && cy == 0) {
-                tl = &v[k];
+                tl = (v + (k));
             } else if (cx == 1 && cy == 0) {
-                tr = &v[k];
+                tr = (v + (k));
             } else if (cx == 0 && cy == 1) {
-                bl = &v[k];
+                bl = (v + (k));
             }
         }
         if (seen != 15 || tl == (Vertex*)0 || tr == (Vertex*)0 || bl == (Vertex*)0) {
@@ -173,9 +173,9 @@ struct SoftRaster {
         }
         for (mut i32 t = 0; t < 6; t = t + 3) {
             // each triangle must use three different corners, or the pair is not one rectangle
-            i32 c0 = SoftRaster.side(v[t].x, min_x, max_x) + 2 * SoftRaster.side(v[t].y, min_y, max_y);
-            i32 c1 = SoftRaster.side(v[t + 1].x, min_x, max_x) + 2 * SoftRaster.side(v[t + 1].y, min_y, max_y);
-            i32 c2 = SoftRaster.side(v[t + 2].x, min_x, max_x) + 2 * SoftRaster.side(v[t + 2].y, min_y, max_y);
+            i32 c0 = SoftRaster.side((*(v + t)).x, min_x, max_x) + 2 * SoftRaster.side((*(v + t)).y, min_y, max_y);
+            i32 c1 = SoftRaster.side((*(v + (t + 1))).x, min_x, max_x) + 2 * SoftRaster.side((*(v + (t + 1))).y, min_y, max_y);
+            i32 c2 = SoftRaster.side((*(v + (t + 2))).x, min_x, max_x) + 2 * SoftRaster.side((*(v + (t + 2))).y, min_y, max_y);
             if (c0 == c1 || c1 == c2 || c0 == c2) {
                 return false;
             }
@@ -202,7 +202,7 @@ struct SoftRaster {
         if (y1 > (i32)canvas.height) {
             y1 = (i32)canvas.height;
         }
-        u32 color = v[0].color;
+        u32 color = (*(v + 0)).color;
         f32 red = SoftRaster.channel(color, 0);
         f32 green = SoftRaster.channel(color, 8);
         f32 blue = SoftRaster.channel(color, 16);
@@ -215,7 +215,7 @@ struct SoftRaster {
             if (fx >= atlas.width || fy >= atlas.height) {
                 return true;
             }
-            flat_alpha = base * ((f32)atlas.pixels[fy * atlas.width + fx] / (f32)255.0);
+            flat_alpha = base * ((f32)*(atlas.pixels + (fy * atlas.width + fx)) / (f32)255.0);
             if (flat_alpha <= (f32)0.0) {
                 return true;
             }
@@ -232,23 +232,23 @@ struct SoftRaster {
                     if (ax >= atlas.width || ay >= atlas.height) {
                         continue;
                     }
-                    alpha = base * ((f32)atlas.pixels[ay * atlas.width + ax] / (f32)255.0);
+                    alpha = base * ((f32)*(atlas.pixels + (ay * atlas.width + ax)) / (f32)255.0);
                     if (alpha <= (f32)0.0) {
                         continue;
                     }
                 }
                 u8* p = row + (size_long)((u32)x * 4);
                 if (alpha >= (f32)0.999) {
-                    p[0] = SoftRaster.byte(red);
-                    p[1] = SoftRaster.byte(green);
-                    p[2] = SoftRaster.byte(blue);
-                    p[3] = (u8)255;
+                    *(p + 0) = SoftRaster.byte(red);
+                    *(p + 1) = SoftRaster.byte(green);
+                    *(p + 2) = SoftRaster.byte(blue);
+                    *(p + 3) = (u8)255;
                 } else {
                     f32 keep = (f32)1.0 - alpha;
-                    p[0] = SoftRaster.byte(red * alpha + (f32)p[0] * keep);
-                    p[1] = SoftRaster.byte(green * alpha + (f32)p[1] * keep);
-                    p[2] = SoftRaster.byte(blue * alpha + (f32)p[2] * keep);
-                    p[3] = SoftRaster.byte((alpha + ((f32)p[3] / (f32)255.0) * keep) * (f32)255.0);
+                    *(p + 0) = SoftRaster.byte(red * alpha + (f32)*(p + 0) * keep);
+                    *(p + 1) = SoftRaster.byte(green * alpha + (f32)*(p + 1) * keep);
+                    *(p + 2) = SoftRaster.byte(blue * alpha + (f32)*(p + 2) * keep);
+                    *(p + 3) = SoftRaster.byte((alpha + ((f32)*(p + 3) / (f32)255.0) * keep) * (f32)255.0);
                 }
             }
         }
@@ -308,7 +308,7 @@ struct SoftRaster {
                 if (ax >= atlas.width || ay >= atlas.height) {
                     continue;
                 }
-                f32 coverage = (f32)atlas.pixels[ay * atlas.width + ax] / (f32)255.0;
+                f32 coverage = (f32)*(atlas.pixels + (ay * atlas.width + ax)) / (f32)255.0;
                 f32 alpha = (SoftRaster.channel(a.color, 24) * l0 + SoftRaster.channel(v1.color, 24) * l1 + SoftRaster.channel(v2.color, 24) * l2) / (f32)255.0 * coverage;
                 if (alpha <= (f32)0.0) {
                     continue;
@@ -318,10 +318,10 @@ struct SoftRaster {
                 f32 blue = SoftRaster.channel(a.color, 16) * l0 + SoftRaster.channel(v1.color, 16) * l1 + SoftRaster.channel(v2.color, 16) * l2;
                 u8* p = canvas.pixels + (size_long)(((u32)y * canvas.width + (u32)x) * 4);
                 f32 keep = (f32)1.0 - alpha;
-                p[0] = SoftRaster.byte(red * alpha + (f32)p[0] * keep);
-                p[1] = SoftRaster.byte(green * alpha + (f32)p[1] * keep);
-                p[2] = SoftRaster.byte(blue * alpha + (f32)p[2] * keep);
-                p[3] = SoftRaster.byte((alpha + ((f32)p[3] / (f32)255.0) * keep) * (f32)255.0);
+                *(p + 0) = SoftRaster.byte(red * alpha + (f32)*(p + 0) * keep);
+                *(p + 1) = SoftRaster.byte(green * alpha + (f32)*(p + 1) * keep);
+                *(p + 2) = SoftRaster.byte(blue * alpha + (f32)*(p + 2) * keep);
+                *(p + 3) = SoftRaster.byte((alpha + ((f32)*(p + 3) / (f32)255.0) * keep) * (f32)255.0);
             }
         }
     }

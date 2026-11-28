@@ -111,17 +111,17 @@ struct Reactive {
             id = g.count;
             g.count = g.count + 1;
         }
-        g.kinds[id] = kind;
-        g.states[id] = Freshness.CLEAN;
-        g.queued[id] = 0;
-        g.sizes[id] = size;
-        g.values[id] = (void*)0;
+        *(g.kinds + id) = kind;
+        *(g.states + id) = Freshness.CLEAN;
+        *(g.queued + id) = 0;
+        *(g.sizes + id) = size;
+        *(g.values + id) = (void*)0;
         if (size > 0) {
-            g.values[id] = __djinn_alloc_zeroed((size_long)size);
+            *(g.values + id) = __djinn_alloc_zeroed((size_long)size);
         }
-        g.owners[id] = g.owner;
+        *(g.owners + id) = g.owner;
         if (g.owner != 0) {
-            IdList* siblings = &g.children[g.owner];
+            IdList* siblings = (g.children + (g.owner));
             siblings.push(id);
         }
         g.live = g.live + 1;
@@ -130,13 +130,13 @@ struct Reactive {
 
     public static unsafe void attach(u32 id, Computation computation) {
         ReactiveGraph* g = Reactive.graph();
-        g.computations[id] = computation;
+        *(g.computations + id) = computation;
     }
 
     public static unsafe u32 create_signal(void* initial, u32 size) {
         u32 id = Reactive.allocate(ReactiveKind.SIGNAL, size);
         ReactiveGraph* g = Reactive.graph();
-        memcpy(g.values[id], initial, (size_long)size);
+        memcpy(*(g.values + id), initial, (size_long)size);
         return id;
     }
 
@@ -146,12 +146,12 @@ struct Reactive {
         if (observer == 0 || g.static_mode) {
             return;
         }
-        IdList* sources = &g.sources[observer];
+        IdList* sources = (g.sources + (observer));
         if (sources.contains(id)) {
             return;
         }
         sources.push(id);
-        IdList* observers = &g.observers[id];
+        IdList* observers = (g.observers + (id));
         observers.push(observer);
     }
 
@@ -159,28 +159,28 @@ struct Reactive {
     public static unsafe void* read(u32 id) {
         Reactive.track(id);
         ReactiveGraph* g = Reactive.graph();
-        if (g.kinds[id] == ReactiveKind.MEMO) {
+        if (*(g.kinds + id) == ReactiveKind.MEMO) {
             Reactive.update(id);
         }
-        return g.values[id];
+        return *(g.values + id);
     }
 
     public static unsafe void* peek(u32 id) {
         ReactiveGraph* g = Reactive.graph();
-        if (g.kinds[id] == ReactiveKind.MEMO) {
+        if (*(g.kinds + id) == ReactiveKind.MEMO) {
             Reactive.update(id);
         }
-        return g.values[id];
+        return *(g.values + id);
     }
 
     // Copies the new value in and returns whether it differs from the old one (byte comparison).
     public static unsafe bool store(u32 id, void* value) {
         ReactiveGraph* g = Reactive.graph();
-        u32 size = g.sizes[id];
-        if (memcmp(g.values[id], value, (size_long)size) == 0) {
+        u32 size = *(g.sizes + id);
+        if (memcmp(*(g.values + id), value, (size_long)size) == 0) {
             return false;
         }
-        memcpy(g.values[id], value, (size_long)size);
+        memcpy(*(g.values + id), value, (size_long)size);
         return true;
     }
 
@@ -193,7 +193,7 @@ struct Reactive {
     // Marks everything that read 'id' as stale and runs the effects that depend on it (unless inside a batch).
     public static unsafe void notify(u32 id) {
         ReactiveGraph* g = Reactive.graph();
-        IdList* observers = &g.observers[id];
+        IdList* observers = (g.observers + (id));
         for (mut u32 i = 0; i < observers.count; i = i + 1) {
             Reactive.mark(observers.get(i), Freshness.DIRTY);
         }
@@ -204,16 +204,16 @@ struct Reactive {
 
     static unsafe void mark(u32 id, u8 state) {
         ReactiveGraph* g = Reactive.graph();
-        if (g.states[id] >= state) {
+        if (*(g.states + id) >= state) {
             return;
         }
-        g.states[id] = state;
-        if (g.kinds[id] == ReactiveKind.EFFECT && g.queued[id] == 0) {
-            g.queued[id] = 1;
+        *(g.states + id) = state;
+        if (*(g.kinds + id) == ReactiveKind.EFFECT && *(g.queued + id) == 0) {
+            *(g.queued + id) = 1;
             IdList* queue = &g.queue;
             queue.push(id);
         }
-        IdList* observers = &g.observers[id];
+        IdList* observers = (g.observers + (id));
         for (mut u32 i = 0; i < observers.count; i = i + 1) {
             Reactive.mark(observers.get(i), Freshness.CHECK);
         }
@@ -221,29 +221,29 @@ struct Reactive {
 
     static unsafe void update(u32 id) {
         ReactiveGraph* g = Reactive.graph();
-        if (g.states[id] == Freshness.CHECK) {
-            for (mut u32 i = 0; i < g.sources[id].count; i = i + 1) {
-                IdList* sources = &g.sources[id];
+        if (*(g.states + id) == Freshness.CHECK) {
+            for (mut u32 i = 0; i < (*(g.sources + id)).count; i = i + 1) {
+                IdList* sources = (g.sources + (id));
                 u32 source = sources.get(i);
-                if (g.kinds[source] == ReactiveKind.MEMO) {
+                if (*(g.kinds + source) == ReactiveKind.MEMO) {
                     Reactive.update(source);
                 }
-                if (g.states[id] == Freshness.DIRTY) {
+                if (*(g.states + id) == Freshness.DIRTY) {
                     break;
                 }
             }
         }
-        if (g.states[id] == Freshness.DIRTY) {
+        if (*(g.states + id) == Freshness.DIRTY) {
             Reactive.run(id);
         }
-        g.states[id] = Freshness.CLEAN;
+        *(g.states + id) = Freshness.CLEAN;
     }
 
     static unsafe void unlink(u32 id) {
         ReactiveGraph* g = Reactive.graph();
-        IdList* sources = &g.sources[id];
+        IdList* sources = (g.sources + (id));
         for (mut u32 i = 0; i < sources.count; i = i + 1) {
-            IdList* observers = &g.observers[sources.get(i)];
+            IdList* observers = (g.observers + (sources.get(i)));
             observers.remove(id);
         }
         sources.clear();
@@ -251,16 +251,16 @@ struct Reactive {
 
     static unsafe void release_owned(u32 id) {
         ReactiveGraph* g = Reactive.graph();
-        while (g.children[id].count > 0) {
-            IdList* children = &g.children[id];
+        while ((*(g.children + id)).count > 0) {
+            IdList* children = (g.children + (id));
             Reactive.destroy(children.pop());
         }
-        while (g.cleanups[id].count > 0) {
-            IdList* cleanups = &g.cleanups[id];
+        while ((*(g.cleanups + id)).count > 0) {
+            IdList* cleanups = (g.cleanups + (id));
             u32 index = cleanups.pop();
-            g.cleanup_pool[index].run();
-            Cleanup finished = g.cleanup_pool[index];
-            memset((void*)&g.cleanup_pool[index], 0, (size_long)sizeof(Cleanup));
+            (*(g.cleanup_pool + index)).run();
+            Cleanup finished = *(g.cleanup_pool + index);
+            memset((void*)(g.cleanup_pool + (index)), 0, (size_long)sizeof(Cleanup));
             IdList* free_cleanups = &g.free_cleanups;
             free_cleanups.push(index);
         }
@@ -274,24 +274,24 @@ struct Reactive {
         u32 saved_observer = g.observer;
         g.owner = id;
         g.observer = id;
-        bool changed = g.computations[id].run();
+        bool changed = (*(g.computations + id)).run();
         g.owner = saved_owner;
         g.observer = saved_observer;
-        g.states[id] = Freshness.CLEAN;
-        if (changed && g.kinds[id] == ReactiveKind.MEMO) {
-            IdList* observers = &g.observers[id];
+        *(g.states + id) = Freshness.CLEAN;
+        if (changed && *(g.kinds + id) == ReactiveKind.MEMO) {
+            IdList* observers = (g.observers + (id));
             for (mut u32 i = 0; i < observers.count; i = i + 1) {
-                g.states[observers.get(i)] = Freshness.DIRTY;
+                *(g.states + (observers.get(i))) = Freshness.DIRTY;
             }
         }
-        if (g.static_mode && g.kinds[id] == ReactiveKind.EFFECT) {
+        if (g.static_mode && *(g.kinds + id) == ReactiveKind.EFFECT) {
             Reactive.drop_computation(id);
         }
     }
 
     public static unsafe void start(u32 id) {
         ReactiveGraph* g = Reactive.graph();
-        g.states[id] = Freshness.DIRTY;
+        *(g.states + id) = Freshness.DIRTY;
         Reactive.update(id);
     }
 
@@ -304,8 +304,8 @@ struct Reactive {
         IdList* queue = &g.queue;
         for (mut u32 i = 0; i < queue.count; i = i + 1) {
             u32 id = queue.get(i);
-            g.queued[id] = 0;
-            if (g.kinds[id] == ReactiveKind.EFFECT) {
+            *(g.queued + id) = 0;
+            if (*(g.kinds + id) == ReactiveKind.EFFECT) {
                 Reactive.update(id);
             }
         }
@@ -315,28 +315,28 @@ struct Reactive {
 
     static unsafe void drop_computation(u32 id) {
         ReactiveGraph* g = Reactive.graph();
-        Computation finished = g.computations[id];
-        memset((void*)&g.computations[id], 0, (size_long)sizeof(Computation));
+        Computation finished = *(g.computations + id);
+        memset((void*)(g.computations + (id)), 0, (size_long)sizeof(Computation));
     }
 
     static unsafe void destroy(u32 id) {
         ReactiveGraph* g = Reactive.graph();
-        if (g.kinds[id] == ReactiveKind.FREE) {
+        if (*(g.kinds + id) == ReactiveKind.FREE) {
             return;
         }
         Reactive.release_owned(id);
         Reactive.unlink(id);
-        IdList* observers = &g.observers[id];
+        IdList* observers = (g.observers + (id));
         observers.clear();
-        u8 kind = g.kinds[id];
+        u8 kind = *(g.kinds + id);
         if (kind == ReactiveKind.MEMO || kind == ReactiveKind.EFFECT) {
             Reactive.drop_computation(id);
         }
-        if (g.values[id] != (void*)0) {
-            __djinn_free(g.values[id]);
-            g.values[id] = (void*)0;
+        if (*(g.values + id) != (void*)0) {
+            __djinn_free(*(g.values + id));
+            *(g.values + id) = (void*)0;
         }
-        g.kinds[id] = ReactiveKind.FREE;
+        *(g.kinds + id) = ReactiveKind.FREE;
         g.live = g.live - 1;
         IdList* free_nodes = &g.free_nodes;
         free_nodes.push(id);
@@ -345,9 +345,9 @@ struct Reactive {
     // Disposes a root (or any computation) with everything it owns, and detaches it from its owner.
     public static unsafe void dispose(u32 id) {
         ReactiveGraph* g = Reactive.graph();
-        u32 owner = g.owners[id];
-        if (owner != 0 && g.kinds[owner] != ReactiveKind.FREE) {
-            IdList* siblings = &g.children[owner];
+        u32 owner = *(g.owners + id);
+        if (owner != 0 && *(g.kinds + owner) != ReactiveKind.FREE) {
+            IdList* siblings = (g.children + owner);
             siblings.remove(id);
         }
         Reactive.destroy(id);
@@ -362,7 +362,7 @@ struct Reactive {
         Reactive.attach(id, computation);
         Reactive.start(id);
         ReactiveGraph* g = Reactive.graph();
-        if (g.sources[id].count == 0 && g.children[id].count == 0 && g.cleanups[id].count == 0) {
+        if ((*(g.sources + id)).count == 0 && (*(g.children + id)).count == 0 && (*(g.cleanups + id)).count == 0) {
             Reactive.dispose(id);
             return 0;
         }
@@ -442,8 +442,8 @@ struct Reactive {
             g.cleanup_count = g.cleanup_count + 1;
         }
         Cleanup cleanup = { .run = body };
-        g.cleanup_pool[index] = cleanup;
-        IdList* cleanups = &g.cleanups[g.owner];
+        *(g.cleanup_pool + index) = cleanup;
+        IdList* cleanups = (g.cleanups + (g.owner));
         cleanups.push(index);
     }
 

@@ -82,7 +82,7 @@ constexpr struct Token {
             return false;
         }
         for (mut u32 i = 0; i < (u32)text.length; i = i + 1) {
-            if (this.text.data[i] != text.data[i]) {
+            if (*(this.text.data + i) != *(text.data + i)) {
                 return false;
             }
         }
@@ -117,7 +117,7 @@ constexpr struct TokenStream {
     }
 
     public unsafe Token get(u32 index) {
-        return this.data[index];
+        return *(this.data + index);
     }
 
     public unsafe void push(Token token) {
@@ -129,13 +129,13 @@ constexpr struct TokenStream {
             this.data = (Token*)__djinn_realloc((void*)this.data, (size_long)((u64)grown * sizeof(Token)));
             this.capacity = grown;
         }
-        this.data[this.count] = token;
+        *(this.data + (this.count)) = token;
         this.count = this.count + 1;
     }
 
     public unsafe void append(TokenStream other) {
         for (mut u32 i = 0; i < other.count; i = i + 1) {
-            this.push(other.data[i]);
+            this.push(*(other.data + i));
         }
     }
 
@@ -143,7 +143,7 @@ constexpr struct TokenStream {
     public unsafe TokenStream slice(u32 start, u32 end) {
         mut TokenStream part = TokenStream.create();
         for (mut u32 i = start; i < end && i < this.count; i = i + 1) {
-            part.push(this.data[i]);
+            part.push(*(this.data + i));
         }
         return part;
     }
@@ -152,7 +152,7 @@ constexpr struct TokenStream {
     public unsafe u32 matching(u32 open) {
         mut i32 depth = 0;
         for (mut u32 i = open; i < this.count; i = i + 1) {
-            i32 kind = this.data[i].kind;
+            i32 kind = (*(this.data + i)).kind;
             if (kind == TokenClass.OPEN) {
                 depth = depth + 1;
             } else if (kind == TokenClass.CLOSE) {
@@ -167,16 +167,16 @@ constexpr struct TokenStream {
 
     static unsafe u32 read_number(i8* data, u64 length, u64* cursor, bool* negative) {
         mut u32 value = 0;
-        negative[0] = false;
-        if (cursor[0] < length && data[cursor[0]] == 45) {
-            negative[0] = true;
-            cursor[0] = cursor[0] + 1;
+        *(negative + 0) = false;
+        if (*(cursor + 0) < length && *(data + (*(cursor + 0))) == 45) {
+            *(negative + 0) = true;
+            *(cursor + 0) = *(cursor + 0) + 1;
         }
-        while (cursor[0] < length && data[cursor[0]] >= 48 && data[cursor[0]] <= 57) {
-            value = value * 10 + (u32)(data[cursor[0]] - 48);
-            cursor[0] = cursor[0] + 1;
+        while (*(cursor + 0) < length && *(data + (*(cursor + 0))) >= 48 && *(data + (*(cursor + 0))) <= 57) {
+            value = value * 10 + (u32)(*(data + (*(cursor + 0))) - 48);
+            *(cursor + 0) = *(cursor + 0) + 1;
         }
-        cursor[0] = cursor[0] + 1;
+        *(cursor + 0) = *(cursor + 0) + 1;
         return value;
     }
 
@@ -205,8 +205,8 @@ constexpr struct TokenStream {
     static unsafe void write_number(i8* buffer, u64* cursor, i32 value) {
         mut i32 rest = value;
         if (rest < 0) {
-            buffer[cursor[0]] = 45;
-            cursor[0] = cursor[0] + 1;
+            *(buffer + (*(cursor + 0))) = 45;
+            *(cursor + 0) = *(cursor + 0) + 1;
             rest = 0 - rest;
         }
         mut i32 divisor = 1;
@@ -214,8 +214,8 @@ constexpr struct TokenStream {
             divisor = divisor * 10;
         }
         while (divisor > 0) {
-            buffer[cursor[0]] = (i8)(48 + (rest / divisor) % 10);
-            cursor[0] = cursor[0] + 1;
+            *(buffer + (*(cursor + 0))) = (i8)(48 + (rest / divisor) % 10);
+            *(cursor + 0) = *(cursor + 0) + 1;
             divisor = divisor / 10;
         }
     }
@@ -223,32 +223,32 @@ constexpr struct TokenStream {
     public unsafe u64 encode(i8** result) {
         mut u64 capacity = 16;
         for (mut u32 i = 0; i < this.count; i = i + 1) {
-            capacity = capacity + 48 + (u64)this.data[i].text.length;
+            capacity = capacity + 48 + (u64)(*(this.data + i)).text.length;
         }
         i8* buffer = (i8*)__djinn_alloc((size_long)capacity);
         mut u64 cursor = 0;
         for (mut u32 i = 0; i < this.count; i = i + 1) {
-            Token token = this.data[i];
+            Token token = *(this.data + i);
             TokenStream.write_number(buffer, &cursor, token.kind);
-            buffer[cursor] = 44;
+            *(buffer + cursor) = 44;
             cursor = cursor + 1;
             TokenStream.write_number(buffer, &cursor, token.span);
-            buffer[cursor] = 44;
+            *(buffer + cursor) = 44;
             cursor = cursor + 1;
             mut i32 joint = 0;
             if (token.joint) {
                 joint = 1;
             }
             TokenStream.write_number(buffer, &cursor, joint);
-            buffer[cursor] = 44;
+            *(buffer + cursor) = 44;
             cursor = cursor + 1;
             TokenStream.write_number(buffer, &cursor, (i32)token.text.length);
-            buffer[cursor] = 58;
+            *(buffer + cursor) = 58;
             cursor = cursor + 1;
             memcpy((void*)(buffer + cursor), (void*)token.text.data, (size_long)token.text.length);
             cursor = cursor + (u64)token.text.length;
         }
-        result[0] = buffer;
+        *(result + 0) = buffer;
         return cursor;
     }
 }
@@ -258,10 +258,10 @@ constexpr struct TokenStreams {
     public static unsafe TokenStream before_separator(TokenStream all) {
         mut TokenStream part = TokenStream.create();
         for (mut u32 i = 0; i < all.count; i = i + 1) {
-            if (all.data[i].kind == TokenClass.SEPARATOR) {
+            if ((*(all.data + i)).kind == TokenClass.SEPARATOR) {
                 break;
             }
-            part.push(all.data[i]);
+            part.push(*(all.data + i));
         }
         return part;
     }
@@ -271,8 +271,8 @@ constexpr struct TokenStreams {
         mut bool seen = false;
         for (mut u32 i = 0; i < all.count; i = i + 1) {
             if (seen) {
-                part.push(all.data[i]);
-            } else if (all.data[i].kind == TokenClass.SEPARATOR) {
+                part.push(*(all.data + i));
+            } else if ((*(all.data + i)).kind == TokenClass.SEPARATOR) {
                 seen = true;
             }
         }
