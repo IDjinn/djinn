@@ -6,9 +6,6 @@
 - Refinement types (#21): `struct Positive : u32 where value > 0;` declares a type with the representation of an integer or float base and a predicate over `value`. `(Positive)x` returns a `result<Positive, ContractViolation>` (new core error type), `(Positive!)x` the value, trapping with R10013; both follow the contracts mode of the declaring file. A constant converts implicitly and is checked while compiling (`E3087`, `W6011` under `observe`/`ignore`); a refinement converts to its base and its operators yield the base. The compiler refuses zeroed storage a predicate rejects (`E3092`), in-place mutation (`E3093`), foreign functions that would produce one (`E3094`) and array, pointer or union conversions that would forge one. The web target has the `!` form and constants only. See `GRAMMAR.md`, "Refinement types".
 - `try` also takes a `result<T, E>` value: `try r ?: fallback`, or `try r` inside a function that declares `throws`.
 
-### Fixed
-- `djinn-lsp/build.sh` compiles `runtime/cpu.c`, without which the language server did not link since `std::simd`.
-
 ## [0.7.19] - 2026-11-28
 
 0.7.17 and 0.7.18 were not published: this release also carries their changes, listed in their own sections of the changelog, breaking ones included.
