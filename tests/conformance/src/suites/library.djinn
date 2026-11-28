@@ -188,7 +188,7 @@ i32 main() {
         str library = """
 namespace asynclib;
 
-public async i32 plus_one(i32 x) {
+public async task<i32> plus_one(i32 x) {
     return x + 1;
 }
 """;
@@ -196,18 +196,57 @@ public async i32 plus_one(i32 x) {
 namespace app;
 import asynclib;
 
-async i32 twice_plus(i32 x) {
+async task<i32> twice_plus(i32 x) {
     i32 value = await plus_one(x);
     return value * 2;
 }
 
-i32 main() {
+task<i32> main() {
     i32 direct = await plus_one(20);
     i32 chained = await twice_plus(10);
     return direct + chained;
 }
 """;
         Verify.source(source).links_library(library, Expected.exit(43));
+    }
+
+    [Test]
+    void task_signatures_cross_the_library() {
+        str library = """
+import std::sys;
+
+namespace asynclib;
+
+public task<i32> slow_plus_one(i32 x) {
+    await Task.pause();
+    return x + 1;
+}
+
+public task<i32> forward(i32 x) {
+    return slow_plus_one(x);
+}
+
+public task<T> echo<T>(T value) {
+    await Task.pause();
+    return value;
+}
+
+public sync i32 blocking(i32 x) {
+    return slow_plus_one(x).sync;
+}
+""";
+        str source = """
+namespace app;
+import asynclib;
+
+task<i32> main() {
+    i32 a = await slow_plus_one(1);
+    i32 b = await forward(a);
+    i32 c = await echo(b);
+    return c * 10 + blocking(b);
+}
+""";
+        Verify.source(source).with_std().links_library(library, Expected.exit(34));
     }
 
     [Test]

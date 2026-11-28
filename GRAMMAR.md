@@ -317,15 +317,15 @@ interface or has a member of every name the interface requires. A parameter with
 instance is checked.
 
 A parameter is a template parameter as in C++: an untyped one (`struct S<T, N>`) takes a type or a constant, a typed one
-(`struct S<T, i32 N>`) only a constant of that type (integer, bool, char or enum; `E3077` for a type, `E3075` when the value
+(`struct S<T, i32 N>`) only a constant of that type (integer, bool, char or enum; `E3080` for a type, `E3078` when the value
 does not fit). A constant argument is a literal, a parenthesized constant expression (`S<i32, (N * 2)>`,
 `S<i32, (cells(N))>` with a `constexpr` function), a `constexpr` global or a struct constant / enum variant
 (`S<Color::Red>`). Inside the instance the parameter is that constant: it folds like a literal, sizes inline arrays and
-can be passed on (`S<T, (N + 1)>`); using it as a type is `E3076`. Integer constants of untyped parameters are compared by
+can be passed on (`S<T, (N + 1)>`); using it as a type is `E3079`. Integer constants of untyped parameters are compared by
 value, so `S<4>` is one instance however the 4 was written. `Name<args>.member(...)` calls a static member of an instance.
 
 `type_trait(T, integer)` and `same_type(A, B)` are bool constants answered while checking (traits: integer, signed,
-unsigned, float, number, bool, char, pointer, struct, enum, array, copyable; `E3080` for another name); `std::types`
+unsigned, float, number, bool, char, pointer, struct, enum, array, copyable; `E3083` for another name); `std::types`
 wraps them as `is_integer<T>()`, `is_same<A, B>()` and so on. With `if constexpr` only the taken branch is checked, so
 generic code can have one branch per kind of type.
 
@@ -350,10 +350,10 @@ overflow_suffix      = "w" | "t" | "c" | "s" ;
 - `T*` is a safe pointer, `ptr` / `ptr<T>` are raw pointers (dereference, indexing, arithmetic and int-to-pointer casts need
   `unsafe`), `T?` is `optional<T>` (`T*?` uses the pointer niche), `T[]` is `arr<T>`, `i8[n]` is a stack array (any primitive or struct type: `Point[n]` gives a `Point*`).
 - `T[N]` in a declaration (field, local, parameter, template argument) is an inline array: N elements held in the value
-  itself, copied with it, sized by a positive constant (`E3078` otherwise). Indexing is bounds checked: at compile time
+  itself, copied with it, sized by a positive constant (`E3081` otherwise). Indexing is bounds checked: at compile time
   for a constant index (`E3057`), at run time otherwise (R10010); writing an element needs a `mut` holder. It is built
   with `{}` (zeros) or an array literal of exactly N elements, `.length` is not needed (N is known), and its elements must
-  be trivially copyable (`E3078` for `string[4]`).
+  be trivially copyable (`E3081` for `string[4]`).
 - Overflow suffix: `w` wrapped (default, C-style), `t` trapped (panic), `c` checked (throws `Overflow`), `s` saturating.
   On a cast the suffix picks the conversion: `(i16w)x` truncates like C, `(i16s)x` clamps to the range of `i16`, and a plain
   `(i16)x` panics when the value does not fit (R10005).
@@ -455,7 +455,10 @@ argument             = [ IDENTIFIER ":" ] expression ;
   supported yet. A value of a `fn` type is called like a function: `f(x)`, `this.on_click(id)`.
 - `expr is T` / `expr is T name` tests a boxed `object` and optionally binds the unboxed value; `expr is Enum::Variant a b`
   tests a union value and binds the payload.
-- `sync` is a contextual modifier (a method may still be called `sync`); `await` is an error inside a `sync` function. `task.sync` blocks the calling thread until the task completes (C# `GetAwaiter().GetResult()`) and warns (E6005) inside async functions. `await task` suspends in async functions and runs the event loop in the others; `spawn task;` schedules a task.
+- A function is async when its return type is written `task<T>` and its body awaits (or it is `main`), or when it says `async`. An async function must return `task<T>` (`task<void>` for no value, `E3075`); inside it `return` takes a `T`, and the error type of the task comes from `throws(E)` (`E3077`). A `task<T>` function with no `await` and no `async` returns a task it got from elsewhere. A generic function counts as awaiting only when its written return type is `task`.
+- `await task` is allowed only in async functions: it suspends the caller. Elsewhere it is `E3076`, and inside a `sync` function `E3061` (constructors, properties and operators cannot await).
+- `sync` is a contextual modifier (a method may still be called `sync`). `task.sync` blocks the calling thread until the task completes (C# `GetAwaiter().GetResult()`) and warns (E6005) inside async functions. `spawn task;` schedules a task.
+- A `public` function that blocks on or holds async work must declare `sync` or return `task<T>` (`E3063`).
 
 #### Switch expression
 

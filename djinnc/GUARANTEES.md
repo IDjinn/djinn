@@ -684,14 +684,14 @@ Todos verificados no código de `master`:
   sem concorrência alguma**, é o estado parcialmente atualizado quando um `try` sai no meio da atualização. Os
   caminhos de saída de erro já existem (`codegen/code_generator_error_exit.djinn`,
   `code_generator_error_propagation.djinn`) e são o ponto natural do rollback automático.
-- **Scheduler.** Em `djinnc`, uma função só é async quando declarada `async`
-  (`semantic/analyzer/semantic_analyzer_functions.djinn:173,189`), embora o `README.md` e o `AGENTS.md` descrevam o
-  codegen como "async por padrão": a documentação e o código divergem e este capítulo segue o código. Coroutines rodam na thread do event loop; o pool de 4 threads existe, mas nada o alimenta (`runtime/scheduler.c`;
+- **Scheduler.** Em `djinnc`, uma função é async quando retorna `task<T>` e usa `await` (ou é o `main`), ou quando é
+  declarada `async` (que também exige `task<T>`); ver `declares_async` em
+  `semantic/analyzer/semantic_analyzer_functions.djinn`. Coroutines rodam na thread do event loop; o pool de 4 threads existe, mas nada o alimenta (`runtime/scheduler.c`;
   `djinnc/TEST_ROADMAP.md` confirma). Logo, hoje **não há data race entre código Djinn**, mas **há business race em
   todo `await`**, porque o intercalamento é cooperativo.
-- **`await` em função síncrona.** Chama `__djinn_event_loop_run`, que executa outras tasks de dentro da função
-  síncrona. Qualquer análise de "sem suspensão" precisa tratar `await` em qualquer chamado transitivo, inclusive
-  síncrono, como ponto de intercalamento.
+- **Espera bloqueante (`.sync`).** `await` só é permitido em função async (`E3076`, `E3061`). `.sync` chama
+  `__djinn_event_loop_run`, que executa outras tasks de dentro de quem espera. Qualquer análise de "sem suspensão"
+  precisa tratar `.sync` em qualquer chamado transitivo, inclusive síncrono, como ponto de intercalamento.
 - **Sem closures** (`djinnc/SUBSET.md:55`). Blocos não podem ser passados a funções de biblioteca, o que justifica
   sintaxe própria para `atomic { }` e `after_commit { }`.
 - **Colisão de nome:** "contract" designa interfaces em `djinnc` (§3.6).
@@ -775,7 +775,7 @@ sabe pelo conjunto de `throws` dos chamados).
 Com o scheduler atual, só há intercalamento nos pontos de suspensão. Portanto, uma região **sem nenhum ponto de
 suspensão alcançável** é isolada de todo outro código Djinn, a custo zero em execução.
 
-- **O que conta como suspensão:** `await` (em async ou em função síncrona, que entra no event loop), `coro.suspend`
+- **O que conta como suspensão:** `await`, a espera bloqueante `.sync` (que entra no event loop), `coro.suspend`
   (usado por `Task.pause`/`Task.delay`) e qualquer chamada, transitivamente, a uma função que faça isso.
 - **Verificação:** novo efeito `suspends`, inferido por ponto fixo (§4.4). Região `cooperative` com `suspends` é erro.
 - **Premissa registrada no relatório:** "scheduler de uma thread executando coroutines". Se o pool passar a executar
@@ -1025,7 +1025,7 @@ void transfer(Account mut from, Account mut to, i64 amount) throws(InsufficientF
 **Variante com banco** (`await` presente, então `cooperative` não serve):
 
 ```djinn
-async void transfer_db(PostgresSession mut db, i64 from_id, i64 to_id, i64 cents) throws(InsufficientFunds, Unknown)
+async task<void> transfer_db(PostgresSession mut db, i64 from_id, i64 to_id, i64 cents) throws(InsufficientFunds, Unknown)
     require(cents > 0)
     atomic strategy database(isolation = serializable) retry allowed(max = 3)
 {
@@ -1067,7 +1067,7 @@ int pay(Payment* p) {
              Submitted -> Settled, Failed, Unknown; Unknown -> Settled, Failed)]
 enum PixState { Created, Reserved, Submitted, Settled, Failed, Unknown }
 
-async void submit(Db mut db, PixClient mut psp, PixPayment mut p) throws(Rejected)
+async task<void> submit(Db mut db, PixClient mut psp, PixPayment mut p) throws(Rejected)
     effects(db, net, irreversible)
 {
     try await db.transition(p, Reserved -> Submitted);
@@ -1078,7 +1078,7 @@ async void submit(Db mut db, PixClient mut psp, PixPayment mut p) throws(Rejecte
     }
 }
 
-async PixState reconcile(Db mut db, PixClient mut psp, PixPayment mut p)
+async task<PixState> reconcile(Db mut db, PixClient mut psp, PixPayment mut p)
     require(p.state == Unknown)
 {
     ...
@@ -1169,7 +1169,7 @@ void remove_upload(Dir mut uploads, str name) throws(IoError, NotRegularFile)
 **Insegura** (perda de atualização por *business race*, sem nenhum data race de memória):
 
 ```djinn
-async void increment(Counter mut c) {
+async task<void> increment(Counter mut c) {
     i64 v = c.value;
     await log("incrementando");
     c.value = v + 1;
@@ -1182,7 +1182,7 @@ async void increment(Counter mut c) {
 região" e oferece correções):
 
 ```djinn
-async void increment(Counter mut c)
+async task<void> increment(Counter mut c)
     writes(c.value)
 {
     atomic strategy cooperative {
@@ -1216,7 +1216,7 @@ db_save(u);
 **Djinn:**
 
 ```djinn
-async void rename_user(Db mut db, UserId id, str new_name) throws(Conflict, NotFound)
+async task<void> rename_user(Db mut db, UserId id, str new_name) throws(Conflict, NotFound)
     effects(db)
     retry allowed(max = 3, backoff = exponential)
 {
@@ -1249,7 +1249,7 @@ loop pode demorar mais que o chamador esperava.
 **Djinn:**
 
 ```djinn
-async Label create_label(HttpClient mut http, Order o, Deadline deadline) throws(Rejected, Unknown)
+async task<Label> create_label(HttpClient mut http, Order o, Deadline deadline) throws(Rejected, Unknown)
     effects(net, irreversible)
 {
     IdempotencyKey key = IdempotencyKey.for_order(o.id);
@@ -1287,7 +1287,7 @@ ordem (ack antes), a queda **perde** a mensagem.
 **Djinn** (typestate impede aplicar sem reivindicar a mensagem):
 
 ```djinn
-async void handle(Db mut db, Broker mut broker, Message<Unclaimed> m) throws(Retry)
+async task<void> handle(Db mut db, Broker mut broker, Message<Unclaimed> m) throws(Retry)
     effects(db, net)
 {
     atomic strategy database(isolation = read_committed) {
@@ -1356,7 +1356,7 @@ cobrança deixa o cliente pago e sem entrega; nenhuma etapa sabe desfazer as ant
 **Djinn** (pivô e compensação, §7.8):
 
 ```djinn
-async void fulfill(Order o) throws(OutOfStock, Declined, Stuck)
+async task<void> fulfill(Order o) throws(OutOfStock, Declined, Stuck)
     effects(db, net, irreversible)
 {
     Reservation r = try await reserve_stock(o);

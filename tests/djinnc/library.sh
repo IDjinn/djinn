@@ -124,7 +124,7 @@ public sync i32 blocking(i32 x) {
     return x + 1;
 }
 
-public async i32 asynchronous(i32 x) {
+public async task<i32> asynchronous(i32 x) {
     return x + 2;
 }
 
@@ -144,7 +144,7 @@ extern "C" {
     i32 printf(ptr<i8> format, ...);
 }
 
-unsafe i32 main() {
+unsafe task<i32> main() {
     const i32 FIXED = triple_const(4);
     Pair<i32> p = { .first = 3, .second = 4 };
     i32 a = p.sum() + biggest(2, 9) + negate(5) + FIXED + shown(1);
@@ -175,7 +175,7 @@ cat > "$out/sync_use.djinn" <<'SOURCE'
 namespace app;
 import featurelib;
 
-i32 main() {
+task<i32> main() {
     return await blocking(1);
 }
 SOURCE

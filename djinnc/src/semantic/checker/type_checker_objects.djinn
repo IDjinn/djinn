@@ -58,25 +58,16 @@ impl TypeChecker {
 
     u32 task_result(u32 type) {
         SymbolTable* symbols = this.symbols;
-        if (type == 0 || !Types.is_struct(type) || symbols.enum_of_type(type) != null) {
+        IdList* args = symbols.task_args(type);
+        if (args == null) {
             return 0;
         }
-        StructInfo* info = symbols.struct_at(Types.struct_index(type));
-        if (info.origin == null || info.type_args == null) {
-            return 0;
-        }
-        StructInfo* origin = info.origin;
-        if (origin.name_atom != Ast.intern_base_name("task", 4)) {
-            return 0;
-        }
-        IdList* args = info.type_args;
         return args.get(0) + 1;
     }
 
     u32 task_error(u32 type) {
         SymbolTable* symbols = this.symbols;
-        StructInfo* info = symbols.struct_at(Types.struct_index(type));
-        IdList* args = info.type_args;
+        IdList* args = symbols.task_args(type);
         return args.get(1);
     }
 
@@ -122,13 +113,13 @@ impl TypeChecker {
     }
 
     // A public function that works with tasks without awaiting them ('.sync' or an unawaited async call) must say
-    // whether it is 'async' or 'sync': that choice is part of its contract for the callers of a library.
+    // so in its signature, with 'sync' or a 'task<T>' result: that is part of its contract for the callers of a library.
     unsafe void check_public_contract(Node* node, FunctionInfo* owner) {
-        if (!owner.is_public || owner.is_async || owner.is_sync || owner.public_async_warned) {
+        if (!owner.is_public || owner.is_async || owner.is_sync || owner.public_async_warned || this.task_result(owner.return_type) != 0) {
             return;
         }
         owner.public_async_warned = true;
-        this.error_code(node, DiagnosticErrors.PUBLIC_NEEDS_ASYNC_OR_SYNC, "a public function that blocks on or holds async work must declare 'async' or 'sync'");
+        this.error_code(node, DiagnosticErrors.PUBLIC_NEEDS_ASYNC_OR_SYNC, "a public function that blocks on or holds async work must declare 'sync' or return 'task<T>'");
     }
 
     u32 check_await(Node* node) {
@@ -138,6 +129,8 @@ impl TypeChecker {
         }
         if (waiter != null && !node.flag() && waiter.is_sync) {
             this.error_code(node, DiagnosticErrors.AWAIT_IN_SYNC_FUNCTION, "'await' is not allowed in a 'sync' function; use '.sync' to block on the task");
+        } else if (waiter != null && !node.flag() && !waiter.is_async) {
+            this.error_code(node, DiagnosticErrors.AWAIT_NEEDS_TASK_RETURN, "'await' needs a function that returns 'task<T>'; change the return type or use '.sync' to block on the task");
         }
         if (waiter != null && node.flag()) {
             this.check_public_contract(node, waiter);

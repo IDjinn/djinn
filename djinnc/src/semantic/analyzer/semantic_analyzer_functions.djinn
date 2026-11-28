@@ -219,10 +219,12 @@ impl SemanticAnalyzer {
             info.node = declaration;
             info.generics = generics;
             info.is_template = true;
-            info.is_async = (declaration.op() & 1) != 0;
             info.is_sync = (declaration.op() & 32) != 0;
-        info.is_private = (declaration.op() & 64) != 0;
-        info.is_public = (declaration.op() & 128) != 0;
+            TypeRef* written = declaration.type();
+            bool awaits_task = (declaration.op() & 1024) != 0 && !info.is_sync && written != null && written.name_atom == Ast.intern_base_name("task", 4);
+            info.is_async = (declaration.op() & 1) != 0 || awaits_task;
+            info.is_private = (declaration.op() & 64) != 0;
+            info.is_public = (declaration.op() & 128) != 0;
             info.is_unsafe = (declaration.op() & 8) != 0;
             info.const_kind = ConstEval.kind_of(declaration.op());
             info.owner = owner;
@@ -238,7 +240,6 @@ impl SemanticAnalyzer {
         info.param_types = IdList.create();
         info.is_variadic = declaration.is_variadic();
         info.is_extern = is_extern;
-        info.is_async = (declaration.op() & 1) != 0;
         info.is_sync = (declaration.op() & 32) != 0;
         info.is_private = (declaration.op() & 64) != 0;
         info.is_public = (declaration.op() & 128) != 0;
@@ -247,6 +248,7 @@ impl SemanticAnalyzer {
         info.const_kind = ConstEval.kind_of(declaration.op());
         info.node = declaration;
         info.owner = owner;
+        info.is_async = this.declares_async(declaration, info);
 
         IdList* param_types = info.param_types;
         if (owner != null && !declaration.flag()) {
@@ -265,8 +267,56 @@ impl SemanticAnalyzer {
             }
         }
         this.resolve_throws(declaration, info);
+        if (info.is_async) {
+            this.unwrap_task_result(declaration, info);
+        }
 
         return info;
+    }
+
+    // A function is async when it says 'async', or when it returns a task and either awaits or is the entry point. Any
+    // other function that returns a task only passes one on.
+    unsafe bool declares_async(Node* declaration, FunctionInfo* info) {
+        if ((declaration.op() & 1) != 0) {
+            return true;
+        }
+        SymbolTable* symbols = this.symbols;
+        if (info.is_sync || symbols.task_args(info.return_type) == null) {
+            return false;
+        }
+        bool entry = info.owner == null && info.name_atom == Atoms.MAIN_ATOM;
+        return entry || (declaration.op() & 1024) != 0;
+    }
+
+    // Inside the compiler the return type of an async function is the result it produces; callers see the task again.
+    unsafe void unwrap_task_result(Node* declaration, FunctionInfo* info) {
+        SymbolTable* symbols = this.symbols;
+        IdList* task = symbols.task_args(info.return_type);
+        if (task == null) {
+            this.error_code(declaration, DiagnosticErrors.ASYNC_NEEDS_TASK, "an async function must return 'task<T>' (for example 'task<i32>' or 'task<void>')");
+            return;
+        }
+        info.return_type = task.get(0);
+        u32 error = task.get(1);
+        if (!Types.is_void(error) && error != this.thrown_type(info)) {
+            this.error_code(declaration, DiagnosticErrors.TASK_ERROR_NEEDS_THROWS, "the error type of a task comes from 'throws(E)'; declare it there");
+        }
+    }
+
+    unsafe u32 thrown_type(FunctionInfo* info) {
+        if (!info.has_throws) {
+            return Types.void_type();
+        }
+        if (!info.throws_any) {
+            IdList* types = info.throws_types;
+            return types.get(0);
+        }
+        SymbolTable* symbols = this.symbols;
+        StructInfo* root = symbols.find_core_struct(Ast.intern_base_name("Error", 5));
+        if (root == null || root.is_template) {
+            return 0;
+        }
+        return root.type_id;
     }
 
     unsafe void resolve_throws(Node* declaration, FunctionInfo* info) {
