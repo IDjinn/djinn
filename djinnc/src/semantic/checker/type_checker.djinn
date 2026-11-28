@@ -88,13 +88,62 @@ struct TypeChecker {
             this.error_code(at, DiagnosticErrors.UNKNOWN_TYPE, "unknown type");
             return Types.i32_type();
         }
-        this.reject_owning_array(resolved, at);
+        this.reject_unfit_array(resolved, at);
         return resolved;
     }
 
-    // An inline array is copied bit for bit and never disposed, so its elements must be trivially copyable.
-    unsafe void reject_owning_array(u32 type, Node* at) {
+    // The most scalar values the inline arrays of one type may hold. Such a value is copied and passed as one LLVM
+    // value, which makes the compiler very slow, and then crashes it, as it grows.
+    const i64 MAX_INLINE_VALUES = 4096;
+    const i32 MAX_VALUE_NESTING = 64;
+
+    // Scalar values that 'type' holds in inline arrays (all of them when 'inside' one), counting just past the limit.
+    unsafe i64 inline_values(u32 type, bool inside, i32 depth) {
+        i64 over = TypeChecker.MAX_INLINE_VALUES + 1;
+        if (Types.is_array(type)) {
+            i64 each = this.inline_values(Types.element(type), true, depth + 1);
+            i64 length = Types.value_of(type);
+            if (each > 0 && length > TypeChecker.MAX_INLINE_VALUES / each) {
+                return over;
+            }
+            return length * each;
+        }
+        mut PointerList* fields = (PointerList*)0;
+        if (Types.is_struct(type) && depth < TypeChecker.MAX_VALUE_NESTING) {
+            SymbolTable* symbols = this.symbols;
+            StructInfo* info = symbols.struct_at(Types.struct_index(type));
+            if (info != null && !info.is_enum) {
+                fields = info.fields;
+            }
+        }
+        if (fields == null) {
+            if (inside) {
+                return 1;
+            }
+            return 0;
+        }
+        mut i64 total = 0;
+        for (mut i32 f = 0; f < fields.length && total < over; f = f + 1) {
+            FieldInfo* field = (FieldInfo*)fields.get(f);
+            total = total + this.inline_values(field.type, inside, depth + 1);
+        }
+        if (total > over) {
+            return over;
+        }
+        return total;
+    }
+
+    // An inline array is copied bit for bit and never disposed, so its elements must be trivially copyable, and it
+    // cannot be larger than the compiler can copy.
+    unsafe void reject_unfit_array(u32 type, Node* at) {
         if (!Types.is_array(type)) {
+            return;
+        }
+        if (this.inline_values(type, false, 0) > TypeChecker.MAX_INLINE_VALUES) {
+            SymbolTable* described = this.symbols;
+            ByteBuffer* name = ByteBuffer.create();
+            described.describe_type(type, name);
+            this.report_inline_size(name.cstr(), at);
             return;
         }
         mut u32 element = Types.element(type);
@@ -112,6 +161,16 @@ struct TypeChecker {
         this.error_code(at, DiagnosticErrors.INVALID_ARRAY_SIZE, message.cstr());
     }
 
+    unsafe void report_inline_size(ptr<i8> name, Node* at) {
+        ByteBuffer* message = ByteBuffer.create();
+        message.append("'");
+        message.append(name);
+        message.append("' holds more than ");
+        message.append_int(TypeChecker.MAX_INLINE_VALUES);
+        message.append(" values in inline arrays, which are copied as a whole: use an arr<T> or a List for a buffer this large");
+        this.error_code(at, DiagnosticErrors.INVALID_ARRAY_SIZE, message.cstr());
+    }
+
     public unsafe bool run() {
         SymbolTable* symbols = this.symbols;
         PointerList* structs = symbols.structs;
@@ -121,17 +180,6 @@ struct TypeChecker {
                 continue;
             }
             symbols.bindings = info.bindings;
-            PointerList* held_fields = info.fields;
-            if (held_fields != null && info.node != null) {
-                for (mut i32 f = 0; f < held_fields.length; f = f + 1) {
-                    FieldInfo* field = (FieldInfo*)held_fields.get(f);
-                    mut Node* at = field.node;
-                    if (at == null) {
-                        at = info.node;
-                    }
-                    this.reject_owning_array(field.type, at);
-                }
-            }
             PointerList* constants = info.constants;
             for (mut i32 c = 0; c < constants.length; c = c + 1) {
                 Node* constant = (Node*)constants.get(c);
@@ -164,8 +212,58 @@ struct TypeChecker {
                 this.check_function(info);
             }
         }
+        this.check_held_arrays();
         Diagnostics* diagnostics = this.diagnostics;
         return !diagnostics.failed();
+    }
+
+    // Runs last: checking a body creates instances, and their fields and signatures may hold inline arrays.
+    unsafe void check_held_arrays() {
+        SymbolTable* symbols = this.symbols;
+        PointerList* structs = symbols.structs;
+        for (mut i32 i = 0; i < structs.length; i = i + 1) {
+            StructInfo* info = (StructInfo*)structs.get(i);
+            PointerList* held_fields = info.fields;
+            if (info.is_template || held_fields == null || info.node == null) {
+                continue;
+            }
+            mut i64 held = 0;
+            mut bool field_too_large = false;
+            for (mut i32 f = 0; f < held_fields.length; f = f + 1) {
+                FieldInfo* field = (FieldInfo*)held_fields.get(f);
+                mut Node* at = field.node;
+                if (at == null) {
+                    at = info.node;
+                }
+                this.reject_unfit_array(field.type, at);
+                i64 values = this.inline_values(field.type, false, 0);
+                held = held + values;
+                if (values > TypeChecker.MAX_INLINE_VALUES) {
+                    field_too_large = true;
+                }
+            }
+            // Fields that each fit can still add up to too much.
+            if (!field_too_large && !info.is_enum && held > TypeChecker.MAX_INLINE_VALUES) {
+                this.report_inline_size(info.name, info.node);
+            }
+        }
+        PointerList* functions = symbols.functions;
+        for (mut i32 i = 0; i < functions.length; i = i + 1) {
+            FunctionInfo* info = (FunctionInfo*)functions.get(i);
+            Node* declaration = info.node;
+            IdList* types = info.param_types;
+            if (info.is_extern || info.is_template || declaration == null || types == null) {
+                continue;
+            }
+            mut i32 declared = 0;
+            while (declared < declaration.count() && declaration.child(declared).kind() == NodeKind::PARAMETER) {
+                declared = declared + 1;
+            }
+            i32 receiver = types.length - declared;
+            for (mut i32 p = 0; p < declared && receiver >= 0; p = p + 1) {
+                this.reject_unfit_array(types.get(receiver + p), declaration.child(p));
+            }
+        }
     }
 
     // Runs before the instances are checked, so an error both find is reported once, as the generic declares it.

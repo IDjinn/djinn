@@ -143,6 +143,9 @@ blocks on a task (warning `E6005` in async code). Coroutine wrappers: `codegen/c
 Requirements: LLVM 21 with the C API (`LLVM-C.dll`/`libLLVM-C.so` on `PATH`), `clang`, Git Bash. A seed `djinnc`
 (tag `stage0-final`, or any later `djinnc`) is always needed.
 
+`djinnc/src/codegen/target/cpu_table.djinn` (the features of each x86 `--cpu` name) is generated: after moving to
+another LLVM, run `CLANG=<clang of that LLVM> bash tools/cpu_features.sh`. CI runs it with `--check`.
+
 ```bash
 bash tools/build_runtime.sh --out build/runtime                       # runtime lib (djinn_runtime.lib / libdjinn_runtime.a)
 djinnc djinnc -o build/stage2/djinnc --runtime-dir runtime            # build the compiler (a dir with djinn.proj is accepted)

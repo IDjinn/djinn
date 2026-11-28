@@ -260,7 +260,39 @@ i32 main() {
     return 0;
 }
 """;
+        str instance = """
+struct Box<T, N> {
+    T[N] items;
+}
+
+i32 main() {
+    Box<string, 2> names = {};
+    return 0;
+}
+""";
+        str param = """
+i32 take(string[2] names) {
+    return 0;
+}
+
+i32 main() {
+    return 0;
+}
+""";
+        str generic = """
+i32 held<T>() {
+    T[2] items = {};
+    return 0;
+}
+
+i32 main() {
+    return held<string>();
+}
+""";
         Verify.source(source).with_std().diagnostics(Expected.error(DiagnosticErrors.INVALID_ARRAY_SIZE).at(2, 5));
+        Verify.source(instance).with_std().diagnostics(Expected.error(DiagnosticErrors.INVALID_ARRAY_SIZE).at(2, 5));
+        Verify.source(param).with_std().diagnostics(Expected.error(DiagnosticErrors.INVALID_ARRAY_SIZE).at(1, 10));
+        Verify.source(generic).with_std().diagnostics(Expected.error(DiagnosticErrors.INVALID_ARRAY_SIZE).at(2, 5));
     }
 
     [Test]
@@ -336,5 +368,338 @@ i32 main() {
 }
 """;
         Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.INVALID_TYPE_TRAIT).at(2, 18));
+    }
+
+    // Inline arrays are copied as a whole, so a type holds at most 4096 of their values.
+    [Test]
+    void inline_arrays_have_a_size_limit() {
+        str local = """
+i32 main() {
+    mut u8[100000000] huge = {};
+    return (i32)huge[0];
+}
+""";
+        str param = """
+i32 take(u8[5000] big) {
+    return 0;
+}
+
+i32 main() {
+    return 0;
+}
+""";
+        str field = """
+struct Two {
+    u8[3000] a;
+    u8[3000] b;
+}
+
+i32 main() {
+    Two two = {};
+    return 0;
+}
+""";
+        str grid = """
+struct Grid {
+    u32[80][80] cells;
+}
+
+i32 main() {
+    return 0;
+}
+""";
+        str pairs = """
+struct Pair {
+    u64 x;
+    u64 y;
+}
+
+struct Pairs<N> {
+    Pair[N] items;
+}
+
+i32 main() {
+    Pairs<2049> pairs = {};
+    return 0;
+}
+""";
+        str fits = """
+struct Fits {
+    u8[2048] a;
+    u8[2048] b;
+}
+
+struct Pair {
+    u64 x;
+    u64 y;
+}
+
+i32 main() {
+    Pair[2048] pairs = {};
+    mut Fits fits = {};
+    fits.b[2047] = 9;
+    Fits copy = fits;
+    return (i32)copy.b[2047] + (i32)pairs[2047].y;
+}
+""";
+        Verify.source(local).diagnostics(Expected.error(DiagnosticErrors.INVALID_ARRAY_SIZE).at(2, 5));
+        Verify.source(param).diagnostics(Expected.error(DiagnosticErrors.INVALID_ARRAY_SIZE).at(1, 10));
+        Verify.source(field).diagnostics(Expected.error(DiagnosticErrors.INVALID_ARRAY_SIZE).at(1, 1));
+        Verify.source(grid).diagnostics(Expected.error(DiagnosticErrors.INVALID_ARRAY_SIZE).at(2, 5));
+        Verify.source(pairs).diagnostics(Expected.error(DiagnosticErrors.INVALID_ARRAY_SIZE).at(7, 5));
+        Verify.source(fits).runs(Expected.exit(9));
+        Verify.source(fits).optimized(2).runs(Expected.exit(9));
+    }
+
+    [Test]
+    void endless_template_recursion_stops() {
+        str calls = """
+i32 deeper<N>() {
+    return deeper<(N + 1)>();
+}
+
+i32 main() {
+    return deeper<0>();
+}
+""";
+        str types = """
+struct Rec<N> {
+    Rec<(N + 1)>* next;
+    i32 value;
+}
+
+i32 main() {
+    Rec<0> first = {};
+    return first.value;
+}
+""";
+        Verify.source(calls).diagnostics(Expected.error(DiagnosticErrors.TEMPLATE_DEPTH_EXCEEDED).at(2, 27));
+        Verify.source(types).diagnostics(Expected.error(DiagnosticErrors.TEMPLATE_DEPTH_EXCEEDED).at(2, 5));
+    }
+
+    [Test]
+    void different_structs_do_not_convert() {
+        str argument = """
+struct Pair {
+    i32 a;
+    i32 b;
+}
+
+struct Other {
+    i64 a;
+    i64 b;
+    i64 c;
+}
+
+i64 take(Other other) {
+    return other.c;
+}
+
+i32 main() {
+    Pair pair = { .a = 1, .b = 2 };
+    return (i32)take(pair);
+}
+""";
+        str values = """
+struct Pair {
+    i32 a;
+    i32 b;
+}
+
+struct Other {
+    i64 a;
+    i64 b;
+    i64 c;
+}
+
+struct Holder {
+    Other other;
+}
+
+Other make(Pair pair) {
+    return pair;
+}
+
+i32 main() {
+    Pair pair = { .a = 1, .b = 2 };
+    mut Holder holder = { .other = pair };
+    holder.other = pair;
+    return (i32)holder.other.c;
+}
+""";
+        Verify.source(argument).diagnostics(Expected.error(DiagnosticErrors.IMPLICIT_CONVERSION).at(18, 22));
+        Verify.source(values).diagnostics(Expected.error(DiagnosticErrors.IMPLICIT_CONVERSION).at(17, 12)
+            .and_error(DiagnosticErrors.IMPLICIT_CONVERSION).at(22, 36)
+            .and_error(DiagnosticErrors.IMPLICIT_CONVERSION).at(23, 20));
+    }
+
+    [Test]
+    void arr_passes_as_a_slice() {
+        str source = """
+import std::types;
+import std::collections;
+
+struct Reader {
+    mut i32 total;
+
+    public void add(slice<i32> values) {
+        for (mut size i = 0u; i < values.length(); i = i + 1u) {
+            this.total = this.total + values[i];
+        }
+    }
+
+    public static i32 first(slice<i32> values) {
+        return values[0u];
+    }
+
+    public static i32 pick(i32 value) {
+        return value;
+    }
+
+    public static i32 pick(slice<i32> values) {
+        return values[1u];
+    }
+}
+
+T head<T>(slice<T> values) {
+    return values[0u];
+}
+
+struct Box {
+    slice<i32> view;
+}
+
+i32 main() {
+    arr<i32> items = [10, 20, 30];
+    mut Reader reader = { .total = 0 };
+    reader.add(items);
+    slice<i32> view = items;
+    Box box = { .view = items };
+    return reader.total + Reader.first(items) + Reader.pick(items) + Reader.pick(7) + view[2u] + box.view[1u]
+        + head<i32>(items);
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(157));
+        Verify.source(source).with_std().optimized(2).runs(Expected.exit(157));
+    }
+
+    [Test]
+    void slice_of_a_returned_arr_borrows_the_receiver() {
+        str returned = """
+import std::types;
+import std::collections;
+
+struct Owner {
+    string name;
+
+    public arr<i32> numbers() {
+        arr<i32> items = [1, 2, 3];
+        return items;
+    }
+}
+
+slice<i32> make() {
+    mut Owner owner = { .name = $"x{1}" };
+    return owner.numbers();
+}
+
+i32 main() {
+    slice<i32> view = make();
+    return view[0u];
+}
+""";
+        str moved = """
+import std::types;
+import std::collections;
+
+struct Owner {
+    string name;
+
+    public arr<i32> numbers() {
+        arr<i32> items = [1, 2, 3];
+        return items;
+    }
+}
+
+i32 main() {
+    mut Owner owner = { .name = $"x{1}" };
+    slice<i32> view = owner.numbers();
+    mut Owner other = owner;
+    return view[0u] + (i32)other.name.length();
+}
+""";
+        Verify.source(returned).with_std().diagnostics(Expected.error(DiagnosticErrors.BORROW_OUTLIVES_VALUE).at(15, 25));
+        Verify.source(moved).with_std().diagnostics(Expected.error(DiagnosticErrors.BORROW_CONFLICT).at(16, 23));
+    }
+
+    [Test]
+    void constants_passed_to_generic_functions() {
+        str source = """
+import std::simd;
+
+enum Color {
+    Red,
+    Green,
+    Blue,
+}
+
+constexpr i32 WIDTH = 12;
+
+i32 count<T, N>() {
+    return (i32)N;
+}
+
+i32 shade<C>() {
+    return (i32)C;
+}
+
+i32 both(bool first, bool second) {
+    if (first && second) {
+        return 1;
+    }
+    return 0;
+}
+
+i32 main() {
+    vector<u8, 4> bytes = vector<u8, 4>.splat((u8)1);
+    vector<u32, 1> whole = bytes.reinterpret<u32, 1>();
+    if (whole[0] != 16843009) {
+        return 1;
+    }
+    i32 low = 1;
+    i32 high = 20;
+    // A plain name first leaves '<' and '>' as comparisons.
+    i32 compared = both(low < WIDTH, high > (WIDTH));
+    return count<i8, 16>() + count<i32, WIDTH>() + count<i32, (WIDTH * 2)>() + shade<Color::Blue>()
+        + shade<(WIDTH)>() + compared;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(67));
+    }
+
+    // A loop inside the discarded branch is not analyzed.
+    [Test]
+    void discarded_branch_with_a_loop() {
+        str source = """
+i32 pick<T>(T x) {
+    mut i32 total = 0;
+    for (mut i32 i = 0; i < 4; i = i + 1) {
+        if constexpr sizeof(T) == 8 {
+            mut i32 bits = 8;
+            for (mut i32 b = 1; b < bits; b = b + 1) {
+                total = total + 1;
+            }
+        } else {
+            total = total + i;
+        }
+    }
+    return total;
+}
+
+i32 main() {
+    return pick<i32>(1) + pick<i64>(1);
+}
+""";
+        Verify.source(source).optimized(2).runs(Expected.exit(34));
     }
 }

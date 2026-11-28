@@ -146,6 +146,10 @@ impl SemanticAnalyzer {
             return (FunctionInfo*)registered.get((i32)existing);
         }
 
+        if (!this.accepts_depth(template.name, blame)) {
+            return (FunctionInfo*)0;
+        }
+
         U32Map* bindings = U32Map.create(Memory.arena(), 8);
         if (template.bindings != null) {
             U32Map* inherited = template.bindings;
@@ -178,7 +182,13 @@ impl SemanticAnalyzer {
         } else {
             Attributes.copy_lowering(template.node, declaration);
         }
+        Node* saved_site = this.instance_site;
+        this.instance_site = blame;
+        i32 refused = this.refused_shapes;
         FunctionInfo* info = this.build_function(declaration, false, template.owner, true);
+        this.instance_site = saved_site;
+        // The body of a refused signature would only repeat the error from inside the template.
+        info.is_refused = this.refused_shapes != refused;
         ByteBuffer* name = ByteBuffer.create();
         name.append(template.name);
         name.append_char('<');
@@ -194,6 +204,7 @@ impl SemanticAnalyzer {
         info.is_extern = template.is_extern;
         info.bindings = bindings;
         info.mode_bindings = mode_bindings;
+        info.depth = symbols.template_depth + 1;
         symbols.add_function_instance(info);
         instances.put(key, (u32)(registered.length - 1));
         this.check_bounds(params, args, blame, template.node);

@@ -6,7 +6,8 @@ typedef _Float16 half_t;
 #else
 typedef uint16_t half_t;
 #endif
-#if defined(__BFLT16_MAX__) || defined(__clang__)
+/* WebAssembly clang has no __bf16: the helpers take and return its bits there. */
+#if !defined(__wasm__) && (defined(__BFLT16_MAX__) || defined(__clang__))
 typedef __bf16 brain_t;
 #else
 typedef uint16_t brain_t;
@@ -67,6 +68,23 @@ __attribute__((weak)) float __extendhfsf2(half_t value) {
     return bits_float(sign | ((exponent + 112) << 23) | (mantissa << 13));
 }
 
+/* The double as a float whose lowest bit is set when something was lost, so that rounding it again to 16 bits gives
+   what a single rounding would: rounding to nearest twice can take a value just off a halfway point for the point. */
+static float odd_float(double value) {
+    float narrow = (float)value;
+    if ((double)narrow == value || value != value) {
+        return narrow;
+    }
+    uint32_t bits = float_bits(narrow);
+    if (!(bits & 1)) {
+        double magnitude = value < 0 ? -value : value;
+        double rounded = narrow < 0 ? -(double)narrow : (double)narrow;
+        /* One step from the rounded float toward the value. */
+        bits = rounded > magnitude ? bits - 1 : bits + 1;
+    }
+    return bits_float(bits);
+}
+
 static uint16_t float_to_half_bits(float value) {
     uint32_t bits = float_bits(value);
     uint32_t sign = (bits >> 16) & 0x8000;
@@ -105,7 +123,7 @@ __attribute__((weak)) half_t __truncsfhf2(float value) {
 }
 
 __attribute__((weak)) half_t __truncdfhf2(double value) {
-    return bits_half(float_to_half_bits((float)value));
+    return bits_half(float_to_half_bits(odd_float(value)));
 }
 
 static uint16_t float_to_brain_bits(float value) {
@@ -122,5 +140,5 @@ __attribute__((weak)) brain_t __truncsfbf2(float value) {
 }
 
 __attribute__((weak)) brain_t __truncdfbf2(double value) {
-    return bits_brain(float_to_brain_bits((float)value));
+    return bits_brain(float_to_brain_bits(odd_float(value)));
 }

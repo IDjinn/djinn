@@ -10,7 +10,8 @@ namespace std::simd;
 //
 // Every operation works lane by lane. On native targets the compiler generates it as vector instructions ([Simd]):
 // SSE/AVX on x86, NEON on AArch64, SIMD128 on WebAssembly, and plain scalar code on a CPU without SIMD. The Djinn body
-// below each one is its definition, and what the web (JavaScript) target runs.
+// below each one is its definition: it runs where there is no vector form (f16 and bf16 lanes, a builtin the target
+// lacks) and gives the same result. The web (JavaScript) target has no std::simd; --target wasm does.
 //
 // Integer lanes wrap on overflow (like u64w), as SIMD hardware does; use saturating_add/saturating_subtract to clamp.
 // Shift amounts are taken modulo the lane width. Division by zero in an integer lane stops the program.
@@ -175,6 +176,7 @@ struct vector<T, N> {
         return out;
     }
 
+    // Float lanes: a NaN loses against a number, and of two zeros with different signs the one from 'other' is taken.
     [Simd("minimum")] public vector<T, N> minimum(vector<T, N> other) {
         mut vector<T, N> out = {};
         for (mut i32 i = 0; i < N; i = i + 1) {
@@ -315,11 +317,33 @@ struct vector<T, N> {
                     } else {
                         out.lanes[i] = (T)(((u64)this.lanes[i] * (u64)other.lanes[i]) >> (u64)bits);
                     }
-                } else {
+                } else if constexpr sizeof(T) == 8 {
                     if constexpr is_signed<T>() {
                         out.lanes[i] = (T)(((i128)this.lanes[i] * (i128)other.lanes[i]) >> 64);
                     } else {
                         out.lanes[i] = (T)(((u128)this.lanes[i] * (u128)other.lanes[i]) >> 64);
+                    }
+                } else {
+                    // No wider integer exists, so the product is built from 64-bit halves.
+                    u128w left = (u128w)this.lanes[i];
+                    u128w right = (u128w)other.lanes[i];
+                    u128w half = (~(u128w)0) >> (u128w)64;
+                    u128w low_low = (left & half) * (right & half);
+                    u128w low_high = (left & half) * (right >> (u128w)64);
+                    u128w high_low = (left >> (u128w)64) * (right & half);
+                    u128w high_high = (left >> (u128w)64) * (right >> (u128w)64);
+                    u128w middle = (low_low >> (u128w)64) + (low_high & half) + (high_low & half);
+                    mut u128w high = high_high + (low_high >> (u128w)64) + (high_low >> (u128w)64) + (middle >> (u128w)64);
+                    if constexpr is_signed<T>() {
+                        if (this.lanes[i] < 0) {
+                            high = high - right;
+                        }
+                        if (other.lanes[i] < 0) {
+                            high = high - left;
+                        }
+                        out.lanes[i] = (T)(i128w)high;
+                    } else {
+                        out.lanes[i] = (T)high;
                     }
                 }
             }
@@ -337,7 +361,11 @@ struct vector<T, N> {
             for (mut i32 i = 0; i < N; i = i + 1) {
                 u64w low = (u64w)this.lanes[i] & 4294967295;
                 u64w high = (u64w)other.lanes[i] & 4294967295;
-                out.lanes[i] = (T)(low * high);
+                if constexpr is_signed<T>() {
+                    out.lanes[i] = (T)(i64w)(low * high);
+                } else {
+                    out.lanes[i] = (T)(low * high);
+                }
             }
         } else {
             panic("vector.multiply_low32 needs 64-bit integer lanes");
@@ -345,11 +373,41 @@ struct vector<T, N> {
         return out;
     }
 
+    // a * b + c for 16-bit lanes, whose product is exact in f64. When the sum is not, its last bit is made odd, so that
+    // rounding it again to 16 bits cannot take a value just off a halfway point for the halfway point itself.
+    static unsafe f64 odd_fused(f64 a, f64 b, f64 c) {
+        f64 product = a * b;
+        mut f64 sum = product + c;
+        f64 added = sum - product;
+        f64 error = (product - (sum - added)) + (c - added);
+        // 'error' is not a number when the sum is infinite or not a number, which stays as it is.
+        if (error > 0.0 || error < 0.0) {
+            mut u64 bits = 0;
+            memcpy((void*)&bits, (void*)&sum, 8);
+            if ((bits & 1) == 0) {
+                if ((error > 0.0) == (sum > 0.0)) {
+                    bits = bits + 1;
+                } else {
+                    bits = bits - 1;
+                }
+                memcpy((void*)&sum, (void*)&bits, 8);
+            }
+        }
+        return sum;
+    }
+
+    // this * factor + addend with a single rounding. The body is what 16-bit lanes use.
     [Simd("fused_multiply_add")] public vector<T, N> fused_multiply_add(vector<T, N> factor, vector<T, N> addend) {
         mut vector<T, N> out = {};
         if constexpr is_float<T>() {
             for (mut i32 i = 0; i < N; i = i + 1) {
-                out.lanes[i] = this.lanes[i] * factor.lanes[i] + addend.lanes[i];
+                if constexpr sizeof(T) < 8 {
+                    unsafe {
+                        out.lanes[i] = (T)vector<T, N>.odd_fused((f64)this.lanes[i], (f64)factor.lanes[i], (f64)addend.lanes[i]);
+                    }
+                } else {
+                    out.lanes[i] = this.lanes[i] * factor.lanes[i] + addend.lanes[i];
+                }
             }
         } else {
             panic("vector.fused_multiply_add needs float lanes");
@@ -361,7 +419,8 @@ struct vector<T, N> {
         mut vector<T, N> out = {};
         if constexpr is_float<T>() {
             for (mut i32 i = 0; i < N; i = i + 1) {
-                out.lanes[i] = Math.sqrt(this.lanes[i]);
+                // In f64, which Math has a form for: rounding the result back to T gives T's own square root.
+                out.lanes[i] = (T)Math.sqrt((f64)this.lanes[i]);
             }
         } else {
             panic("vector.square_root needs float lanes");
@@ -373,7 +432,13 @@ struct vector<T, N> {
         mut vector<T, N> out = {};
         if constexpr is_float<T>() {
             for (mut i32 i = 0; i < N; i = i + 1) {
-                out.lanes[i] = Math.floor(this.lanes[i]);
+                T value = this.lanes[i];
+                mut T whole = (T)Math.floor((f64)value);
+                if (whole == (T)0.0) {
+                    // Math.floor loses the sign of a zero result, which IEEE 754 keeps.
+                    whole = value * (T)0.0;
+                }
+                out.lanes[i] = whole;
             }
         } else {
             out = { .lanes = this.lanes };
@@ -385,7 +450,13 @@ struct vector<T, N> {
         mut vector<T, N> out = {};
         if constexpr is_float<T>() {
             for (mut i32 i = 0; i < N; i = i + 1) {
-                out.lanes[i] = Math.ceiling(this.lanes[i]);
+                T value = this.lanes[i];
+                mut T whole = (T)Math.ceiling((f64)value);
+                if (whole == (T)0.0) {
+                    // Math.ceiling loses the sign of a zero result, which IEEE 754 keeps.
+                    whole = value * (T)0.0;
+                }
+                out.lanes[i] = whole;
             }
         } else {
             out = { .lanes = this.lanes };
@@ -397,7 +468,13 @@ struct vector<T, N> {
         mut vector<T, N> out = {};
         if constexpr is_float<T>() {
             for (mut i32 i = 0; i < N; i = i + 1) {
-                out.lanes[i] = Math.round(this.lanes[i]);
+                T value = this.lanes[i];
+                mut T whole = (T)Math.round((f64)value);
+                if (whole == (T)0.0) {
+                    // Math.round loses the sign of a zero result, which IEEE 754 keeps.
+                    whole = value * (T)0.0;
+                }
+                out.lanes[i] = whole;
             }
         } else {
             out = { .lanes = this.lanes };
@@ -409,7 +486,13 @@ struct vector<T, N> {
         mut vector<T, N> out = {};
         if constexpr is_float<T>() {
             for (mut i32 i = 0; i < N; i = i + 1) {
-                out.lanes[i] = Math.truncate(this.lanes[i]);
+                T value = this.lanes[i];
+                mut T whole = (T)Math.truncate((f64)value);
+                if (whole == (T)0.0) {
+                    // Math.truncate loses the sign of a zero result, which IEEE 754 keeps.
+                    whole = value * (T)0.0;
+                }
+                out.lanes[i] = whole;
             }
         } else {
             out = { .lanes = this.lanes };
@@ -552,7 +635,11 @@ struct vector<T, N> {
 
     [Simd("byte_swap")] public vector<T, N> byte_swap() {
         mut vector<T, N> out = {};
-        if constexpr is_integer<T>() {
+        if constexpr is_integer<T>() && sizeof(T) == 1 {
+            for (mut i32 i = 0; i < N; i = i + 1) {
+                out.lanes[i] = this.lanes[i];
+            }
+        } else if constexpr is_integer<T>() {
             i32 bytes = (i32)sizeof(T);
             for (mut i32 i = 0; i < N; i = i + 1) {
                 mut T swapped = 0;
@@ -570,11 +657,15 @@ struct vector<T, N> {
 
     // ---- moving lanes ----
 
-    // Lanes 1, 0, 3, 2, ...: each pair trades places.
+    // Lanes 1, 0, 3, 2, ...: each pair trades places, and the last lane of an odd count stays where it is.
     [Simd("swap_pairs")] public vector<T, N> swap_pairs() {
         mut vector<T, N> out = {};
         for (mut i32 i = 0; i < N; i = i + 1) {
-            out.lanes[i] = this.lanes[i ^ 1];
+            mut i32 partner = i ^ 1;
+            if (partner >= N) {
+                partner = i;
+            }
+            out.lanes[i] = this.lanes[partner];
         }
         return out;
     }
@@ -590,18 +681,24 @@ struct vector<T, N> {
     // this[0], other[0], this[1], other[1], ... from the low halves (unpacklo, zip1).
     [Simd("interleave_low")] public vector<T, N> interleave_low(vector<T, N> other) {
         mut vector<T, N> out = {};
-        for (mut i32 i = 0; i < N / 2; i = i + 1) {
-            out.lanes[i * 2] = this.lanes[i];
-            out.lanes[i * 2 + 1] = other.lanes[i];
+        for (mut i32 i = 0; i < N; i = i + 1) {
+            if (i % 2 == 0) {
+                out.lanes[i] = this.lanes[i / 2];
+            } else {
+                out.lanes[i] = other.lanes[i / 2];
+            }
         }
         return out;
     }
 
     [Simd("interleave_high")] public vector<T, N> interleave_high(vector<T, N> other) {
         mut vector<T, N> out = {};
-        for (mut i32 i = 0; i < N / 2; i = i + 1) {
-            out.lanes[i * 2] = this.lanes[N / 2 + i];
-            out.lanes[i * 2 + 1] = other.lanes[N / 2 + i];
+        for (mut i32 i = 0; i < N; i = i + 1) {
+            if (i % 2 == 0) {
+                out.lanes[i] = this.lanes[N / 2 + i / 2];
+            } else {
+                out.lanes[i] = other.lanes[N / 2 + i / 2];
+            }
         }
         return out;
     }
@@ -619,11 +716,52 @@ struct vector<T, N> {
         return out;
     }
 
-    // Each lane converted to U as a cast does; floats going to integers clamp at the limits of U.
+    // Each lane converted to U. Unlike a scalar cast it never stops the program: an integer wraps to the width of U,
+    // and a float going to an integer clamps at the limits of U, with NaN giving 0.
     [Simd("convert")] public vector<U, N> convert<U>() {
         mut vector<U, N> out = {};
         for (mut i32 i = 0; i < N; i = i + 1) {
-            out.lanes[i] = (U)this.lanes[i];
+            if constexpr is_integer<T>() && is_integer<U>() {
+                u128w kept = (~(u128w)0) >> (u128w)(128 - (i32)sizeof(U) * 8);
+                u128w low = (u128w)this.lanes[i] & kept;
+                if constexpr is_signed<U>() {
+                    u128w sign = (kept >> (u128w)1) + 1;
+                    out.lanes[i] = (U)(i128w)((low ^ sign) - sign);
+                } else {
+                    out.lanes[i] = (U)low;
+                }
+            } else if constexpr is_float<T>() && is_integer<U>() {
+                f64 value = (f64)this.lanes[i];
+                i32 bits = (i32)sizeof(U) * 8;
+                u128w all = (~(u128w)0) >> (u128w)(128 - bits);
+                // 2 to the power of bits - 1.
+                mut f64 half = 1.0;
+                for (mut i32 b = 1; b < bits; b = b + 1) {
+                    half = half * 2.0;
+                }
+                if constexpr is_signed<U>() {
+                    i128w highest = (i128w)(all >> (u128w)1);
+                    if (value != value) {
+                        out.lanes[i] = 0;
+                    } else if (value >= half) {
+                        out.lanes[i] = (U)highest;
+                    } else if (value <= 0.0 - half) {
+                        out.lanes[i] = (U)(0 - highest - 1);
+                    } else {
+                        out.lanes[i] = (U)value;
+                    }
+                } else {
+                    if (!(value > 0.0)) {
+                        out.lanes[i] = 0;
+                    } else if (value >= half * 2.0) {
+                        out.lanes[i] = (U)all;
+                    } else {
+                        out.lanes[i] = (U)value;
+                    }
+                }
+            } else {
+                out.lanes[i] = (U)this.lanes[i];
+            }
         }
         return out;
     }
@@ -631,7 +769,7 @@ struct vector<T, N> {
     // The same bits seen as M lanes of U; both vectors must have the same size.
     [Simd("reinterpret")] public vector<U, M> reinterpret<U, M>() {
         mut vector<U, M> out = {};
-        if constexpr sizeof(vector<U, M>) == sizeof(vector<T, N>) {
+        if constexpr (i64)sizeof(U) * (i64)M == (i64)sizeof(T) * (i64)N {
             unsafe {
                 memcpy((void*)&out, (void*)this, (u64)sizeof(vector<T, N>));
             }
@@ -775,17 +913,19 @@ struct vector<T, N> {
 
     // ---- builtins of the SIMD extensions, with the same result on every target ----
 
-    // Byte lanes: lane i takes this[(i / 16) * 16 + (indices[i] & 15)], or 0 when the top bit of indices[i] is set.
+    // Byte lanes: lane i takes this[(i / 16) * 16 + (indices[i] & 15)], or 0 when the top bit of indices[i] is set or
+    // the vector ends before that lane.
     // pshufb (SSSE3, AVX2, AVX-512BW) per 16-byte block; tbl on AArch64 and swizzle on WebAssembly for 16 lanes.
     [Simd("shuffle_bytes")] public vector<T, N> shuffle_bytes(vector<T, N> indices) {
         mut vector<T, N> out = {};
         if constexpr is_integer<T>() && sizeof(T) == 1 {
             for (mut i32 i = 0; i < N; i = i + 1) {
                 i32 index = (i32)indices.lanes[i] & 255;
-                if (index >= 128) {
+                i32 from = (i / 16) * 16 + (index & 15);
+                if (index >= 128 || from >= N) {
                     out.lanes[i] = 0;
                 } else {
-                    out.lanes[i] = this.lanes[(i / 16) * 16 + (index & 15)];
+                    out.lanes[i] = this.lanes[from];
                 }
             }
         } else {

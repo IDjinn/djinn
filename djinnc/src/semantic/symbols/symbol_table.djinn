@@ -25,6 +25,8 @@ struct SymbolTable {
     // Set when a template argument was already reported, so the caller adds no 'unknown type' on top.
     bool template_failed;
     Node* blame;
+    // How many template instances led to the one being built or checked.
+    i32 template_depth;
     bool generate_disabled;
     bool strict_externs;
     i32 error_count;
@@ -862,6 +864,59 @@ struct SymbolTable {
             return (StructInfo*)0;
         }
         return this.find_struct(atom, atom, (u32)library);
+    }
+
+    // 'arr<T>' passes where 'std::collections::slice<T>' is expected: both view a pointer and a length.
+    public unsafe bool views_as_slice(u32 passed, u32 wanted) {
+        if (!Types.is_struct(passed) || !Types.is_struct(wanted)) {
+            return false;
+        }
+        StructInfo* from = this.struct_at(Types.struct_index(passed));
+        StructInfo* to = this.struct_at(Types.struct_index(wanted));
+        if (from == null || to == null || from.origin == null || to.origin == null) {
+            return false;
+        }
+        AtomTable* atoms = Atoms.get();
+        i64 library = this.find_child_namespace(0, atoms.intern_copy("std::collections", 16));
+        if (library < 0) {
+            return false;
+        }
+        u32 slice_name = Ast.intern_base_name("slice", 5);
+        if (from.origin != this.find_core_struct(Ast.intern_base_name("arr", 3))
+            || to.origin != this.find_struct(slice_name, slice_name, (u32)library)) {
+            return false;
+        }
+        IdList* given = from.type_args;
+        IdList* expected = to.type_args;
+        return given.get(0) == expected.get(0);
+    }
+
+    // The runtime declares some std structs again ('StringMeta'): same name and same fields, one layout.
+    public unsafe bool redeclares(u32 passed, u32 wanted) {
+        if (passed == wanted) {
+            return true;
+        }
+        if (!Types.is_struct(passed) || !Types.is_struct(wanted)) {
+            return false;
+        }
+        StructInfo* from = this.struct_at(Types.struct_index(passed));
+        StructInfo* to = this.struct_at(Types.struct_index(wanted));
+        if (from == null || to == null || from.name_atom != to.name_atom || from.fields == null || to.fields == null) {
+            return false;
+        }
+        PointerList* given = from.fields;
+        PointerList* expected = to.fields;
+        if (given.length != expected.length) {
+            return false;
+        }
+        for (mut i32 f = 0; f < given.length; f = f + 1) {
+            FieldInfo* left = (FieldInfo*)given.get(f);
+            FieldInfo* right = (FieldInfo*)expected.get(f);
+            if (!this.redeclares(left.type, right.type)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     public unsafe StructInfo* struct_at(u32 index) {

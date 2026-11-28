@@ -1,13 +1,20 @@
 namespace djinnc;
 
 // [Simd("op")] on a function of std::simd: the body is generated as LLVM vector IR instead of the Djinn loop it was
-// written with. A vector is any struct whose only field is an inline array of numbers or bools ('T[N] lanes'), and it
+// written with. Elsewhere the attribute does nothing. A vector is any struct whose only field is an inline array of numbers or bools ('T[N] lanes'), and it
 // is loaded as '<N x T>' from that array. Generic vector IR is legal on every LLVM target: one without SIMD splits it
 // into scalar code, so the instructions of the target are used when it has them and plain code when it has not. An
 // operation the generator does not handle for these lane types keeps the Djinn body (the reference the web target runs).
 impl CodeGenerator {
     unsafe ptr<i8> simd_operation(FunctionInfo* info) {
         if (info.node == null || info.is_async || info.has_throws) {
+            return (ptr<i8>)0;
+        }
+        // The operations read operands by position and trust their shapes, so only the std's own are lowered.
+        SymbolTable* symbols = this.symbols;
+        AtomTable* atoms = Atoms.get();
+        i64 library = symbols.find_child_namespace(0, atoms.intern_copy("std::simd", 9));
+        if (library < 0 || info.namespace_id != (u32)library) {
             return (ptr<i8>)0;
         }
         PointerList* uses = Attributes.of(info.node);
@@ -214,6 +221,19 @@ impl CodeGenerator {
         return LLVMVectorType(LLVMIntTypeInContext(this.context, bits * 2), this.simd_count(type));
     }
 
+    // A struct the function takes or returns that has no vector form (16-bit float lanes): reading it as lanes would
+    // be wrong, so the whole operation keeps its body.
+    unsafe bool simd_lacks_a_form(FunctionInfo* info, i32 operands) {
+        for (mut i32 i = 0; i < operands; i = i + 1) {
+            u32 type = this.simd_operand_type(info, i);
+            if (type != 0 && Types.is_struct(type) && this.simd_lanes_of(type) == 0) {
+                return true;
+            }
+        }
+        u32 returned = info.return_type;
+        return Types.is_struct(returned) && this.simd_lanes_of(returned) == 0;
+    }
+
     // Returns false to keep the Djinn body: the operation is unknown or not lowered for these lanes.
     unsafe bool generate_simd_body(FunctionInfo* info) {
         ptr<i8> op = this.simd_operation(info);
@@ -221,6 +241,9 @@ impl CodeGenerator {
             return false;
         }
         i32 operands = this.simd_operand_count(info);
+        if (this.simd_lacks_a_form(info, operands)) {
+            return false;
+        }
         mut u32 shape = info.return_type;
         if (operands > 0 && this.simd_lanes_of(this.simd_operand_type(info, 0)) != 0) {
             shape = this.simd_operand_type(info, 0);
@@ -340,8 +363,14 @@ impl CodeGenerator {
             ptr right = this.simd_operand(info, 1);
             bool lowest = Strings.same(op, "minimum");
             if (is_float) {
-                if (lowest) { return this.simd_binary_call("llvm.minnum", left, right); }
-                return this.simd_binary_call("llvm.maxnum", left, right);
+                // minnum and maxnum leave the sign of a zero result open, so it would differ between -O0 and -O2.
+                mut i32 predicate = LlvmConst.REAL_OGT;
+                if (lowest) {
+                    predicate = LlvmConst.REAL_OLT;
+                }
+                ptr wins = LLVMBuildFCmp(this.builder, predicate, left, right, "extreme.wins");
+                ptr alone = LLVMBuildFCmp(this.builder, LlvmConst.REAL_UNO, right, right, "extreme.alone");
+                return LLVMBuildSelect(this.builder, LLVMBuildOr(this.builder, wins, alone, "extreme.left"), left, right, "extreme");
             }
             if (lowest && is_signed) { return this.simd_binary_call("llvm.smin", left, right); }
             if (lowest) { return this.simd_binary_call("llvm.umin", left, right); }
@@ -458,6 +487,9 @@ impl CodeGenerator {
             for (mut i32 i = 0; i < count; i = i + 1) {
                 if (Strings.same(op, "swap_pairs")) {
                     order[i] = i ^ 1;
+                    if (order[i] >= count) {
+                        order[i] = i;
+                    }
                 } else {
                     order[i] = count - 1 - i;
                 }
@@ -470,9 +502,9 @@ impl CodeGenerator {
             if (Strings.same(op, "interleave_high")) {
                 start = count / 2;
             }
-            for (mut i32 i = 0; i < count / 2; i = i + 1) {
-                order[i * 2] = start + i;
-                order[i * 2 + 1] = count + start + i;
+            for (mut i32 i = 0; i < count; i = i + 1) {
+                // Odd lanes come from the second operand, which shufflevector numbers after the first.
+                order[i] = start + i / 2 + (i % 2) * count;
             }
             return this.simd_shuffle(this.simd_operand(info, 0), this.simd_operand(info, 1), order, count, "interleave");
         }
@@ -605,8 +637,7 @@ impl CodeGenerator {
             }
             ptr lanes = this.simd_operand(info, 0);
             bool lowest = Strings.same(op, "reduce_minimum");
-            if (is_float && lowest) { return this.simd_reduce("llvm.vector.reduce.fmin", lanes); }
-            if (is_float) { return this.simd_reduce("llvm.vector.reduce.fmax", lanes); }
+            if (is_float) { return this.simd_ordered_extreme(lanes, this.simd_count(shape), lowest); }
             if (lowest && is_signed) { return this.simd_reduce("llvm.vector.reduce.smin", lanes); }
             if (lowest) { return this.simd_reduce("llvm.vector.reduce.umin", lanes); }
             if (is_signed) { return this.simd_reduce("llvm.vector.reduce.smax", lanes); }
@@ -644,6 +675,23 @@ impl CodeGenerator {
             return this.simd_call("llvm.cttz", LLVMTypeOf(lanes), args, 2);
         }
         return this.simd_conversion(info, op, shape, element, is_float, is_signed, is_mask);
+    }
+
+    // The float reductions go lane by lane as their Djinn bodies do: the order decides which zero is kept.
+    unsafe ptr simd_ordered_extreme(ptr lanes, u32 count, bool lowest) {
+        ptr i32_type = LLVMIntTypeInContext(this.context, 32);
+        mut i32 predicate = LlvmConst.REAL_OGT;
+        if (lowest) {
+            predicate = LlvmConst.REAL_OLT;
+        }
+        mut ptr kept = LLVMBuildExtractElement(this.builder, lanes, LLVMConstInt(i32_type, 0, 0), "extreme.first");
+        for (mut u32 i = 1; i < count; i = i + 1) {
+            ptr lane = LLVMBuildExtractElement(this.builder, lanes, LLVMConstInt(i32_type, (u64)i, 0), "extreme.lane");
+            ptr wins = LLVMBuildFCmp(this.builder, predicate, lane, kept, "extreme.wins");
+            ptr missing = LLVMBuildFCmp(this.builder, LlvmConst.REAL_UNO, kept, kept, "extreme.missing");
+            kept = LLVMBuildSelect(this.builder, LLVMBuildOr(this.builder, missing, wins, "extreme.take"), lane, kept, "extreme");
+        }
+        return kept;
     }
 
     unsafe ptr simd_conversion(FunctionInfo* info, ptr<i8> op, u32 shape, u32 element, bool is_float, bool is_signed, bool is_mask) {

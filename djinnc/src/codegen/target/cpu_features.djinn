@@ -21,26 +21,14 @@ struct CpuFeatures {
         return Strings.same(name, first) || Strings.same(name, second) || Strings.same(name, third) || Strings.same(name, fourth);
     }
 
-    // The ladder step a CPU name reaches; x86-64 (and every unknown name) is the SSE2 baseline.
-    public static i32 cpu_level(ptr<i8> cpu) {
-        if (cpu == null) {
-            return 1;
+    // The features of a CPU name, as a "+sse2,+avx" list (cpu_table.djinn, generated from LLVM). "generic" and every
+    // name the table does not know get the SSE2 baseline, so nothing the CPU may lack is assumed.
+    static ptr<i8> cpu_features(ptr<i8> cpu) {
+        ptr<i8> known = CpuTable.features(cpu);
+        if (known == null) {
+            return "+sse2";
         }
-        if (CpuFeatures.any_of(cpu, "x86-64-v4", "skylake-avx512", "cascadelake", "cooperlake") || CpuFeatures.any_of(cpu, "cannonlake", "icelake-client", "icelake-server", "tigerlake")
-            || CpuFeatures.any_of(cpu, "sapphirerapids", "graniterapids", "znver4", "znver5") || Strings.same(cpu, "rocketlake")) {
-            return 9;
-        }
-        if (CpuFeatures.any_of(cpu, "x86-64-v3", "haswell", "broadwell", "skylake") || CpuFeatures.any_of(cpu, "alderlake", "raptorlake", "meteorlake", "gracemont")
-            || CpuFeatures.any_of(cpu, "znver1", "znver2", "znver3", "arrowlake")) {
-            return 7;
-        }
-        if (CpuFeatures.any_of(cpu, "sandybridge", "ivybridge", "btver2", "bdver1") || CpuFeatures.any_of(cpu, "bdver2", "bdver3", "bdver4", "bdver4")) {
-            return 6;
-        }
-        if (CpuFeatures.any_of(cpu, "x86-64-v2", "nehalem", "westmere", "silvermont") || CpuFeatures.any_of(cpu, "goldmont", "goldmont-plus", "tremont", "tremont")) {
-            return 5;
-        }
-        return 1;
+        return known;
     }
 
     // True when 'list' ("+avx2,-sse4.1,fma") names 'name' with the given sign; a bare name counts as '+'.
@@ -124,13 +112,13 @@ struct CpuFeatures {
             return true;
         }
         if (Target.is_x64() || Target.is_x86()) {
-            i32 level = CpuFeatures.cpu_level(ObjectWriter.cpu_name());
+            if (CpuFeatures.list_names(CpuFeatures.cpu_features(ObjectWriter.cpu_name()), name, true)) {
+                return true;
+            }
+            // A feature listed in --features or [Target] brings the steps of the ladder below it.
             i32 listed = CpuFeatures.list_level(module);
             i32 asked = CpuFeatures.list_level(extra);
-            mut i32 reached = level;
-            if (listed > reached) {
-                reached = listed;
-            }
+            mut i32 reached = listed;
             if (asked > reached) {
                 reached = asked;
             }
@@ -138,16 +126,7 @@ struct CpuFeatures {
             if (wanted > 0) {
                 return reached >= wanted;
             }
-            if (Strings.same(name, "popcnt")) {
-                return reached >= 5;
-            }
-            if (CpuFeatures.any_of(name, "fma", "bmi", "bmi2", "lzcnt") || Strings.same(name, "f16c")) {
-                return level >= 7;
-            }
-            if (CpuFeatures.any_of(name, "avx512vl", "avx512dq", "avx512dq", "avx512dq")) {
-                return level >= 9;
-            }
-            return false;
+            return Strings.same(name, "popcnt") && reached >= 5;
         }
         if (Target.is_arm64()) {
             return Strings.same(name, "neon");
