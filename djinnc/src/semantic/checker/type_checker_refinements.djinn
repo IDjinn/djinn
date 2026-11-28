@@ -1,0 +1,385 @@
+namespace djinnc;
+
+// '(Positive)x' and '(Positive!)x' become calls to the constructions synthesized next to the type. A constant is
+// decided here instead, by running the predicate at compile time.
+impl TypeChecker {
+    // A literal or an operation written where a refinement is expected is computed in its base type.
+    u32 operand_hint_of(Node* node, u32 expected) {
+        NodeKind kind = node.kind();
+        if (expected == 0 || (kind != NodeKind::INT_LITERAL && kind != NodeKind::FLOAT_LITERAL && kind != NodeKind::UNARY
+            && kind != NodeKind::BINARY)) {
+            return expected;
+        }
+        return Types.base_of(expected);
+    }
+
+    unsafe u32 check_refinement_cast(Node* node, AliasInfo* alias) {
+        u32 target = alias.refined;
+        u32 base = Types.base_of(target);
+        Node* operand = node.first();
+        bool forced = node.op() == CastForm.FORCED;
+        mut u32 hint = base;
+        if (this.narrows_literal_arithmetic(operand, base)) {
+            hint = 0;
+        }
+        u32 source = this.check_expression(operand, hint);
+        if (forced && source == target) {
+            node.set_op(CastForm.RAW);
+            return target;
+        }
+        if ((!Types.is_integer(source) && !Types.is_float(source)) || !Types.widens(source, base)) {
+            this.error_refinement(operand, DiagnosticErrors.REFINEMENT_OPERAND, "cannot build '", target, "' from this value: convert it to the base type first");
+            return this.construction_type(alias, forced);
+        }
+        if (forced) {
+            i32 decided = this.decide_refinement(operand, source, alias);
+            if (decided == 1) {
+                node.set_op(CastForm.RAW);
+                return target;
+            }
+            if (decided == 0 && this.report_violation(operand, alias)) {
+                return target;
+            }
+        }
+        Node* declaration = alias.node;
+        ptr<i8> name = forced ? Refinements.force_name(declaration.text()) : Refinements.try_name(declaration.text());
+        SymbolTable* symbols = this.symbols;
+        AtomTable* atoms = Atoms.get();
+        u32 name_atom = atoms.intern_copy(name, (u32)strlen(name));
+        if (symbols.refinement_function(alias, name_atom) == null) {
+            ptr<i8> advice = Target.is_js() ? "' returns a 'result', which the web target does not support yet: use the '!' form"
+                : "' returns a 'result': import std::types where the type is declared, or use the '!' form";
+            this.error_refinement(node, DiagnosticErrors.REFINEMENT_RESULT_UNAVAILABLE, "the checked construction of '", target, advice);
+            return target;
+        }
+        // Written with the declaring namespace, so the call resolves the same way wherever it is checked again.
+        Node* callee = Node.create(NodeKind::IDENTIFIER, node.token);
+        callee.set_text(atoms.text(symbols.join_atom(alias.namespace_id, name_atom)));
+        node.become_call(callee);
+        return this.check_call(node, 0);
+    }
+
+    unsafe u32 construction_type(AliasInfo* alias, bool forced) {
+        if (forced) {
+            return alias.refined;
+        }
+        SymbolTable* symbols = this.symbols;
+        AtomTable* atoms = Atoms.get();
+        Node* declaration = alias.node;
+        ptr<i8> name = Refinements.try_name(declaration.text());
+        FunctionInfo* tried = symbols.refinement_function(alias, atoms.intern_copy(name, (u32)strlen(name)));
+        if (tried == null) {
+            return alias.refined;
+        }
+        return tried.return_type;
+    }
+
+    // A value that reaches a refinement without a cast must be a constant that satisfies it.
+    unsafe void require_refined(Node* value, u32 passed, u32 wanted, FunctionInfo* callee, i32 argument) {
+        if (!Types.widens(passed, Types.base_of(wanted))) {
+            this.error_conversion(value, passed, wanted, callee, argument, "only a wider type of the same kind converts implicitly; use an explicit cast");
+            return;
+        }
+        SymbolTable* symbols = this.symbols;
+        AliasInfo* alias = symbols.refinement_of(wanted);
+        i32 decided = this.decide_refinement(value, passed, alias);
+        if (decided < 0) {
+            this.error_refinement(value, DiagnosticErrors.REFINEMENT_NEEDS_CHECK, "this value is not known to satisfy '", wanted, "': build it with a cast, which checks it");
+            return;
+        }
+        if (decided == 0) {
+            this.report_violation(value, alias);
+        }
+    }
+
+    unsafe void require_refined_arm(Node* arm, u32 passed, u32 result) {
+        if (passed != 0 && passed != result && Types.is_refined(result)) {
+            this.require_value_type(arm, passed, result);
+        }
+    }
+
+    void require_zero(Node* at, u32 type) {
+        u32 refused = this.rejects_zero(type);
+        if (refused != 0) {
+            this.error_refinement(at, DiagnosticErrors.REFINEMENT_ZERO, "this would start at zero, which '", refused, "' does not admit: give it a value");
+        }
+    }
+
+    unsafe void require_field_zero(Node* at, FieldInfo* field) {
+        u32 refused = this.rejects_zero(field.type);
+        if (refused != 0) {
+            ByteBuffer* before = ByteBuffer.create();
+            before.append("the field '");
+            before.append(field.name);
+            before.append("' would start at zero, which '");
+            this.error_refinement(at, DiagnosticErrors.REFINEMENT_ZERO, before.cstr(), refused, "' does not admit: give it a value");
+        }
+    }
+
+    // The first refinement stored inside 'type' that zeroed memory would break, or 0.
+    unsafe u32 rejects_zero(u32 type) {
+        if (Types.is_refined(type)) {
+            return this.admits_zero(type) ? 0 : type;
+        }
+        if (Types.is_array(type)) {
+            return this.rejects_zero(Types.element(type));
+        }
+        if (!Types.is_struct(type)) {
+            return 0;
+        }
+        SymbolTable* symbols = this.symbols;
+        StructInfo* choice = symbols.enum_of_type(type);
+        if (choice != null) {
+            // A zeroed union is its first variant.
+            PointerList* variants = choice.constants;
+            if (!choice.has_payload || variants.length == 0) {
+                return 0;
+            }
+            Node* first = (Node*)variants.get(0);
+            for (mut i32 i = 0; i < first.payload_count(); i = i + 1) {
+                Node* payload = first.child(i);
+                u32 held = this.rejects_zero(payload.value_type());
+                if (held != 0) {
+                    return held;
+                }
+            }
+            return 0;
+        }
+        StructInfo* owner = symbols.struct_at(Types.struct_index(type));
+        if (owner.fields == null) {
+            return 0;
+        }
+        PointerList* fields = owner.fields;
+        for (mut i32 i = 0; i < fields.length; i = i + 1) {
+            FieldInfo* field = (FieldInfo*)fields.get(i);
+            u32 refused = this.rejects_zero(field.type);
+            if (refused != 0) {
+                return refused;
+            }
+        }
+        return 0;
+    }
+
+    // Inside a generic instance raw memory is typed by the parameter, so it stays the generic author's concern.
+    bool reaches_refinement(u32 pointer) {
+        SymbolTable* symbols = this.symbols;
+        if (symbols.bindings != null) {
+            return false;
+        }
+        mut u32 type = pointer;
+        while (Types.is_pointer(type)) {
+            type = Types.element(type);
+        }
+        return this.holds_refinement(type);
+    }
+
+    // Conversions from and to inline arrays are not checked elsewhere, so the ones that would forge a refinement are
+    // refused here.
+    unsafe bool forges_from_array(u32 passed, u32 wanted) {
+        if (passed == 0 || wanted == 0 || passed == wanted || (!Types.is_array(passed) && !Types.is_array(wanted))) {
+            return false;
+        }
+        if (Types.is_pointer(wanted)) {
+            u32 element = Types.element(wanted);
+            return !Types.is_void(element) && element != Types.element(passed)
+                && (this.reaches_refinement(wanted) || (this.holds_refinement(Types.element(passed)) && this.symbols.bindings == null));
+        }
+        if (this.holds_refinement(wanted)) {
+            return true;
+        }
+        if (!Types.is_struct(wanted)) {
+            return false;
+        }
+        if (this.holds_refinement(passed)) {
+            return true;
+        }
+        SymbolTable* symbols = this.symbols;
+        StructInfo* owner = symbols.struct_at(Types.struct_index(wanted));
+        if (owner.type_args == null) {
+            return false;
+        }
+        IdList* arguments = owner.type_args;
+        for (mut i32 i = 0; i < arguments.length; i = i + 1) {
+            if (this.holds_refinement(arguments.get(i))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Conversions from and to unions are not checked elsewhere, and a union read as anything else yields its tag. A value
+    // reaches a refinement through a union only as one of its payloads.
+    unsafe bool forges_through_union(Node* value, u32 passed, u32 wanted) {
+        if (passed == 0 || passed == wanted || value.kind() == NodeKind::NULL_LITERAL || !this.holds_refinement(wanted)) {
+            return false;
+        }
+        StructInfo* target = this.payload_union(wanted);
+        if (target == null) {
+            return this.payload_union(passed) != null;
+        }
+        PointerList* variants = target.constants;
+        for (mut i32 i = 0; i < variants.length; i = i + 1) {
+            Node* variant = (Node*)variants.get(i);
+            if (variant.payload_count() == 1) {
+                Node* payload = variant.child(0);
+                if (payload.value_type() == passed) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    unsafe StructInfo* payload_union(u32 type) {
+        if (!Types.is_struct(type)) {
+            return (StructInfo*)0;
+        }
+        SymbolTable* symbols = this.symbols;
+        StructInfo* choice = symbols.enum_of_type(type);
+        return choice != null && choice.has_payload ? choice : (StructInfo*)0;
+    }
+
+    unsafe bool holds_refinement(u32 type) {
+        if (Types.is_refined(type)) {
+            return true;
+        }
+        if (Types.is_array(type)) {
+            return this.holds_refinement(Types.element(type));
+        }
+        if (!Types.is_struct(type)) {
+            return false;
+        }
+        SymbolTable* symbols = this.symbols;
+        StructInfo* choice = symbols.enum_of_type(type);
+        if (choice != null) {
+            if (!choice.has_payload) {
+                return false;
+            }
+            PointerList* variants = choice.constants;
+            for (mut i32 v = 0; v < variants.length; v = v + 1) {
+                Node* variant = (Node*)variants.get(v);
+                for (mut i32 i = 0; i < variant.payload_count(); i = i + 1) {
+                    Node* payload = variant.child(i);
+                    if (this.holds_refinement(payload.value_type())) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+        StructInfo* owner = symbols.struct_at(Types.struct_index(type));
+        if (owner.fields == null) {
+            return false;
+        }
+        PointerList* fields = owner.fields;
+        for (mut i32 i = 0; i < fields.length; i = i + 1) {
+            FieldInfo* field = (FieldInfo*)fields.get(i);
+            if (this.holds_refinement(field.type)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Foreign code does not run the predicate, so it may not hand back a refinement or write one through a pointer.
+    unsafe void check_foreign_refinements() {
+        SymbolTable* symbols = this.symbols;
+        PointerList* functions = symbols.functions;
+        for (mut i32 i = 0; i < functions.length; i = i + 1) {
+            FunctionInfo* info = (FunctionInfo*)functions.get(i);
+            if (!this.is_foreign(info)) {
+                continue;
+            }
+            mut bool produces = this.holds_refinement(info.return_type) || this.reaches_refinement(info.return_type);
+            IdList* params = info.param_types;
+            for (mut i32 p = 0; p < params.length; p = p + 1) {
+                u32 parameter = params.get(p);
+                if (Types.is_pointer(parameter) && this.reaches_refinement(parameter)) {
+                    produces = true;
+                }
+            }
+            if (produces) {
+                this.error_code(info.node, DiagnosticErrors.REFINEMENT_FOREIGN, "a foreign function cannot produce a refinement type: declare the base type and build the refinement from it");
+            }
+        }
+    }
+
+    unsafe bool is_foreign(FunctionInfo* info) {
+        Node* declaration = info.node;
+        if (declaration == null || info.from_library || info.is_template) {
+            return false;
+        }
+        if (declaration.kind() == NodeKind::EXTERN_FUNCTION) {
+            return true;
+        }
+        StructInfo* owner = info.owner;
+        return info.is_abstract && (owner == null || (owner.node != null && (owner.node.op() & 6) != 0));
+    }
+
+    unsafe bool admits_zero(u32 refined) {
+        SymbolTable* symbols = this.symbols;
+        AliasInfo* alias = symbols.refinement_of(refined);
+        u32 base = Types.base_of(refined);
+        Node* declaration = alias.node;
+        Node* zero = Node.create(NodeKind::INT_LITERAL, declaration.token);
+        zero.set_int_value(0);
+        u32 type = this.check_expression(zero, base);
+        return this.decide_refinement(zero, type, alias) == 1;
+    }
+
+    // 1 when the constant satisfies the predicate, 0 when it does not, -1 when it is not decided at compile time.
+    unsafe i32 decide_refinement(Node* operand, u32 source, AliasInfo* alias) {
+        ConstEval* evaluator = this.const_eval;
+        if (!evaluator.evaluate(operand, source, Types.base_of(alias.refined))) {
+            return -1;
+        }
+        SymbolTable* symbols = this.symbols;
+        AtomTable* atoms = Atoms.get();
+        Node* declaration = alias.node;
+        ptr<i8> name = Refinements.holds_name(declaration.text());
+        FunctionInfo* holds = symbols.refinement_function(alias, atoms.intern_copy(name, (u32)strlen(name)));
+        if (holds == null) {
+            return -1;
+        }
+        this.ensure_checked(holds);
+        Node* callee = Node.create(NodeKind::IDENTIFIER, operand.token);
+        callee.set_text(name);
+        callee.set_symbol(SymbolKind.FUNCTION, (ptr)holds);
+        Node* call = Node.create_list(NodeKind::CALL, operand.token);
+        call.set_first(callee);
+        call.add(operand);
+        call.set_value_type(Types.bool_type());
+        if (!evaluator.evaluate(call, Types.bool_type(), Types.bool_type())) {
+            return -1;
+        }
+        return evaluator.ri != 0 ? 1 : 0;
+    }
+
+    // The contract mode of the file that declares the type decides how serious a violating constant is.
+    unsafe bool report_violation(Node* at, AliasInfo* alias) {
+        Node* declaration = alias.node;
+        TokenList* tokens = TokenList.get();
+        SourceFile* file = Sources.of_token(tokens.site_of(declaration.token));
+        ByteBuffer* message = this.refinement_message("this constant does not satisfy the predicate of '", alias.refined, "'");
+        if (ContractMode.of(file) == ContractMode.CHECK) {
+            this.error_code(at, DiagnosticErrors.REFINEMENT_VIOLATED, message.cstr());
+            return true;
+        }
+        this.warning_code(at, DiagnosticWarnings.REFINEMENT_VIOLATED, message.cstr());
+        return false;
+    }
+
+    unsafe ByteBuffer* refinement_message(ptr<i8> before, u32 type, ptr<i8> after) {
+        ByteBuffer* message = ByteBuffer.create();
+        message.append(before);
+        SymbolTable* symbols = this.symbols;
+        symbols.describe_type(type, message);
+        message.append(after);
+        return message;
+    }
+
+    unsafe void error_refinement(Node* at, i32 code, ptr<i8> before, u32 type, ptr<i8> after) {
+        ByteBuffer* message = this.refinement_message(before, type, after);
+        this.error_code(at, code, message.cstr());
+    }
+}

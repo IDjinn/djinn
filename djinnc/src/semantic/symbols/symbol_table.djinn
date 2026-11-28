@@ -16,6 +16,7 @@ struct SymbolTable {
     U32Map* primitive_map;
     U32Map* alias_map;
     PointerList* aliases;
+    U32Map* refinement_map;
     U32Map* ambiguity_sites;
     PointerList* primitives;
     U32Map* bindings;
@@ -48,6 +49,7 @@ struct SymbolTable {
         table.primitive_map = U32Map.create(arena, 16);
         table.alias_map = U32Map.create(arena, 16);
         table.aliases = PointerList.create();
+        table.refinement_map = U32Map.create(arena, 8);
         table.ambiguity_sites = U32Map.create(arena, 8);
         table.primitives = PointerList.create();
         NamespaceInfo* root = (NamespaceInfo*)arena.zalloc(sizeof(NamespaceInfo), 8);
@@ -301,6 +303,7 @@ struct SymbolTable {
         info.namespace_id = namespace_id;
         info.node = declaration;
         PointerList* list = this.aliases;
+        info.index = (u32)list.length;
         list.push((ptr)info);
         map.put(key, (u32)(list.length - 1));
         return true;
@@ -316,6 +319,13 @@ struct SymbolTable {
     }
 
     unsafe u32 resolve_alias(AliasInfo* alias) {
+        if (alias.node.first() != null) {
+            return this.resolve_refinement(alias);
+        }
+        return this.resolve_alias_target(alias);
+    }
+
+    unsafe u32 resolve_alias_target(AliasInfo* alias) {
         U32Map* saved_bindings = this.bindings;
         Node* saved_blame = this.blame;
         this.bindings = (U32Map*)0;
@@ -591,6 +601,10 @@ struct SymbolTable {
     }
 
     unsafe u32 constant_argument(Node* expression, u32 declared, u32 scope) {
+        if (declared != 0 && Types.is_refined(declared)) {
+            this.template_error(DiagnosticErrors.INVALID_TEMPLATE_CONSTANT, "a constant template parameter cannot have a refinement type: declare the base type");
+            return 0;
+        }
         mut TypeChecker* checker = this.checker;
         if (checker == null) {
             SemanticAnalyzer* analyzer = this.analyzer;
@@ -1104,6 +1118,10 @@ struct SymbolTable {
         U32Map* map = owner.method_map;
         i64 index = map.find(name);
         if (index < 0) {
+            // A refinement has the methods of its base type, apart from those it declares itself.
+            if (owner.is_primitive && Types.is_refined(owner.type_id)) {
+                return this.find_method(this.primitive_owner(Types.base_of(owner.type_id)), name);
+            }
             return (FunctionInfo*)0;
         }
         PointerList* list = this.functions;

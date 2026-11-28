@@ -1,0 +1,131 @@
+namespace djinnc;
+
+// 'struct Positive : u32 where value > 0;' declares a refinement of a base type. The predicate becomes an ordinary
+// function, and '(Positive)x' / '(Positive!)x' are calls to the two constructions synthesized next to it, so that the
+// back ends and the compile-time evaluator see nothing but calls.
+impl Parser {
+    void parse_refinement(Node* declaration) {
+        i32 keyword = this.advance();
+        i32 following = this.peek_token(1);
+        if (this.kind_of(this.current()) == TokenKind::IDENTIFIER && this.kind_of(following) == TokenKind::COLON) {
+            this.fail("'where' needs a generic declaration");
+            return;
+        }
+        if (declaration.type() == null || declaration.count() != 0) {
+            this.fail("'where' on a struct without type parameters refines one base type: 'struct Name : u32 where value > 0;'");
+            return;
+        }
+        Node* predicate = this.parse_expression();
+        if (!this.check(TokenKind::SEMICOLON)) {
+            this.fail("expected ';' after the predicate: a refinement type has no body (a struct with members states conditions with 'invariant')");
+            return;
+        }
+        declaration.set_first(predicate);
+        this.synthesize_refinement(declaration, predicate, keyword, this.current() - 1);
+    }
+
+    unsafe void synthesize_refinement(Node* declaration, Node* predicate, i32 keyword, i32 last) {
+        ptr<i8> name = declaration.text();
+        i32 at = declaration.token;
+        TypeRef* base = declaration.type();
+        ByteBuffer* written = ByteBuffer.create();
+        written.append(name);
+        written.append_char(' ');
+        written.append(this.clause_text(keyword, last));
+        ptr<i8> text = written.cstr();
+
+        ptr<i8> holds = Refinements.holds_name(name);
+        Node* test = this.refinement_function(at, holds, base, TypeRef.integer(1, false), 2);
+        this.add_statement(test, this.refinement_return(at, Node.clone(predicate)));
+
+        ptr<i8> force = Refinements.force_name(name);
+        Node* forced = this.refinement_function(at, force, base, TypeRef.named(name), 2);
+        this.add_statement(forced, this.contract_check(at, Intrinsic.REQUIRE_CLAUSE, this.refinement_call(at, holds), text));
+        this.add_statement(forced, this.refinement_return(at, this.refinement_value(at, name)));
+
+        TypeRef* outcome = TypeRef.named("result");
+        PointerList* arguments = PointerList.create();
+        arguments.push((ptr)TypeRef.named(name));
+        arguments.push((ptr)TypeRef.named("ContractViolation"));
+        outcome.args = arguments;
+        Node* tried = this.refinement_function(at, Refinements.try_name(name), base, outcome, 0);
+        if (this.contract_mode == ContractMode.CHECK) {
+            Node* negated = Node.create(NodeKind::UNARY, at);
+            negated.set_op_kind(TokenKind::BANG);
+            negated.set_first(this.refinement_call(at, holds));
+            Node* message = Node.create(NodeKind::STRING_LITERAL, at);
+            message.set_text_n(text, strlen(text));
+            message.set_int_value((i64)strlen(text));
+            Node* violation = this.call_with(at, "ContractViolation", message);
+            Node* branch = Node.create(NodeKind::IF, at);
+            branch.set_first(negated);
+            branch.set_second(this.refinement_return(at, this.call_with(at, "result::Error", violation)));
+            this.add_statement(tried, branch);
+        }
+        mut Node* accepted = this.refinement_value(at, name);
+        if (this.contract_mode == ContractMode.OBSERVE) {
+            accepted = this.refinement_call(at, force);
+        }
+        this.add_statement(tried, this.refinement_return(at, this.call_with(at, "result::Ok", accepted)));
+
+        if (this.extra_declarations == null) {
+            this.extra_declarations = PointerList.create();
+        }
+        PointerList* pending = this.extra_declarations;
+        pending.push((ptr)test);
+        pending.push((ptr)forced);
+        pending.push((ptr)tried);
+    }
+
+    unsafe Node* refinement_function(i32 at, ptr<i8> name, TypeRef* base, TypeRef* returned, i32 modifiers) {
+        Node* function = Node.create_list(NodeKind::FUNCTION, at);
+        function.set_op(modifiers);
+        function.set_type(returned);
+        function.set_text(name);
+        Node* parameter = Node.create(NodeKind::PARAMETER, at);
+        parameter.set_type(base);
+        parameter.set_text("value");
+        function.add(parameter);
+        function.set_first(Node.create_list(NodeKind::BLOCK, at));
+        return function;
+    }
+
+    void add_statement(Node* function, Node* statement) {
+        Node* body = function.first();
+        body.add(statement);
+    }
+
+    Node* refinement_return(i32 at, Node* value) {
+        Node* returned = Node.create(NodeKind::RETURN, at);
+        returned.set_first(value);
+        return returned;
+    }
+
+    unsafe Node* refinement_parameter(i32 at) {
+        Node* reference = Node.create(NodeKind::IDENTIFIER, at);
+        reference.set_text("value");
+        return reference;
+    }
+
+    // The parameter taken as the refined type without any check; only these synthesized bodies may write it.
+    unsafe Node* refinement_value(i32 at, ptr<i8> name) {
+        Node* cast = Node.create(NodeKind::CAST, at);
+        cast.set_op(CastForm.RAW);
+        cast.set_type(TypeRef.named(name));
+        cast.set_first(this.refinement_parameter(at));
+        return cast;
+    }
+
+    unsafe Node* refinement_call(i32 at, ptr<i8> callee) {
+        return this.call_with(at, callee, this.refinement_parameter(at));
+    }
+
+    unsafe Node* call_with(i32 at, ptr<i8> callee, Node* argument) {
+        Node* name = Node.create(NodeKind::IDENTIFIER, at);
+        name.set_text(callee);
+        Node* call = Node.create_list(NodeKind::CALL, at);
+        call.set_first(name);
+        call.add(argument);
+        return call;
+    }
+}

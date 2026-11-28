@@ -42,9 +42,14 @@ impl TypeChecker {
         if (then_type == else_type) {
             return then_type;
         }
+        if (Types.is_refined(expected)) {
+            this.require_value_type(then_branch, then_type, expected);
+            this.require_value_type(else_branch, else_type, expected);
+            return expected;
+        }
         bool numbers = (Types.is_integer(then_type) || Types.is_float(then_type)) && (Types.is_integer(else_type) || Types.is_float(else_type));
         if (numbers && (Types.widens(then_type, else_type) || Types.widens(else_type, then_type))) {
-            return Types.common(then_type, else_type);
+            return Types.common(Types.base_of(then_type), Types.base_of(else_type));
         }
         if (Types.is_nullable_pointer(then_type) && Types.is_safe_pointer(else_type)) {
             return then_type;
@@ -329,6 +334,9 @@ impl TypeChecker {
             } else if (inferred && actual != element && !this.same_number_kind(actual, element)) {
                 element = this.core_type("object");
                 inferred = false;
+            } else if (actual != element && this.holds_refinement(element)) {
+                // Elements are not converted otherwise, which would let any number into a refinement.
+                this.require_value_type(node.child(i), actual, element);
             }
         }
         u32 atom = Ast.intern_base_name("arr", 3);
@@ -351,6 +359,7 @@ impl TypeChecker {
             expected = this.resolve_type(node.type(), node);
         }
         if (expected != 0 && Types.is_array(expected) && node.count() == 0) {
+            this.require_zero(node, expected);
             return expected;
         }
         if (expected == 0 || !Types.is_struct(expected) || symbols.enum_of_type(expected) != null) {
@@ -399,7 +408,11 @@ impl TypeChecker {
             this.error_code(node.first(), DiagnosticErrors.INVALID_SWITCH, "switch expression needs an enum value");
             return Types.i32_type();
         }
+        return this.check_variant_arms(node, expected, owner);
+    }
 
+    unsafe u32 check_variant_arms(Node* node, u32 expected, StructInfo* owner) {
+        SymbolTable* symbols = this.symbols;
         PointerList* constants = owner.constants;
         mut i32 covered = 0;
         mut bool wildcard = false;
@@ -420,6 +433,7 @@ impl TypeChecker {
                 if (result == 0) {
                     result = wildcard_type;
                 }
+                this.require_refined_arm(arm.first(), wildcard_type, result);
                 continue;
             }
             Node* variant = symbols.find_constant(owner, arm.name());
@@ -456,6 +470,7 @@ impl TypeChecker {
             if (result == 0) {
                 result = arm_type;
             }
+            this.require_refined_arm(arm.first(), arm_type, result);
             scopes.reset_to(mark);
         }
         if (covered < constants.length && !wildcard) {

@@ -1,0 +1,519 @@
+namespace conformance;
+
+import testing;
+import djinnc::testing;
+import djinnc;
+
+// 'struct Positive : u32 where value > 0;': a type that holds only the values of its base that satisfy a predicate.
+struct RefinementTests {
+    [Test]
+    void constants_convert_and_values_work_as_their_base() {
+        str source = """
+struct Positive : u32 where value > 0;
+struct Ratio : f64 where value >= 0.0 && value <= 1.0;
+
+constexpr u32 LIMIT = 8;
+
+struct Holder {
+    mut Positive count;
+    Ratio share;
+}
+
+u32 twice(u32 x) => x * 2u;
+
+Positive pick(Positive p) {
+    return p;
+}
+
+i32 main() {
+    Positive one = 1;
+    Positive eight = LIMIT;
+    Positive computed = 3 * 4 - 2;
+    Holder holder = Holder { .count = eight, .share = 0.5 };
+    mut Positive current = pick(holder.count);
+    current = computed;
+    u32 widened = current;
+    u64 wider = current;
+    u32 sum = one + current + twice(eight) + widened + (u32)wider + (u32)(holder.share * 4.0);
+    return (i32)sum;
+}
+""";
+        Verify.source(source).runs(Expected.exit(49));
+    }
+
+    [Test]
+    void violating_constant_is_a_compile_error() {
+        str source = """
+struct Positive : u32 where value > 0;
+
+void take(Positive p) {}
+
+Positive none() {
+    return 0;
+}
+
+i32 main() {
+    Positive zero = 0;
+    take(1 - 1);
+    Positive forced = (Positive!)0;
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.REFINEMENT_VIOLATED).at(6, 12).and_error(DiagnosticErrors.REFINEMENT_VIOLATED).at(10, 21).and_error(DiagnosticErrors.REFINEMENT_VIOLATED).at(11, 12).and_error(DiagnosticErrors.REFINEMENT_VIOLATED).at(12, 34));
+    }
+
+    [Test]
+    void unknown_value_needs_a_cast() {
+        str source = """
+struct Positive : u32 where value > 0;
+
+void take(Positive p) {}
+
+Positive give(u32 raw) {
+    return raw;
+}
+
+i32 run(u32 raw) {
+    mut Positive p = raw;
+    p = raw;
+    take(raw);
+    return 0;
+}
+
+i32 main() {
+    return run(1u);
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.REFINEMENT_NEEDS_CHECK).at(6, 12).and_error(DiagnosticErrors.REFINEMENT_NEEDS_CHECK).at(10, 22).and_error(DiagnosticErrors.REFINEMENT_NEEDS_CHECK).at(11, 9).and_error(DiagnosticErrors.REFINEMENT_NEEDS_CHECK).at(12, 10));
+    }
+
+    [Test]
+    void forced_cast_checks_at_run_time() {
+        str source = """
+struct Positive : u32 where value > 0;
+
+u32 read(u32 raw) {
+    Positive p = (Positive!)raw;
+    return p;
+}
+
+i32 main() {
+    return (i32)(read(5u) + read(0u));
+}
+""";
+        Verify.source(source).crashes(Expected.contains("R10013: contract violated: Positive where value > 0"));
+    }
+
+    [Test]
+    void forced_cast_of_a_valid_value_runs() {
+        str source = """
+struct Even : i64 where value % 2 == 0;
+
+i64 read(i32 raw) {
+    Even e = (Even!)raw;
+    Even again = (Even!)e;
+    return again;
+}
+
+i32 main() {
+    return (i32)read(42);
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void checked_cast_returns_a_result() {
+        str source = """
+import std::types;
+
+struct Positive : u32 where value > 0;
+
+i32 classify(u32 raw) {
+    result<Positive, ContractViolation> made = (Positive)raw;
+    if (made is result::Ok ok) {
+        return (i32)(u32)ok;
+    }
+    return 100;
+}
+
+i32 main() {
+    return classify(7u) + classify(0u);
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(107));
+    }
+
+    [Test]
+    void try_takes_a_fallback_or_throws_the_error() {
+        str source = """
+import std::types;
+
+struct Positive : u32 where value > 0;
+
+u32 or_one(u32 raw) {
+    Positive p = try (Positive)raw ?: 1;
+    return p;
+}
+
+u32 strict(u32 raw) throws(ContractViolation) {
+    Positive p = try (Positive)raw;
+    return p;
+}
+
+i32 main() {
+    u32 caught = switch strict(0u) {
+        Result v -> v,
+        ContractViolation e -> 50u,
+    };
+    u32 passed = switch strict(3u) {
+        Result v -> v,
+        Error e -> 0u,
+    };
+    return (i32)(or_one(0u) + or_one(9u) + caught + passed);
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(63));
+    }
+
+    [Test]
+    void checked_cast_needs_the_result_type() {
+        str source = """
+struct Positive : u32 where value > 0;
+
+void run(u32 raw) {
+    auto made = (Positive)raw;
+}
+
+i32 main() {
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.REFINEMENT_RESULT_UNAVAILABLE).at(4, 17));
+    }
+
+    [Test]
+    void observe_mode_warns_for_constants_and_continues_at_run_time() {
+        str source = """
+struct Positive : u32 where value > 0;
+
+u32 read(u32 raw) {
+    Positive p = (Positive!)raw;
+    return p;
+}
+
+i32 main() {
+    Positive zero = 0;
+    return (i32)(read(0u) + zero + 9u);
+}
+""";
+        Verify.source(source).with_flag("--contracts=observe").diagnostics(Expected.warning(DiagnosticWarnings.REFINEMENT_VIOLATED).at(9, 21));
+        Verify.source(source).with_flag("--contracts=observe").runs_linked(Expected.exit(9));
+    }
+
+    [Test]
+    void ignore_mode_does_not_evaluate_the_predicate() {
+        str source = """
+import std::types;
+
+struct Divides : u32 where 100u / value > 0u;
+
+u32 read(u32 raw) {
+    Divides forced = (Divides!)raw;
+    result<Divides, ContractViolation> made = (Divides)raw;
+    if (made is result::Ok ok) {
+        return forced + ok + 5u;
+    }
+    return 100u;
+}
+
+u32 zero() {
+    return 0u;
+}
+
+i32 main() {
+    return (i32)read(zero());
+}
+""";
+        Verify.source(source).with_std().with_flag("--contracts=ignore").runs(Expected.exit(5));
+    }
+
+    [Test]
+    void operators_return_the_base_type() {
+        str source = """
+struct Positive : u32 where value > 0;
+
+i32 main() {
+    mut Positive p = 5;
+    Positive sum = p + 1u;
+    Positive negated = ~p;
+    p += 1u;
+    p++;
+    --p;
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.REFINEMENT_NEEDS_CHECK).at(5, 22).and_error(DiagnosticErrors.REFINEMENT_NEEDS_CHECK).at(6, 24).and_error(DiagnosticErrors.REFINEMENT_NEEDS_CHECK).at(7, 7).and_error(DiagnosticErrors.REFINEMENT_MUTATION).at(8, 6).and_error(DiagnosticErrors.REFINEMENT_MUTATION).at(9, 5));
+    }
+
+    [Test]
+    void overload_resolution_does_not_build_a_refinement() {
+        str source = """
+struct Positive : u32 where value > 0;
+
+i32 pick(Positive p) {
+    return 1;
+}
+
+i32 pick(u32 p) {
+    return 2;
+}
+
+i32 main() {
+    Positive p = 3;
+    u32 raw = 3u;
+    return pick(p) * 100 + pick(raw) * 10 + pick(3);
+}
+""";
+        Verify.source(source).runs(Expected.exit(122));
+    }
+
+    [Test]
+    void zeroed_storage_needs_a_predicate_that_admits_zero() {
+        str source = """
+struct Positive : u32 where value > 0;
+
+struct Holder {
+    mut Positive value;
+    mut i32 other;
+}
+
+i32 main() {
+    Positive declared;
+    Holder omitted = { .other = 1 };
+    Positive[4] array = {};
+    Holder* made = new Holder();
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.REFINEMENT_ZERO).at(9, 5).and_error(DiagnosticErrors.REFINEMENT_ZERO).at(10, 22).and_error(DiagnosticErrors.REFINEMENT_ZERO).at(11, 25).and_error(DiagnosticErrors.REFINEMENT_ZERO).at(12, 20));
+    }
+
+    [Test]
+    void zeroed_storage_is_accepted_when_zero_satisfies_the_predicate() {
+        str source = """
+struct Small : u32 where value < 10;
+
+struct Holder {
+    mut Small value;
+    mut i32 other;
+}
+
+i32 main() {
+    Holder holder = { .other = 40 };
+    Small[2] pair = {};
+    return holder.other + (i32)holder.value + (i32)pair[1] + 2;
+}
+""";
+        Verify.source(source).runs(Expected.exit(42));
+    }
+
+    [Test]
+    void raw_memory_does_not_forge_a_refinement() {
+        str source = """
+struct Positive : u32 where value > 0;
+
+i32 main() {
+    mut Positive p = 5;
+    mut u32 raw = 0u;
+    Positive* from_raw = (Positive*)&raw;
+    u32* to_raw = (u32*)&p;
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.UNSAFE_REQUIRED).at(6, 26).and_error(DiagnosticErrors.UNSAFE_REQUIRED).at(7, 19));
+    }
+
+    [Test]
+    void arrays_do_not_convert_into_or_from_a_refinement() {
+        str source = """
+struct Positive : u32 where value > 0;
+
+i32 main() {
+    mut u32[2] numbers = [0u, 0u];
+    mut Positive[2] checked = [1, 2];
+    Positive[2] taken = numbers;
+    mut u32* decayed = checked;
+    Positive single = numbers;
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.IMPLICIT_CONVERSION).at(6, 25).and_error(DiagnosticErrors.IMPLICIT_CONVERSION).at(7, 24).and_error(DiagnosticErrors.IMPLICIT_CONVERSION).at(8, 23));
+    }
+
+    [Test]
+    void foreign_functions_cannot_produce_a_refinement() {
+        str source = """
+struct Positive : u32 where value > 0;
+
+extern "C" {
+    Positive foreign_value();
+    void foreign_fill(Positive* target);
+    void foreign_read(Positive value);
+}
+
+i32 main() {
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.REFINEMENT_FOREIGN).at(4, 5).and_error(DiagnosticErrors.REFINEMENT_FOREIGN).at(5, 5));
+    }
+
+    [Test]
+    void base_must_be_a_number() {
+        str source = """
+struct Truth : bool where value;
+
+i32 main() {
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.INVALID_REFINEMENT_BASE).at(1, 1));
+    }
+
+    [Test]
+    void operand_must_widen_to_the_base() {
+        str source = """
+struct Tiny : u8 where value > 0;
+
+i32 main() {
+    u32 raw = 1u;
+    Tiny tiny = (Tiny!)raw;
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.REFINEMENT_OPERAND).at(5, 24));
+    }
+
+    [Test]
+    void forced_cast_syntax_needs_a_refinement() {
+        str source = """
+i32 main() {
+    i64 wide = 1;
+    return (i32!)wide;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.FORCED_CAST_TARGET).at(3, 12));
+    }
+
+    [Test]
+    void refinements_have_the_methods_of_their_base() {
+        str source = """
+import std::types;
+import std::collections;
+
+struct Positive : u32 where value > 0;
+
+struct Box<T> {
+    mut T value;
+
+    Box(T value) {
+        this.value = value;
+    }
+
+    T get() => this.value;
+}
+
+T identity<T>(T value) => value;
+
+i32 main() {
+    Positive p = 5;
+    Box<Positive> box = Box<Positive>(3);
+    Positive held = identity(box.get());
+    mut array<Positive> items = array<Positive>();
+    items.push(held);
+    items.push(9);
+    mut u32 total = 0u;
+    for (Positive item in items) {
+        total = total + item;
+    }
+    mut map<Positive, Positive> table = map<Positive, Positive>();
+    table.set(p, p);
+    bool same = p.hash() == table.get(p).hash();
+    return (i32)(total + table.get(p) + (same ? 1u : 0u));
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(18));
+    }
+
+    [Test]
+    void refinement_crosses_a_library() {
+        str library = """
+namespace limits;
+import std::types;
+
+struct Percent : u32 where value <= 100u;
+
+public Percent clamp(u32 raw) {
+    return try (Percent)raw ?: 100;
+}
+""";
+        str source = """
+namespace app;
+import std::types;
+import limits;
+
+i32 main() {
+    Percent fixed = 7;
+    Percent clamped = clamp(250u);
+    Percent forced = (Percent!)(fixed + 1u);
+    result<Percent, ContractViolation> made = (Percent)clamped;
+    if (made is result::Ok ok) {
+        return (i32)(fixed + clamped + forced + (u32)ok - 200u);
+    }
+    return 1;
+}
+""";
+        Verify.source(source).with_std().links_library(library, Expected.exit(15));
+    }
+
+    [Test]
+    void array_literal_elements_are_checked() {
+        str source = """
+import std::types;
+
+struct Positive : u32 where value > 0;
+
+void lists(u32 raw) {
+    arr<Positive> many = [1, raw];
+    Positive p = 3;
+    auto mixed = [p, raw];
+}
+
+i32 main() {
+    return 0;
+}
+""";
+        Verify.source(source).with_std().diagnostics(Expected.error(DiagnosticErrors.REFINEMENT_NEEDS_CHECK).at(6, 30).and_error(DiagnosticErrors.REFINEMENT_NEEDS_CHECK).at(8, 22));
+    }
+
+    [Test]
+    void a_union_does_not_forge_a_refinement() {
+        str source = """
+import std::types;
+
+struct Positive : u32 where value > 0;
+
+i32 main() {
+    u32 raw = 1u;
+    Positive five = 5;
+    optional<Positive> wrapped = five;
+    optional<Positive> forged = raw;
+    optional<u32> loose = optional::Value(raw);
+    Positive read = loose;
+    return 0;
+}
+""";
+        Verify.source(source).with_std().diagnostics(Expected.error(DiagnosticErrors.IMPLICIT_CONVERSION).at(9, 33).and_error(DiagnosticErrors.IMPLICIT_CONVERSION).at(11, 21));
+    }
+}

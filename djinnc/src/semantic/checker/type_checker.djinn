@@ -204,6 +204,7 @@ struct TypeChecker {
         }
         this.check_attribute_payloads();
         this.check_abi_functions();
+        this.check_foreign_refinements();
         this.check_generic_definitions();
         PointerList* functions = symbols.functions;
         for (mut i32 i = 0; i < functions.length; i = i + 1) {
@@ -286,7 +287,7 @@ struct TypeChecker {
 
     public u32 check_expression(Node* node, u32 expected) {
         node.set_text_conversion(0);
-        u32 type = this.compute_expression(node, expected);
+        u32 type = this.compute_expression(node, this.operand_hint_of(node, expected));
         node.set_value_type(type);
         node.set_mode(this.compute_mode(node));
         return type;
@@ -363,6 +364,16 @@ struct TypeChecker {
                 return this.check_call(node, expected);
             case CAST:
                 u32 target = this.resolve_type(node.type(), node);
+                if (node.op() != CastForm.RAW) {
+                    SymbolTable* cast_symbols = this.symbols;
+                    AliasInfo* refinement = cast_symbols.refinement_of(target);
+                    if (refinement != null) {
+                        return this.check_refinement_cast(node, refinement);
+                    }
+                    if (node.op() == CastForm.FORCED) {
+                        this.error_code(node, DiagnosticErrors.FORCED_CAST_TARGET, "'(T!)x' builds a refinement type; this type has no predicate");
+                    }
+                }
                 mut u32 operand_hint = target;
                 if (this.narrows_literal_arithmetic(node.first(), target)) {
                     operand_hint = 0;
@@ -381,6 +392,9 @@ struct TypeChecker {
                 return this.check_await(node);
             case TRY_EXPR:
                 return this.check_try(node, expected);
+            case THROW_STMT:
+                this.check_throw(node);
+                return expected;
             case LET_EXPR:
                 return this.check_let(node, expected);
             case COND_EXPR:

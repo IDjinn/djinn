@@ -63,6 +63,28 @@ struct Types {
         return table.enum_index(id);
     }
 
+    public static bool is_refined(u32 id) {
+        TypeTable* table = TypeTable.get();
+        return table.refinement_base(id) >= 0;
+    }
+
+    // The base of a refinement type; every other type is its own base.
+    public static u32 base_of(u32 id) {
+        TypeTable* table = TypeTable.get();
+        i64 base = table.refinement_base(id);
+        return base < 0 ? id : (u32)base;
+    }
+
+    public static bool can_be_refined(u32 id) {
+        if (id == 0 || Types.is_refined(id)) {
+            return false;
+        }
+        if (Types.is_float(id)) {
+            return !Types.is_brain_float(id);
+        }
+        return Types.is_integer(id) && Types.bits(id) != 1 && !Types.is_char(id) && Types.enum_index(id) < 0;
+    }
+
     public static u32 pointer_to(u32 element) {
         TypeTable* table = TypeTable.get();
         return table.pointer_to(element);
@@ -170,6 +192,9 @@ struct Types {
     }
 
     public static bool widens(u32 from, u32 to) {
+        if (from != to && Types.is_refined(to)) {
+            return false;
+        }
         if (Types.is_float(from)) {
             if (Types.is_float(to) && Types.bits(from) == 16 && Types.bits(to) == 16) {
                 return from == to;
@@ -217,6 +242,12 @@ struct Types {
     }
 
     public static void describe(u32 id, ByteBuffer* out) {
+        if (Types.is_refined(id)) {
+            TypeTable* table = TypeTable.get();
+            AtomTable* atoms = Atoms.get();
+            out.append(atoms.text((u32)table.value(id)));
+            return;
+        }
         i32 kind = Types.kind(id);
         switch (kind) {
             case TypeKind.VOID:
