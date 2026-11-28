@@ -1,0 +1,202 @@
+namespace djinnc;
+
+// Which CPU features code may use: those of the target CPU (--cpu), the --features list and the [Target("...")] list
+// of a function. On x86 the SIMD extensions form a ladder where each one implies the ones below it.
+struct CpuFeatures {
+    // sse2 = 1 ... avx512bw = 9; 0 for a feature outside the ladder.
+    public static i32 x86_level(ptr<i8> name) {
+        if (Strings.same(name, "sse2")) { return 1; }
+        if (Strings.same(name, "sse3")) { return 2; }
+        if (Strings.same(name, "ssse3")) { return 3; }
+        if (Strings.same(name, "sse4.1")) { return 4; }
+        if (Strings.same(name, "sse4.2")) { return 5; }
+        if (Strings.same(name, "avx")) { return 6; }
+        if (Strings.same(name, "avx2")) { return 7; }
+        if (Strings.same(name, "avx512f")) { return 8; }
+        if (Strings.same(name, "avx512bw")) { return 9; }
+        return 0;
+    }
+
+    static bool any_of(ptr<i8> name, ptr<i8> first, ptr<i8> second, ptr<i8> third, ptr<i8> fourth) {
+        return Strings.same(name, first) || Strings.same(name, second) || Strings.same(name, third) || Strings.same(name, fourth);
+    }
+
+    // The features of a CPU name, as a "+sse2,+avx" list (cpu_table.djinn, generated from LLVM). "generic" and every
+    // name the table does not know get the SSE2 baseline, so nothing the CPU may lack is assumed.
+    static ptr<i8> cpu_features(ptr<i8> cpu) {
+        ptr<i8> known = CpuTable.features(cpu);
+        if (known == null) {
+            return "+sse2";
+        }
+        return known;
+    }
+
+    // True when 'list' ("+avx2,-sse4.1,fma") names 'name' with the given sign; a bare name counts as '+'.
+    public static unsafe bool list_names(ptr<i8> list, ptr<i8> name, bool enabled) {
+        if (list == null) {
+            return false;
+        }
+        i32 length = strlen(list);
+        i32 wanted = strlen(name);
+        mut i32 start = 0;
+        while (start < length) {
+            mut i32 end = start;
+            while (end < length && list[end] != 44) {
+                end = end + 1;
+            }
+            mut i32 at = start;
+            while (at < end && list[at] == 32) {
+                at = at + 1;
+            }
+            mut bool plus = true;
+            if (at < end && (list[at] == 43 || list[at] == 45)) {
+                plus = list[at] == 43;
+                at = at + 1;
+            }
+            mut i32 stop = end;
+            while (stop > at && list[stop - 1] == 32) {
+                stop = stop - 1;
+            }
+            if (plus == enabled && stop - at == wanted && Strings.equals(list + at, wanted, name)) {
+                return true;
+            }
+            start = end + 1;
+        }
+        return false;
+    }
+
+    static unsafe i32 list_level(ptr<i8> list) {
+        mut i32 best = 0;
+        ptr<ptr<i8>> ladder = (ptr<ptr<i8>>)Memory.zalloc(9 * 8);
+        ladder[0] = "sse2";
+        ladder[1] = "sse3";
+        ladder[2] = "ssse3";
+        ladder[3] = "sse4.1";
+        ladder[4] = "sse4.2";
+        ladder[5] = "avx";
+        ladder[6] = "avx2";
+        ladder[7] = "avx512f";
+        ladder[8] = "avx512bw";
+        for (mut i32 i = 0; i < 9; i = i + 1) {
+            if (CpuFeatures.list_names(list, ladder[i], true)) {
+                best = i + 1;
+            }
+        }
+        return best;
+    }
+
+    // A feature the target architecture knows, so [Target] can name it.
+    public static bool known(ptr<i8> name) {
+        if (Target.is_x64() || Target.is_x86()) {
+            return CpuFeatures.x86_level(name) > 0 || CpuFeatures.any_of(name, "fma", "popcnt", "bmi", "bmi2")
+                || CpuFeatures.any_of(name, "lzcnt", "f16c", "avx512vl", "avx512dq") || CpuFeatures.any_of(name, "avx512vnni", "aes", "pclmul", "sha")
+                || CpuFeatures.any_of(name, "avxvnni", "avx512vbmi", "gfni", "vpclmulqdq");
+        }
+        if (Target.is_arm64()) {
+            return CpuFeatures.any_of(name, "neon", "sve", "sve2", "dotprod") || CpuFeatures.any_of(name, "crypto", "i8mm", "fp16", "aes")
+                || CpuFeatures.any_of(name, "sha2", "sha3", "crc", "bf16");
+        }
+        if (Target.is_wasm()) {
+            return CpuFeatures.any_of(name, "simd128", "relaxed-simd", "bulk-memory", "sign-ext");
+        }
+        return false;
+    }
+
+    // Whether code may use 'name': given by the target, or by 'extra' (the [Target] list of the function at hand).
+    public static bool enabled(ptr<i8> name, ptr<i8> extra) {
+        ptr<i8> module = ObjectWriter.feature_list();
+        if (CpuFeatures.list_names(module, name, false)) {
+            return false;
+        }
+        if (CpuFeatures.list_names(module, name, true) || CpuFeatures.list_names(extra, name, true)) {
+            return true;
+        }
+        if (Target.is_x64() || Target.is_x86()) {
+            if (CpuFeatures.list_names(CpuFeatures.cpu_features(ObjectWriter.cpu_name()), name, true)) {
+                return true;
+            }
+            // A feature listed in --features or [Target] brings the steps of the ladder below it.
+            i32 listed = CpuFeatures.list_level(module);
+            i32 asked = CpuFeatures.list_level(extra);
+            mut i32 reached = listed;
+            if (asked > reached) {
+                reached = asked;
+            }
+            i32 wanted = CpuFeatures.x86_level(name);
+            if (wanted > 0) {
+                return reached >= wanted;
+            }
+            return Strings.same(name, "popcnt") && reached >= 5;
+        }
+        if (Target.is_arm64()) {
+            return Strings.same(name, "neon");
+        }
+        return false;
+    }
+
+    // True when every feature of 'needed' is enabled for code that also has 'held'.
+    public static unsafe bool covers(ptr<i8> held, ptr<i8> needed) {
+        PointerList* names = CpuFeatures.names_of(needed);
+        for (mut i32 i = 0; i < names.length; i = i + 1) {
+            if (!CpuFeatures.enabled((ptr<i8>)names.get(i), held)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // The names of a "+avx2, fma" list, without signs or spaces.
+    public static unsafe PointerList* names_of(ptr<i8> list) {
+        PointerList* names = PointerList.create();
+        if (list == null) {
+            return names;
+        }
+        i32 length = strlen(list);
+        mut i32 start = 0;
+        while (start < length) {
+            mut i32 end = start;
+            while (end < length && list[end] != 44) {
+                end = end + 1;
+            }
+            mut i32 at = start;
+            while (at < end && (list[at] == 32 || list[at] == 43)) {
+                at = at + 1;
+            }
+            mut i32 stop = end;
+            while (stop > at && list[stop - 1] == 32) {
+                stop = stop - 1;
+            }
+            if (stop > at) {
+                names.push((ptr)Strings.duplicate(list + at, stop - at));
+            }
+            start = end + 1;
+        }
+        return names;
+    }
+
+    // The [Target("...")] list of a function, or null.
+    public static unsafe ptr<i8> of(Node* declaration) {
+        if (declaration == null) {
+            return (ptr<i8>)0;
+        }
+        PointerList* uses = Attributes.of(declaration);
+        for (mut i32 i = 0; i < uses.length; i = i + 1) {
+            AttributeUse* use = (AttributeUse*)uses.get(i);
+            if (Strings.same(use.name, "Target") && use.text_arg != null) {
+                return use.text_arg;
+            }
+        }
+        return (ptr<i8>)0;
+    }
+
+    // True when some feature of the list means something on this target (on another architecture the attribute is inert).
+    public static unsafe bool applies(ptr<i8> list) {
+        PointerList* names = CpuFeatures.names_of(list);
+        for (mut i32 i = 0; i < names.length; i = i + 1) {
+            if (CpuFeatures.known((ptr<i8>)names.get(i))) {
+                return true;
+            }
+        }
+        return false;
+    }
+}

@@ -1,0 +1,765 @@
+namespace conformance;
+
+import testing;
+import djinnc::testing;
+import djinnc;
+
+// std::simd: vector<T, N> and mask<N> run lane by lane everywhere; on native targets [Simd] operations become vector
+// IR, and the builtins of the SIMD extensions (pshufb, tbl, swizzle) are used only where the target has them.
+struct SimdTests {
+    const str MIX = """
+import std::simd;
+
+public vector<u64, 4> mix(vector<u64, 4> a, vector<u64, 4> key) {
+    vector<u64, 4> x = a ^ key;
+    return a + x.swap_pairs() + x.multiply_low32(x.shift_right(32));
+}
+
+public vector<u8, 16> table(vector<u8, 16> bytes, vector<u8, 16> picks) {
+    return bytes.shuffle_bytes(picks);
+}
+
+i32 main() {
+    return 0;
+}
+""";
+
+    [Test]
+    void vector_lanes_and_reductions() {
+        str source = """
+import std::simd;
+
+i32 main() {
+    vector<u64, 4> a = vector<u64, 4>.of([1, 2, 3, 4]);
+    vector<u64, 4> b = vector<u64, 4>.splat(10);
+    vector<u64, 4> c = a + b;
+    vector<u64, 4> d = c.swap_pairs();
+    vector<u64, 4> e = d.multiply_low32(d.shift_right(1));
+    mask<4> big = e.greater_than(vector<u64, 4>.splat(70));
+    vector<f32, 4> roots = vector<f32, 4>.of([1.0, 4.0, 9.0, 16.0]).square_root();
+    vector<i16, 8> words = vector<i16, 8>.splat(3);
+    vector<i32, 4> madd = Vectors.multiply_add_adjacent(words, words);
+    vector<u64, 8> joined = Vectors.concatenate(a, b);
+    vector<u8, 16> bytes = vector<u8, 16>.splat(250);
+    vector<u8, 16> clamped = bytes.saturating_add(vector<u8, 16>.splat(10));
+    vector<u8, 16> wrapped = bytes + vector<u8, 16>.splat(10);
+    if (e[0] != 72 || e[3] != 78 || big.count() != 3 || big.bits() != 13) {
+        return 1;
+    }
+    if (roots[2] != 3.0 || madd[1] != 18 || joined.reduce_add() != 50) {
+        return 2;
+    }
+    if (clamped[0] != 255 || wrapped[0] != 4 || a == b || a != a) {
+        return 3;
+    }
+    vector<i32, 4> chosen = vector<i32, 4>.splat(1).select(big, vector<i32, 4>.splat(0));
+    return chosen.reduce_add() + (i32)Vectors.low_half(joined).reduce_maximum();
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(7));
+        Verify.source(source).with_std().optimized(2).runs(Expected.exit(7));
+    }
+
+    [Test]
+    void vector_load_store_and_bounds() {
+        str source = """
+import std::simd;
+import std::collections;
+
+unsafe i32 main() {
+    i32* values = i32[6];
+    for (mut i32 i = 0; i < 6; i = i + 1) {
+        values[i] = i * 10;
+    }
+    slice<i32> items = { .data = values, .length = 6 };
+    vector<i32, 4> loaded = vector<i32, 4>.load(items, 2);
+    loaded.reverse().store(items, 0);
+    return values[0] + values[3] + loaded[0];
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(90));
+        str outside = """
+import std::simd;
+import std::collections;
+
+unsafe i32 main() {
+    i32* values = i32[6];
+    slice<i32> items = { .data = values, .length = 6 };
+    vector<i32, 4> loaded = vector<i32, 4>.load(items, 3);
+    return loaded[0];
+}
+""";
+        Verify.source(outside).with_std().crashes(Expected.contains("fewer than N values"));
+    }
+
+    [Test]
+    void vector_ir_on_each_target() {
+        Verify.source(SimdTests.MIX).with_std().optimized(2).emits_ir(Expected.ir_contains("%mul32 = mul")
+            .and_ir_contains("shufflevector <4 x i64>").and_ir_lacks("pshuf.b"));
+        Verify.source(SimdTests.MIX).with_std().optimized(2).with_flag("--cpu").with_flag("x86-64-v3")
+            .emits_ir(Expected.ir_contains("@llvm.x86.ssse3.pshuf.b.128"));
+        Verify.source(SimdTests.MIX).with_std().optimized(2).with_flag("--target").with_flag("aarch64-linux-gnu")
+            .emits_ir(Expected.ir_contains("@llvm.aarch64.neon.tbl1.v16i8").and_ir_contains("%mul32 = mul"));
+        Verify.source(SimdTests.MIX).with_std().optimized(2).with_flag("--target").with_flag("wasm32-unknown-unknown").with_flag("--features").with_flag("+simd128")
+            .emits_ir(Expected.ir_contains("@llvm.wasm.swizzle"));
+        Verify.source(SimdTests.MIX).with_std().optimized(2).with_flag("--target").with_flag("wasm32-unknown-unknown")
+            .emits_ir(Expected.ir_contains("<4 x i64>").and_ir_lacks("@llvm.wasm.swizzle"));
+    }
+
+    [Test]
+    void target_attribute_compiles_for_more_features() {
+        str source = """
+import std::simd;
+
+[Target("avx2")] public u64 sum_avx2(vector<u64, 4> a, vector<u64, 4> b) {
+    return (a + b.multiply_low32(a)).reduce_add();
+}
+
+u64 sum(vector<u64, 4> a, vector<u64, 4> b) {
+    return (a + b.multiply_low32(a)).reduce_add();
+}
+
+i32 main() {
+    vector<u64, 4> a = vector<u64, 4>.of([1, 2, 3, 4]);
+    vector<u64, 4> b = vector<u64, 4>.splat(5);
+    mut u64 total = sum(a, b);
+    if (Cpu.has_avx2()) {
+        unsafe {
+            total = total + sum_avx2(a, b);
+        }
+    } else {
+        total = total + sum(a, b);
+    }
+    return (i32)total;
+}
+""";
+        Verify.source(source).with_std().optimized(2).runs(Expected.exit(120));
+        Verify.source(source).with_std().optimized(2).emits_ir(Expected.ir_contains("\"target-features\"=\"+avx2\""));
+    }
+
+    [Test]
+    void target_function_needs_unsafe_from_baseline_code() {
+        str source = """
+[Target("avx2")] u64 fast(u64 x) {
+    return x;
+}
+
+[Target("avx2, fma")] u64 faster(u64 x) {
+    return fast(x);
+}
+
+i32 main() {
+    return (i32)fast(1);
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.UNSAFE_REQUIRED).at(10, 21));
+    }
+
+    [Test]
+    void text_hash_paths_agree() {
+        str source = """
+import std::types;
+import std::simd;
+
+unsafe i32 main() {
+    i8* buffer = i8[1100];
+    for (mut i32 i = 0; i < 1100; i = i + 1) {
+        buffer[i] = (i8)(u8)((i * 131 + 7) & 255);
+    }
+    mut i32 mismatches = 0;
+    for (mut size length = 0; length <= 1024; length = length + 1) {
+        for (mut size offset = 0; offset < 3; offset = offset + 1) {
+            u64 scalar = TextHash.of_path(buffer + offset, length, 0);
+            if (TextHash.of_path(buffer + offset, length, 1) != scalar || TextHash.of(buffer + offset, length) != scalar) {
+                mismatches = mismatches + 1;
+            }
+            if (Cpu.has_avx2() && TextHash.of_path(buffer + offset, length, 2) != scalar) {
+                mismatches = mismatches + 1;
+            }
+        }
+    }
+    return mismatches;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(0));
+        Verify.source(source).with_std().optimized(2).runs(Expected.exit(0));
+    }
+
+    [Test]
+    void text_hash_folds_and_literals_cache_it() {
+        str source = """
+import std::types;
+
+constexpr str SHORT_TEXT = "hello, world";
+constexpr u64 SHORT = SHORT_TEXT.hash();
+constexpr str LONG_TEXT = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+constexpr u64 LONG = LONG_TEXT.hash();
+
+unsafe i32 main() {
+    str a = "hello, world";
+    str b = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+    i8* heap = i8[13];
+    memcpy(heap, a.data, 12);
+    str copy = { .data = heap, .length = 12 };
+    str other = "hello, there";
+    if (SHORT != a.hash() || LONG != b.hash()) {
+        return 1;
+    }
+    if (a.meta.hash() == 0 || (u32)(a.hash() & 268435455) != a.meta.hash() || copy.meta.hash() != 0) {
+        return 2;
+    }
+    if (!(a == copy) || !(copy == a) || a == other) {
+        return 3;
+    }
+    return 0;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(0));
+    }
+
+    [Test]
+    void lane_semantics_at_every_level() {
+        str source = """
+import std::types;
+import std::simd;
+
+[NoInline] i32 integer_lanes() {
+    vector<i8, 16> hundred = vector<i8, 16>.splat((i8)100);
+    vector<i8, 16> low = vector<i8, 16>.splat((i8)(0 - 100));
+    vector<i8, 16> wrapped = hundred + hundred;
+    if ((i32)wrapped[0] != 0 - 56 || (i32)(low - hundred)[15] != 56) {
+        return 1;
+    }
+    if ((i32)hundred.saturating_add(hundred)[0] != 127 || (i32)low.saturating_subtract(hundred)[0] != 0 - 128) {
+        return 2;
+    }
+    if ((i32)hundred.multiply_high(hundred)[0] != 39 || (i32)low.multiply_high(hundred)[0] != 0 - 40) {
+        return 3;
+    }
+    // Shift amounts are taken modulo the lane width, and a signed right shift keeps the sign.
+    if ((i32)wrapped.shift_right(1)[0] != 0 - 28 || (i32)wrapped.shift_right(9)[0] != 0 - 28
+        || (i32)vector<i8, 16>.splat((i8)3).shift_left(9)[0] != 6) {
+        return 4;
+    }
+    if ((i32)wrapped.byte_swap()[0] != 0 - 56 || (i32)wrapped.minimum(low)[0] != 0 - 100
+        || (i32)wrapped.maximum(low)[0] != 0 - 56 || (i32)low.absolute()[0] != 100) {
+        return 5;
+    }
+    if ((i32)low.reduce_minimum() != 0 - 100 || (i32)hundred.reduce_add() != 64) {
+        return 6;
+    }
+    vector<u8, 16> full = vector<u8, 16>.splat((u8)255);
+    if ((i32)full.average_rounded(full)[3] != 255 || (i32)full.population_count()[0] != 8
+        || (i32)vector<u8, 16>.zero().leading_zeros()[0] != 8 || (i32)vector<u8, 16>.zero().trailing_zeros()[0] != 8) {
+        return 7;
+    }
+    vector<u64, 2> largest = vector<u64, 2>.splat(18446744073709551615);
+    if (largest.multiply_high(largest)[1] != 18446744073709551614) {
+        return 8;
+    }
+    vector<i64, 2> minus_one = vector<i64, 2>.splat(0 - 1);
+    if (minus_one.multiply_high(minus_one)[0] != 0 || minus_one.multiply_high(vector<i64, 2>.splat(1))[0] != 0 - 1) {
+        return 9;
+    }
+    vector<u128, 2> widest = vector<u128, 2>.splat(~(u128)0);
+    if (widest.multiply_high(widest)[0] != ~(u128)0 - (u128)1) {
+        return 10;
+    }
+    if (minus_one.multiply_low32(minus_one)[0] != 0 - 8589934591 || largest.multiply_low32(largest)[0] != 18446744065119617025) {
+        return 12;
+    }
+    vector<i128, 1> negative = vector<i128, 1>.splat((i128)(0 - 1));
+    if (negative.multiply_high(vector<i128, 1>.splat((i128)1))[0] != (i128)(0 - 1)) {
+        return 11;
+    }
+    return 0;
+}
+
+[NoInline] i32 moving_lanes() {
+    mut vector<u8, 16> bytes = {};
+    mut vector<u8, 16> picks = {};
+    for (mut i32 i = 0; i < 16; i = i + 1) {
+        bytes.lanes[i] = (u8)(100 + i);
+    }
+    picks.lanes[0] = (u8)15;
+    picks.lanes[1] = (u8)0;
+    picks.lanes[2] = (u8)128;
+    picks.lanes[3] = (u8)129;
+    picks.lanes[4] = (u8)16;
+    picks.lanes[5] = (u8)31;
+    vector<u8, 16> picked = bytes.shuffle_bytes(picks);
+    if ((i32)picked[0] != 115 || (i32)picked[1] != 100 || (i32)picked[2] != 0 || (i32)picked[3] != 0
+        || (i32)picked[4] != 100 || (i32)picked[5] != 115) {
+        return 20;
+    }
+    // Fewer than 16 lanes: an index past the last lane gives 0.
+    mut vector<u8, 8> half = {};
+    for (mut i32 i = 0; i < 8; i = i + 1) {
+        half.lanes[i] = (u8)(10 + i);
+    }
+    vector<u8, 8> short_picked = half.shuffle_bytes(vector<u8, 8>.splat((u8)9));
+    if ((i32)short_picked[0] != 0 || (i32)half.shuffle_bytes(vector<u8, 8>.splat((u8)7))[2] != 17) {
+        return 21;
+    }
+    // More than 16 lanes: every group of 16 picks from itself.
+    mut vector<u8, 32> wide = {};
+    for (mut i32 i = 0; i < 32; i = i + 1) {
+        wide.lanes[i] = (u8)i;
+    }
+    vector<u8, 32> grouped = wide.shuffle_bytes(vector<u8, 32>.splat((u8)1));
+    if ((i32)grouped[0] != 1 || (i32)grouped[15] != 1 || (i32)grouped[16] != 17 || (i32)grouped[31] != 17) {
+        return 22;
+    }
+    vector<i32, 3> odd = vector<i32, 3>.of([1, 2, 3]);
+    vector<i32, 3> other = vector<i32, 3>.of([4, 5, 6]);
+    vector<i32, 3> swapped = odd.swap_pairs();
+    if (swapped[0] != 2 || swapped[1] != 1 || swapped[2] != 3) {
+        return 23;
+    }
+    vector<i32, 3> lower = odd.interleave_low(other);
+    vector<i32, 3> upper = odd.interleave_high(other);
+    if (lower[0] != 1 || lower[1] != 4 || lower[2] != 2 || upper[0] != 2 || upper[1] != 5 || upper[2] != 3) {
+        return 24;
+    }
+    if (odd.reverse()[0] != 3 || Vectors.concatenate(odd, other)[3] != 4) {
+        return 25;
+    }
+    vector<u32, 4> counting = vector<u32, 4>.splat(67305985);
+    vector<u8, 16> seen = counting.reinterpret<u8, 16>();
+    if ((i32)seen[0] != 1 || (i32)seen[1] != 2 || (i32)seen[7] != 4) {
+        return 26;
+    }
+    if (vector<f32, 4>.splat((f32)1.0).reinterpret<u32, 4>()[2] != 1065353216) {
+        return 27;
+    }
+    mask<4> some = vector<i32, 4>.of([1, 9, 3, 9]).greater_than(vector<i32, 4>.splat(5));
+    if (!some.any() || some.all() || some.none() || some.count() != 2 || some.bits() != 10 || some.invert().bits() != 5) {
+        return 28;
+    }
+    return 0;
+}
+
+[NoInline] bool negative_zero(f64 value) {
+    return value == 0.0 && 1.0 / value < 0.0;
+}
+
+[NoInline] bool positive_zero(f64 value) {
+    return value == 0.0 && 1.0 / value > 0.0;
+}
+
+[NoInline] i32 float_lanes(f64 zero, f32 one) {
+    vector<f64, 2> plus = vector<f64, 2>.splat(zero);
+    vector<f64, 2> minus = vector<f64, 2>.splat(zero * (0.0 - 1.0));
+    // Of two zeros the argument's lane is taken.
+    if (!negative_zero(plus.minimum(minus)[0]) || !positive_zero(minus.minimum(plus)[0])
+        || !negative_zero(plus.maximum(minus)[0]) || !positive_zero(minus.maximum(plus)[0])) {
+        return 30;
+    }
+    vector<f64, 2> invalid = vector<f64, 2>.splat(zero / zero);
+    vector<f64, 2> two = vector<f64, 2>.splat(2.0);
+    if (invalid.minimum(two)[0] != 2.0 || two.minimum(invalid)[0] != 2.0 || invalid.maximum(two)[1] != 2.0
+        || two.maximum(invalid)[1] != 2.0) {
+        return 31;
+    }
+    vector<f64, 4> mixed = vector<f64, 4>.of([zero / zero, 3.0, zero / zero, 1.0]);
+    if (mixed.reduce_minimum() != 1.0 || mixed.reduce_maximum() != 3.0) {
+        return 32;
+    }
+    vector<f64, 2> half_below = vector<f64, 2>.splat(zero - 0.5);
+    vector<f64, 2> little_below = vector<f64, 2>.splat(zero - 0.25);
+    if (half_below.floor()[0] != 0.0 - 1.0 || !negative_zero(half_below.ceiling()[0])
+        || half_below.round()[0] != 0.0 - 1.0 || !negative_zero(little_below.round()[0])
+        || !negative_zero(half_below.truncate()[0]) || !negative_zero(minus.floor()[1])
+        || !positive_zero(plus.ceiling()[1])) {
+        return 33;
+    }
+    vector<f64, 2> halves = vector<f64, 2>.of([2.5, 0.0 - 2.5]);
+    if (halves.round()[0] != 3.0 || halves.round()[1] != 0.0 - 3.0) {
+        return 34;
+    }
+    // One rounding: the product of 0.1 and 10 is not exactly 1.
+    vector<f32, 4> tenth = vector<f32, 4>.splat(one / (f32)10.0);
+    vector<f32, 4> rest = tenth.fused_multiply_add(vector<f32, 4>.splat((f32)10.0), vector<f32, 4>.splat((f32)0.0 - one));
+    if (rest[0] == (f32)0.0 || rest[3] > (f32)0.0000001) {
+        return 35;
+    }
+    vector<f64, 2> precise = vector<f64, 2>.splat((f64)one / 10.0)
+        .fused_multiply_add(vector<f64, 2>.splat(10.0), vector<f64, 2>.splat(0.0 - 1.0));
+    if (precise[1] == 0.0 || precise[1] > 0.000000000000001) {
+        return 36;
+    }
+    return 0;
+}
+
+[NoInline] i32 conversions(i32 big, f64 zero) {
+    vector<i32, 4> numbers = vector<i32, 4>.of([big, 0 - 1, 200, 0 - 200]);
+    vector<u8, 4> bytes = numbers.convert<u8>();
+    vector<i8, 4> signed_bytes = numbers.convert<i8>();
+    if ((i32)bytes[0] != 44 || (i32)bytes[1] != 255 || (i32)bytes[2] != 200 || (i32)bytes[3] != 56) {
+        return 40;
+    }
+    if ((i32)signed_bytes[0] != 44 || (i32)signed_bytes[1] != 0 - 1 || (i32)signed_bytes[2] != 0 - 56
+        || (i32)signed_bytes[3] != 56) {
+        return 41;
+    }
+    if (numbers.convert<u64>()[1] != 18446744073709551615 || numbers.convert<i64>()[3] != 0 - 200) {
+        return 42;
+    }
+    vector<f64, 4> reals = vector<f64, 4>.of([10000000000.0, 0.0 - 10000000000.0, zero / zero, 2.9]);
+    vector<i32, 4> clamped = reals.convert<i32>();
+    if (clamped[0] != 2147483647 || clamped[1] != (0 - 2147483647) - 1 || clamped[2] != 0 || clamped[3] != 2) {
+        return 43;
+    }
+    vector<u32, 4> positive = reals.convert<u32>();
+    if (positive[0] != 4294967295 || positive[1] != 0 || positive[2] != 0 || positive[3] != 2) {
+        return 44;
+    }
+    vector<u8, 2> narrow = vector<f32, 2>.of([(f32)300.7, (f32)(zero - 5.0)]).convert<u8>();
+    if ((i32)narrow[0] != 255 || (i32)narrow[1] != 0) {
+        return 45;
+    }
+    vector<i128, 2> huge = vector<f64, 2>.splat(1.0 / zero).convert<i128>();
+    if (huge[0] <= (i128)0 || numbers.convert<f64>()[3] != 0.0 - 200.0) {
+        return 46;
+    }
+    return 0;
+}
+
+[NoInline] i32 odd_shapes() {
+    vector<u32, 1> single = vector<u32, 1>.splat(41);
+    vector<u8, 64> many = vector<u8, 64>.splat((u8)2);
+    vector<i32, 7> seven = vector<i32, 7>.splat(3);
+    if (single.reduce_add() != 41 || (i32)many.reduce_add() != 128 || seven.reduce_add() != 21
+        || seven.multiply_high(seven)[6] != 0) {
+        return 50;
+    }
+    if (single.swap_pairs()[0] != 41 || single.shift_left(33)[0] != 82 || single.shift_right(0 - 1)[0] != 0) {
+        return 51;
+    }
+    return 0;
+}
+
+i32 main() {
+    mut i32 failed = integer_lanes();
+    if (failed == 0) {
+        failed = moving_lanes();
+    }
+    if (failed == 0) {
+        failed = float_lanes(0.0, (f32)1.0);
+    }
+    if (failed == 0) {
+        failed = conversions(300, 0.0);
+    }
+    if (failed == 0) {
+        failed = odd_shapes();
+    }
+    return failed;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(0));
+        Verify.source(source).with_std().optimized(2).runs(Expected.exit(0));
+        Verify.source(source).with_std().optimized(3).with_flag("--cpu").with_flag("native").runs(Expected.exit(0));
+    }
+
+    // 16-bit float lanes have no vector form: every operation runs its body.
+    [Test]
+    void sixteen_bit_float_lanes_keep_their_bodies() {
+        str half = """
+import std::types;
+import std::simd;
+
+[NoInline] i32 halves(f32 one) {
+    vector<f16, 4> a = vector<f16, 4>.of([(f16)(one * (f32)4.0), (f16)(one * (f32)9.0), (f16)(one * (f32)2.5), (f16)(one * (f32)(0.0 - 0.5))]);
+    vector<f16, 4> b = vector<f16, 4>.splat((f16)one);
+    if ((f32)(a + b)[0] != (f32)5.0 || (f32)(a - b)[1] != (f32)8.0 || (f32)(a * a)[2] != (f32)6.25 || (f32)(a / b)[1] != (f32)9.0) {
+        return 1;
+    }
+    if ((f32)a.square_root()[0] != (f32)2.0 || (f32)a.square_root()[1] != (f32)3.0) {
+        return 2;
+    }
+    if ((f32)a.floor()[2] != (f32)2.0 || (f32)a.ceiling()[2] != (f32)3.0 || (f32)a.round()[2] != (f32)3.0
+        || (f32)a.truncate()[2] != (f32)2.0 || (f32)a.floor()[3] != (f32)(0.0 - 1.0)) {
+        return 3;
+    }
+    vector<f16, 4> up = a.ceiling();
+    if ((f32)up[3] != (f32)0.0 || (f32)1.0 / (f32)up[3] > (f32)0.0) {
+        return 4;
+    }
+    if ((f32)a.minimum(b)[0] != (f32)1.0 || (f32)a.maximum(b)[0] != (f32)4.0 || (f32)a.negate()[0] != (f32)(0.0 - 4.0)
+        || (f32)a.absolute()[3] != (f32)0.5) {
+        return 5;
+    }
+    if ((f32)a.fused_multiply_add(b, b)[1] != (f32)10.0 || (f32)a.reduce_add() != (f32)15.0
+        || (f32)a.reduce_minimum() != (f32)(0.0 - 0.5) || (f32)a.reduce_maximum() != (f32)9.0) {
+        return 6;
+    }
+    if (a.convert<i32>()[1] != 9 || (f32)vector<i32, 4>.splat(3).convert<f16>()[0] != (f32)3.0
+        || a.greater_than(b).count() != 3 || a != a || a == b) {
+        return 7;
+    }
+    if (a.reinterpret<u16, 4>()[0] != 17408 || (f32)a.reverse()[0] != (f32)(0.0 - 0.5)) {
+        return 8;
+    }
+    // Just above the point halfway between 1 and the next f16: one rounding goes up, two would stay.
+    mut f64 above = (f64)one;
+    for (mut i32 i = 0; i < 40; i = i + 1) {
+        above = above * 0.5;
+    }
+    f64 value = (f64)one + 0.00048828125 + above;
+    if ((f32)(f16)value != (f32)1.0009765625 || (f32)(f16)(0.0 - value) != (f32)(0.0 - 1.0009765625)) {
+        return 9;
+    }
+    return 0;
+}
+
+i32 main() {
+    return halves((f32)1.0);
+}
+""";
+        str brain = """
+import std::types;
+import std::simd;
+
+[NoInline] i32 brain_halves(f32 one) {
+    vector<bf16, 4> a = vector<bf16, 4>.of([(bf16)(one * (f32)4.0), (bf16)(one * (f32)9.0), (bf16)(one * (f32)2.5), (bf16)(one * (f32)(0.0 - 0.5))]);
+    vector<bf16, 4> b = vector<bf16, 4>.splat((bf16)one);
+    if ((f32)(a + b)[0] != (f32)5.0 || (f32)(a - b)[1] != (f32)8.0 || (f32)(a * a)[2] != (f32)6.25 || (f32)(a / b)[1] != (f32)9.0) {
+        return 1;
+    }
+    if ((f32)a.square_root()[0] != (f32)2.0 || (f32)a.square_root()[1] != (f32)3.0) {
+        return 2;
+    }
+    if ((f32)a.floor()[2] != (f32)2.0 || (f32)a.ceiling()[2] != (f32)3.0 || (f32)a.round()[2] != (f32)3.0
+        || (f32)a.truncate()[2] != (f32)2.0 || (f32)a.floor()[3] != (f32)(0.0 - 1.0)) {
+        return 3;
+    }
+    vector<bf16, 4> up = a.ceiling();
+    if ((f32)up[3] != (f32)0.0 || (f32)1.0 / (f32)up[3] > (f32)0.0) {
+        return 4;
+    }
+    if ((f32)a.minimum(b)[0] != (f32)1.0 || (f32)a.maximum(b)[0] != (f32)4.0 || (f32)a.negate()[0] != (f32)(0.0 - 4.0)
+        || (f32)a.absolute()[3] != (f32)0.5) {
+        return 5;
+    }
+    if ((f32)a.fused_multiply_add(b, b)[1] != (f32)10.0 || (f32)a.reduce_add() != (f32)15.0
+        || (f32)a.reduce_minimum() != (f32)(0.0 - 0.5) || (f32)a.reduce_maximum() != (f32)9.0) {
+        return 6;
+    }
+    if (a.convert<i32>()[1] != 9 || (f32)vector<i32, 4>.splat(3).convert<bf16>()[0] != (f32)3.0
+        || a.greater_than(b).count() != 3 || a != a || a == b) {
+        return 7;
+    }
+    if (a.reinterpret<u16, 4>()[0] != 16512 || (f32)a.reverse()[0] != (f32)(0.0 - 0.5)) {
+        return 8;
+    }
+    // 1.0078125 * 1.5 is halfway between two bf16 values: the addend, far below what f64 keeps, decides.
+    vector<bf16, 4> near = vector<bf16, 4>.splat((bf16)(one * (f32)1.0078125));
+    vector<bf16, 4> factor = vector<bf16, 4>.splat((bf16)(one * (f32)1.5));
+    mut f32 tiny = one;
+    for (mut i32 i = 0; i < 100; i = i + 1) {
+        tiny = tiny * (f32)0.5;
+    }
+    vector<bf16, 4> below = near.fused_multiply_add(factor, vector<bf16, 4>.splat((bf16)((f32)0.0 - tiny)));
+    vector<bf16, 4> above = near.fused_multiply_add(factor, vector<bf16, 4>.splat((bf16)tiny));
+    if ((f32)below[0] != (f32)1.5078125 || (f32)above[0] != (f32)1.515625) {
+        return 9;
+    }
+    return 0;
+}
+
+i32 main() {
+    return brain_halves((f32)1.0);
+}
+""";
+        Verify.source(half).with_std().runs(Expected.exit(0));
+        Verify.source(half).with_std().optimized(2).runs(Expected.exit(0));
+        Verify.source(brain).with_std().runs(Expected.exit(0));
+        Verify.source(brain).with_std().optimized(2).runs(Expected.exit(0));
+    }
+
+    [Test]
+    void lane_division_by_zero_stops() {
+        str source = """
+import std::simd;
+
+[NoInline] vector<i32, 4> divided(vector<i32, 4> a, i32 by) {
+    return a / vector<i32, 4>.of([1, 1, by, 1]);
+}
+
+i32 main() {
+    return divided(vector<i32, 4>.splat(8), 0)[2];
+}
+""";
+        Verify.source(source).with_std().crashes(Expected.contains("division by zero"));
+        Verify.source(source).with_std().optimized(2).crashes(Expected.contains("division by zero"));
+    }
+
+    [Test]
+    void lane_shapes_are_checked() {
+        str source = """
+import std::simd;
+
+struct Point {
+    i32 x;
+}
+
+i32 flags(vector<bool, 4>* v) {
+    return 0;
+}
+
+i32 many(vector<i32, 65>* v) {
+    return 0;
+}
+
+i32 none(vector<i32, 0>* v) {
+    return 0;
+}
+
+i32 points(vector<Point, 4>* v) {
+    return 0;
+}
+
+i32 main() {
+    return 0;
+}
+""";
+        Verify.source(source).with_std().diagnostics(Expected.error(DiagnosticErrors.INVALID_LANE_SHAPE).at(7, 11)
+            .and_error(DiagnosticErrors.INVALID_LANE_SHAPE).at(11, 10)
+            .and_error(DiagnosticErrors.INVALID_LANE_SHAPE).at(15, 10)
+            .and_error(DiagnosticErrors.INVALID_LANE_SHAPE).at(19, 12));
+    }
+
+    [Test]
+    void a_lane_type_chosen_by_a_call_is_reported_there() {
+        str source = """
+import std::simd;
+
+i32 main() {
+    vector<u8, 4> bytes = vector<u8, 4>.splat((u8)7);
+    bytes.reinterpret<bool, 4>();
+    return 0;
+}
+""";
+        str halved = """
+import std::simd;
+
+i32 main() {
+    vector<i32, 1> one = vector<i32, 1>.splat(1);
+    Vectors.low_half(one);
+    return 0;
+}
+""";
+        Verify.source(source).with_std().diagnostics(Expected.error(DiagnosticErrors.INVALID_LANE_SHAPE).at(5, 31));
+        Verify.source(halved).with_std().diagnostics(Expected.error(DiagnosticErrors.INVALID_LANE_SHAPE).at(5, 21));
+    }
+
+    [Test]
+    void simd_attribute_outside_the_std_does_nothing() {
+        str source = """
+import std::simd;
+
+// Outside std::simd the attribute does nothing: the body is what runs, whatever its operands look like.
+[Simd("add")] i32 odd(i32 only) {
+    return only + 1;
+}
+
+[Simd("add")] vector<i32, 4> doubled(vector<i32, 4> only) {
+    return only + only;
+}
+
+[Simd("subtract")] vector<i32, 4> lopsided(vector<i32, 4> a, vector<i8, 16> b) {
+    return a;
+}
+
+i32 main() {
+    vector<i32, 4> three = vector<i32, 4>.splat(3);
+    return odd(1) + doubled(three)[0] + lopsided(three, vector<i8, 16>.splat((i8)1))[1];
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(11));
+        Verify.source(source).with_std().optimized(2).runs(Expected.exit(11));
+    }
+
+    // The features of a --cpu name come from the table generated from LLVM.
+    [Test]
+    void cpu_names_carry_their_features() {
+        str source = """
+[Target("avx2")] public i32 fast(i32 x) {
+    return x;
+}
+
+i32 main() {
+    return fast(0);
+}
+""";
+        Verify.source(source).with_flag("--target").with_flag("x86_64-unknown-linux-gnu").with_flag("--cpu").with_flag("skylake")
+            .emits_ir(Expected.ir_contains("\"target-features\"=\"+avx2\""));
+        Verify.source(source).with_flag("--target").with_flag("x86_64-unknown-linux-gnu").with_flag("--cpu").with_flag("emeraldrapids")
+            .emits_ir(Expected.ir_contains("\"target-features\"=\"+avx2\""));
+        Verify.source(source).with_flag("--target").with_flag("x86_64-unknown-linux-gnu").with_flag("--cpu").with_flag("lunarlake")
+            .emits_ir(Expected.ir_contains("\"target-features\"=\"+avx2\""));
+        Verify.source(source).with_flag("--target").with_flag("x86_64-unknown-linux-gnu").with_flag("--cpu").with_flag("sierraforest")
+            .emits_ir(Expected.ir_contains("\"target-features\"=\"+avx2\""));
+        Verify.source(source).with_flag("--target").with_flag("x86_64-unknown-linux-gnu").with_flag("--cpu").with_flag("znver5")
+            .emits_ir(Expected.ir_contains("\"target-features\"=\"+avx2\""));
+        Verify.source(source).with_flag("--target").with_flag("x86_64-unknown-linux-gnu").with_flag("--cpu").with_flag("sandybridge")
+            .diagnostics(Expected.error(DiagnosticErrors.UNSAFE_REQUIRED).at(6, 16));
+        Verify.source(source).with_flag("--target").with_flag("x86_64-unknown-linux-gnu").with_flag("--cpu").with_flag("tremont")
+            .diagnostics(Expected.error(DiagnosticErrors.UNSAFE_REQUIRED).at(6, 16));
+        Verify.source(source).with_flag("--target").with_flag("x86_64-unknown-linux-gnu").with_flag("--cpu").with_flag("not-a-cpu")
+            .diagnostics(Expected.error(DiagnosticErrors.UNSAFE_REQUIRED).at(6, 16));
+    }
+
+    [Test]
+    void operations_lower_on_each_target() {
+        str source = """
+import std::simd;
+
+public vector<i8, 16> clamp_sum(vector<i8, 16> a, vector<i8, 16> b) {
+    return a.saturating_add(b);
+}
+
+public vector<f32, 4> blend(vector<f32, 4> a, vector<f32, 4> b, vector<f32, 4> c) {
+    return a.fused_multiply_add(b, c).floor().minimum(a);
+}
+
+public vector<u32, 4> bits_set(vector<u32, 4> a) {
+    return a.population_count();
+}
+
+public i32 total(vector<i32, 8> a) {
+    return a.reduce_add();
+}
+
+public vector<u8, 32> wide_table(vector<u8, 32> bytes, vector<u8, 32> picks) {
+    return bytes.shuffle_bytes(picks);
+}
+
+public vector<u8, 64> widest_table(vector<u8, 64> bytes, vector<u8, 64> picks) {
+    return bytes.shuffle_bytes(picks);
+}
+
+public vector<f16, 4> halves(vector<f16, 4> a, vector<f16, 4> b) {
+    return a + b;
+}
+
+i32 main() {
+    return 0;
+}
+""";
+        Verify.source(source).with_std().optimized(2).with_flag("--target").with_flag("x86_64-unknown-linux-gnu")
+            .emits_ir(Expected.ir_contains("@llvm.sadd.sat.v16i8").and_ir_contains("@llvm.fma.v4f32")
+                .and_ir_contains("@llvm.floor.v4f32").and_ir_contains("@llvm.ctpop.v4i32")
+                .and_ir_contains("@llvm.vector.reduce.add.v8i32").and_ir_contains("fadd half")
+                .and_ir_lacks("fadd <4 x half>").and_ir_lacks("pshuf.b"));
+        Verify.source(source).with_std().optimized(2).with_flag("--target").with_flag("x86_64-unknown-linux-gnu").with_flag("--cpu").with_flag("x86-64-v3")
+            .emits_ir(Expected.ir_contains("@llvm.x86.avx2.pshuf.b").and_ir_lacks("avx512.pshuf.b"));
+        Verify.source(source).with_std().optimized(2).with_flag("--target").with_flag("x86_64-unknown-linux-gnu").with_flag("--cpu").with_flag("x86-64-v4")
+            .emits_ir(Expected.ir_contains("@llvm.x86.avx512.pshuf.b.512"));
+        Verify.source(source).with_std().optimized(2).with_flag("--target").with_flag("aarch64-linux-gnu")
+            .emits_ir(Expected.ir_contains("@llvm.sadd.sat.v16i8").and_ir_contains("@llvm.fma.v4f32")
+                .and_ir_contains("@llvm.vector.reduce.add.v8i32").and_ir_lacks("x86."));
+        Verify.source(source).with_std().optimized(2).with_flag("--target").with_flag("wasm32-unknown-unknown").with_flag("--features").with_flag("+simd128")
+            .emits_ir(Expected.ir_contains("@llvm.sadd.sat.v16i8").and_ir_contains("@llvm.ctpop.v4i32").and_ir_lacks("x86."));
+    }
+}

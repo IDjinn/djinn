@@ -20,7 +20,13 @@ struct SymbolTable {
     PointerList* primitives;
     U32Map* bindings;
     SemanticAnalyzer* analyzer;
+    // The checker that folds constant template arguments ('(N * 2)', 'LANES'); the real one once checking starts.
+    TypeChecker* checker;
+    // Set when a template argument was already reported, so the caller adds no 'unknown type' on top.
+    bool template_failed;
     Node* blame;
+    // How many template instances led to the one being built or checked.
+    i32 template_depth;
     bool generate_disabled;
     bool strict_externs;
     i32 error_count;
@@ -357,6 +363,7 @@ struct SymbolTable {
             inner.name = ref.name;
             inner.name_atom = ref.name_atom;
             inner.full_atom = ref.full_atom;
+            inner.value = ref.value;
             u32 payload = this.resolve_type(inner, scope);
             if (payload == 0) {
                 return 0;
@@ -397,10 +404,27 @@ struct SymbolTable {
             }
             return Types.pointer_to(element);
         }
+        if (kind == TypeKind.VALUE) {
+            this.template_error(DiagnosticErrors.TYPE_ARGUMENT_EXPECTED, "a constant is not a type: only a template argument can be a constant");
+            return 0;
+        }
+        if (kind == TypeKind.ARRAY) {
+            return this.resolve_inline_array(ref, scope);
+        }
         if (ref.args == null && this.bindings != null && ref.full_atom == ref.name_atom) {
             U32Map* active = this.bindings;
             i64 bound = active.find(ref.name_atom);
             if (bound >= 0) {
+                if (Types.is_value((u32)bound)) {
+                    ByteBuffer* message = ByteBuffer.create();
+                    message.append("'");
+                    message.append(ref.name);
+                    message.append("' stands for the constant ");
+                    this.describe_type((u32)bound, message);
+                    message.append(" here, not for a type");
+                    this.template_error(DiagnosticErrors.TYPE_ARGUMENT_EXPECTED, message.cstr());
+                    return 0;
+                }
                 return (u32)bound;
             }
         }
@@ -419,8 +443,13 @@ struct SymbolTable {
             }
             PointerList* given = ref.args;
             IdList* resolved = IdList.create();
+            GenericParams* params = info.generics;
             for (mut i32 i = 0; i < given.length; i = i + 1) {
-                u32 argument = this.resolve_type((TypeRef*)given.get(i), scope);
+                mut TypeRef* declared = (TypeRef*)0;
+                if (params != null) {
+                    declared = params.value_type(i);
+                }
+                u32 argument = this.resolve_argument((TypeRef*)given.get(i), declared, scope);
                 if (argument == 0) {
                     return 0;
                 }
@@ -435,10 +464,235 @@ struct SymbolTable {
         return info.type_id;
     }
 
+    unsafe void template_error(i32 code, ptr<i8> message) {
+        this.template_failed = true;
+        Node* at = this.blame;
+        if (at == null) {
+            return;
+        }
+        SemanticAnalyzer* analyzer = this.analyzer;
+        Diagnostics* diagnostics = analyzer.diagnostics;
+        diagnostics.error_span(code, at.file_name(), at.line(), at.column(), at.length(), message);
+    }
+
+    // One argument of 'Name<...>'. A parameter declared with a type ('i32 N') takes a constant; an untyped one
+    // takes a type or a constant, like a C++ template parameter.
+    public unsafe u32 resolve_argument(TypeRef* ref, TypeRef* declared_ref, u32 scope) {
+        mut u32 declared = 0;
+        if (declared_ref != null) {
+            declared = this.resolve_type(declared_ref, scope);
+            if (declared == 0) {
+                return 0;
+            }
+            if (!Types.is_integer(declared)) {
+                this.template_error(DiagnosticErrors.INVALID_CONSTANT_PARAMETER, "a constant template parameter is an integer, bool, char or enum");
+                return 0;
+            }
+        }
+        if (ref.kind == TypeKind.VALUE) {
+            return this.constant_argument(Node.clone(ref.value), declared, scope);
+        }
+        if (ref.kind == TypeKind.NAMED && ref.args == null && !ref.nullable) {
+            if (this.bindings != null && ref.full_atom == ref.name_atom) {
+                U32Map* active = this.bindings;
+                i64 bound = active.find(ref.name_atom);
+                if (bound >= 0) {
+                    if (Types.is_value((u32)bound)) {
+                        return this.convert_constant(Types.element((u32)bound), Types.value_of((u32)bound), declared);
+                    }
+                    if (declared != 0) {
+                        this.template_error(DiagnosticErrors.CONSTANT_ARGUMENT_EXPECTED, "this template parameter takes a constant, not a type");
+                        return 0;
+                    }
+                    return (u32)bound;
+                }
+            }
+            if (declared != 0 || this.names_constant(ref, scope)) {
+                Node* variant = this.enum_variant_named(ref, scope);
+                if (variant != null) {
+                    Node* tag = variant.first();
+                    return this.convert_constant(variant.value_type(), tag.int_value(), declared);
+                }
+                return this.constant_argument(this.name_expression(ref, scope), declared, scope);
+            }
+        }
+        if (declared != 0) {
+            this.template_error(DiagnosticErrors.CONSTANT_ARGUMENT_EXPECTED, "this template parameter takes a constant, not a type");
+            return 0;
+        }
+        return this.resolve_type(ref, scope);
+    }
+
+    // A plain name in a template argument is a constant when it names no type: a constexpr global, a struct
+    // constant ('Limits::SIZE') or an enum variant ('Color::Red').
+    unsafe bool names_constant(TypeRef* ref, u32 scope) {
+        if (this.find_struct(ref.full_atom, ref.name_atom, scope) != null || this.find_alias(ref.full_atom, ref.name_atom, scope) != null) {
+            return false;
+        }
+        if (this.find_interface(ref.full_atom, ref.name_atom, scope) != null) {
+            return false;
+        }
+        if (ref.full_atom != ref.name_atom) {
+            return true;
+        }
+        return this.find_global(ref.full_atom, ref.name_atom, scope) != null;
+    }
+
+    // 'Color::Red' as a template argument: the variant of a plain enum, whose tag is the constant.
+    unsafe Node* enum_variant_named(TypeRef* ref, u32 scope) {
+        if (ref.full_atom == ref.name_atom) {
+            return (Node*)0;
+        }
+        ptr<i8> text = ref.name;
+        i32 length = (i32)strlen(text);
+        mut i32 split = 0 - 1;
+        for (mut i32 i = 0; i + 1 < length; i = i + 1) {
+            if (text[i] == (i8)58 && text[i + 1] == (i8)58) {
+                split = i;
+            }
+        }
+        if (split <= 0) {
+            return (Node*)0;
+        }
+        AtomTable* atoms = Atoms.get();
+        u32 owner_full = atoms.intern_copy(text, (u32)split);
+        StructInfo* owner = this.find_struct(owner_full, atoms.base_of(owner_full), scope);
+        if (owner == null || !owner.is_enum || owner.has_payload) {
+            return (Node*)0;
+        }
+        PointerList* constants = owner.constants;
+        u32 variant_atom = atoms.intern_copy(text + split + 2, (u32)(length - split - 2));
+        for (mut i32 c = 0; c < constants.length; c = c + 1) {
+            Node* variant = (Node*)constants.get(c);
+            if (variant.text_atom() == variant_atom && variant.first() != null) {
+                if (variant.value_type() == 0) {
+                    variant.set_value_type(owner.type_id);
+                }
+                return variant;
+            }
+        }
+        return (Node*)0;
+    }
+
+    unsafe Node* name_expression(TypeRef* ref, u32 scope) {
+        mut i32 token = 0;
+        Node* at = this.blame;
+        if (at != null) {
+            token = at.token;
+        }
+        Node* identifier = Node.create(NodeKind::IDENTIFIER, token);
+        identifier.set_text(ref.name);
+        if (ref.full_atom == ref.name_atom) {
+            return identifier;
+        }
+        Node* scoped = Node.create_list(NodeKind::CALL, token);
+        scoped.set_first(identifier);
+        return scoped;
+    }
+
+    unsafe u32 constant_argument(Node* expression, u32 declared, u32 scope) {
+        mut TypeChecker* checker = this.checker;
+        if (checker == null) {
+            SemanticAnalyzer* analyzer = this.analyzer;
+            checker = TypeChecker.create(analyzer.diagnostics, this);
+        }
+        Node* saved_blame = this.blame;
+        u32 type = checker.evaluate_template_constant(expression, declared, scope);
+        this.blame = saved_blame;
+        if (type == 0) {
+            this.template_failed = true;
+            return 0;
+        }
+        return this.convert_constant(type, checker.template_value, declared);
+    }
+
+    // Untyped parameters keep one spelling per value: every integer is an i64 constant, so 'vector<u64, 4>' is the
+    // same instance whether '4' came from a literal, an i32 constant or another template's parameter.
+    unsafe u32 convert_constant(u32 type, i64 value, u32 declared) {
+        if (declared == 0) {
+            bool keeps_type = Types.bits(type) == 1 || Types.is_char(type) || Types.enum_index(type) >= 0;
+            if (keeps_type) {
+                return Types.constant(type, value);
+            }
+            return Types.constant(Types.i64_type(), value);
+        }
+        bool same_kind = (Types.bits(type) == 1) == (Types.bits(declared) == 1) && Types.is_char(type) == Types.is_char(declared)
+            && (Types.enum_index(declared) < 0 || type == declared);
+        if (!same_kind) {
+            ByteBuffer* mismatch = ByteBuffer.create();
+            mismatch.append("this template parameter takes a constant of type '");
+            this.describe_type(declared, mismatch);
+            mismatch.append("', not '");
+            this.describe_type(type, mismatch);
+            mismatch.append("'");
+            this.template_error(DiagnosticErrors.INVALID_TEMPLATE_CONSTANT, mismatch.cstr());
+            return 0;
+        }
+        u32 bits = Types.bits(declared);
+        mut bool fits = true;
+        if (bits < 64 && bits > 1) {
+            if (Types.is_signed(declared)) {
+                i64 limit = (i64)1 << (i64)(bits - 1);
+                fits = value >= 0 - limit && value < limit;
+            } else {
+                fits = value >= 0 && value < ((i64)1 << (i64)bits);
+            }
+        } else if (bits == 64 && !Types.is_signed(declared) && Types.is_signed(type)) {
+            fits = value >= 0;
+        }
+        if (!fits) {
+            ByteBuffer* message = ByteBuffer.create();
+            message.append_int(value);
+            message.append(" does not fit in '");
+            this.describe_type(declared, message);
+            message.append("', the type of this template parameter");
+            this.template_error(DiagnosticErrors.INVALID_TEMPLATE_CONSTANT, message.cstr());
+            return 0;
+        }
+        return Types.constant(declared, value);
+    }
+
+    // 'T[N]': N is a positive integer constant, possibly a parameter of the enclosing template.
+    unsafe u32 resolve_inline_array(TypeRef* ref, u32 scope) {
+        u32 element = this.resolve_type(ref.element, scope);
+        if (element == 0) {
+            return 0;
+        }
+        if (Types.is_void(element) || element == Types.auto_type()) {
+            this.template_error(DiagnosticErrors.INVALID_ARRAY_SIZE, "an inline array needs a sized element type");
+            return 0;
+        }
+        PointerList* sizes = ref.args;
+        u32 size = this.resolve_argument((TypeRef*)sizes.get(0), (TypeRef*)0, scope);
+        if (size == 0) {
+            return 0;
+        }
+        if (!Types.is_value(size) || Types.bits(Types.element(size)) == 1 || Types.is_char(Types.element(size))) {
+            this.template_error(DiagnosticErrors.INVALID_ARRAY_SIZE, "the size of an inline array is an integer constant");
+            return 0;
+        }
+        i64 length = Types.value_of(size);
+        if (length <= 0 || length > 1073741824) {
+            ByteBuffer* message = ByteBuffer.create();
+            message.append("an inline array holds 1 to 1073741824 elements, not ");
+            message.append_int(length);
+            this.template_error(DiagnosticErrors.INVALID_ARRAY_SIZE, message.cstr());
+            return 0;
+        }
+        return Types.array(element, length);
+    }
+
     public void describe_type(u32 id, ByteBuffer* out) {
         if (Types.is_pointer(id)) {
             this.describe_type(Types.element(id), out);
             out.append_char('*');
+            return;
+        }
+        if (Types.is_array(id)) {
+            this.describe_type(Types.element(id), out);
+            out.append_char('[');
+            out.append_int(Types.value_of(id));
+            out.append_char(']');
             return;
         }
         StructInfo* named = this.enum_of_type(id);
@@ -610,6 +864,59 @@ struct SymbolTable {
             return (StructInfo*)0;
         }
         return this.find_struct(atom, atom, (u32)library);
+    }
+
+    // 'arr<T>' passes where 'std::collections::slice<T>' is expected: both view a pointer and a length.
+    public unsafe bool views_as_slice(u32 passed, u32 wanted) {
+        if (!Types.is_struct(passed) || !Types.is_struct(wanted)) {
+            return false;
+        }
+        StructInfo* from = this.struct_at(Types.struct_index(passed));
+        StructInfo* to = this.struct_at(Types.struct_index(wanted));
+        if (from == null || to == null || from.origin == null || to.origin == null) {
+            return false;
+        }
+        AtomTable* atoms = Atoms.get();
+        i64 library = this.find_child_namespace(0, atoms.intern_copy("std::collections", 16));
+        if (library < 0) {
+            return false;
+        }
+        u32 slice_name = Ast.intern_base_name("slice", 5);
+        if (from.origin != this.find_core_struct(Ast.intern_base_name("arr", 3))
+            || to.origin != this.find_struct(slice_name, slice_name, (u32)library)) {
+            return false;
+        }
+        IdList* given = from.type_args;
+        IdList* expected = to.type_args;
+        return given.get(0) == expected.get(0);
+    }
+
+    // The runtime declares some std structs again ('StringMeta'): same name and same fields, one layout.
+    public unsafe bool redeclares(u32 passed, u32 wanted) {
+        if (passed == wanted) {
+            return true;
+        }
+        if (!Types.is_struct(passed) || !Types.is_struct(wanted)) {
+            return false;
+        }
+        StructInfo* from = this.struct_at(Types.struct_index(passed));
+        StructInfo* to = this.struct_at(Types.struct_index(wanted));
+        if (from == null || to == null || from.name_atom != to.name_atom || from.fields == null || to.fields == null) {
+            return false;
+        }
+        PointerList* given = from.fields;
+        PointerList* expected = to.fields;
+        if (given.length != expected.length) {
+            return false;
+        }
+        for (mut i32 f = 0; f < given.length; f = f + 1) {
+            FieldInfo* left = (FieldInfo*)given.get(f);
+            FieldInfo* right = (FieldInfo*)expected.get(f);
+            if (!this.redeclares(left.type, right.type)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     public unsafe StructInfo* struct_at(u32 index) {

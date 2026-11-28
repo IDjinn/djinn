@@ -33,6 +33,9 @@ struct TypeChecker {
 
     LambdaScope* lambda;
 
+    i64 template_value;
+    u32 folded_type;
+
     public static unsafe TypeChecker* create(Diagnostics* diagnostics, SymbolTable* symbols) {
         TypeChecker* checker = (TypeChecker*)Memory.zalloc(sizeof(TypeChecker));
         checker.borrows = PointerList.create();
@@ -41,6 +44,7 @@ struct TypeChecker {
         checker.symbols = symbols;
         checker.scopes = LocalScopes.create();
         checker.const_eval = ConstEval.create(checker);
+        symbols.checker = checker;
         return checker;
     }
 
@@ -71,16 +75,100 @@ struct TypeChecker {
     public u32 resolve_type(TypeRef* ref, Node* at) {
         SymbolTable* symbols = this.symbols;
         symbols.blame = at;
+        symbols.template_failed = false;
         u32 resolved = symbols.resolve_type(ref, this.scope);
         if (resolved == 0 && ref.is_brain_float()) {
             this.error_code(at, DiagnosticErrors.BRAIN_FLOAT_UNAVAILABLE, "bf16 is not available on this target (x86, ARM, AArch64 and RISC-V only)");
+            return Types.i32_type();
+        }
+        if (resolved == 0 && symbols.template_failed) {
             return Types.i32_type();
         }
         if (resolved == 0) {
             this.error_code(at, DiagnosticErrors.UNKNOWN_TYPE, "unknown type");
             return Types.i32_type();
         }
+        this.reject_unfit_array(resolved, at);
         return resolved;
+    }
+
+    // The most scalar values the inline arrays of one type may hold. Such a value is copied and passed as one LLVM
+    // value, which makes the compiler very slow, and then crashes it, as it grows.
+    const i64 MAX_INLINE_VALUES = 4096;
+    const i32 MAX_VALUE_NESTING = 64;
+
+    // Scalar values that 'type' holds in inline arrays (all of them when 'inside' one), counting just past the limit.
+    unsafe i64 inline_values(u32 type, bool inside, i32 depth) {
+        i64 over = TypeChecker.MAX_INLINE_VALUES + 1;
+        if (Types.is_array(type)) {
+            i64 each = this.inline_values(Types.element(type), true, depth + 1);
+            i64 length = Types.value_of(type);
+            if (each > 0 && length > TypeChecker.MAX_INLINE_VALUES / each) {
+                return over;
+            }
+            return length * each;
+        }
+        mut PointerList* fields = (PointerList*)0;
+        if (Types.is_struct(type) && depth < TypeChecker.MAX_VALUE_NESTING) {
+            SymbolTable* symbols = this.symbols;
+            StructInfo* info = symbols.struct_at(Types.struct_index(type));
+            if (info != null && !info.is_enum) {
+                fields = info.fields;
+            }
+        }
+        if (fields == null) {
+            if (inside) {
+                return 1;
+            }
+            return 0;
+        }
+        mut i64 total = 0;
+        for (mut i32 f = 0; f < fields.length && total < over; f = f + 1) {
+            FieldInfo* field = (FieldInfo*)fields.get(f);
+            total = total + this.inline_values(field.type, inside, depth + 1);
+        }
+        if (total > over) {
+            return over;
+        }
+        return total;
+    }
+
+    // An inline array is copied bit for bit and never disposed, so its elements must be trivially copyable, and it
+    // cannot be larger than the compiler can copy.
+    unsafe void reject_unfit_array(u32 type, Node* at) {
+        if (!Types.is_array(type)) {
+            return;
+        }
+        if (this.inline_values(type, false, 0) > TypeChecker.MAX_INLINE_VALUES) {
+            SymbolTable* described = this.symbols;
+            ByteBuffer* name = ByteBuffer.create();
+            described.describe_type(type, name);
+            this.report_inline_size(name.cstr(), at);
+            return;
+        }
+        mut u32 element = Types.element(type);
+        while (Types.is_array(element)) {
+            element = Types.element(element);
+        }
+        SymbolTable* symbols = this.symbols;
+        if (Ownership.is_copy(symbols, element)) {
+            return;
+        }
+        ByteBuffer* message = ByteBuffer.create();
+        message.append("an inline array holds trivially copyable elements, and '");
+        symbols.describe_type(element, message);
+        message.append("' owns resources: use an arr<T> or a List instead");
+        this.error_code(at, DiagnosticErrors.INVALID_ARRAY_SIZE, message.cstr());
+    }
+
+    unsafe void report_inline_size(ptr<i8> name, Node* at) {
+        ByteBuffer* message = ByteBuffer.create();
+        message.append("'");
+        message.append(name);
+        message.append("' holds more than ");
+        message.append_int(TypeChecker.MAX_INLINE_VALUES);
+        message.append(" values in inline arrays, which are copied as a whole: use an arr<T> or a List for a buffer this large");
+        this.error_code(at, DiagnosticErrors.INVALID_ARRAY_SIZE, message.cstr());
     }
 
     public unsafe bool run() {
@@ -124,8 +212,58 @@ struct TypeChecker {
                 this.check_function(info);
             }
         }
+        this.check_held_arrays();
         Diagnostics* diagnostics = this.diagnostics;
         return !diagnostics.failed();
+    }
+
+    // Runs last: checking a body creates instances, and their fields and signatures may hold inline arrays.
+    unsafe void check_held_arrays() {
+        SymbolTable* symbols = this.symbols;
+        PointerList* structs = symbols.structs;
+        for (mut i32 i = 0; i < structs.length; i = i + 1) {
+            StructInfo* info = (StructInfo*)structs.get(i);
+            PointerList* held_fields = info.fields;
+            if (info.is_template || held_fields == null || info.node == null) {
+                continue;
+            }
+            mut i64 held = 0;
+            mut bool field_too_large = false;
+            for (mut i32 f = 0; f < held_fields.length; f = f + 1) {
+                FieldInfo* field = (FieldInfo*)held_fields.get(f);
+                mut Node* at = field.node;
+                if (at == null) {
+                    at = info.node;
+                }
+                this.reject_unfit_array(field.type, at);
+                i64 values = this.inline_values(field.type, false, 0);
+                held = held + values;
+                if (values > TypeChecker.MAX_INLINE_VALUES) {
+                    field_too_large = true;
+                }
+            }
+            // Fields that each fit can still add up to too much.
+            if (!field_too_large && !info.is_enum && held > TypeChecker.MAX_INLINE_VALUES) {
+                this.report_inline_size(info.name, info.node);
+            }
+        }
+        PointerList* functions = symbols.functions;
+        for (mut i32 i = 0; i < functions.length; i = i + 1) {
+            FunctionInfo* info = (FunctionInfo*)functions.get(i);
+            Node* declaration = info.node;
+            IdList* types = info.param_types;
+            if (info.is_extern || info.is_template || declaration == null || types == null) {
+                continue;
+            }
+            mut i32 declared = 0;
+            while (declared < declaration.count() && declaration.child(declared).kind() == NodeKind::PARAMETER) {
+                declared = declared + 1;
+            }
+            i32 receiver = types.length - declared;
+            for (mut i32 p = 0; p < declared && receiver >= 0; p = p + 1) {
+                this.reject_unfit_array(types.get(receiver + p), declaration.child(p));
+            }
+        }
     }
 
     // Runs before the instances are checked, so an error both find is reported once, as the generic declares it.
@@ -195,6 +333,12 @@ struct TypeChecker {
             case NULL_LITERAL:
                 return this.check_null(expected);
             case IDENTIFIER:
+                if (this.folds_template_constant(node)) {
+                    if (this.folded_type != 0) {
+                        return this.folded_type;
+                    }
+                    return this.compute_expression(node, expected);
+                }
                 u32 converted = this.check_function_as_closure(node, expected);
                 if (converted != 0) {
                     return converted;
@@ -255,6 +399,39 @@ struct TypeChecker {
         return Types.i32_type();
     }
 
+    // 'N' of 'struct S<T, N>' inside an instance: the name becomes the literal it was given, so it folds,
+    // sizes arrays and adapts to the integer type around it like any literal does.
+    unsafe bool folds_template_constant(Node* node) {
+        SymbolTable* symbols = this.symbols;
+        U32Map* bindings = symbols.bindings;
+        if (bindings == null || node.text_atom() != node.name() || this.find_variable(node.name()) != null) {
+            return false;
+        }
+        i64 bound = bindings.find(node.name());
+        if (bound < 0 || !Types.is_value((u32)bound)) {
+            return false;
+        }
+        u32 type = Types.element((u32)bound);
+        i64 value = Types.value_of((u32)bound);
+        if (Types.bits(type) == 1 || Types.enum_index(type) >= 0) {
+            ConstEval* evaluator = this.const_eval;
+            evaluator.ri = value;
+            evaluator.rf = (f64)value;
+            evaluator.fold(node, type);
+            this.folded_type = type;
+            return true;
+        }
+        this.folded_type = 0;
+        node.flags = (u16)0;
+        node.set_kind(NodeKind::INT_LITERAL);
+        node.set_int_value(value);
+        ByteBuffer* digits = ByteBuffer.create();
+        digits.append_int(value);
+        node.set_text(digits.cstr());
+        node.set_flag(Types.is_char(type));
+        return true;
+    }
+
     unsafe u32 measured_type_of_operand(Node* node) {
         TypeRef* reference = node.type();
         if (reference.kind == TypeKind.NAMED && reference.args == null) {
@@ -267,7 +444,62 @@ struct TypeChecker {
         return this.resolve_type(reference, node);
     }
 
+    // 'type_trait(T, integer)', 'same_type(A, B)': folded to a bool literal here, so 'if constexpr' can branch
+    // on them in generic code and only the taken branch is checked.
+    unsafe u32 check_type_question(Node* node) {
+        u32 subject = this.resolve_type(node.type(), node);
+        mut bool answer = false;
+        if (node.op() == Intrinsic.SAME_TYPE) {
+            Node* other = node.first();
+            answer = subject == this.resolve_type(other.type(), node);
+        } else {
+            SymbolTable* symbols = this.symbols;
+            bool is_enum = symbols.enum_of_type(subject) != null;
+            bool flag = Types.is_integer(subject) && Types.bits(subject) == 1;
+            bool integer = Types.is_integer(subject) && !flag && !Types.is_char(subject) && !is_enum;
+            ptr<i8> trait = node.text();
+            if (Strings.same(trait, "integer")) {
+                answer = integer;
+            } else if (Strings.same(trait, "signed")) {
+                answer = (integer && Types.is_signed(subject)) || Types.is_float(subject);
+            } else if (Strings.same(trait, "unsigned")) {
+                answer = integer && !Types.is_signed(subject);
+            } else if (Strings.same(trait, "float")) {
+                answer = Types.is_float(subject);
+            } else if (Strings.same(trait, "number")) {
+                answer = integer || Types.is_float(subject);
+            } else if (Strings.same(trait, "bool")) {
+                answer = flag;
+            } else if (Strings.same(trait, "char")) {
+                answer = Types.is_char(subject);
+            } else if (Strings.same(trait, "pointer")) {
+                answer = Types.is_pointer(subject);
+            } else if (Strings.same(trait, "enum")) {
+                answer = is_enum;
+            } else if (Strings.same(trait, "struct")) {
+                answer = Types.is_struct(subject) && !is_enum;
+            } else if (Strings.same(trait, "array")) {
+                answer = Types.is_array(subject);
+            } else if (Strings.same(trait, "copyable")) {
+                answer = Ownership.is_copy(symbols, subject);
+            } else {
+                this.error_code(node, DiagnosticErrors.INVALID_TYPE_TRAIT, "unknown trait: expected integer, signed, unsigned, float, number, bool, char, pointer, struct, enum, array or copyable");
+            }
+        }
+        node.flags = (u16)0;
+        node.set_kind(NodeKind::BOOL_LITERAL);
+        if (answer) {
+            node.set_int_value(1);
+        } else {
+            node.set_int_value(0);
+        }
+        return Types.bool_type();
+    }
+
     unsafe u32 check_intrinsic_expression(Node* node) {
+        if (node.op() == Intrinsic.TYPE_TRAIT || node.op() == Intrinsic.SAME_TYPE) {
+            return this.check_type_question(node);
+        }
         if (node.op() != Intrinsic.SIZEOF && node.op() != Intrinsic.ALIGNOF) {
             return this.check_intrinsic(node);
         }

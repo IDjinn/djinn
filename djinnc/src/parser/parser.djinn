@@ -78,18 +78,19 @@ struct Parser {
             if (endsType && i + 3 < file.token_end && list.kind(i + 1) == TokenKind::IDENTIFIER
                 && list.kind(i + 2) == TokenKind::LESS && list.kind(i + 3) == TokenKind::IDENTIFIER) {
                 mut i32 scan = i + 3;
-                while (scan + 1 < file.token_end && list.kind(scan) == TokenKind::IDENTIFIER && list.kind(scan + 1) == TokenKind::COMMA) {
-                    scan = scan + 2;
+                while (scan + 1 < file.token_end && list.kind(scan) == TokenKind::IDENTIFIER) {
+                    if (list.kind(scan + 1) == TokenKind::IDENTIFIER) {
+                        scan = scan + 1;
+                    }
+                    if (scan + 1 < file.token_end && list.kind(scan + 1) == TokenKind::COMMA) {
+                        scan = scan + 2;
+                    } else {
+                        break;
+                    }
                 }
                 if (scan + 2 < file.token_end && list.kind(scan) == TokenKind::IDENTIFIER
                     && list.kind(scan + 1) == TokenKind::GREATER && list.kind(scan + 2) == TokenKind::LPAREN) {
-                    mut i32 cursor = i + 3;
-                    while (cursor <= scan) {
-                        if (list.kind(cursor) == TokenKind::IDENTIFIER) {
-                            names.put(list.atom(cursor), 1);
-                        }
-                        cursor = cursor + 1;
-                    }
+                    Parser.collect_parameter_names(list, i + 3, scan + 1, names);
                 }
             }
             if (kind == TokenKind::IDENTIFIER && Strings.equals(list.text(i), list.text_length(i), "attribute")) {
@@ -111,13 +112,28 @@ struct Parser {
                 if (list.kind(name_at + 1) == TokenKind::LESS) {
                     mut i32 cursor = name_at + 2;
                     while (cursor < file.token_end && list.kind(cursor) == TokenKind::IDENTIFIER) {
-                        names.put(list.atom(cursor), 1);
                         cursor = cursor + 1;
                         if (list.kind(cursor) == TokenKind::COMMA) {
                             cursor = cursor + 1;
                         }
                     }
+                    Parser.collect_parameter_names(list, name_at + 2, cursor, names);
                 }
+            }
+        }
+    }
+
+    // Registers the parameters of '<A, B, i32 N>' that may stand for a type. A typed parameter ('i32 N') is
+    // always a constant, so its name stays an ordinary name and 'N * 2' keeps parsing as a product.
+    static void collect_parameter_names(TokenList* list, i32 from, i32 to, U32Map* names) {
+        for (mut i32 cursor = from; cursor < to; cursor = cursor + 1) {
+            if (list.kind(cursor) != TokenKind::IDENTIFIER) {
+                continue;
+            }
+            bool typed = list.kind(cursor + 1) == TokenKind::IDENTIFIER;
+            bool named_after_type = cursor > from && list.kind(cursor - 1) == TokenKind::IDENTIFIER;
+            if (!typed && !named_after_type) {
+                names.put(list.atom(cursor), 1);
             }
         }
     }

@@ -794,6 +794,11 @@ float erff(float x) { return (float)erf(x); }
 float erfcf(float x) { return (float)erfc(x); }
 float tgammaf(float x) { return (float)tgamma(x); }
 float lgammaf(float x) { return (float)lgamma(x); }
+#include "fma.c"
+double fma(double x, double y, double z) { return fma_exact(x, y, z); }
+float fmaf(float x, float y, float z) { return fma_exact_float(x, y, z); }
+double round(double x) { return round_away(x); }
+float roundf(float x) { return round_away_float(x); }
 
 // ── 128-bit integers ────────────────────────────────────────────────────────────────────────────────────────────────
 //
@@ -879,6 +884,8 @@ __int128 __multi3(__int128 left, __int128 right)
 }
 
 #include "../int128.c"
+// The f16 and bf16 conversions, which WebAssembly has no instructions for.
+#include "../float16.c"
 
 // ── Reflection and calls ────────────────────────────────────────────────────────────────────────────────────────────
 

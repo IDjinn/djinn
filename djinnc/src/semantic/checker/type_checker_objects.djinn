@@ -298,6 +298,24 @@ impl TypeChecker {
 
     u32 check_array_literal(Node* node, u32 expected) {
         SymbolTable* symbols = this.symbols;
+        if (expected != 0 && Types.is_array(expected)) {
+            if ((i64)node.count() != Types.value_of(expected)) {
+                ByteBuffer* message = ByteBuffer.create();
+                message.append("the literal has ");
+                message.append_int((i64)node.count());
+                message.append(" elements, but '");
+                symbols.describe_type(expected, message);
+                message.append("' holds ");
+                message.append_int(Types.value_of(expected));
+                this.error_code(node, DiagnosticErrors.INVALID_ARRAY_SIZE, message.cstr());
+            }
+            u32 held = Types.element(expected);
+            for (mut i32 i = 0; i < node.count(); i = i + 1) {
+                Node* item = node.child(i);
+                this.require_value_type(item, this.check_expression(item, held), held);
+            }
+            return expected;
+        }
         mut u32 element = this.array_element(expected);
         if (element == 0 && node.count() == 0) {
             this.error_code(node, DiagnosticErrors.LITERAL_NEEDS_CONTEXT, "an empty array literal needs an array type from its context");
@@ -331,6 +349,9 @@ impl TypeChecker {
         mut u32 expected = declared;
         if (node.type() != null) {
             expected = this.resolve_type(node.type(), node);
+        }
+        if (expected != 0 && Types.is_array(expected) && node.count() == 0) {
+            return expected;
         }
         if (expected == 0 || !Types.is_struct(expected) || symbols.enum_of_type(expected) != null) {
             this.error_code(node, DiagnosticErrors.LITERAL_NEEDS_CONTEXT, "a struct initializer needs a struct type from its context");

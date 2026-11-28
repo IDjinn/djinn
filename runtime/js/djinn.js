@@ -22,3 +22,5 @@ const $ck = (value, min, max) => value >= min && value <= max ? value : $overflo
 const $sat = (value, min, max) => value < min ? min : value > max ? max : value;
 const $div = (left, right) => right === 0 ? $panic("division by zero") : Math.trunc(left / right);
 const $rem = (left, right) => right === 0 ? $panic("division by zero") : left % right;
+// The index of an inline array 'T[N]', checked against its length like the native build.
+const $at = (index, length) => index >= 0 && index < length ? index : $panic("R10010: index out of range");

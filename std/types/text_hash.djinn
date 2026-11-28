@@ -1,3 +1,6 @@
+import std::simd;
+import std::sys;
+
 namespace std::types;
 
 struct TextHash {
@@ -48,7 +51,75 @@ struct TextHash {
         return TextHash.mix(a ^ k1, b ^ seed);
     }
 
+    // Texts over 64 bytes: the AVX2 stripe loop when the CPU has it (the program itself is built for baseline x86-64),
+    // the SSE2 one on other x86-64 CPUs, the scalar one elsewhere. All give the same value, and the compiler folds
+    // literals with the scalar definition.
     static unsafe u64w long_text(i8* data, size length) {
+        if constexpr Arch.X64 && !Platform.Web {
+            if (Cpu.has_avx2()) {
+                return TextHash.long_text_avx2(data, length);
+            }
+            return TextHash.long_text_vectors(data, length);
+        }
+        return TextHash.long_text_scalar(data, length);
+    }
+
+    [Target("avx2")] static unsafe u64w long_text_avx2(i8* data, size length) {
+        return TextHash.long_text_vectors(data, length);
+    }
+
+    // The scalar loop on two vector<u64, 4>: lanes 0-3 and 4-7 of every stripe. Lane i adds its word, its neighbour's
+    // (swap_pairs) and the 32x32 product of its keyed halves (multiply_low32: pmuludq on SSE2, vpmuludq on AVX2).
+    [ForceInline] static unsafe u64w long_text_vectors(i8* data, size length) {
+        vector<u64, 4> keys_low = vector<u64, 4>.of([13898507668257350876, 9874931141998527612, 12936763147494389601, 7639117502952287850]);
+        vector<u64, 4> keys_high = vector<u64, 4>.of([325179382338061662, 17399041339907576624, 4115426874723844861, 5453732345331108626]);
+        vector<u64, 4> size_mix = vector<u64, 4>.splat((u64)length);
+        mut vector<u64, 4> acc_low = vector<u64, 4>.of([7639117502952287850, 325179382338061662, 17399041339907576624, 4115426874723844861]) ^ size_mix;
+        mut vector<u64, 4> acc_high = vector<u64, 4>.of([5453732345331108626, 13898507668257350876, 9874931141998527612, 12936763147494389601]) ^ size_mix;
+        mut size at = 0;
+        mut bool more = true;
+        while (more) {
+            i8* stripe = data + at;
+            vector<u64, 4> d_low = vector<u64, 4>.load_unaligned((u64*)stripe);
+            vector<u64, 4> d_high = vector<u64, 4>.load_unaligned((u64*)(stripe + 32));
+            vector<u64, 4> x_low = d_low ^ keys_low;
+            vector<u64, 4> x_high = d_high ^ keys_high;
+            acc_low = acc_low + d_low.swap_pairs() + x_low.multiply_low32(x_low.shift_right(32));
+            acc_high = acc_high + d_high.swap_pairs() + x_high.multiply_low32(x_high.shift_right(32));
+            if (at + 64 >= length) {
+                more = false;
+            } else {
+                at = at + 64;
+                if (at + 64 > length) {
+                    at = length - 64;
+                }
+            }
+        }
+        return TextHash.finish_long(acc_low[0], acc_low[1], acc_low[2], acc_low[3], acc_high[0], acc_high[1], acc_high[2], acc_high[3], (u64w)length);
+    }
+
+    [ForceInline] static u64w finish_long(u64w acc0, u64w acc1, u64w acc2, u64w acc3, u64w acc4, u64w acc5, u64w acc6, u64w acc7, u64w size_mix) {
+        u64w key0 = 13898507668257350876;
+        u64w key1 = 9874931141998527612;
+        u64w key2 = 12936763147494389601;
+        u64w key3 = 7639117502952287850;
+        u64w key4 = 325179382338061662;
+        u64w key5 = 17399041339907576624;
+        u64w key6 = 4115426874723844861;
+        u64w key7 = 5453732345331108626;
+        mut u64w h = 11400714819323198485 ^ size_mix;
+        h = TextHash.mix(acc0 ^ key7, h ^ key0);
+        h = TextHash.mix(acc1 ^ key6, h ^ key1);
+        h = TextHash.mix(acc2 ^ key5, h ^ key2);
+        h = TextHash.mix(acc3 ^ key4, h ^ key3);
+        h = TextHash.mix(acc4 ^ key3, h ^ key4);
+        h = TextHash.mix(acc5 ^ key2, h ^ key5);
+        h = TextHash.mix(acc6 ^ key1, h ^ key6);
+        h = TextHash.mix(acc7 ^ key0, h ^ key7);
+        return h;
+    }
+
+    static unsafe u64w long_text_scalar(i8* data, size length) {
         u64w key0 = 13898507668257350876;
         u64w key1 = 9874931141998527612;
         u64w key2 = 12936763147494389601;
@@ -68,7 +139,6 @@ struct TextHash {
         mut u64w acc7 = key2 ^ size_mix;
         mut size at = 0;
         mut bool more = true;
-        [Vectorize]
         while (more) {
             i8* stripe = data + at;
             u64w d0 = TextHash.read64(stripe);
@@ -96,16 +166,22 @@ struct TextHash {
                 }
             }
         }
-        mut u64w h = 11400714819323198485 ^ size_mix;
-        h = TextHash.mix(acc0 ^ key7, h ^ key0);
-        h = TextHash.mix(acc1 ^ key6, h ^ key1);
-        h = TextHash.mix(acc2 ^ key5, h ^ key2);
-        h = TextHash.mix(acc3 ^ key4, h ^ key3);
-        h = TextHash.mix(acc4 ^ key3, h ^ key4);
-        h = TextHash.mix(acc5 ^ key2, h ^ key5);
-        h = TextHash.mix(acc6 ^ key1, h ^ key6);
-        h = TextHash.mix(acc7 ^ key0, h ^ key7);
-        return h;
+        return TextHash.finish_long(acc0, acc1, acc2, acc3, acc4, acc5, acc6, acc7, size_mix);
+    }
+
+    // of() through one path, for the tests that check all of them agree: 0 = scalar, 1 = vectors at the target's
+    // baseline (SSE2 on x86-64), 2 = AVX2 (only on a CPU that has it).
+    public static unsafe u64 of_path(i8* data, size length, i32 path) {
+        if (length <= 64) {
+            return (u64)TextHash.short_text(data, length);
+        }
+        if (path == 2) {
+            return (u64)TextHash.long_text_avx2(data, length);
+        }
+        if (path == 1) {
+            return (u64)TextHash.long_text_vectors(data, length);
+        }
+        return (u64)TextHash.long_text_scalar(data, length);
     }
 
     public static unsafe u64 of(i8* data, size length) {

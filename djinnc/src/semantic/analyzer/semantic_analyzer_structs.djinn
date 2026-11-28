@@ -208,6 +208,9 @@ impl SemanticAnalyzer {
             StructInfo* known = symbols.struct_at((u32)existing);
             return known.type_id;
         }
+        if (!this.accepts_lanes(template, args) || !this.accepts_depth(template.name, blame)) {
+            return Types.i32_type();
+        }
 
         ByteBuffer* name = ByteBuffer.create();
         name.append(template.name);
@@ -223,14 +226,17 @@ impl SemanticAnalyzer {
 
         StructInfo* info = this.new_struct(Node.clone(template.node), template.namespace_id, name.cstr(), name_atom);
         info.origin = template;
-        if (Target.is_js()) {
-            Node* original = template.node;
-            Node* copy = info.node;
-            for (mut i32 m = 0; m < original.count() && m < copy.count(); m = m + 1) {
-                Attributes.copy_tree(original.child(m), copy.child(m));
+        Node* original_members = template.node;
+        Node* copied_members = info.node;
+        for (mut i32 m = 0; m < original_members.count() && m < copied_members.count(); m = m + 1) {
+            if (Target.is_js()) {
+                Attributes.copy_tree(original_members.child(m), copied_members.child(m));
+            } else {
+                Attributes.copy_lowering(original_members.child(m), copied_members.child(m));
             }
         }
         info.type_args = args;
+        info.depth = symbols.template_depth + 1;
         info.bindings = U32Map.create(Memory.arena(), 8);
         U32Map* bindings = info.bindings;
         IdList* names = params.names;
@@ -245,6 +251,8 @@ impl SemanticAnalyzer {
         u32 saved_scope = this.scope;
         this.scope = info.namespace_id;
         symbols.bindings = info.bindings;
+        i32 saved_depth = symbols.template_depth;
+        symbols.template_depth = info.depth;
         this.finish_struct(info, info.node);
         this.resolve_members(info);
         Node* declaration = info.node;
@@ -271,6 +279,8 @@ impl SemanticAnalyzer {
                     Node* member_copy = Node.clone(member);
                     if (Target.is_js()) {
                         Attributes.copy_tree(member, member_copy);
+                    } else {
+                        Attributes.copy_lowering(member, member_copy);
                     }
                     FunctionInfo* method = this.build_function(member_copy, false, info, false);
                     if (method != null) {
@@ -293,7 +303,71 @@ impl SemanticAnalyzer {
         symbols.bindings = saved_bindings;
         this.scope = saved_scope;
         symbols.blame = blame;
+        symbols.template_depth = saved_depth;
         return info.type_id;
+    }
+
+    // A template that names a new instance of itself in each instance would never end.
+    unsafe bool accepts_depth(ptr<i8> name, Node* blame) {
+        SymbolTable* symbols = this.symbols;
+        if (symbols.template_depth < SemanticAnalyzer.MAX_TEMPLATE_DEPTH) {
+            return true;
+        }
+        ByteBuffer* message = ByteBuffer.create();
+        message.append("'");
+        message.append(name);
+        message.append("' nests more than ");
+        message.append_int((i64)SemanticAnalyzer.MAX_TEMPLATE_DEPTH);
+        message.append(" template instances: give the recursion a final case");
+        this.error_code(blame, DiagnosticErrors.TEMPLATE_DEPTH_EXCEEDED, message.cstr());
+        return false;
+    }
+
+    // 'std::simd::vector<T, N>' takes integer or float lanes, and both it and 'mask<N>' take 1 to 64 of them.
+    unsafe bool accepts_lanes(StructInfo* template, IdList* args) {
+        bool is_vector = template.name_atom == Ast.intern_base_name("vector", 6);
+        if (!is_vector && template.name_atom != Ast.intern_base_name("mask", 4)) {
+            return true;
+        }
+        SymbolTable* symbols = this.symbols;
+        // A shape a signature asks for is reported at the call that chose it, not inside the template.
+        Node* blame = this.instance_site != null ? this.instance_site : symbols.blame;
+        AtomTable* atoms = Atoms.get();
+        i64 library = symbols.find_child_namespace(0, atoms.intern_copy("std::simd", 9));
+        if (library < 0 || template.namespace_id != (u32)library) {
+            return true;
+        }
+        if (is_vector) {
+            u32 lane = args.get(0);
+            bool number = Types.is_float(lane)
+                || (Types.is_integer(lane) && Types.bits(lane) > 1 && !Types.is_char(lane) && Types.enum_index(lane) < 0);
+            if (Types.is_value(lane) || !number) {
+                ByteBuffer* message = ByteBuffer.create();
+                message.append("a 'vector' lane is an integer or a float, not '");
+                symbols.describe_type(lane, message);
+                message.append("'");
+                this.error_code(blame, DiagnosticErrors.INVALID_LANE_SHAPE, message.cstr());
+                this.refused_shapes = this.refused_shapes + 1;
+                return false;
+            }
+        }
+        u32 count = args.get(args.length - 1);
+        mut bool counts = false;
+        if (Types.is_value(count)) {
+            u32 kind = Types.element(count);
+            counts = Types.bits(kind) > 1 && !Types.is_char(kind) && Types.enum_index(kind) < 0
+                && Types.value_of(count) >= 1 && Types.value_of(count) <= 64;
+        }
+        if (counts) {
+            return true;
+        }
+        ByteBuffer* message = ByteBuffer.create();
+        message.append(is_vector ? "'vector' takes 1 to 64 lanes, not '" : "'mask' takes 1 to 64 lanes, not '");
+        symbols.describe_type(count, message);
+        message.append("'");
+        this.error_code(blame, DiagnosticErrors.INVALID_LANE_SHAPE, message.cstr());
+        this.refused_shapes = this.refused_shapes + 1;
+        return false;
     }
 
     unsafe void check_pending_bounds() {

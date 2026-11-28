@@ -1,0 +1,756 @@
+namespace djinnc;
+
+// [Simd("op")] on a function of std::simd: the body is generated as LLVM vector IR instead of the Djinn loop it was
+// written with. Elsewhere the attribute does nothing. A vector is any struct whose only field is an inline array of numbers or bools ('T[N] lanes'), and it
+// is loaded as '<N x T>' from that array. Generic vector IR is legal on every LLVM target: one without SIMD splits it
+// into scalar code, so the instructions of the target are used when it has them and plain code when it has not. An
+// operation the generator does not handle for these lane types keeps the Djinn body (the reference the web target runs).
+impl CodeGenerator {
+    unsafe ptr<i8> simd_operation(FunctionInfo* info) {
+        if (info.node == null || info.is_async || info.has_throws) {
+            return (ptr<i8>)0;
+        }
+        // The operations read operands by position and trust their shapes, so only the std's own are lowered.
+        SymbolTable* symbols = this.symbols;
+        AtomTable* atoms = Atoms.get();
+        i64 library = symbols.find_child_namespace(0, atoms.intern_copy("std::simd", 9));
+        if (library < 0 || info.namespace_id != (u32)library) {
+            return (ptr<i8>)0;
+        }
+        PointerList* uses = Attributes.of(info.node);
+        for (mut i32 i = 0; i < uses.length; i = i + 1) {
+            AttributeUse* use = (AttributeUse*)uses.get(i);
+            if (Strings.same(use.name, "Simd") && use.text_arg != null) {
+                return use.text_arg;
+            }
+        }
+        return (ptr<i8>)0;
+    }
+
+    // The 'T[N]' of a vector-shaped struct, or 0.
+    unsafe u32 simd_lanes_of(u32 type) {
+        if (type == 0 || !Types.is_struct(type)) {
+            return 0;
+        }
+        StructInfo* info = this.struct_of(type);
+        if (info == null || info.fields == null || info.is_enum) {
+            return 0;
+        }
+        PointerList* fields = info.fields;
+        if (fields.length != 1) {
+            return 0;
+        }
+        FieldInfo* field = (FieldInfo*)fields.get(0);
+        if (!Types.is_array(field.type) || Types.value_of(field.type) > 64) {
+            return 0;
+        }
+        u32 element = Types.element(field.type);
+        if (Types.is_brain_float(element) || (Types.is_float(element) && Types.bits(element) == 16)) {
+            return 0;
+        }
+        if (!Types.is_integer(element) && !Types.is_float(element)) {
+            return 0;
+        }
+        return field.type;
+    }
+
+    u32 simd_element(u32 type) {
+        return Types.element(this.simd_lanes_of(type));
+    }
+
+    u32 simd_count(u32 type) {
+        return (u32)Types.value_of(this.simd_lanes_of(type));
+    }
+
+    bool simd_is_mask(u32 type) {
+        u32 element = this.simd_element(type);
+        return Types.is_integer(element) && Types.bits(element) == 1;
+    }
+
+    ptr simd_vector_type(u32 type) {
+        return LLVMVectorType(this.llvm_type(this.simd_element(type)), this.simd_count(type));
+    }
+
+    u32 simd_element_bytes(u32 type) {
+        u32 element = this.simd_element(type);
+        if (Types.bits(element) < 8) {
+            return 1;
+        }
+        return Types.bits(element) / 8;
+    }
+
+    // A bool lane is a byte in memory and an i1 in the vector.
+    unsafe ptr simd_load(ptr address, u32 type) {
+        u32 count = this.simd_count(type);
+        if (this.simd_is_mask(type)) {
+            ptr bytes = LLVMVectorType(LLVMIntTypeInContext(this.context, 8), count);
+            ptr loaded = LLVMBuildLoad2(this.builder, bytes, address, "mask.bytes");
+            LLVMSetAlignment(loaded, 1);
+            return LLVMBuildICmp(this.builder, LlvmConst.INT_NE, loaded, LLVMConstNull(bytes), "mask");
+        }
+        ptr vector = LLVMBuildLoad2(this.builder, this.simd_vector_type(type), address, "lanes");
+        LLVMSetAlignment(vector, this.simd_element_bytes(type));
+        return vector;
+    }
+
+    unsafe void simd_store(ptr vector, ptr address, u32 type) {
+        mut ptr stored = vector;
+        if (this.simd_is_mask(type)) {
+            ptr bytes = LLVMVectorType(LLVMIntTypeInContext(this.context, 8), this.simd_count(type));
+            stored = LLVMBuildCast(this.builder, LlvmConst.OP_ZEXT, vector, bytes, "mask.bytes");
+        }
+        ptr store = LLVMBuildStore(this.builder, stored, address);
+        LLVMSetAlignment(store, this.simd_element_bytes(type));
+    }
+
+    unsafe void simd_return(FunctionInfo* info, ptr result) {
+        this.emit_drops(0);
+        this.emit_frame_pop();
+        if (Types.is_void(info.return_type)) {
+            LLVMBuildRetVoid(this.builder);
+            return;
+        }
+        if (this.simd_lanes_of(info.return_type) == 0) {
+            LLVMBuildRet(this.builder, result);
+            return;
+        }
+        ptr slot = this.create_slot(info.return_type, "simd.result");
+        this.simd_store(result, slot, info.return_type);
+        LLVMBuildRet(this.builder, LLVMBuildLoad2(this.builder, this.llvm_type(info.return_type), slot, "simd.value"));
+    }
+
+    // The operands in order: the receiver of a method first, then the parameters.
+    unsafe u32 simd_operand_type(FunctionInfo* info, i32 index) {
+        mut i32 position = index;
+        if (info.is_instance) {
+            if (index == 0) {
+                LocalVariable* self = info.this_variable;
+                return Types.element(self.type);
+            }
+            position = index - 1;
+        }
+        Node* declaration = info.node;
+        if (position >= declaration.count()) {
+            return 0;
+        }
+        LocalVariable* variable = (LocalVariable*)declaration.child(position).symbol();
+        return variable.type;
+    }
+
+    unsafe ptr simd_operand(FunctionInfo* info, i32 index) {
+        mut i32 position = index;
+        if (info.is_instance) {
+            if (index == 0) {
+                LocalVariable* self = info.this_variable;
+                return this.simd_load(LLVMGetParam(info.function, 0), Types.element(self.type));
+            }
+            position = index - 1;
+        }
+        Node* declaration = info.node;
+        LocalVariable* variable = (LocalVariable*)declaration.child(position).symbol();
+        if (this.simd_lanes_of(variable.type) != 0) {
+            return this.simd_load(variable.slot, variable.type);
+        }
+        return LLVMBuildLoad2(this.builder, this.llvm_type(variable.type), variable.slot, "simd.scalar");
+    }
+
+    unsafe i32 simd_operand_count(FunctionInfo* info) {
+        Node* declaration = info.node;
+        if (info.is_instance) {
+            return declaration.count() + 1;
+        }
+        return declaration.count();
+    }
+
+    unsafe ptr simd_splat(ptr scalar, u32 type) {
+        ptr vector_type = this.simd_vector_type(type);
+        ptr i32_type = LLVMIntTypeInContext(this.context, 32);
+        ptr single = LLVMBuildInsertElement(this.builder, LLVMGetPoison(vector_type), scalar, LLVMConstInt(i32_type, 0, 0), "splat.first");
+        ptr<ptr> zeros = CodeGenerator.array_of((i32)this.simd_count(type));
+        for (mut i32 i = 0; i < (i32)this.simd_count(type); i = i + 1) {
+            zeros[i] = LLVMConstInt(i32_type, 0, 0);
+        }
+        ptr mask = LLVMConstVector(zeros, this.simd_count(type));
+        return LLVMBuildShuffleVector(this.builder, single, LLVMGetPoison(vector_type), mask, "splat");
+    }
+
+    unsafe ptr simd_constant(u32 type, u64 value) {
+        return this.simd_splat(LLVMConstInt(this.llvm_type(this.simd_element(type)), value, 0), type);
+    }
+
+    // A shuffle whose indices are lane numbers of 'first' followed by those of 'second'.
+    unsafe ptr simd_shuffle(ptr first, ptr second, ptr<i32> order, i32 count, ptr<i8> name) {
+        ptr i32_type = LLVMIntTypeInContext(this.context, 32);
+        ptr<ptr> lanes = CodeGenerator.array_of(count);
+        for (mut i32 i = 0; i < count; i = i + 1) {
+            lanes[i] = LLVMConstInt(i32_type, (u64)order[i], 0);
+        }
+        return LLVMBuildShuffleVector(this.builder, first, second, LLVMConstVector(lanes, (u32)count), name);
+    }
+
+    unsafe ptr simd_call(ptr<i8> name, ptr overload, ptr<ptr> args, i32 count) {
+        ptr<ptr> types = CodeGenerator.array_of(1);
+        types[0] = overload;
+        return this.coro_intrinsic(name, types, 1, args, count, "simd");
+    }
+
+    unsafe ptr simd_unary_call(ptr<i8> name, ptr value) {
+        ptr<ptr> args = CodeGenerator.array_of(1);
+        args[0] = value;
+        return this.simd_call(name, LLVMTypeOf(value), args, 1);
+    }
+
+    unsafe ptr simd_binary_call(ptr<i8> name, ptr left, ptr right) {
+        ptr<ptr> args = CodeGenerator.array_of(2);
+        args[0] = left;
+        args[1] = right;
+        return this.simd_call(name, LLVMTypeOf(left), args, 2);
+    }
+
+    unsafe ptr simd_reduce(ptr<i8> name, ptr value) {
+        ptr<ptr> args = CodeGenerator.array_of(1);
+        args[0] = value;
+        ptr<ptr> types = CodeGenerator.array_of(1);
+        types[0] = LLVMTypeOf(value);
+        return this.coro_intrinsic(name, types, 1, args, 1, "reduce");
+    }
+
+    // Lanes twice as wide, for the products and sums that must not overflow before they are narrowed again.
+    ptr simd_wide_type(u32 type) {
+        u32 bits = Types.bits(this.simd_element(type));
+        return LLVMVectorType(LLVMIntTypeInContext(this.context, bits * 2), this.simd_count(type));
+    }
+
+    // A struct the function takes or returns that has no vector form (16-bit float lanes): reading it as lanes would
+    // be wrong, so the whole operation keeps its body.
+    unsafe bool simd_lacks_a_form(FunctionInfo* info, i32 operands) {
+        for (mut i32 i = 0; i < operands; i = i + 1) {
+            u32 type = this.simd_operand_type(info, i);
+            if (type != 0 && Types.is_struct(type) && this.simd_lanes_of(type) == 0) {
+                return true;
+            }
+        }
+        u32 returned = info.return_type;
+        return Types.is_struct(returned) && this.simd_lanes_of(returned) == 0;
+    }
+
+    // Returns false to keep the Djinn body: the operation is unknown or not lowered for these lanes.
+    unsafe bool generate_simd_body(FunctionInfo* info) {
+        ptr<i8> op = this.simd_operation(info);
+        if (op == null || Target.is_js()) {
+            return false;
+        }
+        i32 operands = this.simd_operand_count(info);
+        if (this.simd_lacks_a_form(info, operands)) {
+            return false;
+        }
+        mut u32 shape = info.return_type;
+        if (operands > 0 && this.simd_lanes_of(this.simd_operand_type(info, 0)) != 0) {
+            shape = this.simd_operand_type(info, 0);
+        }
+        if (this.simd_lanes_of(shape) == 0 && !Strings.same(op, "load")) {
+            return false;
+        }
+        if (Strings.same(op, "load")) {
+            if (this.simd_lanes_of(info.return_type) == 0 || this.simd_is_mask(info.return_type)) {
+                return false;
+            }
+            ptr address = this.simd_operand(info, 0);
+            ptr loaded = LLVMBuildLoad2(this.builder, this.simd_vector_type(info.return_type), address, "load.unaligned");
+            LLVMSetAlignment(loaded, 1);
+            this.simd_return(info, loaded);
+            return true;
+        }
+        u32 element = this.simd_element(shape);
+        bool is_float = Types.is_float(element);
+        bool is_signed = Types.is_signed(element);
+        bool is_mask = this.simd_is_mask(shape);
+        mut ptr result = (ptr)0;
+        if (Strings.same(op, "splat")) {
+            result = this.simd_splat(this.simd_operand(info, 0), info.return_type);
+        } else if (Strings.same(op, "zero")) {
+            result = LLVMConstNull(this.simd_vector_type(info.return_type));
+        } else if (Strings.same(op, "store")) {
+            if (is_mask) {
+                return false;
+            }
+            ptr store = LLVMBuildStore(this.builder, this.simd_operand(info, 0), this.simd_operand(info, 1));
+            LLVMSetAlignment(store, 1);
+        } else {
+            result = this.simd_lane_operation(info, op, shape, element, is_float, is_signed, is_mask);
+            if (result == null) {
+                return false;
+            }
+        }
+        this.simd_return(info, result);
+        return true;
+    }
+
+    unsafe ptr simd_lane_operation(FunctionInfo* info, ptr<i8> op, u32 shape, u32 element, bool is_float, bool is_signed, bool is_mask) {
+        bool integer = !is_float;
+        if (Strings.same(op, "add") || Strings.same(op, "subtract") || Strings.same(op, "multiply") || Strings.same(op, "divide")) {
+            if (is_mask || (integer && Strings.same(op, "divide"))) {
+                return (ptr)0;
+            }
+            ptr left = this.simd_operand(info, 0);
+            ptr right = this.simd_operand(info, 1);
+            if (Strings.same(op, "add")) {
+                if (is_float) { return LLVMBuildFAdd(this.builder, left, right, "add"); }
+                return LLVMBuildAdd(this.builder, left, right, "add");
+            }
+            if (Strings.same(op, "subtract")) {
+                if (is_float) { return LLVMBuildFSub(this.builder, left, right, "sub"); }
+                return LLVMBuildSub(this.builder, left, right, "sub");
+            }
+            if (Strings.same(op, "multiply")) {
+                if (is_float) { return LLVMBuildFMul(this.builder, left, right, "mul"); }
+                return LLVMBuildMul(this.builder, left, right, "mul");
+            }
+            return LLVMBuildFDiv(this.builder, left, right, "div");
+        }
+        if (Strings.same(op, "and") || Strings.same(op, "or") || Strings.same(op, "xor")) {
+            if (is_float) {
+                return (ptr)0;
+            }
+            ptr left = this.simd_operand(info, 0);
+            ptr right = this.simd_operand(info, 1);
+            if (Strings.same(op, "and")) { return LLVMBuildAnd(this.builder, left, right, "and"); }
+            if (Strings.same(op, "or")) { return LLVMBuildOr(this.builder, left, right, "or"); }
+            return LLVMBuildXor(this.builder, left, right, "xor");
+        }
+        if (Strings.same(op, "bitwise_not")) {
+            if (is_float) {
+                return (ptr)0;
+            }
+            return LLVMBuildNot(this.builder, this.simd_operand(info, 0), "not");
+        }
+        if (Strings.same(op, "negate")) {
+            if (is_mask) {
+                return (ptr)0;
+            }
+            if (is_float) {
+                return LLVMBuildFNeg(this.builder, this.simd_operand(info, 0), "neg");
+            }
+            return LLVMBuildNeg(this.builder, this.simd_operand(info, 0), "neg");
+        }
+        if (Strings.same(op, "shift_left") || Strings.same(op, "shift_right")) {
+            if (is_float || is_mask) {
+                return (ptr)0;
+            }
+            ptr lanes = this.simd_operand(info, 0);
+            u32 amount_type = this.simd_operand_type(info, 1);
+            ptr element_llvm = this.llvm_type(element);
+            mut ptr amount = this.simd_operand(info, 1);
+            amount = LLVMBuildIntCast2(this.builder, amount, element_llvm, 0, "shift.amount");
+            amount = LLVMBuildAnd(this.builder, amount, LLVMConstInt(element_llvm, (u64)Types.bits(element) - 1, 0), "shift.masked");
+            ptr spread = this.simd_splat(amount, shape);
+            if (Strings.same(op, "shift_left")) {
+                return LLVMBuildShl(this.builder, lanes, spread, "shl");
+            }
+            if (is_signed) {
+                return LLVMBuildAShr(this.builder, lanes, spread, "ashr");
+            }
+            if (Types.is_integer(amount_type)) {
+                return LLVMBuildLShr(this.builder, lanes, spread, "lshr");
+            }
+            return (ptr)0;
+        }
+        if (Strings.same(op, "minimum") || Strings.same(op, "maximum")) {
+            if (is_mask) {
+                return (ptr)0;
+            }
+            ptr left = this.simd_operand(info, 0);
+            ptr right = this.simd_operand(info, 1);
+            bool lowest = Strings.same(op, "minimum");
+            if (is_float) {
+                // minnum and maxnum leave the sign of a zero result open, so it would differ between -O0 and -O2.
+                mut i32 predicate = LlvmConst.REAL_OGT;
+                if (lowest) {
+                    predicate = LlvmConst.REAL_OLT;
+                }
+                ptr wins = LLVMBuildFCmp(this.builder, predicate, left, right, "extreme.wins");
+                ptr alone = LLVMBuildFCmp(this.builder, LlvmConst.REAL_UNO, right, right, "extreme.alone");
+                return LLVMBuildSelect(this.builder, LLVMBuildOr(this.builder, wins, alone, "extreme.left"), left, right, "extreme");
+            }
+            if (lowest && is_signed) { return this.simd_binary_call("llvm.smin", left, right); }
+            if (lowest) { return this.simd_binary_call("llvm.umin", left, right); }
+            if (is_signed) { return this.simd_binary_call("llvm.smax", left, right); }
+            return this.simd_binary_call("llvm.umax", left, right);
+        }
+        if (Strings.same(op, "absolute")) {
+            if (is_mask) {
+                return (ptr)0;
+            }
+            ptr lanes = this.simd_operand(info, 0);
+            if (is_float) {
+                return this.simd_unary_call("llvm.fabs", lanes);
+            }
+            if (!is_signed) {
+                return lanes;
+            }
+            ptr<ptr> args = CodeGenerator.array_of(2);
+            args[0] = lanes;
+            args[1] = LLVMConstInt(LLVMIntTypeInContext(this.context, 1), 0, 0);
+            return this.simd_call("llvm.abs", LLVMTypeOf(lanes), args, 2);
+        }
+        if (Strings.same(op, "square_root") || Strings.same(op, "floor") || Strings.same(op, "ceiling") || Strings.same(op, "round") || Strings.same(op, "truncate")) {
+            if (!is_float) {
+                return (ptr)0;
+            }
+            ptr lanes = this.simd_operand(info, 0);
+            if (Strings.same(op, "square_root")) { return this.simd_unary_call("llvm.sqrt", lanes); }
+            if (Strings.same(op, "floor")) { return this.simd_unary_call("llvm.floor", lanes); }
+            if (Strings.same(op, "ceiling")) { return this.simd_unary_call("llvm.ceil", lanes); }
+            if (Strings.same(op, "round")) { return this.simd_unary_call("llvm.round", lanes); }
+            return this.simd_unary_call("llvm.trunc", lanes);
+        }
+        if (Strings.same(op, "fused_multiply_add")) {
+            if (!is_float) {
+                return (ptr)0;
+            }
+            ptr<ptr> args = CodeGenerator.array_of(3);
+            args[0] = this.simd_operand(info, 0);
+            args[1] = this.simd_operand(info, 1);
+            args[2] = this.simd_operand(info, 2);
+            return this.simd_call("llvm.fma", LLVMTypeOf(args[0]), args, 3);
+        }
+        if (Strings.same(op, "saturating_add") || Strings.same(op, "saturating_subtract")) {
+            if (is_float || is_mask) {
+                return (ptr)0;
+            }
+            ptr left = this.simd_operand(info, 0);
+            ptr right = this.simd_operand(info, 1);
+            bool adds = Strings.same(op, "saturating_add");
+            if (adds && is_signed) { return this.simd_binary_call("llvm.sadd.sat", left, right); }
+            if (adds) { return this.simd_binary_call("llvm.uadd.sat", left, right); }
+            if (is_signed) { return this.simd_binary_call("llvm.ssub.sat", left, right); }
+            return this.simd_binary_call("llvm.usub.sat", left, right);
+        }
+        if (Strings.same(op, "average_rounded")) {
+            if (is_float || is_mask || is_signed) {
+                return (ptr)0;
+            }
+            ptr wide = this.simd_wide_type(shape);
+            ptr left = LLVMBuildCast(this.builder, LlvmConst.OP_ZEXT, this.simd_operand(info, 0), wide, "avg.left");
+            ptr right = LLVMBuildCast(this.builder, LlvmConst.OP_ZEXT, this.simd_operand(info, 1), wide, "avg.right");
+            ptr<ptr> ones = CodeGenerator.array_of((i32)this.simd_count(shape));
+            ptr wide_element = LLVMIntTypeInContext(this.context, Types.bits(element) * 2);
+            for (mut i32 i = 0; i < (i32)this.simd_count(shape); i = i + 1) {
+                ones[i] = LLVMConstInt(wide_element, 1, 0);
+            }
+            ptr one = LLVMConstVector(ones, this.simd_count(shape));
+            ptr sum = LLVMBuildAdd(this.builder, LLVMBuildAdd(this.builder, left, right, "avg.sum"), one, "avg.rounded");
+            ptr halved = LLVMBuildLShr(this.builder, sum, one, "avg.half");
+            return LLVMBuildCast(this.builder, LlvmConst.OP_TRUNC, halved, this.simd_vector_type(shape), "avg");
+        }
+        if (Strings.same(op, "multiply_high")) {
+            if (is_float || is_mask) {
+                return (ptr)0;
+            }
+            ptr wide = this.simd_wide_type(shape);
+            mut i32 extend = LlvmConst.OP_ZEXT;
+            if (is_signed) {
+                extend = LlvmConst.OP_SEXT;
+            }
+            ptr left = LLVMBuildCast(this.builder, extend, this.simd_operand(info, 0), wide, "mulh.left");
+            ptr right = LLVMBuildCast(this.builder, extend, this.simd_operand(info, 1), wide, "mulh.right");
+            ptr product = LLVMBuildMul(this.builder, left, right, "mulh.product");
+            ptr<ptr> shifts = CodeGenerator.array_of((i32)this.simd_count(shape));
+            ptr wide_element = LLVMIntTypeInContext(this.context, Types.bits(element) * 2);
+            for (mut i32 i = 0; i < (i32)this.simd_count(shape); i = i + 1) {
+                shifts[i] = LLVMConstInt(wide_element, (u64)Types.bits(element), 0);
+            }
+            mut ptr high = (ptr)0;
+            if (is_signed) {
+                high = LLVMBuildAShr(this.builder, product, LLVMConstVector(shifts, this.simd_count(shape)), "mulh.high");
+            } else {
+                high = LLVMBuildLShr(this.builder, product, LLVMConstVector(shifts, this.simd_count(shape)), "mulh.high");
+            }
+            return LLVMBuildCast(this.builder, LlvmConst.OP_TRUNC, high, this.simd_vector_type(shape), "mulh");
+        }
+        if (Strings.same(op, "multiply_low32")) {
+            if (is_float || Types.bits(element) != 64) {
+                return (ptr)0;
+            }
+            ptr low_mask = this.simd_constant(shape, 4294967295);
+            ptr left = LLVMBuildAnd(this.builder, this.simd_operand(info, 0), low_mask, "mul32.left");
+            ptr right = LLVMBuildAnd(this.builder, this.simd_operand(info, 1), low_mask, "mul32.right");
+            return LLVMBuildMul(this.builder, left, right, "mul32");
+        }
+        return this.simd_rearrangement(info, op, shape, element, is_float, is_signed, is_mask);
+    }
+
+    unsafe ptr simd_rearrangement(FunctionInfo* info, ptr<i8> op, u32 shape, u32 element, bool is_float, bool is_signed, bool is_mask) {
+        i32 count = (i32)this.simd_count(shape);
+        ptr<i32> order = (ptr<i32>)Memory.zalloc((u64)(count * 2 + 2) * 4);
+        if (Strings.same(op, "swap_pairs") || Strings.same(op, "reverse")) {
+            for (mut i32 i = 0; i < count; i = i + 1) {
+                if (Strings.same(op, "swap_pairs")) {
+                    order[i] = i ^ 1;
+                    if (order[i] >= count) {
+                        order[i] = i;
+                    }
+                } else {
+                    order[i] = count - 1 - i;
+                }
+            }
+            ptr lanes = this.simd_operand(info, 0);
+            return this.simd_shuffle(lanes, LLVMGetPoison(LLVMTypeOf(lanes)), order, count, "shuffle");
+        }
+        if (Strings.same(op, "interleave_low") || Strings.same(op, "interleave_high")) {
+            mut i32 start = 0;
+            if (Strings.same(op, "interleave_high")) {
+                start = count / 2;
+            }
+            for (mut i32 i = 0; i < count; i = i + 1) {
+                // Odd lanes come from the second operand, which shufflevector numbers after the first.
+                order[i] = start + i / 2 + (i % 2) * count;
+            }
+            return this.simd_shuffle(this.simd_operand(info, 0), this.simd_operand(info, 1), order, count, "interleave");
+        }
+        if (Strings.same(op, "concatenate")) {
+            if (this.simd_count(info.return_type) != (u32)(count * 2)) {
+                return (ptr)0;
+            }
+            for (mut i32 i = 0; i < count * 2; i = i + 1) {
+                order[i] = i;
+            }
+            return this.simd_shuffle(this.simd_operand(info, 0), this.simd_operand(info, 1), order, count * 2, "concat");
+        }
+        if (Strings.same(op, "low_half") || Strings.same(op, "high_half")) {
+            if (this.simd_count(info.return_type) * 2 != (u32)count) {
+                return (ptr)0;
+            }
+            mut i32 start = 0;
+            if (Strings.same(op, "high_half")) {
+                start = count / 2;
+            }
+            for (mut i32 i = 0; i < count / 2; i = i + 1) {
+                order[i] = start + i;
+            }
+            ptr lanes = this.simd_operand(info, 0);
+            return this.simd_shuffle(lanes, LLVMGetPoison(LLVMTypeOf(lanes)), order, count / 2, "half");
+        }
+        return this.simd_comparison(info, op, shape, element, is_float, is_signed, is_mask);
+    }
+
+    unsafe ptr simd_comparison(FunctionInfo* info, ptr<i8> op, u32 shape, u32 element, bool is_float, bool is_signed, bool is_mask) {
+        mut i32 integer_predicate = 0 - 1;
+        mut i32 float_predicate = 0 - 1;
+        bool all_equal = Strings.same(op, "all_equal");
+        bool any_different = Strings.same(op, "any_different");
+        if (Strings.same(op, "equals") || all_equal) {
+            integer_predicate = LlvmConst.INT_EQ;
+            float_predicate = LlvmConst.REAL_OEQ;
+        } else if (Strings.same(op, "not_equals") || any_different) {
+            integer_predicate = LlvmConst.INT_NE;
+            float_predicate = LlvmConst.REAL_UNE;
+        } else if (Strings.same(op, "less_than")) {
+            integer_predicate = LlvmConst.INT_ULT;
+            if (is_signed) { integer_predicate = LlvmConst.INT_SLT; }
+            float_predicate = LlvmConst.REAL_OLT;
+        } else if (Strings.same(op, "less_or_equal")) {
+            integer_predicate = LlvmConst.INT_ULE;
+            if (is_signed) { integer_predicate = LlvmConst.INT_SLE; }
+            float_predicate = LlvmConst.REAL_OLE;
+        } else if (Strings.same(op, "greater_than")) {
+            integer_predicate = LlvmConst.INT_UGT;
+            if (is_signed) { integer_predicate = LlvmConst.INT_SGT; }
+            float_predicate = LlvmConst.REAL_OGT;
+        } else if (Strings.same(op, "greater_or_equal")) {
+            integer_predicate = LlvmConst.INT_UGE;
+            if (is_signed) { integer_predicate = LlvmConst.INT_SGE; }
+            float_predicate = LlvmConst.REAL_OGE;
+        }
+        if (integer_predicate >= 0) {
+            if (is_mask && integer_predicate != LlvmConst.INT_EQ && integer_predicate != LlvmConst.INT_NE) {
+                return (ptr)0;
+            }
+            ptr left = this.simd_operand(info, 0);
+            ptr right = this.simd_operand(info, 1);
+            mut ptr compared = (ptr)0;
+            if (is_float) {
+                compared = LLVMBuildFCmp(this.builder, float_predicate, left, right, "compare");
+            } else {
+                compared = LLVMBuildICmp(this.builder, integer_predicate, left, right, "compare");
+            }
+            if (all_equal) {
+                return this.simd_reduce("llvm.vector.reduce.and", compared);
+            }
+            if (any_different) {
+                return this.simd_reduce("llvm.vector.reduce.or", compared);
+            }
+            return compared;
+        }
+        if (Strings.same(op, "select")) {
+            ptr chosen = this.simd_operand(info, 0);
+            ptr pick = this.simd_operand(info, 1);
+            ptr otherwise = this.simd_operand(info, 2);
+            if (this.simd_count(this.simd_operand_type(info, 1)) != this.simd_count(shape)) {
+                return (ptr)0;
+            }
+            return LLVMBuildSelect(this.builder, pick, chosen, otherwise, "select");
+        }
+        return this.simd_reduction(info, op, shape, element, is_float, is_signed, is_mask);
+    }
+
+    unsafe ptr simd_reduction(FunctionInfo* info, ptr<i8> op, u32 shape, u32 element, bool is_float, bool is_signed, bool is_mask) {
+        if (Strings.same(op, "any") || Strings.same(op, "all")) {
+            if (!is_mask) {
+                return (ptr)0;
+            }
+            if (Strings.same(op, "any")) {
+                return this.simd_reduce("llvm.vector.reduce.or", this.simd_operand(info, 0));
+            }
+            return this.simd_reduce("llvm.vector.reduce.and", this.simd_operand(info, 0));
+        }
+        if (Strings.same(op, "bits") || Strings.same(op, "count")) {
+            if (!is_mask) {
+                return (ptr)0;
+            }
+            ptr packed_type = LLVMIntTypeInContext(this.context, this.simd_count(shape));
+            ptr packed = LLVMBuildCast(this.builder, LlvmConst.OP_BITCAST, this.simd_operand(info, 0), packed_type, "mask.bits");
+            mut ptr value = packed;
+            if (Strings.same(op, "count")) {
+                value = this.simd_unary_call("llvm.ctpop", packed);
+            }
+            return LLVMBuildIntCast2(this.builder, value, this.llvm_type(info.return_type), 0, "mask.wide");
+        }
+        if (Strings.same(op, "reduce_add")) {
+            if (is_mask) {
+                return (ptr)0;
+            }
+            ptr lanes = this.simd_operand(info, 0);
+            if (is_float) {
+                ptr<ptr> args = CodeGenerator.array_of(2);
+                args[0] = LLVMConstReal(this.llvm_type(element), 0.0);
+                args[1] = lanes;
+                ptr<ptr> types = CodeGenerator.array_of(1);
+                types[0] = LLVMTypeOf(lanes);
+                return this.coro_intrinsic("llvm.vector.reduce.fadd", types, 1, args, 2, "reduce");
+            }
+            return this.simd_reduce("llvm.vector.reduce.add", lanes);
+        }
+        if (Strings.same(op, "reduce_minimum") || Strings.same(op, "reduce_maximum")) {
+            if (is_mask) {
+                return (ptr)0;
+            }
+            ptr lanes = this.simd_operand(info, 0);
+            bool lowest = Strings.same(op, "reduce_minimum");
+            if (is_float) { return this.simd_ordered_extreme(lanes, this.simd_count(shape), lowest); }
+            if (lowest && is_signed) { return this.simd_reduce("llvm.vector.reduce.smin", lanes); }
+            if (lowest) { return this.simd_reduce("llvm.vector.reduce.umin", lanes); }
+            if (is_signed) { return this.simd_reduce("llvm.vector.reduce.smax", lanes); }
+            return this.simd_reduce("llvm.vector.reduce.umax", lanes);
+        }
+        if (Strings.same(op, "reduce_and") || Strings.same(op, "reduce_or") || Strings.same(op, "reduce_xor")) {
+            if (is_float) {
+                return (ptr)0;
+            }
+            ptr lanes = this.simd_operand(info, 0);
+            if (Strings.same(op, "reduce_and")) { return this.simd_reduce("llvm.vector.reduce.and", lanes); }
+            if (Strings.same(op, "reduce_or")) { return this.simd_reduce("llvm.vector.reduce.or", lanes); }
+            return this.simd_reduce("llvm.vector.reduce.xor", lanes);
+        }
+        if (Strings.same(op, "population_count") || Strings.same(op, "leading_zeros") || Strings.same(op, "trailing_zeros") || Strings.same(op, "byte_swap")) {
+            if (is_float || is_mask) {
+                return (ptr)0;
+            }
+            ptr lanes = this.simd_operand(info, 0);
+            if (Strings.same(op, "population_count")) {
+                return this.simd_unary_call("llvm.ctpop", lanes);
+            }
+            if (Strings.same(op, "byte_swap")) {
+                if (Types.bits(element) < 16) {
+                    return lanes;
+                }
+                return this.simd_unary_call("llvm.bswap", lanes);
+            }
+            ptr<ptr> args = CodeGenerator.array_of(2);
+            args[0] = lanes;
+            args[1] = LLVMConstInt(LLVMIntTypeInContext(this.context, 1), 0, 0);
+            if (Strings.same(op, "leading_zeros")) {
+                return this.simd_call("llvm.ctlz", LLVMTypeOf(lanes), args, 2);
+            }
+            return this.simd_call("llvm.cttz", LLVMTypeOf(lanes), args, 2);
+        }
+        return this.simd_conversion(info, op, shape, element, is_float, is_signed, is_mask);
+    }
+
+    // The float reductions go lane by lane as their Djinn bodies do: the order decides which zero is kept.
+    unsafe ptr simd_ordered_extreme(ptr lanes, u32 count, bool lowest) {
+        ptr i32_type = LLVMIntTypeInContext(this.context, 32);
+        mut i32 predicate = LlvmConst.REAL_OGT;
+        if (lowest) {
+            predicate = LlvmConst.REAL_OLT;
+        }
+        mut ptr kept = LLVMBuildExtractElement(this.builder, lanes, LLVMConstInt(i32_type, 0, 0), "extreme.first");
+        for (mut u32 i = 1; i < count; i = i + 1) {
+            ptr lane = LLVMBuildExtractElement(this.builder, lanes, LLVMConstInt(i32_type, (u64)i, 0), "extreme.lane");
+            ptr wins = LLVMBuildFCmp(this.builder, predicate, lane, kept, "extreme.wins");
+            ptr missing = LLVMBuildFCmp(this.builder, LlvmConst.REAL_UNO, kept, kept, "extreme.missing");
+            kept = LLVMBuildSelect(this.builder, LLVMBuildOr(this.builder, missing, wins, "extreme.take"), lane, kept, "extreme");
+        }
+        return kept;
+    }
+
+    unsafe ptr simd_conversion(FunctionInfo* info, ptr<i8> op, u32 shape, u32 element, bool is_float, bool is_signed, bool is_mask) {
+        u32 target = info.return_type;
+        if (this.simd_lanes_of(target) == 0 || this.simd_is_mask(target) || is_mask) {
+            return this.simd_target_operation(info, op, shape, element);
+        }
+        u32 wanted = this.simd_element(target);
+        if (Strings.same(op, "convert")) {
+            if (this.simd_count(target) != this.simd_count(shape)) {
+                return (ptr)0;
+            }
+            ptr lanes = this.simd_operand(info, 0);
+            ptr vector_type = this.simd_vector_type(target);
+            if (!is_float && Types.is_float(wanted)) {
+                if (is_signed) {
+                    return LLVMBuildCast(this.builder, LlvmConst.OP_SITOFP, lanes, vector_type, "convert");
+                }
+                return LLVMBuildCast(this.builder, LlvmConst.OP_UITOFP, lanes, vector_type, "convert");
+            }
+            if (is_float && Types.is_float(wanted)) {
+                if (Types.bits(wanted) > Types.bits(element)) {
+                    return LLVMBuildCast(this.builder, LlvmConst.OP_FPEXT, lanes, vector_type, "convert");
+                }
+                if (Types.bits(wanted) < Types.bits(element)) {
+                    return LLVMBuildCast(this.builder, LlvmConst.OP_FPTRUNC, lanes, vector_type, "convert");
+                }
+                return lanes;
+            }
+            if (is_float) {
+                ptr<ptr> types = CodeGenerator.array_of(2);
+                types[0] = vector_type;
+                types[1] = LLVMTypeOf(lanes);
+                ptr<ptr> args = CodeGenerator.array_of(1);
+                args[0] = lanes;
+                if (Types.is_signed(wanted)) {
+                    return this.coro_intrinsic("llvm.fptosi.sat", types, 2, args, 1, "convert");
+                }
+                return this.coro_intrinsic("llvm.fptoui.sat", types, 2, args, 1, "convert");
+            }
+            if (Types.bits(wanted) < Types.bits(element)) {
+                return LLVMBuildCast(this.builder, LlvmConst.OP_TRUNC, lanes, vector_type, "convert");
+            }
+            if (Types.bits(wanted) > Types.bits(element)) {
+                if (is_signed) {
+                    return LLVMBuildCast(this.builder, LlvmConst.OP_SEXT, lanes, vector_type, "convert");
+                }
+                return LLVMBuildCast(this.builder, LlvmConst.OP_ZEXT, lanes, vector_type, "convert");
+            }
+            return lanes;
+        }
+        if (Strings.same(op, "reinterpret")) {
+            u32 from_bits = Types.bits(element) * this.simd_count(shape);
+            u32 to_bits = Types.bits(wanted) * this.simd_count(target);
+            if (from_bits != to_bits) {
+                return (ptr)0;
+            }
+            return LLVMBuildCast(this.builder, LlvmConst.OP_BITCAST, this.simd_operand(info, 0), this.simd_vector_type(target), "reinterpret");
+        }
+        return this.simd_target_operation(info, op, shape, element);
+    }
+}

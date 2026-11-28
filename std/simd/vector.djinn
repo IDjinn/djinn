@@ -1,0 +1,936 @@
+import std::types;
+import std::collections;
+import std::math;
+import std::libc;
+
+namespace std::simd;
+
+// N lanes of T held in one value: vector<u64, 4> is 256 bits, vector<f32, 4> and vector<u8, 16> are 128. The lanes
+// are an inline array, so a vector is a plain value (copied, never allocated) and indexing it is bounds checked.
+//
+// Every operation works lane by lane. On native targets the compiler generates it as vector instructions ([Simd]):
+// SSE/AVX on x86, NEON on AArch64, SIMD128 on WebAssembly, and plain scalar code on a CPU without SIMD. The Djinn body
+// below each one is its definition: it runs where there is no vector form (f16 and bf16 lanes, a builtin the target
+// lacks) and gives the same result. The web (JavaScript) target has no std::simd; --target wasm does.
+//
+// Integer lanes wrap on overflow (like u64w), as SIMD hardware does; use saturating_add/saturating_subtract to clamp.
+// Shift amounts are taken modulo the lane width. Division by zero in an integer lane stops the program.
+struct vector<T, N> {
+    T[N] lanes;
+
+    // ---- building and storing ----
+
+    [Simd("splat")] public static vector<T, N> splat(T value) {
+        mut vector<T, N> made = {};
+        for (mut i32 i = 0; i < N; i = i + 1) {
+            made.lanes[i] = value;
+        }
+        return made;
+    }
+
+    [Simd("zero")] public static vector<T, N> zero() {
+        vector<T, N> made = {};
+        return made;
+    }
+
+    public static vector<T, N> of(T[N] values) {
+        vector<T, N> made = { .lanes = values };
+        return made;
+    }
+
+    // Reads N values starting at 'at', with no alignment needed.
+    [Simd("load")] public static unsafe vector<T, N> load_unaligned(T* at) {
+        mut vector<T, N> made = {};
+        for (mut i32 i = 0; i < N; i = i + 1) {
+            made.lanes[i] = at[i];
+        }
+        return made;
+    }
+
+    // Reads items[offset .. offset + N]; stops the program when they are not all there.
+    public static vector<T, N> load(slice<T> items, size offset) {
+        if (offset > items.length || items.length - offset < (size)N) {
+            panic("vector.load: the slice has fewer than N values after the offset");
+        }
+        unsafe {
+            return vector<T, N>.load_unaligned(&items.data[offset]);
+        }
+    }
+
+    [Simd("store")] public unsafe void store_unaligned(T* at) {
+        for (mut i32 i = 0; i < N; i = i + 1) {
+            at[i] = this.lanes[i];
+        }
+    }
+
+    // Writes the lanes to items[offset .. offset + N]; stops the program when they do not fit.
+    public void store(slice<T> items, size offset) {
+        if (offset > items.length || items.length - offset < (size)N) {
+            panic("vector.store: the slice has room for fewer than N values after the offset");
+        }
+        unsafe {
+            this.store_unaligned(&items.data[offset]);
+        }
+    }
+
+    public i32 length() {
+        return N;
+    }
+
+    operator get[](vector<T, N> values, i32 index) -> T {
+        return values.lanes[index];
+    }
+
+    // A copy with lane 'index' replaced.
+    public vector<T, N> with_lane(i32 index, T value) {
+        mut vector<T, N> copy = { .lanes = this.lanes };
+        copy.lanes[index] = value;
+        return copy;
+    }
+
+    // ---- one lane, the reference of every operation ----
+
+    [ForceInline] static T add_lane(T left, T right) {
+        if constexpr is_integer<T>() {
+            return left + (right ^ 0w);
+        } else {
+            return left + right;
+        }
+    }
+
+    [ForceInline] static T subtract_lane(T left, T right) {
+        if constexpr is_integer<T>() {
+            return left - (right ^ 0w);
+        } else {
+            return left - right;
+        }
+    }
+
+    [ForceInline] static T multiply_lane(T left, T right) {
+        if constexpr is_integer<T>() {
+            return left * (right ^ 0w);
+        } else {
+            return left * right;
+        }
+    }
+
+    [ForceInline] static i32 lane_bits() {
+        return (i32)sizeof(T) * 8;
+    }
+
+    // ---- arithmetic ----
+
+    [Simd("add")] operator +(vector<T, N> left, vector<T, N> right) -> vector<T, N> {
+        mut vector<T, N> out = {};
+        for (mut i32 i = 0; i < N; i = i + 1) {
+            out.lanes[i] = vector<T, N>.add_lane(left.lanes[i], right.lanes[i]);
+        }
+        return out;
+    }
+
+    [Simd("subtract")] operator -(vector<T, N> left, vector<T, N> right) -> vector<T, N> {
+        mut vector<T, N> out = {};
+        for (mut i32 i = 0; i < N; i = i + 1) {
+            out.lanes[i] = vector<T, N>.subtract_lane(left.lanes[i], right.lanes[i]);
+        }
+        return out;
+    }
+
+    [Simd("multiply")] operator *(vector<T, N> left, vector<T, N> right) -> vector<T, N> {
+        mut vector<T, N> out = {};
+        for (mut i32 i = 0; i < N; i = i + 1) {
+            out.lanes[i] = vector<T, N>.multiply_lane(left.lanes[i], right.lanes[i]);
+        }
+        return out;
+    }
+
+    [Simd("divide")] operator /(vector<T, N> left, vector<T, N> right) -> vector<T, N> {
+        mut vector<T, N> out = {};
+        for (mut i32 i = 0; i < N; i = i + 1) {
+            out.lanes[i] = left.lanes[i] / right.lanes[i];
+        }
+        return out;
+    }
+
+    operator %(vector<T, N> left, vector<T, N> right) -> vector<T, N> {
+        mut vector<T, N> out = {};
+        if constexpr is_integer<T>() {
+            for (mut i32 i = 0; i < N; i = i + 1) {
+                out.lanes[i] = left.lanes[i] % right.lanes[i];
+            }
+        } else {
+            panic("vector: % needs integer lanes");
+        }
+        return out;
+    }
+
+    [Simd("negate")] public vector<T, N> negate() {
+        mut vector<T, N> out = {};
+        for (mut i32 i = 0; i < N; i = i + 1) {
+            if constexpr is_integer<T>() {
+                out.lanes[i] = 0w - this.lanes[i];
+            } else {
+                out.lanes[i] = -this.lanes[i];
+            }
+        }
+        return out;
+    }
+
+    // Float lanes: a NaN loses against a number, and of two zeros with different signs the one from 'other' is taken.
+    [Simd("minimum")] public vector<T, N> minimum(vector<T, N> other) {
+        mut vector<T, N> out = {};
+        for (mut i32 i = 0; i < N; i = i + 1) {
+            T left = this.lanes[i];
+            T right = other.lanes[i];
+            if (left != left) {
+                out.lanes[i] = right;
+            } else if (right != right || left < right) {
+                out.lanes[i] = left;
+            } else {
+                out.lanes[i] = right;
+            }
+        }
+        return out;
+    }
+
+    [Simd("maximum")] public vector<T, N> maximum(vector<T, N> other) {
+        mut vector<T, N> out = {};
+        for (mut i32 i = 0; i < N; i = i + 1) {
+            T left = this.lanes[i];
+            T right = other.lanes[i];
+            if (left != left) {
+                out.lanes[i] = right;
+            } else if (right != right || left > right) {
+                out.lanes[i] = left;
+            } else {
+                out.lanes[i] = right;
+            }
+        }
+        return out;
+    }
+
+    // |x|; the most negative integer stays itself, as it has no positive twin.
+    [Simd("absolute")] public vector<T, N> absolute() {
+        mut vector<T, N> out = {};
+        for (mut i32 i = 0; i < N; i = i + 1) {
+            T value = this.lanes[i];
+            if constexpr is_integer<T>() {
+                if (value < 0) {
+                    out.lanes[i] = 0w - value;
+                } else {
+                    out.lanes[i] = value;
+                }
+            } else {
+                if (value < 0.0) {
+                    out.lanes[i] = -value;
+                } else if (value == 0.0) {
+                    out.lanes[i] = 0.0;
+                } else {
+                    out.lanes[i] = value;
+                }
+            }
+        }
+        return out;
+    }
+
+    // Clamps at the limits of T instead of wrapping (integer lanes).
+    [Simd("saturating_add")] public vector<T, N> saturating_add(vector<T, N> other) {
+        mut vector<T, N> out = {};
+        if constexpr is_integer<T>() {
+            for (mut i32 i = 0; i < N; i = i + 1) {
+                T sum = vector<T, N>.add_lane(this.lanes[i], other.lanes[i]);
+                if constexpr is_signed<T>() {
+                    bool overflow = (this.lanes[i] >= 0) == (other.lanes[i] >= 0) && (sum >= 0) != (this.lanes[i] >= 0);
+                    if (overflow && this.lanes[i] >= 0) {
+                        out.lanes[i] = ~(1w << (T)(vector<T, N>.lane_bits() - 1));
+                    } else if (overflow) {
+                        out.lanes[i] = 1w << (T)(vector<T, N>.lane_bits() - 1);
+                    } else {
+                        out.lanes[i] = sum;
+                    }
+                } else {
+                    if (sum < this.lanes[i]) {
+                        out.lanes[i] = ~(T)0;
+                    } else {
+                        out.lanes[i] = sum;
+                    }
+                }
+            }
+        } else {
+            panic("vector.saturating_add needs integer lanes");
+        }
+        return out;
+    }
+
+    [Simd("saturating_subtract")] public vector<T, N> saturating_subtract(vector<T, N> other) {
+        mut vector<T, N> out = {};
+        if constexpr is_integer<T>() {
+            for (mut i32 i = 0; i < N; i = i + 1) {
+                T difference = vector<T, N>.subtract_lane(this.lanes[i], other.lanes[i]);
+                if constexpr is_signed<T>() {
+                    bool overflow = (this.lanes[i] >= 0) != (other.lanes[i] >= 0) && (difference >= 0) != (this.lanes[i] >= 0);
+                    if (overflow && this.lanes[i] >= 0) {
+                        out.lanes[i] = ~(1w << (T)(vector<T, N>.lane_bits() - 1));
+                    } else if (overflow) {
+                        out.lanes[i] = 1w << (T)(vector<T, N>.lane_bits() - 1);
+                    } else {
+                        out.lanes[i] = difference;
+                    }
+                } else {
+                    if (other.lanes[i] > this.lanes[i]) {
+                        out.lanes[i] = 0;
+                    } else {
+                        out.lanes[i] = difference;
+                    }
+                }
+            }
+        } else {
+            panic("vector.saturating_subtract needs integer lanes");
+        }
+        return out;
+    }
+
+    // (a + b + 1) / 2 without overflow (unsigned lanes): pavgb, urhadd.
+    [Simd("average_rounded")] public vector<T, N> average_rounded(vector<T, N> other) {
+        mut vector<T, N> out = {};
+        if constexpr is_unsigned<T>() {
+            for (mut i32 i = 0; i < N; i = i + 1) {
+                T left = this.lanes[i];
+                T right = other.lanes[i];
+                out.lanes[i] = (left >> 1) + (right >> 1) + ((left | right) & 1);
+            }
+        } else {
+            panic("vector.average_rounded needs unsigned lanes");
+        }
+        return out;
+    }
+
+    // The upper half of each full product (integer lanes): pmulhw, pmulhuw.
+    [Simd("multiply_high")] public vector<T, N> multiply_high(vector<T, N> other) {
+        mut vector<T, N> out = {};
+        if constexpr is_integer<T>() {
+            i32 bits = vector<T, N>.lane_bits();
+            for (mut i32 i = 0; i < N; i = i + 1) {
+                if constexpr sizeof(T) < 8 {
+                    if constexpr is_signed<T>() {
+                        out.lanes[i] = (T)(((i64)this.lanes[i] * (i64)other.lanes[i]) >> (i64)bits);
+                    } else {
+                        out.lanes[i] = (T)(((u64)this.lanes[i] * (u64)other.lanes[i]) >> (u64)bits);
+                    }
+                } else if constexpr sizeof(T) == 8 {
+                    if constexpr is_signed<T>() {
+                        out.lanes[i] = (T)(((i128)this.lanes[i] * (i128)other.lanes[i]) >> 64);
+                    } else {
+                        out.lanes[i] = (T)(((u128)this.lanes[i] * (u128)other.lanes[i]) >> 64);
+                    }
+                } else {
+                    // No wider integer exists, so the product is built from 64-bit halves.
+                    u128w left = (u128w)this.lanes[i];
+                    u128w right = (u128w)other.lanes[i];
+                    u128w half = (~(u128w)0) >> (u128w)64;
+                    u128w low_low = (left & half) * (right & half);
+                    u128w low_high = (left & half) * (right >> (u128w)64);
+                    u128w high_low = (left >> (u128w)64) * (right & half);
+                    u128w high_high = (left >> (u128w)64) * (right >> (u128w)64);
+                    u128w middle = (low_low >> (u128w)64) + (low_high & half) + (high_low & half);
+                    mut u128w high = high_high + (low_high >> (u128w)64) + (high_low >> (u128w)64) + (middle >> (u128w)64);
+                    if constexpr is_signed<T>() {
+                        if (this.lanes[i] < 0) {
+                            high = high - right;
+                        }
+                        if (other.lanes[i] < 0) {
+                            high = high - left;
+                        }
+                        out.lanes[i] = (T)(i128w)high;
+                    } else {
+                        out.lanes[i] = (T)high;
+                    }
+                }
+            }
+        } else {
+            panic("vector.multiply_high needs integer lanes");
+        }
+        return out;
+    }
+
+    // 64-bit lanes: the product of the low 32 bits of each side, unsigned (pmuludq, umull). The building block of
+    // multiply-mix hashes: x.multiply_low32(x.shift_right(32)).
+    [Simd("multiply_low32")] public vector<T, N> multiply_low32(vector<T, N> other) {
+        mut vector<T, N> out = {};
+        if constexpr is_integer<T>() && sizeof(T) == 8 {
+            for (mut i32 i = 0; i < N; i = i + 1) {
+                u64w low = (u64w)this.lanes[i] & 4294967295;
+                u64w high = (u64w)other.lanes[i] & 4294967295;
+                if constexpr is_signed<T>() {
+                    out.lanes[i] = (T)(i64w)(low * high);
+                } else {
+                    out.lanes[i] = (T)(low * high);
+                }
+            }
+        } else {
+            panic("vector.multiply_low32 needs 64-bit integer lanes");
+        }
+        return out;
+    }
+
+    // a * b + c for 16-bit lanes, whose product is exact in f64. When the sum is not, its last bit is made odd, so that
+    // rounding it again to 16 bits cannot take a value just off a halfway point for the halfway point itself.
+    static unsafe f64 odd_fused(f64 a, f64 b, f64 c) {
+        f64 product = a * b;
+        mut f64 sum = product + c;
+        f64 added = sum - product;
+        f64 error = (product - (sum - added)) + (c - added);
+        // 'error' is not a number when the sum is infinite or not a number, which stays as it is.
+        if (error > 0.0 || error < 0.0) {
+            mut u64 bits = 0;
+            memcpy((void*)&bits, (void*)&sum, 8);
+            if ((bits & 1) == 0) {
+                if ((error > 0.0) == (sum > 0.0)) {
+                    bits = bits + 1;
+                } else {
+                    bits = bits - 1;
+                }
+                memcpy((void*)&sum, (void*)&bits, 8);
+            }
+        }
+        return sum;
+    }
+
+    // this * factor + addend with a single rounding. The body is what 16-bit lanes use.
+    [Simd("fused_multiply_add")] public vector<T, N> fused_multiply_add(vector<T, N> factor, vector<T, N> addend) {
+        mut vector<T, N> out = {};
+        if constexpr is_float<T>() {
+            for (mut i32 i = 0; i < N; i = i + 1) {
+                if constexpr sizeof(T) < 8 {
+                    unsafe {
+                        out.lanes[i] = (T)vector<T, N>.odd_fused((f64)this.lanes[i], (f64)factor.lanes[i], (f64)addend.lanes[i]);
+                    }
+                } else {
+                    out.lanes[i] = this.lanes[i] * factor.lanes[i] + addend.lanes[i];
+                }
+            }
+        } else {
+            panic("vector.fused_multiply_add needs float lanes");
+        }
+        return out;
+    }
+
+    [Simd("square_root")] public vector<T, N> square_root() {
+        mut vector<T, N> out = {};
+        if constexpr is_float<T>() {
+            for (mut i32 i = 0; i < N; i = i + 1) {
+                // In f64, which Math has a form for: rounding the result back to T gives T's own square root.
+                out.lanes[i] = (T)Math.sqrt((f64)this.lanes[i]);
+            }
+        } else {
+            panic("vector.square_root needs float lanes");
+        }
+        return out;
+    }
+
+    [Simd("floor")] public vector<T, N> floor() {
+        mut vector<T, N> out = {};
+        if constexpr is_float<T>() {
+            for (mut i32 i = 0; i < N; i = i + 1) {
+                T value = this.lanes[i];
+                mut T whole = (T)Math.floor((f64)value);
+                if (whole == (T)0.0) {
+                    // Math.floor loses the sign of a zero result, which IEEE 754 keeps.
+                    whole = value * (T)0.0;
+                }
+                out.lanes[i] = whole;
+            }
+        } else {
+            out = { .lanes = this.lanes };
+        }
+        return out;
+    }
+
+    [Simd("ceiling")] public vector<T, N> ceiling() {
+        mut vector<T, N> out = {};
+        if constexpr is_float<T>() {
+            for (mut i32 i = 0; i < N; i = i + 1) {
+                T value = this.lanes[i];
+                mut T whole = (T)Math.ceiling((f64)value);
+                if (whole == (T)0.0) {
+                    // Math.ceiling loses the sign of a zero result, which IEEE 754 keeps.
+                    whole = value * (T)0.0;
+                }
+                out.lanes[i] = whole;
+            }
+        } else {
+            out = { .lanes = this.lanes };
+        }
+        return out;
+    }
+
+    [Simd("round")] public vector<T, N> round() {
+        mut vector<T, N> out = {};
+        if constexpr is_float<T>() {
+            for (mut i32 i = 0; i < N; i = i + 1) {
+                T value = this.lanes[i];
+                mut T whole = (T)Math.round((f64)value);
+                if (whole == (T)0.0) {
+                    // Math.round loses the sign of a zero result, which IEEE 754 keeps.
+                    whole = value * (T)0.0;
+                }
+                out.lanes[i] = whole;
+            }
+        } else {
+            out = { .lanes = this.lanes };
+        }
+        return out;
+    }
+
+    [Simd("truncate")] public vector<T, N> truncate() {
+        mut vector<T, N> out = {};
+        if constexpr is_float<T>() {
+            for (mut i32 i = 0; i < N; i = i + 1) {
+                T value = this.lanes[i];
+                mut T whole = (T)Math.truncate((f64)value);
+                if (whole == (T)0.0) {
+                    // Math.truncate loses the sign of a zero result, which IEEE 754 keeps.
+                    whole = value * (T)0.0;
+                }
+                out.lanes[i] = whole;
+            }
+        } else {
+            out = { .lanes = this.lanes };
+        }
+        return out;
+    }
+
+    // ---- bits (integer lanes) ----
+
+    [Simd("and")] operator &(vector<T, N> left, vector<T, N> right) -> vector<T, N> {
+        mut vector<T, N> out = {};
+        if constexpr is_integer<T>() {
+            for (mut i32 i = 0; i < N; i = i + 1) {
+                out.lanes[i] = left.lanes[i] & right.lanes[i];
+            }
+        } else {
+            panic("vector: & needs integer lanes");
+        }
+        return out;
+    }
+
+    [Simd("or")] operator |(vector<T, N> left, vector<T, N> right) -> vector<T, N> {
+        mut vector<T, N> out = {};
+        if constexpr is_integer<T>() {
+            for (mut i32 i = 0; i < N; i = i + 1) {
+                out.lanes[i] = left.lanes[i] | right.lanes[i];
+            }
+        } else {
+            panic("vector: | needs integer lanes");
+        }
+        return out;
+    }
+
+    [Simd("xor")] operator ^(vector<T, N> left, vector<T, N> right) -> vector<T, N> {
+        mut vector<T, N> out = {};
+        if constexpr is_integer<T>() {
+            for (mut i32 i = 0; i < N; i = i + 1) {
+                out.lanes[i] = left.lanes[i] ^ right.lanes[i];
+            }
+        } else {
+            panic("vector: ^ needs integer lanes");
+        }
+        return out;
+    }
+
+    [Simd("bitwise_not")] public vector<T, N> bitwise_not() {
+        mut vector<T, N> out = {};
+        if constexpr is_integer<T>() {
+            for (mut i32 i = 0; i < N; i = i + 1) {
+                out.lanes[i] = ~this.lanes[i];
+            }
+        } else {
+            panic("vector.bitwise_not needs integer lanes");
+        }
+        return out;
+    }
+
+    [Simd("shift_left")] public vector<T, N> shift_left(i32 amount) {
+        mut vector<T, N> out = {};
+        if constexpr is_integer<T>() {
+            T by = (T)(amount & (vector<T, N>.lane_bits() - 1));
+            for (mut i32 i = 0; i < N; i = i + 1) {
+                out.lanes[i] = (this.lanes[i] ^ 0w) << by;
+            }
+        } else {
+            panic("vector.shift_left needs integer lanes");
+        }
+        return out;
+    }
+
+    // Arithmetic for signed lanes (the sign fills in), logical for unsigned ones.
+    [Simd("shift_right")] public vector<T, N> shift_right(i32 amount) {
+        mut vector<T, N> out = {};
+        if constexpr is_integer<T>() {
+            T by = (T)(amount & (vector<T, N>.lane_bits() - 1));
+            for (mut i32 i = 0; i < N; i = i + 1) {
+                out.lanes[i] = this.lanes[i] >> by;
+            }
+        } else {
+            panic("vector.shift_right needs integer lanes");
+        }
+        return out;
+    }
+
+    [Simd("population_count")] public vector<T, N> population_count() {
+        mut vector<T, N> out = {};
+        if constexpr is_integer<T>() {
+            for (mut i32 i = 0; i < N; i = i + 1) {
+                mut T count = 0;
+                for (mut i32 bit = 0; bit < vector<T, N>.lane_bits(); bit = bit + 1) {
+                    if (((this.lanes[i] >> (T)bit) & 1) != 0) {
+                        count = count + 1;
+                    }
+                }
+                out.lanes[i] = count;
+            }
+        } else {
+            panic("vector.population_count needs integer lanes");
+        }
+        return out;
+    }
+
+    [Simd("leading_zeros")] public vector<T, N> leading_zeros() {
+        mut vector<T, N> out = {};
+        if constexpr is_integer<T>() {
+            i32 bits = vector<T, N>.lane_bits();
+            for (mut i32 i = 0; i < N; i = i + 1) {
+                mut T count = 0;
+                mut i32 bit = bits - 1;
+                while (bit >= 0 && ((this.lanes[i] >> (T)bit) & 1) == 0) {
+                    count = count + 1;
+                    bit = bit - 1;
+                }
+                out.lanes[i] = count;
+            }
+        } else {
+            panic("vector.leading_zeros needs integer lanes");
+        }
+        return out;
+    }
+
+    [Simd("trailing_zeros")] public vector<T, N> trailing_zeros() {
+        mut vector<T, N> out = {};
+        if constexpr is_integer<T>() {
+            i32 bits = vector<T, N>.lane_bits();
+            for (mut i32 i = 0; i < N; i = i + 1) {
+                mut T count = 0;
+                mut i32 bit = 0;
+                while (bit < bits && ((this.lanes[i] >> (T)bit) & 1) == 0) {
+                    count = count + 1;
+                    bit = bit + 1;
+                }
+                out.lanes[i] = count;
+            }
+        } else {
+            panic("vector.trailing_zeros needs integer lanes");
+        }
+        return out;
+    }
+
+    [Simd("byte_swap")] public vector<T, N> byte_swap() {
+        mut vector<T, N> out = {};
+        if constexpr is_integer<T>() && sizeof(T) == 1 {
+            for (mut i32 i = 0; i < N; i = i + 1) {
+                out.lanes[i] = this.lanes[i];
+            }
+        } else if constexpr is_integer<T>() {
+            i32 bytes = (i32)sizeof(T);
+            for (mut i32 i = 0; i < N; i = i + 1) {
+                mut T swapped = 0;
+                for (mut i32 b = 0; b < bytes; b = b + 1) {
+                    T piece = (this.lanes[i] >> (T)(b * 8)) & 255;
+                    swapped = swapped | ((piece ^ 0w) << (T)((bytes - 1 - b) * 8));
+                }
+                out.lanes[i] = swapped;
+            }
+        } else {
+            panic("vector.byte_swap needs integer lanes");
+        }
+        return out;
+    }
+
+    // ---- moving lanes ----
+
+    // Lanes 1, 0, 3, 2, ...: each pair trades places, and the last lane of an odd count stays where it is.
+    [Simd("swap_pairs")] public vector<T, N> swap_pairs() {
+        mut vector<T, N> out = {};
+        for (mut i32 i = 0; i < N; i = i + 1) {
+            mut i32 partner = i ^ 1;
+            if (partner >= N) {
+                partner = i;
+            }
+            out.lanes[i] = this.lanes[partner];
+        }
+        return out;
+    }
+
+    [Simd("reverse")] public vector<T, N> reverse() {
+        mut vector<T, N> out = {};
+        for (mut i32 i = 0; i < N; i = i + 1) {
+            out.lanes[i] = this.lanes[N - 1 - i];
+        }
+        return out;
+    }
+
+    // this[0], other[0], this[1], other[1], ... from the low halves (unpacklo, zip1).
+    [Simd("interleave_low")] public vector<T, N> interleave_low(vector<T, N> other) {
+        mut vector<T, N> out = {};
+        for (mut i32 i = 0; i < N; i = i + 1) {
+            if (i % 2 == 0) {
+                out.lanes[i] = this.lanes[i / 2];
+            } else {
+                out.lanes[i] = other.lanes[i / 2];
+            }
+        }
+        return out;
+    }
+
+    [Simd("interleave_high")] public vector<T, N> interleave_high(vector<T, N> other) {
+        mut vector<T, N> out = {};
+        for (mut i32 i = 0; i < N; i = i + 1) {
+            if (i % 2 == 0) {
+                out.lanes[i] = this.lanes[N / 2 + i / 2];
+            } else {
+                out.lanes[i] = other.lanes[N / 2 + i / 2];
+            }
+        }
+        return out;
+    }
+
+    // Lane i of the result is lane i of this where 'pick' is set, and lane i of 'otherwise' where it is not.
+    [Simd("select")] public vector<T, N> select(mask<N> pick, vector<T, N> otherwise) {
+        mut vector<T, N> out = {};
+        for (mut i32 i = 0; i < N; i = i + 1) {
+            if (pick.lanes[i]) {
+                out.lanes[i] = this.lanes[i];
+            } else {
+                out.lanes[i] = otherwise.lanes[i];
+            }
+        }
+        return out;
+    }
+
+    // Each lane converted to U. Unlike a scalar cast it never stops the program: an integer wraps to the width of U,
+    // and a float going to an integer clamps at the limits of U, with NaN giving 0.
+    [Simd("convert")] public vector<U, N> convert<U>() {
+        mut vector<U, N> out = {};
+        for (mut i32 i = 0; i < N; i = i + 1) {
+            if constexpr is_integer<T>() && is_integer<U>() {
+                u128w kept = (~(u128w)0) >> (u128w)(128 - (i32)sizeof(U) * 8);
+                u128w low = (u128w)this.lanes[i] & kept;
+                if constexpr is_signed<U>() {
+                    u128w sign = (kept >> (u128w)1) + 1;
+                    out.lanes[i] = (U)(i128w)((low ^ sign) - sign);
+                } else {
+                    out.lanes[i] = (U)low;
+                }
+            } else if constexpr is_float<T>() && is_integer<U>() {
+                f64 value = (f64)this.lanes[i];
+                i32 bits = (i32)sizeof(U) * 8;
+                u128w all = (~(u128w)0) >> (u128w)(128 - bits);
+                // 2 to the power of bits - 1.
+                mut f64 half = 1.0;
+                for (mut i32 b = 1; b < bits; b = b + 1) {
+                    half = half * 2.0;
+                }
+                if constexpr is_signed<U>() {
+                    i128w highest = (i128w)(all >> (u128w)1);
+                    if (value != value) {
+                        out.lanes[i] = 0;
+                    } else if (value >= half) {
+                        out.lanes[i] = (U)highest;
+                    } else if (value <= 0.0 - half) {
+                        out.lanes[i] = (U)(0 - highest - 1);
+                    } else {
+                        out.lanes[i] = (U)value;
+                    }
+                } else {
+                    if (!(value > 0.0)) {
+                        out.lanes[i] = 0;
+                    } else if (value >= half * 2.0) {
+                        out.lanes[i] = (U)all;
+                    } else {
+                        out.lanes[i] = (U)value;
+                    }
+                }
+            } else {
+                out.lanes[i] = (U)this.lanes[i];
+            }
+        }
+        return out;
+    }
+
+    // The same bits seen as M lanes of U; both vectors must have the same size.
+    [Simd("reinterpret")] public vector<U, M> reinterpret<U, M>() {
+        mut vector<U, M> out = {};
+        if constexpr (i64)sizeof(U) * (i64)M == (i64)sizeof(T) * (i64)N {
+            unsafe {
+                memcpy((void*)&out, (void*)this, (u64)sizeof(vector<T, N>));
+            }
+        } else {
+            panic("vector.reinterpret: both vectors must have the same size");
+        }
+        return out;
+    }
+
+    // ---- comparing ----
+
+    [Simd("equals")] public mask<N> equals(vector<T, N> other) {
+        mut mask<N> out = {};
+        for (mut i32 i = 0; i < N; i = i + 1) {
+            out.lanes[i] = this.lanes[i] == other.lanes[i];
+        }
+        return out;
+    }
+
+    [Simd("not_equals")] public mask<N> not_equals(vector<T, N> other) {
+        mut mask<N> out = {};
+        for (mut i32 i = 0; i < N; i = i + 1) {
+            out.lanes[i] = this.lanes[i] != other.lanes[i];
+        }
+        return out;
+    }
+
+    [Simd("less_than")] public mask<N> less_than(vector<T, N> other) {
+        mut mask<N> out = {};
+        for (mut i32 i = 0; i < N; i = i + 1) {
+            out.lanes[i] = this.lanes[i] < other.lanes[i];
+        }
+        return out;
+    }
+
+    [Simd("less_or_equal")] public mask<N> less_or_equal(vector<T, N> other) {
+        mut mask<N> out = {};
+        for (mut i32 i = 0; i < N; i = i + 1) {
+            out.lanes[i] = this.lanes[i] <= other.lanes[i];
+        }
+        return out;
+    }
+
+    [Simd("greater_than")] public mask<N> greater_than(vector<T, N> other) {
+        mut mask<N> out = {};
+        for (mut i32 i = 0; i < N; i = i + 1) {
+            out.lanes[i] = this.lanes[i] > other.lanes[i];
+        }
+        return out;
+    }
+
+    [Simd("greater_or_equal")] public mask<N> greater_or_equal(vector<T, N> other) {
+        mut mask<N> out = {};
+        for (mut i32 i = 0; i < N; i = i + 1) {
+            out.lanes[i] = this.lanes[i] >= other.lanes[i];
+        }
+        return out;
+    }
+
+    // Every lane equal; '!=' is its negation.
+    [Simd("all_equal")] operator ==(vector<T, N> left, vector<T, N> right) -> bool {
+        for (mut i32 i = 0; i < N; i = i + 1) {
+            if (left.lanes[i] != right.lanes[i]) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // ---- reducing to one value ----
+
+    // The sum of the lanes, wrapping for integers, in lane order for floats.
+    [Simd("reduce_add")] public T reduce_add() {
+        mut T total = this.lanes[0];
+        if constexpr is_float<T>() {
+            total = 0.0 + this.lanes[0];
+        }
+        for (mut i32 i = 1; i < N; i = i + 1) {
+            total = vector<T, N>.add_lane(total, this.lanes[i]);
+        }
+        return total;
+    }
+
+    [Simd("reduce_minimum")] public T reduce_minimum() {
+        mut T lowest = this.lanes[0];
+        for (mut i32 i = 1; i < N; i = i + 1) {
+            T value = this.lanes[i];
+            if (lowest != lowest || value < lowest) {
+                lowest = value;
+            }
+        }
+        return lowest;
+    }
+
+    [Simd("reduce_maximum")] public T reduce_maximum() {
+        mut T highest = this.lanes[0];
+        for (mut i32 i = 1; i < N; i = i + 1) {
+            T value = this.lanes[i];
+            if (highest != highest || value > highest) {
+                highest = value;
+            }
+        }
+        return highest;
+    }
+
+    [Simd("reduce_and")] public T reduce_and() {
+        mut T all = this.lanes[0];
+        if constexpr is_integer<T>() {
+            for (mut i32 i = 1; i < N; i = i + 1) {
+                all = all & this.lanes[i];
+            }
+        } else {
+            panic("vector.reduce_and needs integer lanes");
+        }
+        return all;
+    }
+
+    [Simd("reduce_or")] public T reduce_or() {
+        mut T any = this.lanes[0];
+        if constexpr is_integer<T>() {
+            for (mut i32 i = 1; i < N; i = i + 1) {
+                any = any | this.lanes[i];
+            }
+        } else {
+            panic("vector.reduce_or needs integer lanes");
+        }
+        return any;
+    }
+
+    [Simd("reduce_xor")] public T reduce_xor() {
+        mut T mixed = this.lanes[0];
+        if constexpr is_integer<T>() {
+            for (mut i32 i = 1; i < N; i = i + 1) {
+                mixed = mixed ^ this.lanes[i];
+            }
+        } else {
+            panic("vector.reduce_xor needs integer lanes");
+        }
+        return mixed;
+    }
+
+    // ---- builtins of the SIMD extensions, with the same result on every target ----
+
+    // Byte lanes: lane i takes this[(i / 16) * 16 + (indices[i] & 15)], or 0 when the top bit of indices[i] is set or
+    // the vector ends before that lane.
+    // pshufb (SSSE3, AVX2, AVX-512BW) per 16-byte block; tbl on AArch64 and swizzle on WebAssembly for 16 lanes.
+    [Simd("shuffle_bytes")] public vector<T, N> shuffle_bytes(vector<T, N> indices) {
+        mut vector<T, N> out = {};
+        if constexpr is_integer<T>() && sizeof(T) == 1 {
+            for (mut i32 i = 0; i < N; i = i + 1) {
+                i32 index = (i32)indices.lanes[i] & 255;
+                i32 from = (i / 16) * 16 + (index & 15);
+                if (index >= 128 || from >= N) {
+                    out.lanes[i] = 0;
+                } else {
+                    out.lanes[i] = this.lanes[from];
+                }
+            }
+        } else {
+            panic("vector.shuffle_bytes needs byte lanes");
+        }
+        return out;
+    }
+}

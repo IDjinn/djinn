@@ -15,6 +15,8 @@ struct TypeRef {
     ptr<i8> name;
     u32 name_atom;
     u32 full_atom;
+    // The expression of a value template argument ('4', '-1', '(N * 2)').
+    Node* value;
 
     public static unsafe TypeRef* create(i32 kind) {
         TypeRef* type = (TypeRef*)Memory.zalloc(sizeof(TypeRef));
@@ -61,7 +63,25 @@ struct TypeRef {
         type.full_atom = atoms.intern_copy(name, (u32)strlen(name));
         type.name_atom = atoms.base_of(type.full_atom);
         return type;
-    }    public static unsafe TypeRef* from_primitive_atom(u32 atom) {
+    }
+
+    public static TypeRef* constant(Node* expression) {
+        TypeRef* type = TypeRef.create(TypeKind.VALUE);
+        type.value = expression;
+        return type;
+    }
+
+    // 'T[N]': the size is a template argument of its own, so it is either a value or a name bound to one.
+    public static TypeRef* inline_array(TypeRef* element, TypeRef* size) {
+        TypeRef* type = TypeRef.create(TypeKind.ARRAY);
+        type.element = element;
+        PointerList* args = PointerList.create();
+        args.push((ptr)size);
+        type.args = args;
+        return type;
+    }
+
+    public static unsafe TypeRef* from_primitive_atom(u32 atom) {
         if (primitive_map == null) {
             primitive_map = (ptr)U32Map.create(Memory.arena(), 256);
             primitive_list = (ptr)PointerList.create();
@@ -231,6 +251,21 @@ struct TypeRef {
             TypeRef* inner = this.element;
             inner.describe(out);
             out.append_char('*');
+        } else if (this.kind == TypeKind.VALUE) {
+            Node* expression = this.value;
+            if (expression != null && expression.text() != null) {
+                out.append(expression.text());
+            } else {
+                out.append("<value>");
+            }
+        } else if (this.kind == TypeKind.ARRAY) {
+            TypeRef* held = this.element;
+            held.describe(out);
+            out.append_char('[');
+            PointerList* sizes = this.args;
+            TypeRef* size = (TypeRef*)sizes.get(0);
+            size.describe(out);
+            out.append_char(']');
         } else {
             out.append(this.name);
             if (this.args != null) {

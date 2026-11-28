@@ -1,0 +1,76 @@
+import std::types;
+import std::sys;
+import std::simd;
+
+namespace app;
+
+// std::simd on the host and on WebAssembly must give the same lanes, bit for bit. Float results are printed as their
+// bits, so a wrong last bit or a lost sign of zero shows; the fused products and the rounding here are the operations
+// WebAssembly has no instruction for.
+void show<T, N>(str tag, vector<T, N> v) {
+    Console.writeSync($"{tag}:");
+    for (mut i32 i = 0; i < N; i = i + 1) {
+        Console.writeSync($" {v[i]}");
+    }
+    Console.writeSync("\n");
+}
+
+[NoInline] f64 d(f64 x) {
+    return x;
+}
+
+[NoInline] f32 s(f32 x) {
+    return x;
+}
+
+void integers() {
+    vector<i8, 16> hundred = vector<i8, 16>.splat((i8)100);
+    show("wrap", (hundred + hundred).convert<i32>());
+    show("saturate", hundred.saturating_add(hundred).convert<i32>());
+    show("high", hundred.multiply_high(hundred).convert<i32>());
+    vector<u64, 4> a = vector<u64, 4>.of([1, 2, 3, 18446744073709551615]);
+    vector<u64, 4> mixed = a ^ vector<u64, 4>.splat(11400714819323198485);
+    show("hash", a + mixed.swap_pairs() + mixed.multiply_low32(mixed.shift_right(32)));
+    show("wide", a.multiply_high(a));
+    mut vector<u8, 16> bytes = {};
+    mut vector<u8, 16> picks = {};
+    for (mut i32 i = 0; i < 16; i = i + 1) {
+        bytes.lanes[i] = (u8)(100 + i);
+        picks.lanes[i] = (u8)(i * 19);
+    }
+    show("shuffle", bytes.shuffle_bytes(picks).convert<i32>());
+    show("zip", bytes.interleave_high(picks).convert<i32>());
+    show("count", picks.population_count().convert<i32>());
+    show("narrow", vector<i32, 4>.of([300, 0 - 1, 200, 0 - 200]).convert<u8>().convert<i32>());
+}
+
+void floats(f64 zero) {
+    vector<f64, 4> values = vector<f64, 4>.of([zero - 0.5, zero - 2.5, d(2.5), zero * (0.0 - 1.0)]);
+    show("floor", values.floor().reinterpret<u64, 4>());
+    show("ceiling", values.ceiling().reinterpret<u64, 4>());
+    show("round", values.round().reinterpret<u64, 4>());
+    show("truncate", values.truncate().reinterpret<u64, 4>());
+    show("root", values.absolute().square_root().reinterpret<u64, 4>());
+    show("least", values.minimum(vector<f64, 4>.splat(zero)).reinterpret<u64, 4>());
+    show("most", values.maximum(vector<f64, 4>.splat(zero)).reinterpret<u64, 4>());
+    vector<f64, 4> tenth = vector<f64, 4>.splat(d(0.1));
+    show("fused", tenth.fused_multiply_add(values, vector<f64, 4>.splat(d(0.3))).reinterpret<u64, 4>());
+    vector<f32, 4> small = vector<f32, 4>.of([s((f32)0.1), s((f32)7.25), s((f32)(0.0 - 2.5)), s((f32)(0.0 - 0.4))]);
+    show("fused32", small.fused_multiply_add(small, vector<f32, 4>.splat(s((f32)(0.0 - 0.01)))).reinterpret<u32, 4>());
+    show("round32", small.round().reinterpret<u32, 4>());
+    show("clamp", vector<f64, 4>.of([10000000000.0, 0.0 - 10000000000.0, zero / zero, 2.9]).convert<i32>());
+    vector<f16, 4> half = vector<f16, 4>.splat((f16)s((f32)2.25));
+    show("half", (half + half).square_root().reinterpret<u16, 4>());
+
+    // The scalar operations that become calls on WebAssembly.
+    f64 a = d(0.1);
+    f32 b = s((f32)0.1);
+    Console.writeSync($"{vector<f64, 1>.splat(a.fma(d(10.0), d(0.0 - 1.0))).reinterpret<u64, 1>()[0]}\n");
+    Console.writeSync($"{vector<f32, 1>.splat(b.fma(s((f32)10.0), s((f32)(0.0 - 1.0)))).reinterpret<u32, 1>()[0]}\n");
+}
+
+i32 main() {
+    integers();
+    floats(0.0);
+    return 0;
+}

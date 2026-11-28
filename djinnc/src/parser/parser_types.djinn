@@ -130,7 +130,7 @@ impl Parser {
             }
         }
         if (this.kind_of(this.peek_token(offset)) == TokenKind::LESS) {
-            offset = this.scan_type_arguments(offset);
+            offset = this.scan_arguments_of(offset, this.is_known_type(first));
             if (offset < 0) {
                 return offset;
             }
@@ -138,8 +138,16 @@ impl Parser {
         while (this.kind_of(this.peek_token(offset)) == TokenKind::STAR) {
             offset = offset + 1;
         }
-        while (this.kind_of(this.peek_token(offset)) == TokenKind::LBRACKET && this.kind_of(this.peek_token(offset + 1)) == TokenKind::RBRACKET) {
-            offset = offset + 2;
+        while (this.kind_of(this.peek_token(offset)) == TokenKind::LBRACKET) {
+            if (this.kind_of(this.peek_token(offset + 1)) == TokenKind::RBRACKET) {
+                offset = offset + 2;
+                continue;
+            }
+            i32 size_end = this.scan_inline_array_size(offset + 1);
+            if (size_end < 0) {
+                break;
+            }
+            offset = size_end + 1;
         }
         if (this.kind_of(this.peek_token(offset)) == TokenKind::QUESTION) {
             offset = offset + 1;
@@ -148,9 +156,29 @@ impl Parser {
     }
 
     i32 scan_type_arguments(i32 start) {
+        return this.scan_arguments_of(start, false);
+    }
+
+    // 'loose' scans the arguments of a known generic type, where a plain name may be a constant ('vector<u64, LANES>').
+    // Elsewhere 'a < b' may be a comparison, so a plain name is one only after a type argument.
+    i32 scan_arguments_of(i32 start, bool loose) {
         mut i32 offset = start + 1;
+        mut bool names_may_be_constants = loose;
         while (true) {
-            i32 end = this.scan_type_inner(offset);
+            mut i32 end = 0;
+            if (this.at_value_argument(offset)) {
+                end = this.scan_value_argument(offset);
+            } else if (names_may_be_constants && this.kind_of(this.peek_token(offset)) == TokenKind::IDENTIFIER
+                && !this.is_type_start(this.peek_token(offset)) && !this.is_qualified_start(offset)) {
+                end = offset + 1;
+            } else {
+                // After an argument that is plainly a type ('count<i32, WIDTH>()') this cannot be a comparison.
+                i32 first = this.peek_token(offset);
+                if (this.is_type_start(first) && !this.is_ptr_keyword(first) && !this.is_qualified_start(offset)) {
+                    names_may_be_constants = true;
+                }
+                end = this.scan_type_inner(offset);
+            }
             if (end < 0) {
                 return end;
             }
@@ -172,6 +200,23 @@ impl Parser {
             }
         }
         return 0 - 1;
+    }
+
+    // The size of 'T[N]' is a literal, a name or a parenthesized expression followed by ']'; returns the offset of ']'.
+    i32 scan_inline_array_size(i32 offset) {
+        mut i32 end = 0 - 1;
+        if (this.at_value_argument(offset)) {
+            end = this.scan_value_argument(offset);
+        } else if (this.kind_of(this.peek_token(offset)) == TokenKind::IDENTIFIER) {
+            end = offset + 1;
+            while (this.kind_of(this.peek_token(end)) == TokenKind::COLON_COLON && this.kind_of(this.peek_token(end + 1)) == TokenKind::IDENTIFIER) {
+                end = end + 2;
+            }
+        }
+        if (end < 0 || this.kind_of(this.peek_token(end)) != TokenKind::RBRACKET) {
+            return 0 - 1;
+        }
+        return end;
     }
 
     bool scan_generic_head(i32 less) {
@@ -211,11 +256,60 @@ impl Parser {
         return name.cstr();
     }
 
+    bool at_value_argument(i32 offset) {
+        TokenKind kind = this.kind_of(this.peek_token(offset));
+        return kind == TokenKind::INTEGER_LITERAL || kind == TokenKind::CHAR_LITERAL || kind == TokenKind::TRUE || kind == TokenKind::FALSE
+            || kind == TokenKind::LPAREN || (kind == TokenKind::MINUS && this.kind_of(this.peek_token(offset + 1)) == TokenKind::INTEGER_LITERAL);
+    }
+
+    // A template argument is a type, or a constant: a literal, a negated literal or a parenthesized expression.
+    // A plain name stays a type reference here and turns into a constant when it names one.
+    TypeRef* parse_template_argument() {
+        if (!this.at_value_argument(0)) {
+            return this.parse_type();
+        }
+        if (this.check(TokenKind::LPAREN)) {
+            this.advance();
+            Node* inner = this.parse_expression();
+            this.expect(TokenKind::RPAREN, "expected ')' after the constant template argument");
+            return TypeRef.constant(inner);
+        }
+        return TypeRef.constant(this.parse_unary());
+    }
+
+    i32 scan_value_argument(i32 offset) {
+        TokenKind kind = this.kind_of(this.peek_token(offset));
+        if (kind == TokenKind::MINUS) {
+            return offset + 2;
+        }
+        if (kind != TokenKind::LPAREN) {
+            return offset + 1;
+        }
+        mut i32 depth = 0;
+        mut i32 at = offset;
+        while (true) {
+            TokenKind inside = this.kind_of(this.peek_token(at));
+            if (inside == TokenKind::END_OF_FILE || inside == TokenKind::SEMICOLON || inside == TokenKind::LBRACE || inside == TokenKind::RBRACE) {
+                return 0 - 1;
+            }
+            if (inside == TokenKind::LPAREN) {
+                depth = depth + 1;
+            } else if (inside == TokenKind::RPAREN) {
+                depth = depth - 1;
+                if (depth == 0) {
+                    return at + 1;
+                }
+            }
+            at = at + 1;
+        }
+        return 0 - 1;
+    }
+
     PointerList* parse_type_arguments() {
         this.expect(TokenKind::LESS, "expected '<'");
         PointerList* args = PointerList.create();
         while (!this.failed) {
-            args.push((ptr)this.parse_type());
+            args.push((ptr)this.parse_template_argument());
             if (this.half_greater) {
                 this.half_greater = false;
                 return args;
@@ -235,13 +329,19 @@ impl Parser {
         return args;
     }
 
-    GenericParams* parse_generic_params() {
+    unsafe GenericParams* parse_generic_params() {
         GenericParams* params = GenericParams.create();
         IdList* names = params.names;
+        PointerList* value_types = params.value_types;
         this.expect(TokenKind::LESS, "expected '<'");
         while (!this.failed) {
+            mut TypeRef* value_type = (TypeRef*)0;
+            if (this.check(TokenKind::IDENTIFIER) && this.kind_of(this.peek_token(1)) == TokenKind::IDENTIFIER) {
+                value_type = this.parse_type();
+            }
             i32 token = this.expect(TokenKind::IDENTIFIER, "expected a type parameter name");
             names.push(this.atom_of(token));
+            value_types.push((ptr)value_type);
             if (this.match(TokenKind::COMMA)) {
                 continue;
             }
@@ -356,7 +456,17 @@ impl Parser {
             base = TypeRef.pointer_to(base);
         }
 
-        while (this.check(TokenKind::LBRACKET) && this.kind_of(this.peek_token(1)) == TokenKind::RBRACKET) {
+        while (this.check(TokenKind::LBRACKET)) {
+            if (this.kind_of(this.peek_token(1)) != TokenKind::RBRACKET) {
+                if (this.scan_inline_array_size(1) < 0) {
+                    break;
+                }
+                this.advance();
+                TypeRef* size = this.parse_template_argument();
+                this.expect(TokenKind::RBRACKET, "expected ']' after the size of the inline array");
+                base = TypeRef.inline_array(base, size);
+                continue;
+            }
             this.advance();
             this.advance();
             TypeRef* array = TypeRef.named("arr");

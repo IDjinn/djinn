@@ -19,6 +19,28 @@ impl TypeChecker {
         this.error_code(at, DiagnosticErrors.UNSAFE_REQUIRED, message.cstr());
     }
 
+    // A [Target("avx2")] function runs instructions the CPU may not have: the caller promises them with the same
+    // features, or takes the risk in 'unsafe' after checking the CPU (std::simd::Cpu).
+    unsafe void require_target_features(Node* call, FunctionInfo* callee) {
+        ptr<i8> needed = CpuFeatures.of(callee.node);
+        if (needed == null || !CpuFeatures.applies(needed)) {
+            return;
+        }
+        mut ptr<i8> held = (ptr<i8>)0;
+        if (this.function != null) {
+            FunctionInfo* caller = this.function;
+            held = CpuFeatures.of(caller.node);
+        }
+        if (CpuFeatures.covers(held, needed)) {
+            return;
+        }
+        ByteBuffer* message = ByteBuffer.create();
+        message.append("calling a function compiled for [Target(\"");
+        message.append(needed);
+        message.append("\")], which the CPU may not have,");
+        this.require_unsafe(call, message.cstr());
+    }
+
     void check_pointer_cast(Node* node, u32 target, u32 source) {
         if (Types.is_float(target) && (Types.is_pointer(source) || this.symbols.nullable_payload(source) != 0)) {
             this.error_pointer_to_float(node, target, source);

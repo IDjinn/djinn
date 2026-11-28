@@ -12,3 +12,4 @@
 #include "process.c"
 #include "int128.c"
 #include "float16.c"
+#include "cpu.c"

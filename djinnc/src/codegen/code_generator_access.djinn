@@ -4,9 +4,8 @@ impl CodeGenerator {
     Value* gen_sizeof(Node* node) {
         u32 measured = (u32)(u64)node.symbol();
         u32 result = Types.integer(32, true);
-        if (Types.is_struct(measured)) {
-            StructInfo* info = this.struct_of(measured);
-            ptr size = LLVMBuildIntCast2(this.builder, LLVMSizeOf(info.llvm), this.llvm_type(result), 0, "sizeof");
+        if (Types.is_struct(measured) || Types.is_array(measured)) {
+            ptr size = LLVMBuildIntCast2(this.builder, LLVMSizeOf(this.llvm_type(measured)), this.llvm_type(result), 0, "sizeof");
             return Value.create(size, result);
         }
         mut i64 bytes = 8;
@@ -248,6 +247,31 @@ impl CodeGenerator {
         return Value.create(loaded, variable.type);
     }
 
+    unsafe ptr inline_array_address(Node* holder) {
+        if (this.is_addressable(holder)) {
+            return this.gen_address(holder);
+        }
+        Value* value = this.gen_expression(holder);
+        ptr spill = this.create_slot(value.type, "inline.array");
+        LLVMBuildStore(this.builder, value.ref, spill);
+        return spill;
+    }
+
+    unsafe ptr inline_element_address(Node* node) {
+        Node* holder = node.first();
+        u32 array_type = holder.value_type();
+        ptr address = this.inline_array_address(holder);
+        u32 widest = Types.integer(64, false);
+        ptr position = this.coerce(this.gen_expression(node.second()), widest);
+        ptr length = LLVMConstInt(this.llvm_type(widest), (u64)Types.value_of(array_type), 0);
+        ptr outside = LLVMBuildICmp(this.builder, LlvmConst.INT_UGE, position, length, "inline.outside");
+        this.stop_when(outside, node, RuntimeErrors.INDEX_OUT_OF_RANGE);
+        ptr<ptr> indices = CodeGenerator.array_of(2);
+        indices[0] = LLVMConstInt(this.llvm_type(widest), 0, 0);
+        indices[1] = position;
+        return LLVMBuildGEP2(this.builder, this.llvm_type(array_type), address, indices, 2, "inline.element");
+    }
+
     Value* load_through(ptr address, u32 type) {
         ptr loaded = LLVMBuildLoad2(this.builder, this.llvm_type(type), address, "load");
         return Value.create(loaded, type);
@@ -266,6 +290,10 @@ impl CodeGenerator {
 
         if (kind == NodeKind::FIELD_ACCESS) {
             return this.field_address(node);
+        }
+
+        if (kind == NodeKind::INDEX && node.symbol_kind() == SymbolKind.INLINE_INDEX) {
+            return this.inline_element_address(node);
         }
 
         if (kind == NodeKind::INDEX) {

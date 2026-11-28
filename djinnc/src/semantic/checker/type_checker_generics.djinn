@@ -113,6 +113,21 @@ impl TypeChecker {
         return true;
     }
 
+    // An explicit argument of 'f<...>(...)' is a type or a constant, resolved as in 'Name<...>'.
+    unsafe u32 resolve_call_argument(TypeRef* argument, TypeRef* declared, Node* callee) {
+        SymbolTable* symbols = this.symbols;
+        symbols.blame = callee;
+        symbols.template_failed = false;
+        u32 resolved = symbols.resolve_argument(argument, declared, this.scope);
+        if (resolved != 0 && Types.is_value(resolved)) {
+            return resolved;
+        }
+        if (resolved == 0 && symbols.template_failed) {
+            return 0;
+        }
+        return this.resolve_type(argument, callee);
+    }
+
     unsafe FunctionInfo* instantiate_call(Node* node, Node* callee, FunctionInfo* template) {
         GenericParams* generics = template.generics;
         i32 count = generics.count();
@@ -128,8 +143,11 @@ impl TypeChecker {
             TypeRef* holder = callee.type();
             PointerList* given = holder.args;
             for (mut i32 i = 0; i < given.length && i < count; i = i + 1) {
-                found.data[i] = this.resolve_type((TypeRef*)given.get(i), callee);
                 TypeRef* argument = (TypeRef*)given.get(i);
+                found.data[i] = this.resolve_call_argument(argument, generics.value_type(i), callee);
+                if (found.get(i) == 0) {
+                    return (FunctionInfo*)0;
+                }
                 modes.data[i] = (u32)argument.mode;
             }
         }

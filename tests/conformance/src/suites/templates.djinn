@@ -1,0 +1,705 @@
+namespace conformance;
+
+import testing;
+import djinnc::testing;
+import djinnc;
+
+// Template parameters that take constants ('S<T, 4>'), inline arrays sized by them ('T[N]'), and the type questions
+// 'if constexpr' branches on in generic code.
+struct TemplateTests {
+    [Test]
+    void constant_parameter_sizes_an_inline_array() {
+        str source = """
+struct Array<T, N> {
+    T[N] data;
+
+    public i64 size() {
+        return N;
+    }
+}
+
+i32 main() {
+    mut Array<i32, 5> numbers = {};
+    numbers.data[0] = 7;
+    numbers.data[4] = 3;
+    for (mut i32 i = 0; i < 5; i = i + 1) {
+        numbers.data[i] = numbers.data[i] + i;
+    }
+    Array<f32, 10> decimals = {};
+    return (i32)numbers.size() + numbers.data[0] + numbers.data[4] + (i32)(sizeof(Array<f32, 10>) / 4) + (i32)decimals.data[9];
+}
+""";
+        Verify.source(source).runs(Expected.exit(29));
+    }
+
+    [Test]
+    void typed_constant_parameters_and_expressions() {
+        str source = """
+enum Color {
+    Red,
+    Green,
+}
+
+constexpr i64 cells(i64 n) {
+    return n * n;
+}
+
+struct Matrix<i32 N> {
+    i32[(cells(N))] data;
+    i32[(N * 2)] edges;
+}
+
+struct Flag<bool ON, Color C> {
+    i32 unused;
+
+    public static i32 code() {
+        if (ON) {
+            return 10;
+        }
+        return 20;
+    }
+}
+
+constexpr i32 LANES = 4;
+
+struct Buffer<T, N> {
+    T[N] items;
+}
+
+i32 main() {
+    Matrix<5> matrix = {};
+    Buffer<u8, LANES> named = {};
+    Buffer<u8, 4> literal = named;
+    i32 flag = Flag<true, Color::Green>.code();
+    return (i32)(sizeof(Matrix<5>) / 4) + (i32)sizeof(Buffer<u8, 4>) + flag + (i32)literal.items[0];
+}
+""";
+        Verify.source(source).runs(Expected.exit(49));
+    }
+
+    [Test]
+    void static_methods_of_instances_and_inferred_constants() {
+        str source = """
+struct Holder<T, N> {
+    T[N] items;
+
+    public static Holder<T, N> filled(T value) {
+        mut Holder<T, N> made = {};
+        for (mut i32 i = 0; i < N; i = i + 1) {
+            made.items[i] = value;
+        }
+        return made;
+    }
+
+    public T sum() {
+        mut T total = 0;
+        for (mut i32 i = 0; i < N; i = i + 1) {
+            total = total + this.items[i];
+        }
+        return total;
+    }
+}
+
+struct Outer<N> {
+    Holder<i32, N> inner;
+    Holder<i32, (N + 1)> bigger;
+}
+
+i64 total<T, i32 N>(Holder<T, N>* holder) {
+    return (i64)holder.sum() + N;
+}
+
+i32 main() {
+    Holder<i32, 3> three = Holder<i32, 3>.filled(2);
+    Outer<2> outer = {};
+    return three.sum() + outer.bigger.sum() + (i32)total(&three) + (i32)(sizeof(Outer<2>) / 4);
+}
+""";
+        Verify.source(source).runs(Expected.exit(20));
+    }
+
+    [Test]
+    void inline_arrays_copy_by_value() {
+        str source = """
+struct Pair {
+    i32[2] values;
+}
+
+i32 main() {
+    mut i32[3] local = [1, 2, 3];
+    i32[3] kept = local;
+    local[2] = 30;
+    mut Pair first = { .values = [4, 5] };
+    Pair second = first;
+    first.values[0] = 40;
+    return kept[2] + local[2] + second.values[0] + first.values[0];
+}
+""";
+        Verify.source(source).runs(Expected.exit(77));
+    }
+
+    [Test]
+    void inline_array_index_is_checked() {
+        str constant_index = """
+i32 main() {
+    i32[4] values = [1, 2, 3, 4];
+    return values[4];
+}
+""";
+        Verify.source(constant_index).diagnostics(Expected.error(DiagnosticErrors.CONSTANT_INDEX_OUT_OF_RANGE).at(3, 18));
+        str runtime_index = """
+i32 main() {
+    i32[4] values = [1, 2, 3, 4];
+    mut i32 at = 3;
+    at = at + 2;
+    return values[at];
+}
+""";
+        Verify.source(runtime_index).crashes(Expected.contains("index out of range"));
+    }
+
+    [Test]
+    void inline_array_element_of_immutable_holder() {
+        str source = """
+i32 main() {
+    i32[4] values = [1, 2, 3, 4];
+    values[0] = 2;
+    return values[0];
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.ASSIGN_TO_IMMUTABLE).at(3, 5));
+    }
+
+    [Test]
+    void inline_array_literal_needs_every_element() {
+        str source = """
+i32 main() {
+    i32[3] values = [1, 2];
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.INVALID_ARRAY_SIZE).at(2, 21));
+    }
+
+    [Test]
+    void inline_array_size_must_be_positive() {
+        str source = """
+struct Counted<N> {
+    i32[N] values;
+}
+
+i32 main() {
+    Counted<0> box = {};
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.INVALID_ARRAY_SIZE).at(2, 5));
+    }
+
+    [Test]
+    void constant_used_as_a_type() {
+        str source = """
+struct Box<T, N> {
+    N value;
+}
+
+i32 main() {
+    Box<i32, 4> box = {};
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.TYPE_ARGUMENT_EXPECTED).at(2, 5));
+    }
+
+    [Test]
+    void type_given_to_a_constant_parameter() {
+        str source = """
+struct Counted<i32 N> {
+    i32[N] values;
+}
+
+i32 count(Counted<i64>* box) {
+    return 0;
+}
+
+i32 main() {
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.CONSTANT_ARGUMENT_EXPECTED).at(5, 11));
+    }
+
+    [Test]
+    void constant_must_fit_its_parameter() {
+        str source = """
+constexpr i32 BIG = 300;
+
+struct Counted<u8 N> {
+    i32[N] values;
+}
+
+i32 count(Counted<BIG>* box) {
+    return 0;
+}
+
+i32 main() {
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.INVALID_TEMPLATE_CONSTANT).at(7, 11));
+    }
+
+    [Test]
+    void inline_array_of_owning_elements() {
+        str source = """
+struct Names {
+    string[2] names;
+}
+
+i32 main() {
+    return 0;
+}
+""";
+        str instance = """
+struct Box<T, N> {
+    T[N] items;
+}
+
+i32 main() {
+    Box<string, 2> names = {};
+    return 0;
+}
+""";
+        str param = """
+i32 take(string[2] names) {
+    return 0;
+}
+
+i32 main() {
+    return 0;
+}
+""";
+        str generic = """
+i32 held<T>() {
+    T[2] items = {};
+    return 0;
+}
+
+i32 main() {
+    return held<string>();
+}
+""";
+        Verify.source(source).with_std().diagnostics(Expected.error(DiagnosticErrors.INVALID_ARRAY_SIZE).at(2, 5));
+        Verify.source(instance).with_std().diagnostics(Expected.error(DiagnosticErrors.INVALID_ARRAY_SIZE).at(2, 5));
+        Verify.source(param).with_std().diagnostics(Expected.error(DiagnosticErrors.INVALID_ARRAY_SIZE).at(1, 10));
+        Verify.source(generic).with_std().diagnostics(Expected.error(DiagnosticErrors.INVALID_ARRAY_SIZE).at(2, 5));
+    }
+
+    [Test]
+    void type_traits_pick_a_branch() {
+        str source = """
+import std::types;
+
+struct Point {
+    i32 x;
+}
+
+i32 describe<T>(T value) {
+    if constexpr is_integer<T>() {
+        return 1;
+    } else if constexpr is_float<T>() {
+        return 2;
+    } else if constexpr type_trait(T, struct) {
+        return 3;
+    } else {
+        return 4;
+    }
+}
+
+struct Dictionary<Key, Value, Capacity> {
+    Key[Capacity] keys;
+    Value[Capacity] values;
+    mut i32 count;
+
+    public bool put(Key key, Value value) {
+        if (this.count >= Capacity) {
+            return false;
+        }
+        this.keys[this.count] = key;
+        this.values[this.count] = value;
+        this.count = this.count + 1;
+        return true;
+    }
+
+    public Value get(Key key, Value missing) {
+        for (mut i32 i = 0; i < this.count; i = i + 1) {
+            if (this.keys[i] == key) {
+                return this.values[i];
+            }
+        }
+        return missing;
+    }
+}
+
+i32 main() {
+    Point p = { .x = 1 };
+    mut Dictionary<i32, f64, 4> table = {};
+    table.put(3, 2.5);
+    table.put(7, 4.0);
+    i32 kinds = describe(5) * 1000 + describe(1.5) * 100 + describe(p) * 10 + describe(true);
+    bool same = is_same<i32, i32>() && !is_same<i32, u32>() && is_unsigned<u8>() && !is_signed<u8>() && is_pointer<i32*>();
+    if (!same) {
+        return 1;
+    }
+    return kinds - 1230 + (i32)table.get(7, 0.0);
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(8));
+    }
+
+    [Test]
+    void unknown_type_trait() {
+        str source = """
+i32 main() {
+    if constexpr type_trait(i32, shiny) {
+        return 1;
+    }
+    return 0;
+}
+""";
+        Verify.source(source).diagnostics(Expected.error(DiagnosticErrors.INVALID_TYPE_TRAIT).at(2, 18));
+    }
+
+    // Inline arrays are copied as a whole, so a type holds at most 4096 of their values.
+    [Test]
+    void inline_arrays_have_a_size_limit() {
+        str local = """
+i32 main() {
+    mut u8[100000000] huge = {};
+    return (i32)huge[0];
+}
+""";
+        str param = """
+i32 take(u8[5000] big) {
+    return 0;
+}
+
+i32 main() {
+    return 0;
+}
+""";
+        str field = """
+struct Two {
+    u8[3000] a;
+    u8[3000] b;
+}
+
+i32 main() {
+    Two two = {};
+    return 0;
+}
+""";
+        str grid = """
+struct Grid {
+    u32[80][80] cells;
+}
+
+i32 main() {
+    return 0;
+}
+""";
+        str pairs = """
+struct Pair {
+    u64 x;
+    u64 y;
+}
+
+struct Pairs<N> {
+    Pair[N] items;
+}
+
+i32 main() {
+    Pairs<2049> pairs = {};
+    return 0;
+}
+""";
+        str fits = """
+struct Fits {
+    u8[2048] a;
+    u8[2048] b;
+}
+
+struct Pair {
+    u64 x;
+    u64 y;
+}
+
+i32 main() {
+    Pair[2048] pairs = {};
+    mut Fits fits = {};
+    fits.b[2047] = 9;
+    Fits copy = fits;
+    return (i32)copy.b[2047] + (i32)pairs[2047].y;
+}
+""";
+        Verify.source(local).diagnostics(Expected.error(DiagnosticErrors.INVALID_ARRAY_SIZE).at(2, 5));
+        Verify.source(param).diagnostics(Expected.error(DiagnosticErrors.INVALID_ARRAY_SIZE).at(1, 10));
+        Verify.source(field).diagnostics(Expected.error(DiagnosticErrors.INVALID_ARRAY_SIZE).at(1, 1));
+        Verify.source(grid).diagnostics(Expected.error(DiagnosticErrors.INVALID_ARRAY_SIZE).at(2, 5));
+        Verify.source(pairs).diagnostics(Expected.error(DiagnosticErrors.INVALID_ARRAY_SIZE).at(7, 5));
+        Verify.source(fits).runs(Expected.exit(9));
+        Verify.source(fits).optimized(2).runs(Expected.exit(9));
+    }
+
+    [Test]
+    void endless_template_recursion_stops() {
+        str calls = """
+i32 deeper<N>() {
+    return deeper<(N + 1)>();
+}
+
+i32 main() {
+    return deeper<0>();
+}
+""";
+        str types = """
+struct Rec<N> {
+    Rec<(N + 1)>* next;
+    i32 value;
+}
+
+i32 main() {
+    Rec<0> first = {};
+    return first.value;
+}
+""";
+        Verify.source(calls).diagnostics(Expected.error(DiagnosticErrors.TEMPLATE_DEPTH_EXCEEDED).at(2, 27));
+        Verify.source(types).diagnostics(Expected.error(DiagnosticErrors.TEMPLATE_DEPTH_EXCEEDED).at(2, 5));
+    }
+
+    [Test]
+    void different_structs_do_not_convert() {
+        str argument = """
+struct Pair {
+    i32 a;
+    i32 b;
+}
+
+struct Other {
+    i64 a;
+    i64 b;
+    i64 c;
+}
+
+i64 take(Other other) {
+    return other.c;
+}
+
+i32 main() {
+    Pair pair = { .a = 1, .b = 2 };
+    return (i32)take(pair);
+}
+""";
+        str values = """
+struct Pair {
+    i32 a;
+    i32 b;
+}
+
+struct Other {
+    i64 a;
+    i64 b;
+    i64 c;
+}
+
+struct Holder {
+    Other other;
+}
+
+Other make(Pair pair) {
+    return pair;
+}
+
+i32 main() {
+    Pair pair = { .a = 1, .b = 2 };
+    mut Holder holder = { .other = pair };
+    holder.other = pair;
+    return (i32)holder.other.c;
+}
+""";
+        Verify.source(argument).diagnostics(Expected.error(DiagnosticErrors.IMPLICIT_CONVERSION).at(18, 22));
+        Verify.source(values).diagnostics(Expected.error(DiagnosticErrors.IMPLICIT_CONVERSION).at(17, 12)
+            .and_error(DiagnosticErrors.IMPLICIT_CONVERSION).at(22, 36)
+            .and_error(DiagnosticErrors.IMPLICIT_CONVERSION).at(23, 20));
+    }
+
+    [Test]
+    void arr_passes_as_a_slice() {
+        str source = """
+import std::types;
+import std::collections;
+
+struct Reader {
+    mut i32 total;
+
+    public void add(slice<i32> values) {
+        for (mut size i = 0u; i < values.length(); i = i + 1u) {
+            this.total = this.total + values[i];
+        }
+    }
+
+    public static i32 first(slice<i32> values) {
+        return values[0u];
+    }
+
+    public static i32 pick(i32 value) {
+        return value;
+    }
+
+    public static i32 pick(slice<i32> values) {
+        return values[1u];
+    }
+}
+
+T head<T>(slice<T> values) {
+    return values[0u];
+}
+
+struct Box {
+    slice<i32> view;
+}
+
+i32 main() {
+    arr<i32> items = [10, 20, 30];
+    mut Reader reader = { .total = 0 };
+    reader.add(items);
+    slice<i32> view = items;
+    Box box = { .view = items };
+    return reader.total + Reader.first(items) + Reader.pick(items) + Reader.pick(7) + view[2u] + box.view[1u]
+        + head<i32>(items);
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(157));
+        Verify.source(source).with_std().optimized(2).runs(Expected.exit(157));
+    }
+
+    [Test]
+    void slice_of_a_returned_arr_borrows_the_receiver() {
+        str returned = """
+import std::types;
+import std::collections;
+
+struct Owner {
+    string name;
+
+    public arr<i32> numbers() {
+        arr<i32> items = [1, 2, 3];
+        return items;
+    }
+}
+
+slice<i32> make() {
+    mut Owner owner = { .name = $"x{1}" };
+    return owner.numbers();
+}
+
+i32 main() {
+    slice<i32> view = make();
+    return view[0u];
+}
+""";
+        str moved = """
+import std::types;
+import std::collections;
+
+struct Owner {
+    string name;
+
+    public arr<i32> numbers() {
+        arr<i32> items = [1, 2, 3];
+        return items;
+    }
+}
+
+i32 main() {
+    mut Owner owner = { .name = $"x{1}" };
+    slice<i32> view = owner.numbers();
+    mut Owner other = owner;
+    return view[0u] + (i32)other.name.length();
+}
+""";
+        Verify.source(returned).with_std().diagnostics(Expected.error(DiagnosticErrors.BORROW_OUTLIVES_VALUE).at(15, 25));
+        Verify.source(moved).with_std().diagnostics(Expected.error(DiagnosticErrors.BORROW_CONFLICT).at(16, 23));
+    }
+
+    [Test]
+    void constants_passed_to_generic_functions() {
+        str source = """
+import std::simd;
+
+enum Color {
+    Red,
+    Green,
+    Blue,
+}
+
+constexpr i32 WIDTH = 12;
+
+i32 count<T, N>() {
+    return (i32)N;
+}
+
+i32 shade<C>() {
+    return (i32)C;
+}
+
+i32 both(bool first, bool second) {
+    if (first && second) {
+        return 1;
+    }
+    return 0;
+}
+
+i32 main() {
+    vector<u8, 4> bytes = vector<u8, 4>.splat((u8)1);
+    vector<u32, 1> whole = bytes.reinterpret<u32, 1>();
+    if (whole[0] != 16843009) {
+        return 1;
+    }
+    i32 low = 1;
+    i32 high = 20;
+    // A plain name first leaves '<' and '>' as comparisons.
+    i32 compared = both(low < WIDTH, high > (WIDTH));
+    return count<i8, 16>() + count<i32, WIDTH>() + count<i32, (WIDTH * 2)>() + shade<Color::Blue>()
+        + shade<(WIDTH)>() + compared;
+}
+""";
+        Verify.source(source).with_std().runs(Expected.exit(67));
+    }
+
+    // A loop inside the discarded branch is not analyzed.
+    [Test]
+    void discarded_branch_with_a_loop() {
+        str source = """
+i32 pick<T>(T x) {
+    mut i32 total = 0;
+    for (mut i32 i = 0; i < 4; i = i + 1) {
+        if constexpr sizeof(T) == 8 {
+            mut i32 bits = 8;
+            for (mut i32 b = 1; b < bits; b = b + 1) {
+                total = total + 1;
+            }
+        } else {
+            total = total + i;
+        }
+    }
+    return total;
+}
+
+i32 main() {
+    return pick<i32>(1) + pick<i64>(1);
+}
+""";
+        Verify.source(source).optimized(2).runs(Expected.exit(34));
+    }
+}

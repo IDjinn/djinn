@@ -7,10 +7,12 @@ struct TypeTable {
     ptr<u32> operands;
     ptr<u8> signs;
     ptr<u32> pointers;
+    ptr<i64> values;
     u32 count;
     u32 capacity;
     U32Map* scalars;
     U32Map* enums;
+    U32Map* composed;
 
     public static unsafe TypeTable* get() {
         if (process_types == null) {
@@ -21,8 +23,10 @@ struct TypeTable {
             table.operands = (ptr<u32>)arena.zalloc(128 * 4, 4);
             table.signs = (ptr<u8>)arena.zalloc(128, 1);
             table.pointers = (ptr<u32>)arena.zalloc(128 * 4, 4);
+            table.values = (ptr<i64>)arena.zalloc(128 * 8, 8);
             table.scalars = U32Map.create(arena, 64);
             table.enums = U32Map.create(arena, 16);
+            table.composed = U32Map.create(arena, 16);
             process_types = (ptr)table;
             table.add(TypeKind.NONE, 0, false);
             table.add(TypeKind.VOID, 0, false);
@@ -52,14 +56,17 @@ struct TypeTable {
         ptr<u32> operands = (ptr<u32>)arena.zalloc((u64)capacity * 4, 4);
         ptr<u8> signs = (ptr<u8>)arena.zalloc((u64)capacity, 1);
         ptr<u32> pointers = (ptr<u32>)arena.zalloc((u64)capacity * 4, 4);
+        ptr<i64> values = (ptr<i64>)arena.zalloc((u64)capacity * 8, 8);
         memcpy(kinds, this.kinds, (u64)this.count);
         memcpy(operands, this.operands, (u64)this.count * 4);
         memcpy(signs, this.signs, (u64)this.count);
         memcpy(pointers, this.pointers, (u64)this.count * 4);
+        memcpy(values, this.values, (u64)this.count * 8);
         this.kinds = kinds;
         this.operands = operands;
         this.signs = signs;
         this.pointers = pointers;
+        this.values = values;
         this.capacity = capacity;
     }
 
@@ -130,6 +137,39 @@ struct TypeTable {
 
     public u32 raw_pointer_to(u32 element) {
         return this.intern_scalar(3145728 + element, TypeKind.POINTER, element, true);
+    }
+
+    unsafe u32 intern_composed(i32 kind, u32 operand, i64 value) {
+        ByteBuffer* key = ByteBuffer.create();
+        key.append_int((i64)kind);
+        key.append_char(':');
+        key.append_int((i64)operand);
+        key.append_char(':');
+        key.append_int(value);
+        ptr<i8> text = key.cstr();
+        AtomTable* atoms = Atoms.get();
+        u32 atom = atoms.intern_copy(text, (u32)strlen(text));
+        U32Map* composed = this.composed;
+        i64 found = composed.find(atom);
+        if (found >= 0) {
+            return (u32)found;
+        }
+        u32 id = this.add(kind, operand, false);
+        this.values[id] = value;
+        composed.put(atom, id);
+        return id;
+    }
+
+    public u32 constant(u32 type, i64 value) {
+        return this.intern_composed(TypeKind.VALUE, type, value);
+    }
+
+    public u32 array(u32 element, i64 length) {
+        return this.intern_composed(TypeKind.ARRAY, element, length);
+    }
+
+    public unsafe i64 value(u32 id) {
+        return this.values[id];
     }
 
     public unsafe i32 kind(u32 id) {

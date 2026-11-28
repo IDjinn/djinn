@@ -6,6 +6,9 @@ impl JsEmitter {
         ptr<i8> value = this.expression(node);
         NodeKind kind = node.kind();
         bool place = kind == NodeKind::IDENTIFIER || kind == NodeKind::FIELD_ACCESS || kind == NodeKind::INDEX;
+        if (place && this.holds_inline_array(node.value_type(), 0)) {
+            return this.copied(value, node.value_type(), 0);
+        }
         if (place && this.needs_copy(node.value_type())) {
             ByteBuffer* out = ByteBuffer.create();
             out.append("{...");
@@ -589,7 +592,15 @@ impl JsEmitter {
         ByteBuffer* out = ByteBuffer.create();
         out.append(JsEmitter.grouped(this.expression(node.first())));
         out.append("[");
-        out.append(this.expression(node.second()));
+        if (node.symbol_kind() == SymbolKind.INLINE_INDEX) {
+            out.append("$at(");
+            out.append(this.expression(node.second()));
+            out.append(", ");
+            out.append_int(Types.value_of(node.first().value_type()));
+            out.append(")");
+        } else {
+            out.append(this.expression(node.second()));
+        }
         out.append("]");
         return out.cstr();
     }
@@ -597,6 +608,9 @@ impl JsEmitter {
     // { .a = x, .b = y }: every field is written, in declaration order, so all values of a struct share one shape.
     unsafe ptr<i8> struct_init(Node* node) {
         u32 type = node.value_type();
+        if (Types.is_array(type)) {
+            return this.default_value(type);
+        }
         StructInfo* info = this.struct_info(type);
         if (info == null || info.fields == null) {
             this.error(node, "this initializer is not supported by the web target yet");
